@@ -1,0 +1,7 @@
+make
+build-essential
+libsqlite3-dev
+zlib1g-dev
+cpp
+gcc
+g++
