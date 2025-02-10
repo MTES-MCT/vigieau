@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/backend-admin",
+    "apps/frontend-admin",
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "scripts": {
+    "dev:public-backend": "yarn workspace vigieau_backend run start:dev",
+    "dev:public-frontend": "yarn workspace vigieau_frontend run dev",
+    "dev:admin-backend": "yarn workspace vigieau_admin_backend run start:dev",
+    "dev:admin-frontend": "yarn workspace vigieau_admin_frontend run dev",
+    "dev": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\" \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^7.0.0"
+  }
+}
