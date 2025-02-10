@@ -1,0 +1,28 @@
+{{! Partiel : recursiveTree }}
+{{#each this}}
+  <li>
+    <span>{{@key}}&nbsp;:</span>
+    {{#if (isObject this)}}
+      <ul>
+        {{> recursiveTree this }}
+      </ul>
+    {{else if (isArray this)}}
+      <span><{{@key}}&nbsp;:</span>
+      <ul>
+        {{#each this}}
+          <li>
+            {{#if (isObject this)}}
+              <ul>
+                {{> recursiveTree this }}
+              </ul>
+            {{else}}
+              {{this}}
+            {{/if}}
+          </li>
+        {{/each}}
+      </ul>
+    {{else}}
+      {{this}}
+    {{/if}}
+  </li>
+{{/each}}
