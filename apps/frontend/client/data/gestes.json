@@ -1,0 +1,88 @@
+{
+  "data": [
+    {
+      "title": "En évitant de laisser couler l’eau du robinet,",
+      "description": "j’économise 10L d’eau par minute en moyenne !",
+      "icon": "eau-goutte-robinet",
+      "home": true,
+      "large": true
+    },
+    {
+      "title": "En prenant des douches de 4 à 5 minutes plutôt que des bains,",
+      "description": "j'économise 100L d’eau à chaque fois !",
+      "icon": "eau-goutte-douche",
+      "home": true,
+      "large": true
+    },
+    {
+      "title": "En optimisant l’usage des appareils de lavage en lançant mes machines à plein,",
+      "description": "je diminue le nombre de cycles de lavage.",
+      "icon": "eau-goutte-machine",
+      "home": true,
+      "large": true
+    },
+    {
+      "title": "En installant des mousseurs d’eau sur mes robinets,",
+      "description": "je réduis de 50% la consommation d’eau de mon robinet.",
+      "icon": "eau-goutte-robinet",
+      "home": true,
+      "large": true
+    },
+    {
+      "title": "En installant une douchette économe dans la salle de bain,",
+      "description": "je réduis de 75% la consommation d’eau lors de la douche.",
+      "icon": "eau-goutte-douche",
+      "home": true,
+      "large": true
+    },
+    {
+      "title": "En identifiant et réparant les fuites,",
+      "description": " j’économise jusqu’à 100L d’eau par jour. Pour cela, je relève mon compteur avant d’aller dormir, s’il a augmenté, c’est qu'il y a une fuite.",
+      "icon": "eau-goutte-douche",
+      "home": true,
+      "large": true
+    },
+    {
+      "title": "En limitant les arrosages tout en évitant d’arroser en pleine journée,",
+      "description": "je limite l’évaporation et j’entretiens mon jardin en utilisant moins d’eau.",
+      "icon": "eau-goutte-arrosoir",
+      "home": false,
+      "large": true
+    },
+    {
+      "title": "En choisissant des plantes qui résistent mieux à la sécheresse,",
+      "description": "comme la lavande, le romarin ou les plantes grasses, j’entretiens mon jardin en utilisant moins d’eau ",
+      "icon": "eau-goutte-arrosoir",
+      "home": false,
+      "large": true
+    },
+    {
+      "title": "En disposant de la paille au pied des plantes pour conserver l’humidité,",
+      "description": "j’entretiens mon jardin en utilisant moins d’eau.",
+      "icon": "eau-goutte-arrosoir",
+      "home": false,
+      "large": true
+    },
+    {
+      "title": "En installant un arrosage au goutte à goutte,",
+      "description": "j’arrose mes plantes en utilisant deux fois moins d’eau.",
+      "icon": "eau-goutte-arrosoir",
+      "home": false,
+      "large": true
+    },
+    {
+      "title": "En installant un récupérateur d’eau de pluie,",
+      "description": "j’arrose mon jardin en évitant au maximum d’ouvrir le robinet.",
+      "icon": "eau-goutte-arrosoir",
+      "home": false,
+      "large": true
+    },
+    {
+      "title": "En évitant de laver sa voiture en période de restriction,",
+      "description": "j’économise l’eau. Chaque lavage à domicile consomme 200 à 400L d’eau.",
+      "icon": "eau-goutte-voiture",
+      "home": false,
+      "large": true
+    }
+  ]
+}

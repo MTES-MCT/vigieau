@@ -1,0 +1,103 @@
+// NOTICE
+.fr-notice.notice-light {
+  width: fit-content;
+  padding: 0.5rem 0;
+  margin: auto;
+
+  .fr-container {
+    width: fit-content;
+    padding: 0 0.5rem;
+
+    .fr-notice__body {
+      padding: 0 1rem 0 2rem;
+    }
+
+    .fr-notice__title {
+      font-weight: 400;
+    }
+  }
+}
+
+// STEPPER
+.fr-stepper {
+  &__steps {
+    background-image: repeating-linear-gradient(to right, var(--background-active-blue-france) 0, var(--background-active-blue-france) var(--active-inner), transparent var(--active-inner), transparent var(--active-outer)), repeating-linear-gradient(to right, var(--background-default-grey) 0, var(--background-default-grey) var(--default-inner), transparent var(--default-inner), transparent var(--default-outer));
+  }
+}
+
+// ACCORDION
+.fr-accordions-group {
+  .fr-accordion {
+    &__btn {
+      color: var(--text-action-high-blue-france);
+    }
+
+    .fr-collapse {
+      white-space: pre-wrap;
+    }
+  }
+}
+
+// TABS
+.fr-tabs {
+  &.tabs-light {
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+
+    &:before {
+      box-shadow: none;
+    }
+
+    .fr-tabs__list {
+      min-height: 0;
+    }
+
+    .fr-tabs__panel {
+      padding: 1rem;
+    }
+  }
+}
+
+// SEARCH BAR
+.fr-search-bar .fr-input, .fr-input {
+  padding-left: 1.5rem;
+  font-size: 1.1rem;
+}
+
+.fr-search-bar .fr-input {
+  box-shadow: inset 0 -2px 0 0 var(--border-plain-grey);
+}
+
+// TAGS
+.fr-tag {
+  &.tag-lg {
+    font-size: 1.1rem;
+    padding: 0.25rem 1rem;
+  }
+
+  .ov-icon {
+    margin: 0;
+    margin-right: 0.2rem;
+  }
+}
+
+// TABLE
+.fr-table {
+  &--no-title {
+    caption {
+      display: none;
+    }
+  }
+}
+
+button.fr-tag[aria-pressed=true]:not(:disabled) {
+  &.no-checkmark {
+    background-image: none;
+    background-color: var(--background-action-high-blue-france);
+
+    &:after {
+      display: none;
+    }
+  }
+}
