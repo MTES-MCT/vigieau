@@ -1,0 +1,158 @@
+body {
+  height: 100%;
+  overflow-x: hidden;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.divider {
+  border-bottom: 1px solid var(--grey-925-125);
+}
+
+.text-align-center {
+  text-align: center;
+}
+
+.text-align-right {
+  text-align: right;
+}
+
+.fr-btns-group--sticky {
+  position: sticky;
+  bottom: 0;
+  padding-top: 1rem;
+  background-color: var(--grey-1000-50);
+  z-index: 9;
+}
+
+.fr-grid-row--space-between {
+  justify-content: space-between;
+}
+
+// PAGINATION
+a:not([href]) {
+  cursor: pointer;
+}
+
+a.fr-pagination__link:not([aria-current]):not([href]):not([disabled]) {
+  color: inherit;
+}
+
+// TABS
+.fr-tabs {
+  &.tabs-light {
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    overflow: visible;
+
+    &:before {
+      box-shadow: none;
+    }
+
+    & > .fr-tabs__list {
+      display: none;
+    }
+
+    & > .fr-tabs__panel {
+      padding: 0;
+    }
+  }
+}
+
+// SEARCH BAR
+.fr-search-bar {
+  &.show-label {
+    flex-wrap: wrap;
+
+    .fr-label {
+      position: relative;
+      width: 100%;
+      height: initial;
+    }
+
+    .fr-input {
+      margin-top: 0.5rem;
+      flex: 1;
+    }
+
+    .fr-btn {
+      margin-top: 0.5rem;
+      flex: none;
+    }
+  }
+}
+
+// SELECT
+.fr-select {
+  &-group--inline {
+    
+    .fr-select-group {
+      display: flex;
+      align-items: center;
+      
+      .fr-label {
+        flex: none;
+        margin-right: 0.5rem;
+      }
+    }
+  }
+}
+
+// ACCORDION
+.fr-accordion {
+  &__title {
+    .fr-fieldset__element {
+      flex: none;
+    }
+  }
+  
+  &--no-shadow:before {
+    box-shadow: none;
+  }
+}
+
+// INPUT GROUP
+.fr-input-group {
+  &__sub-hint {
+    color: var(--text-mention-grey);
+    font-size: .75rem;
+    display: block;
+    text-align: right;
+  }
+}
+
+// BREADCRUMB
+.fr-breadcrumb {
+  margin-bottom: 0.5rem;
+}
+
+// BADGE
+.fr-badge {
+  &--pas_restrictions {
+    background-color: #e8edff;
+    color: #161616;
+  }
+  
+  &--vigilance {
+    background-color: #ffeda0;
+    color: #161616;
+  }
+
+  &--alerte {
+    background-color: #feb24c;
+    color: var(--grey-1000-50);
+  }
+
+  &--alerte_renforcee {
+    background-color: #fc4e2a;
+    color: var(--grey-1000-50);
+  }
+
+  &--crise {
+    background-color: #b10026;
+    color: var(--grey-1000-50);
+  }
+}
