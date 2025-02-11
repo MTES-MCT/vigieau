@@ -12,6 +12,8 @@
     "dev:public-frontend": "yarn workspace vigieau_frontend run dev",
     "dev:admin-backend": "yarn workspace vigieau_admin_backend run start:dev",
     "dev:admin-frontend": "yarn workspace vigieau_admin_frontend run dev",
+    "dev:public": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\"",
+    "dev:admin": "concurrently \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\"",
     "dev": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\" \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\""
   },
   "devDependencies": {

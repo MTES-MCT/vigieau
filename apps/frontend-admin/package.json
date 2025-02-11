@@ -1,6 +1,6 @@
 {
-  "name": "regleau_front",
-  "version": "0.0.1",
+  "name": "vigieau_admin_frontend",
+  "version": "1.0.0",
   "scripts": {
     "build": "nuxi generate && purgecss --config ./purgecss.config.js",
     "start": "nuxi preview",

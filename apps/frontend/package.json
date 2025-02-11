@@ -1,6 +1,6 @@
 {
-  "version": "0.1.0",
-  "name": "preservonsleau",
+  "name": "vigieau_frontend",
+  "version": "1.0.0",
   "scripts": {
     "build": "nuxi generate && purgecss --config ./purgecss.config.js",
     "start": "nuxi preview",
