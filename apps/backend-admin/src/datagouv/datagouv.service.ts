@@ -316,8 +316,8 @@ export class DatagouvService {
     const dateDebut = date ? date : moment();
 
     for (let y = dateDebut.year(); y <= moment().year(); y++) {
-      await this.generateMapsArchive(dateDebut, y, true);
-      await this.generateMapsArchive(dateDebut, y, false);
+      await this.generateMapsArchive(dateDebut.clone(), y, true);
+      await this.generateMapsArchive(dateDebut.clone(), y, false);
     }
   }
 
@@ -345,7 +345,6 @@ export class DatagouvService {
          m.diff(moment(), 'days', true) <= 0 && m.year() === year;
          m.add(1, 'days')) {
       const fileName = `zones_arretes_en_vigueur_${m.format('YYYY-MM-DD')}.${geojsonOrPmtiles}`;
-      this.logger.log(`ADDING zones_arretes_en_vigueur_${m.format('YYYY-MM-DD')}.${geojsonOrPmtiles} to ZIP`);
       try {
         const filePath = m.diff(moment(), 'days', true) === 0 ?
           `${path}/zones_arretes_en_vigueur.${geojsonOrPmtiles}` :
