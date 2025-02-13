@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { BassinVersant } from './entities/bassin_versant.entity';
+import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { BassinVersantService } from './bassin_versant.service';
 
 @Module({

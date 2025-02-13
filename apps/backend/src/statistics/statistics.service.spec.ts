@@ -4,7 +4,7 @@ import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Statistic } from './entities/statistic.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
 import { DepartementsService } from '../departements/departements.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { of } from 'rxjs';

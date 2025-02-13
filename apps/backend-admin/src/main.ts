@@ -6,7 +6,7 @@ import helmet from 'helmet';
 import session from 'express-session';
 import passport from 'passport';
 import { TypeormStore } from 'connect-typeorm';
-import { Session } from './core/entities/session.entity';
+import { Session } from '@shared/entities/session.entity';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { RegleauLogger } from './logger/regleau.logger';

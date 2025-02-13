@@ -1,8 +1,8 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { User } from './entities/user.entity';
+import { User } from '@shared/entities/user.entity';
 import { DeleteResult, In, Like, Repository } from 'typeorm';
-import { Departement } from '../departement/entities/departement.entity';
+import { Departement } from '@shared/entities/departement.entity';
 import moment from 'moment';
 
 @Injectable()

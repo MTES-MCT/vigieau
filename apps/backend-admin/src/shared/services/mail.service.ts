@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { MailerService } from '@nestjs-modules/mailer';
 import { RegleauLogger } from '../../logger/regleau.logger';
 import { UserService } from '../../user/user.service';
+import {ConfigService} from "@nestjs/config";
 
 @Injectable()
 export class MailService {
@@ -13,7 +14,8 @@ export class MailService {
   private readonly logger = new RegleauLogger('MailService');
 
   constructor(private readonly mailerService: MailerService,
-              private readonly userService: UserService) {
+              private readonly userService: UserService,
+              private readonly configService: ConfigService) {
   }
 
   /**
@@ -29,14 +31,14 @@ export class MailService {
     template: string,
     context?: any,
   ): Promise<any> {
-    if (!process.env.MAIL_USER) {
+    if (!this.configService.get('MAIL_USER')) {
       this.logger.log(`EMAIL NOT SEND - NO MAIL_USER ${email} WITH SUBJECT: ${subject} WITH TEMPLATE: ${template}`);
       return;
     }
     return this.mailerService
       .sendMail({
         to: email,
-        from: `${process.env.MAIL_USER}`,
+        from: `${this.configService.get('MAIL_USER')}`,
         subject: `VigiEau Admin - ${subject}`,
         template: `./${template}`,
         context: context,
@@ -79,7 +81,7 @@ export class MailService {
     const users = await this.userService.findByDepartementsCode([depCode]);
     if (sendToMte) {
       // @ts-ignore
-      users.push({ email: process.env.MAIL_MTE });
+      users.push({ email: this.configService.get('MAIL_MTE') });
     }
     return Promise.all(
       users.map((u) => u.email).map((email) => this.sendEmail(email, subject, template, context)),

@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import * as Brevo from '@getbrevo/brevo';
 import { JwtService } from '@nestjs/jwt';
 import { CommunesService } from '../communes/communes.service';
-import process from 'node:process';
 import { ConfigService } from '@nestjs/config';
 import { VigieauLogger } from '../logger/vigieau.logger';
 

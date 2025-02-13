@@ -2,18 +2,18 @@ import { Module } from '@nestjs/common';
 import { ZonesService } from './zones.service';
 import { ZonesController } from './zones.controller';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Restriction } from './entities/restriction.entity';
-import { Usage } from './entities/usage.entity';
-import { Thematique } from './entities/thematique.entity';
-import { ArreteCadre } from './entities/arrete_cadre.entity';
-import { Fichier } from './entities/fichier.entity';
-import { ZoneAlerteComputed } from './entities/zone_alerte_computed.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
+import { Usage } from '@shared/entities/usage.entity';
+import { Thematique } from '@shared/entities/thematique.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
+import { Fichier } from '@shared/entities/fichier.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { DepartementsModule } from '../departements/departements.module';
 import { DataModule } from '../data/data.module';
 import { StatisticsModule } from '../statistics/statistics.module';
-import { ArreteMunicipal } from './entities/arrete_municipal.entity';
+import { ArreteMunicipal } from '@shared/entities/arrete_municipal.entity';
 import { CommunesModule } from '../communes/communes.module';
-import { Config } from './entities/config.entity';
+import { Config } from '@shared/entities/config.entity';
 
 @Module({
   imports: [

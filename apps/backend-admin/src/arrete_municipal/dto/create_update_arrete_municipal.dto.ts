@@ -1,7 +1,7 @@
 import { IsEmail, IsNumber, IsPhoneNumber, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { FilterOperator, PaginateConfig } from 'nestjs-paginate';
-import { ArreteMunicipal } from '../entities/arrete_municipal.entity';
+import { ArreteMunicipal } from '@shared/entities/arrete_municipal.entity';
 
 class UpdateLinkNestedObjectDto {
   @IsNumber()

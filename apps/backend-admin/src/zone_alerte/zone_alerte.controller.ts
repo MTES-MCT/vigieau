@@ -1,7 +1,7 @@
 import { Controller, Get, Param, UseGuards } from '@nestjs/common';
 import { ZoneAlerteService } from './zone_alerte.service';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { ZoneAlerte } from './entities/zone_alerte.entity';
+import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { plainToInstance } from 'class-transformer';
 import camelcaseKeys from 'camelcase-keys';
 import { ZoneAlerteDto, ZoneAlertGeomDto } from './dto/zone_alerte.dto';

@@ -5,16 +5,16 @@ import computeBbox from '@turf/bbox';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
 import { keyBy } from 'lodash';
-import { ZoneAlerteComputed } from './entities/zone_alerte_computed.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { DepartementsService } from '../departements/departements.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ZoneDto } from './dto/zone.dto';
 import { StatisticsService } from '../statistics/statistics.service';
 import { DataService } from '../data/data.service';
-import { ArreteMunicipal } from './entities/arrete_municipal.entity';
+import { ArreteMunicipal } from '@shared/entities/arrete_municipal.entity';
 import { CommunesService } from '../communes/communes.service';
-import { Commune } from './entities/commune.entity';
-import { Config } from './entities/config.entity';
+import { Commune } from '@shared/entities/commune.entity';
+import { Config } from '@shared/entities/config.entity';
 
 @Injectable()
 export class ZonesService {

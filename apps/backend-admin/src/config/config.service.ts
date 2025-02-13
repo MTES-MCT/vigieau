@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, IsNull, MoreThan, Repository } from 'typeorm';
-import { Config } from './entities/config.entity';
-import moment from 'moment';
+import { Brackets, Repository } from 'typeorm';
+import { Config } from '@shared/entities/config.entity';
 
 @Injectable()
 export class ConfigService {

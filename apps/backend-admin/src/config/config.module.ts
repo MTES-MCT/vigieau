@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Config } from './entities/config.entity';
+import { Config } from '@shared/entities/config.entity';
 import { ConfigService } from './config.service';
 
 @Module({

@@ -4,7 +4,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { StatisticDepartementService } from './statistic_departement.service';
 import { plainToInstance } from 'class-transformer';
 import camelcaseKeys from 'camelcase-keys';
-import { StatisticDepartement } from './entities/statistic_departement.entity';
+import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
 
 @UseGuards(AuthenticatedGuard)
 @Controller('statistic_departement')

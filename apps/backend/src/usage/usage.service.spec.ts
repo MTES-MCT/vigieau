@@ -3,8 +3,8 @@ import { HttpException, HttpStatus } from '@nestjs/common';
 import { UsageService } from './usage.service';
 import { Repository } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Usage } from '../zones/entities/usage.entity';
-import { UsageFeedback } from './entities/usage_feedback.entity';
+import { Usage } from '@shared/entities/usage.entity';
+import { UsageFeedback } from '@shared/entities/usage_feedback.entity';
 
 describe('UsageService', () => {
   let service: UsageService;

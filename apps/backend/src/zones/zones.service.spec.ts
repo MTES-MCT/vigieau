@@ -2,15 +2,15 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ZonesService } from './zones.service';
 import { Repository } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { ZoneAlerteComputed } from './entities/zone_alerte_computed.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { DepartementsService } from '../departements/departements.service';
 import { StatisticsService } from '../statistics/statistics.service';
 import { DataService } from '../data/data.service';
 import { CommunesService } from '../communes/communes.service';
-import { ArreteMunicipal } from './entities/arrete_municipal.entity';
-import { Config } from './entities/config.entity';
+import { ArreteMunicipal } from '@shared/entities/arrete_municipal.entity';
+import { Config } from '@shared/entities/config.entity';
 import { HttpException } from '@nestjs/common';
-import { Commune } from './entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
 
 describe('ZonesService', () => {
   let service: ZonesService;

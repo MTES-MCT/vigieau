@@ -8,7 +8,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { FilterOperator, PaginateConfig } from 'nestjs-paginate';
-import { ArreteRestriction } from '../entities/arrete_restriction.entity';
+import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { DepartementDto } from '../../departement/dto/departement.dto';
 import { ZoneAlerteDto } from '../../zone_alerte/dto/zone_alerte.dto';
 import { RestrictionDto } from '../../restriction/dto/restriction.dto';

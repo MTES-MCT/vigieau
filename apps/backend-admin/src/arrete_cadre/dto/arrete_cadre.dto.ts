@@ -10,10 +10,10 @@ import { DepartementDto } from '../../departement/dto/departement.dto';
 import { ZoneAlerteDto } from '../../zone_alerte/dto/zone_alerte.dto';
 import { ArreteRestrictionDto } from '../../arrete_restriction/dto/arrete_restriction.dto';
 import { FilterOperator, PaginateConfig } from 'nestjs-paginate';
-import { ArreteCadre } from '../entities/arrete_cadre.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { ApiProperty } from '@nestjs/swagger';
 import { FichierDto } from '../../fichier/dto/fichier.dto';
-import { Usage } from '../../usage/entities/usage.entity';
+import { Usage } from '@shared/entities/usage.entity';
 import { UsageDto } from '../../usage/dto/usage.dto';
 
 export class ArreteCadreDto {

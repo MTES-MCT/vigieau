@@ -2,20 +2,21 @@ import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, FindOneOptions, FindOptionsWhere, In, LessThan, LessThanOrEqual, Repository } from 'typeorm';
-import { ArreteMunicipal } from './entities/arrete_municipal.entity';
+import { ArreteMunicipal } from '@shared/entities/arrete_municipal.entity';
 import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
 import { arreteMunicipalPaginateConfig } from './dto/arrete_municipal.dto';
-import { User } from '../user/entities/user.entity';
+import { User } from '@shared/entities/user.entity';
 import { CreateUpdateArreteMunicipalDto } from './dto/create_update_arrete_municipal.dto';
 import moment from 'moment';
 import { FichierService } from '../fichier/fichier.service';
 import { StatutArreteMunicipal } from './type/arrete_municipal.type';
-import { ArreteCadre } from '../arrete_cadre/entities/arrete_cadre.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { RepealArreteMunicipalDto } from './dto/repeal_arrete_municipal.dto';
 import { CommuneService } from '../commune/commune.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { MailService } from '../shared/services/mail.service';
-import { Commune } from '../commune/entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
+import {ConfigService} from "@nestjs/config";
 
 @Injectable()
 export class ArreteMunicipalService {
@@ -27,6 +28,7 @@ export class ArreteMunicipalService {
     private readonly fichierService: FichierService,
     private readonly communeService: CommuneService,
     private readonly mailService: MailService,
+    private readonly configService: ConfigService,
   ) {
   }
 
@@ -203,7 +205,7 @@ export class ArreteMunicipalService {
         communeContactEmail: am.userEmail,
         communeContactTelephone: am.userPhone,
         communeArreteLien: newFile ? newFile.url : '',
-        communeLien: `https://${process.env.DOMAIN_NAME}/arrete-municipal`,
+        communeLien: `https://${this.configService.get('DOMAIN_NAME')}/arrete-municipal`,
       },
       true,
     );

@@ -5,7 +5,7 @@ import { CommunesModule } from '../communes/communes.module';
 import { HttpModule } from '@nestjs/axios';
 import { ZonesModule } from '../zones/zones.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AbonnementMail } from '../zones/entities/abonnement_mail.entity';
+import { AbonnementMail } from '@shared/entities/abonnement_mail.entity';
 import { BrevoModule } from '../brevo/brevo.module';
 import { MattermostModule } from '../mattermost/mattermost.module';
 import { CronModule } from '../cron/cron.module';

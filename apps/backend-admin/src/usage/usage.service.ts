@@ -1,11 +1,11 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, In, Not, Repository } from 'typeorm';
-import { Usage } from './entities/usage.entity';
-import { User } from '../user/entities/user.entity';
+import { Usage } from '@shared/entities/usage.entity';
+import { User } from '@shared/entities/user.entity';
 import { CreateUpdateUsageDto } from './dto/create_usage.dto';
-import { Restriction } from '../restriction/entities/restriction.entity';
-import { ArreteCadre } from '../arrete_cadre/entities/arrete_cadre.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { FindOptionsWhere } from 'typeorm/find-options/FindOptionsWhere';
 
 @Injectable()

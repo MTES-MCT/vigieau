@@ -1,7 +1,7 @@
 import { Controller, Delete, Get, Param, Req } from '@nestjs/common';
 import { UsageFeedbackService } from './usage_feedback.service';
 import { ApiOperation, ApiResponse } from '@nestjs/swagger';
-import { UsageFeedback, usageFeedbackPaginateConfig } from './entities/usage_feedback.entity';
+import { UsageFeedback, usageFeedbackPaginateConfig } from '@shared/entities/usage_feedback.entity';
 import { Paginate, Paginated, PaginatedSwaggerDocs, PaginateQuery } from 'nestjs-paginate';
 
 @Controller('usage_feedback')

@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Statistic } from './entities/statistic.entity';
-import { ZoneAlerteComputed } from '../zone_alerte_computed/entities/zone_alerte_computed.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { DepartementService } from '../departement/departement.service';
 import { Utils } from '../core/utils';
 import { max } from 'lodash';
-import { ZoneAlerte } from '../zone_alerte/entities/zone_alerte.entity';
+import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { RegleauLogger } from '../logger/regleau.logger';
 
 @Injectable()

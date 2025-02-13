@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunesService } from './communes.service';
-import { Commune } from '../zones/entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
 
 @Module({
   imports: [

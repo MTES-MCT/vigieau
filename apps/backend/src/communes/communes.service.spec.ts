@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { Commune } from '../zones/entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
 import { CommunesService } from './communes.service';
 import { Repository } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';

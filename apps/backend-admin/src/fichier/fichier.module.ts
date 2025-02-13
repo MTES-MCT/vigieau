@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { FichierService } from './fichier.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Fichier } from './entities/fichier.entity';
+import { Fichier } from '@shared/entities/fichier.entity';
 import { SharedModule } from '../shared/shared.module';
 import { HttpModule } from '@nestjs/axios';
 

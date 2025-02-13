@@ -13,7 +13,7 @@ import { ParametresService } from './parametres.service';
 import { plainToInstance } from 'class-transformer';
 import camelcaseKeys from 'camelcase-keys';
 import { ParametresDto } from './dto/parametres.dto';
-import { Parametres } from './entities/parametres.entity';
+import { Parametres } from '@shared/entities/parametres.entity';
 import { CreateUpdateParametresDto } from './dto/create_update_parametres.dto';
 
 @UseGuards(AuthenticatedGuard)

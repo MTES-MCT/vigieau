@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { StatisticService } from './statistic.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Statistic } from './entities/statistic.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
 import { DepartementModule } from '../departement/departement.module';
 
 @Module({

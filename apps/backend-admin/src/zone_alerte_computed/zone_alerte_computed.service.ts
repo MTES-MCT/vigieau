@@ -1,10 +1,10 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
-import { ZoneAlerteComputed } from './entities/zone_alerte_computed.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { DepartementService } from '../departement/departement.service';
-import { Departement } from '../departement/entities/departement.entity';
+import { Departement } from '@shared/entities/departement.entity';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { CommuneService } from '../commune/commune.service';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';

@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ArreteCadreZoneAlerteCommunes } from './entities/arrete_cadre_zone_alerte_communes.entity';
+import { ArreteCadreZoneAlerteCommunes } from '@shared/entities/arrete_cadre_zone_alerte_communes.entity';
 import { ArreteCadreZoneAlerteCommunesService } from './arrete_cadre_zone_alerte_communes.service';
 
 @Module({

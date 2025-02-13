@@ -3,7 +3,7 @@ import { ApiExcludeController, ApiOperation, ApiResponse } from '@nestjs/swagger
 import { UsageService } from './usage.service';
 import { UsageDto } from '../zones/dto/usage.dto';
 import { UsageFeedbackDto } from './dto/usage_feedback.dto';
-import { UsageFeedback } from './entities/usage_feedback.entity';
+import { UsageFeedback } from '@shared/entities/usage_feedback.entity';
 
 @Controller('usage')
 @ApiExcludeController()

@@ -1,12 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataService } from './data.service';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { StatisticDepartement } from './entities/statistic_departement.entity';
-import { StatisticCommune } from './entities/statistic_commune.entity';
-import { Commune } from '../zones/entities/commune.entity';
-import { Departement } from '../zones/entities/departement.entity';
-import { Region } from '../zones/entities/region.entity';
-import { BassinVersant } from '../zones/entities/bassin_versant.entity';
+import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
+import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
+import { Departement } from '@shared/entities/departement.entity';
+import { Region } from '@shared/entities/region.entity';
+import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { HttpException, HttpStatus } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 

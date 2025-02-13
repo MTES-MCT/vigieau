@@ -14,7 +14,7 @@ import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_c
 import { S3Service } from '../shared/services/s3.service';
 import JSZip from 'jszip';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
-import { ArreteRestriction } from '../arrete_restriction/entities/arrete_restriction.entity';
+import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { DepartementService } from '../departement/departement.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
 import { pipeline, Transform } from 'stream';

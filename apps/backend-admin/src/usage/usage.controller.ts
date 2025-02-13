@@ -6,7 +6,7 @@ import { UsageService } from './usage.service';
 import { plainToInstance } from 'class-transformer';
 import camelcaseKeys from 'camelcase-keys';
 import { UsageDto } from './dto/usage.dto';
-import { Usage } from './entities/usage.entity';
+import { Usage } from '@shared/entities/usage.entity';
 import { CreateUpdateUsageDto } from './dto/create_usage.dto';
 
 @UseGuards(AuthenticatedGuard)

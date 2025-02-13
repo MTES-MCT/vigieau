@@ -1,12 +1,11 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
-import process from 'node:process';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { DepartementsService } from '../departements/departements.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
-import { Statistic } from './entities/statistic.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { ConfigService } from '@nestjs/config';
