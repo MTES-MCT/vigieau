@@ -111,7 +111,7 @@ watch(() => typeEau.value, () => {
     <div class="fr-col-12 fr-container">
       <DsfrBreadcrumb class="fr-mb-0" :links='links' />
     </div>
-    <fieldset class="fr-col-12  fr-container fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w hide-sm">
+    <fieldset class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w hide-sm">
       <legend>
         <p class="fr-mr-1w fr-mb-0">Les restrictions concernent l'eau</p>
       </legend>
@@ -138,7 +138,7 @@ watch(() => typeEau.value, () => {
                      :typeEau="typeEau"
                      :zone="zone" />
 
-    <fieldset class="fr-col-12 fr-container fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mt-1w show-sm">
+    <fieldset class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mt-1w show-sm">
       <legend>
         <p class="fr-mr-1w fr-mb-0">Les restrictions concernent l'eau</p>
       </legend>
@@ -177,7 +177,7 @@ watch(() => typeEau.value, () => {
         </div>
       </div>
     </template>
-    <div class="fr-container fr-grid-row fr-grid-row--center fr-mt-2w">
+    <div class="fr-col-12 fr-grid-row fr-grid-row--center fr-mt-2w">
       <MixinsShare :situationLabel="situationLabel" :address="addressToUse" />
     </div>
   </div>

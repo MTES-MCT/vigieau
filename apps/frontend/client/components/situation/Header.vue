@@ -50,7 +50,7 @@ const niveauGravite = computed(() => {
 </script>
 
 <template>
-  <div class="situation-status-header fr-container fr-grid-row fr-py-4w"
+  <div class="situation-status-header fr-grid-row fr-py-4w"
        :class="'situation-level-' + utils.getRestrictionRank(zone?.niveauGravite)">
     <div class="fr-col-12 situation-status-header__info-wrapper"
          :class="!zone?.id ? 'fr-col-md-8' : ''">
@@ -95,7 +95,6 @@ const niveauGravite = computed(() => {
 
 <style scoped lang="scss">
 .situation-status-header {
-  max-width: 1000px;
   position: relative;
   margin: auto;
 
