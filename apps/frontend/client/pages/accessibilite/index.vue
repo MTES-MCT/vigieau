@@ -43,8 +43,8 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Acce
       <h2>État de conformité</h2>
       <p>
         <strong>{{ appName }}</strong> est
-        <strong><span data-printfilter="lowercase">non conforme</span></strong> avec le <abbr
-        title="Référentiel général d’amélioration de l’accessibilité">RGAA</abbr>. <span>Le site n’a encore pas été audité.</span>
+        <strong><span data-printfilter="lowercase">partiellement conforme</span></strong> avec le <abbr
+          title="Référentiel général d’amélioration de l’accessibilité">RGAA</abbr>.
       </p>
       <h2>Contenus non accessibles</h2>
       <h2>Amélioration et contact</h2>

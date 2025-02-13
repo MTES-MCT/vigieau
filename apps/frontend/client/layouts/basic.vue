@@ -9,7 +9,7 @@ const operatorImgAlt: string = `${useRuntimeConfig().public.appName}`;
 const operatorImgStyle: any = {
   'max-width': '150px',
 };
-const a11yCompliance: string = 'Non conforme';
+const a11yCompliance: string = 'Partiellement conforme';
 let quickLinks: any[] = [];
 const mandatoryLinks: any[] = [{
   label: `Accessibilité : ${a11yCompliance}`,

@@ -5,7 +5,7 @@ const operatorImgAlt: string = `Logo SMGC et Veolia`
 const operatorImgStyle: any = {
   'max-width': '300px'
 };
-const a11yCompliance: string = 'Non conforme';
+const a11yCompliance: string = 'Partiellement conforme';
 let quickLinks: any[] = [];
 const mandatoryLinks: any[] = [{
   label: `Accessibilité : ${a11yCompliance}`,
