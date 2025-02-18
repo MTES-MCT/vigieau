@@ -1,4 +1,4 @@
-import { defineNuxtConfig } from 'nuxt/config';
+import {defineNuxtConfig} from 'nuxt/config';
 import istanbulPlugin from "vite-plugin-istanbul";
 
 const appName = "VigiEau Admin";
@@ -11,24 +11,24 @@ export default defineNuxtConfig({
     head: {
       title: appName,
       meta: [
-        { charset: 'utf-8' },
-        { name: 'viewport', content: 'width=device-width, initial-scale=1' },
+        {charset: 'utf-8'},
+        {name: 'viewport', content: 'width=device-width, initial-scale=1'},
         {
           name: 'description',
           content: `Plateforme d'administration ${appName}`,
         },
-        { name: 'format-detection', content: 'telephone=no' },
-        { property: 'og:title', content: appName },
+        {name: 'format-detection', content: 'telephone=no'},
+        {property: 'og:title', content: appName},
         {
           property: 'og:description',
           content: `Plateforme d'administration ${appName}`,
         },
-        { property: 'og:type', content: 'website' },
-        { property: 'og:url', content: `https://${process.env.DOMAIN_NAME}` },
-        { property: 'og:locale', content: 'fr_FR' },
-        { property: 'og:image', content: `https://${process.env.DOMAIN_NAME}/favicon.svg` },
+        {property: 'og:type', content: 'website'},
+        {property: 'og:url', content: `https://${process.env.DOMAIN_NAME}`},
+        {property: 'og:locale', content: 'fr_FR'},
+        {property: 'og:image', content: `https://${process.env.DOMAIN_NAME}/favicon.svg`},
       ],
-      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
+      link: [{rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg'}],
       htmlAttrs: {
         lang: 'fr',
       },
@@ -64,6 +64,7 @@ export default defineNuxtConfig({
       domainName: process.env.DOMAIN_NAME,
       apiUrl: process.env.API_URL,
       email: 'contact.vigieau@beta.gouv.fr',
+      apiSecheresseUrl: process.env.API_SECHERESSE_URL,
     },
   },
 
@@ -74,7 +75,7 @@ export default defineNuxtConfig({
     plugins: [
       istanbulPlugin({
         exclude: ['node_modules', 'test/', 'coverage/'],
-        extension: [ '.js', '.ts', '.vue' ],
+        extension: ['.js', '.ts', '.vue'],
         cypress: true
       }),
     ]

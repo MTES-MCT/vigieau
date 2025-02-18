@@ -2,7 +2,7 @@
 import type { ArreteMunicipal } from '~/dto/arrete_municipal.dto';
 import useVuelidate from '@vuelidate/core';
 import { useAlertStore } from '~/stores/alert';
-import { parsePhoneNumber } from 'libphonenumber-js';
+import { parsePhoneNumberWithError } from 'libphonenumber-js';
 
 const props = defineProps<{
   arreteMunicipal: ArreteMunicipal;
@@ -13,12 +13,14 @@ const loading = ref(false);
 const alertStore = useAlertStore();
 const api = useApi();
 const v$ = useVuelidate();
+const modalOpened = ref(false);
+const utils = useUtils();
 
 const askEditPublishArrete = async () => {
-  await saveArrete();
+  await checkSaveArrete();
 };
 
-const saveArrete = async () => {
+const checkSaveArrete = async () => {
   if (loading.value) {
     return;
   }
@@ -29,21 +31,15 @@ const saveArrete = async () => {
   }
   loading.value = true;
 
-  const phoneNumber = parsePhoneNumber(props.arreteMunicipal.userPhone, 'FR');
-  props.arreteMunicipal.userPhone = phoneNumber.formatInternational();
-  
-  const { data, error } = props.arreteMunicipal.id
-    ? await api.arreteMunicipal.update(props.arreteMunicipal.id.toString(), props.arreteMunicipal)
-    : await api.arreteMunicipal.create(props.arreteMunicipal);
-  if (data.value?.id) {
-    navigateTo('/arrete-municipal');
-    alertStore.addAlert({
-      description: props.arreteMunicipal.id ? 'Modification réussie' : 'Publication réussie',
-      type: 'success',
-    });
+  // Check si l'arrêté municipal sera visible sur VigiEau
+  const toSave = await checkVisibilityOnVigiEau();
+
+  if (toSave) {
+    await saveArrete();
   }
+
   loading.value = false;
-}
+};
 
 const showErrors = (errors: any, title: string | null) => {
   alertStore.addAlert({
@@ -56,6 +52,31 @@ const showErrors = (errors: any, title: string | null) => {
     }).join(', '),
     type: 'error',
   });
+};
+
+const checkVisibilityOnVigiEau = async () => {
+  const { data, error } = await api.vigiEau.getZonesByCommune(props.arreteMunicipal.communes[0]?.code);
+  if (data.value || (error?.value && error.value.statusCode === 409)) {
+    return true;
+  }
+  modalOpened.value = true;
+  return false;
+};
+
+const saveArrete = async () => {
+  const phoneNumber = parsePhoneNumberWithError(props.arreteMunicipal.userPhone, 'FR');
+  props.arreteMunicipal.userPhone = phoneNumber.formatInternational();
+
+  const { data, error } = props.arreteMunicipal.id
+    ? await api.arreteMunicipal.update(props.arreteMunicipal.id.toString(), props.arreteMunicipal)
+    : await api.arreteMunicipal.create(props.arreteMunicipal);
+  if (data.value?.id) {
+    navigateTo('/arrete-municipal');
+    alertStore.addAlert({
+      description: props.arreteMunicipal.id ? 'Modification réussie' : 'Publication réussie',
+      type: 'success',
+    });
+  }
 };
 </script>
 
@@ -85,4 +106,11 @@ const showErrors = (errors: any, title: string | null) => {
       />
     </li>
   </ul>
+  <MixinsConfirmationModal
+    :opened="modalOpened"
+    title="Visibilité de l'arrêté municipal sur VigiEau"
+    description="Aucun arrêté préfectoral n'est en vigueur sur cette commune. Vous pouvez tout de même créer l'arrêté municipal mais celui-ci ne sera pas visible sur VigiEau."
+    @close="modalOpened = utils.closeModal(modalOpened)"
+    @confirm="saveArrete()"
+  />
 </template>

@@ -7,6 +7,7 @@ import { ArreteMunicipalApi } from "~/api/arrete-municipal";
 import { ParametresApi } from "~/api/parametres";
 import { CommuneApi } from "~/api/commune";
 import { BaseApiPagination } from '~/api/base-api-pagination';
+import {VigiEauApi} from "~/api/vigieau";
 
 export const useApi = () => {
   return {
@@ -22,5 +23,6 @@ export const useApi = () => {
     parametres: new ParametresApi('parametres'),
     statisticDepartement: new BaseApi('statistic_departement'),
     usageFeedback: new BaseApiPagination('usage_feedback'),
+    vigiEau: new VigiEauApi(),
   };
 };
