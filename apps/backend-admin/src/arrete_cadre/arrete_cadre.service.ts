@@ -17,7 +17,7 @@ import { CreateUpdateArreteCadreDto } from './dto/create_update_arrete_cadre.dto
 import { arreteCadrePaginateConfig } from './dto/arrete_cadre.dto';
 import { testArretesCadre } from '../core/test/data';
 import { PublishArreteCadreDto } from './dto/publish_arrete_cadre.dto';
-import { StatutArreteCadre } from './type/arrete_cadre.type';
+import { StatutArreteCadre } from '@shared/types/arrete_cadre.type';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { RepealArreteCadreDto } from './dto/repeal_arrete_cadre.dto';

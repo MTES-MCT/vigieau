@@ -1,5 +1,5 @@
 import { IsArray, IsNotEmpty, IsString, Matches, ValidateIf, ValidateNested } from 'class-validator';
-import { UserRole } from '../type/user-role.type';
+import { UserRole } from '@shared/types/user-role.type';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 

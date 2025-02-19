@@ -57,7 +57,8 @@ export class UsageFeedbackService {
     const paginateToReturn = await paginate(
       query,
       this.usageFeedbackRepository,
-      paginateConfig,
+        // @ts-ignore
+        paginateConfig,
     );
 
     return paginateToReturn;

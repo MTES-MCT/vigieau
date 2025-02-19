@@ -5,7 +5,7 @@ import {
   Entity,
   PrimaryColumn,
 } from 'typeorm';
-import { UserRole } from 'vigieau_admin_backend/src/user/type/user-role.type';
+import { UserRole } from '../types/user-role.type';
 
 @Entity()
 export class User extends BaseEntity {

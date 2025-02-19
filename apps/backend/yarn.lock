@@ -4543,6 +4543,13 @@ neo-async@^2.6.2:
   resolved "https://registry.yarnpkg.com/neo-async/-/neo-async-2.6.2.tgz#b4aafb93e3aeb2d8174ca53cf163ab7d7308305f"
   integrity sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw==
 
+nestjs-paginate@^11.0.1:
+  version "11.0.1"
+  resolved "https://registry.yarnpkg.com/nestjs-paginate/-/nestjs-paginate-11.0.1.tgz#cafb94c9e892fd8d1d78ab8d5c9cddb9353f9150"
+  integrity sha512-u4gMYYn1Zm3Coc5yBuvCxggKij/1eBAO8FxRWaSOodg8GwQi6QlR4eXeVI6NwqCzyUsOusaI36IJ9tW1+wMRDQ==
+  dependencies:
+    lodash "^4.17.21"
+
 node-abort-controller@^3.0.1:
   version "3.1.1"
   resolved "https://registry.yarnpkg.com/node-abort-controller/-/node-abort-controller-3.1.1.tgz#a94377e964a9a37ac3976d848cb5c765833b8548"

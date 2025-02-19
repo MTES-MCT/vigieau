@@ -10,7 +10,7 @@ import {
   Unique,
 } from 'typeorm';
 import { ZoneAlerte } from './zone_alerte.entity';
-import { NiveauGravite } from 'vigieau_admin_backend/src/arrete_restriction/type/niveau_gravite.type';
+import { NiveauGravite } from '../types/niveau_gravite.type';
 import { ArreteRestriction } from './arrete_restriction.entity';
 import { Commune } from './commune.entity';
 import { ArreteCadre } from './arrete_cadre.entity';

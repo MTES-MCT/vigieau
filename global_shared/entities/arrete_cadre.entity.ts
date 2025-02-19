@@ -15,7 +15,7 @@ import {
 import { ZoneAlerte } from './zone_alerte.entity';
 import {
   StatutArreteCadre,
-} from 'vigieau_admin_backend/src/arrete_cadre/type/arrete_cadre.type';
+} from '../types/arrete_cadre.type';
 import { Departement } from './departement.entity';
 import { ArreteRestriction } from './arrete_restriction.entity';
 import { Fichier } from './fichier.entity';

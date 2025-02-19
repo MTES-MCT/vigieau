@@ -25,7 +25,7 @@ import {DepartementService} from '../departement/departement.service';
 import {ArreteCadreService} from '../arrete_cadre/arrete_cadre.service';
 import {CreateUpdateArreteRestrictionDto} from './dto/create_update_arrete_restriction.dto';
 import {RestrictionService} from '../restriction/restriction.service';
-import {StatutArreteCadre} from '../arrete_cadre/type/arrete_cadre.type';
+import {StatutArreteCadre} from '@shared/types/arrete_cadre.type';
 import {RepealArreteRestrictionDto} from './dto/repeal_arrete_restriction.dto';
 import {PublishArreteRestrictionDto} from './dto/publish_arrete_restriction.dto';
 import {FichierService} from '../fichier/fichier.service';
@@ -590,7 +590,7 @@ export class ArreteRestrictionService {
         }
         // CHECKER URL / FILE
         const ar: ArreteRestriction = await this.findOne(id, currentUser);
-        //@ts-expect-error type
+        // @ts-expect-error type
         const arBis: ArreteRestriction = {
             ...ar,
             ...{

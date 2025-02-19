@@ -11,7 +11,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { RessourceEapCommunique, StatutArreteRestriction } from 'vigieau_admin_backend/src/arrete_restriction/type/statut_arrete_restriction.type';
+import { RessourceEapCommunique, StatutArreteRestriction } from '../types/statut_arrete_restriction.type';
 import { ArreteCadre } from './arrete_cadre.entity';
 import { Departement } from './departement.entity';
 import { Restriction } from './restriction.entity';

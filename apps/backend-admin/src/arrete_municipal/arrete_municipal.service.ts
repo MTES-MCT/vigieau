@@ -9,7 +9,7 @@ import { User } from '@shared/entities/user.entity';
 import { CreateUpdateArreteMunicipalDto } from './dto/create_update_arrete_municipal.dto';
 import moment from 'moment';
 import { FichierService } from '../fichier/fichier.service';
-import { StatutArreteMunicipal } from './type/arrete_municipal.type';
+import { StatutArreteMunicipal } from '@shared/types/arrete_municipal.type';
 import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { RepealArreteMunicipalDto } from './dto/repeal_arrete_municipal.dto';
 import { CommuneService } from '../commune/commune.service';

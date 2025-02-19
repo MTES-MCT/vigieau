@@ -7,7 +7,7 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Departement } from './departement.entity';
-import { SuperpositionCommune } from 'vigieau_admin_backend/src/parametres/type/parameters.type';
+import { SuperpositionCommune } from '../types/parameters.type';
 
 @Entity()
 export class Parametres extends BaseEntity {

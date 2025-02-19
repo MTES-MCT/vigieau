@@ -10,7 +10,7 @@ import {
 import { BassinVersant } from './bassin_versant.entity';
 import { Departement } from './departement.entity';
 import { Restriction } from './restriction.entity';
-import { NiveauGravite } from 'vigieau_admin_backend/src/arrete_restriction/type/niveau_gravite.type';
+import { NiveauGravite } from '../types/niveau_gravite.type';
 import { Commune } from './commune.entity';
 
 @Entity()

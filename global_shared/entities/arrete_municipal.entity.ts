@@ -9,7 +9,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { StatutArreteMunicipal } from 'vigieau_admin_backend/src/arrete_municipal/type/arrete_municipal.type';
+import { StatutArreteMunicipal } from '../types/arrete_municipal.type';
 import { Fichier } from './fichier.entity';
 import { Commune } from './commune.entity';
 

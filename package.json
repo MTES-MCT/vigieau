@@ -1,12 +1,6 @@
 {
   "version": "1.0.0",
   "private": true,
-  "workspaces": [
-    "apps/backend-admin",
-    "apps/frontend-admin",
-    "apps/backend",
-    "apps/frontend"
-  ],
   "scripts": {
     "dev:public-backend": "yarn workspace vigieau_backend run start:dev",
     "dev:public-frontend": "yarn workspace vigieau_frontend run dev",
@@ -18,5 +12,10 @@
   },
   "devDependencies": {
     "concurrently": "^7.0.0"
+  },
+  "dependencies": {
+    "connect-typeorm": "^2.0.0",
+    "nestjs-paginate": "^11.0.1",
+    "typeorm": "^0.3.20"
   }
 }
