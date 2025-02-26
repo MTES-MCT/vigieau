@@ -1,10 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DepartementsService } from './departements.service';
 import { Repository } from 'typeorm';
-import { Departement } from '../zones/entities/departement.entity';
-import { Statistic } from '../statistics/entities/statistic.entity';
-import { Region } from '../zones/entities/region.entity';
-import { BassinVersant } from '../zones/entities/bassin_versant.entity';
+import { Departement } from '@shared/entities/departement.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
+import { Region } from '@shared/entities/region.entity';
+import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { HttpException, HttpStatus } from '@nestjs/common';

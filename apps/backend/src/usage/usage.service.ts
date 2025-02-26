@@ -1,8 +1,8 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOneOptions, Repository } from 'typeorm';
-import { Usage } from '../zones/entities/usage.entity';
-import { UsageFeedback } from './entities/usage_feedback.entity';
+import { Usage } from '@shared/entities/usage.entity';
+import { UsageFeedback } from '@shared/entities/usage_feedback.entity';
 
 @Injectable()
 export class UsageService {

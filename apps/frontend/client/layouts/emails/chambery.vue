@@ -5,7 +5,7 @@ const operatorImgAlt: string = `Logo grand chambéry`
 const operatorImgStyle: any = {
   'max-width': '100px'
 };
-const a11yCompliance: string = 'Non conforme';
+const a11yCompliance: string = 'Partiellement conforme';
 let quickLinks: any[] = [];
 const mandatoryLinks: any[] = [{
   label: `Accessibilité : ${a11yCompliance}`,

@@ -2,13 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, FindOptionsWhere, In, Repository } from 'typeorm';
-import { Commune } from './entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { DepartementService } from '../departement/departement.service';
 import { firstValueFrom } from 'rxjs';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { ConfigService } from '@nestjs/config';
-import { User } from '../user/entities/user.entity';
+import { User } from '@shared/entities/user.entity';
 
 @Injectable()
 export class CommuneService {

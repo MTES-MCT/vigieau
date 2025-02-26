@@ -12,16 +12,16 @@ import { UserService } from '../user/user.service';
 import random = generators.random;
 import { RegleauLogger } from '../logger/regleau.logger';
 import { CommuneService } from '../commune/commune.service';
-import { Commune } from '../commune/entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
+import {ConfigService} from "@nestjs/config";
 
-export const buildOpenIdClient = async () => {
-  const TrustIssuer = await Issuer.discover(
-    `${process.env.OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER}/.well-known/openid-configuration`,
-  );
-  const client = new TrustIssuer.Client({
-    client_id: process.env.OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_ID,
-    client_secret: process.env.OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_SECRET,
-    acr_values: TrustIssuer.acr_values_supported,
+export const buildOpenIdClient = async (configService: ConfigService) => {
+  const issuerUrl = configService.get<string>('OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER');
+  const trustIssuer = await Issuer.discover(`${issuerUrl}/.well-known/openid-configuration`);
+  const client = new trustIssuer.Client({
+    client_id: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_ID'),
+    client_secret: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_SECRET'),
+    acr_values: trustIssuer.acr_values_supported,
     response_type: 'code',
     userinfo_signed_response_alg: 'HS256',
     id_token_signed_response_alg: 'HS256',
@@ -37,13 +37,14 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
   constructor(
     private readonly userService: UserService,
     private readonly communeService: CommuneService,
+    private readonly configService: ConfigService,
     client: Client,
   ) {
     super({
       client: client,
       params: {
-        redirect_uri: process.env.OAUTH2_CLIENT_REGISTRATION_LOGIN_REDIRECT_URI,
-        scope: process.env.OAUTH2_CLIENT_REGISTRATION_LOGIN_SCOPE,
+        redirect_uri: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_REDIRECT_URI'),
+        scope: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_SCOPE'),
         acr_values: client.acr_values,
       },
       usePKCE: false,

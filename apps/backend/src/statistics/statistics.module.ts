@@ -5,7 +5,7 @@ import { HttpModule } from '@nestjs/axios';
 import { DepartementsModule } from '../departements/departements.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Statistic } from './entities/statistic.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
 
 @Module({
   imports: [

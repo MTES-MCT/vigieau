@@ -1,14 +1,14 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, Repository } from 'typeorm';
-import { Departement } from '../zones/entities/departement.entity';
+import { Departement } from '@shared/entities/departement.entity';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { DepartementDto } from './dto/departement.dto';
-import { Statistic } from '../statistics/entities/statistic.entity';
+import { Statistic } from '@shared/entities/statistic.entity';
 import { Utils } from '../core/utils';
 import { max } from 'lodash';
-import { Region } from '../zones/entities/region.entity';
-import { BassinVersant } from '../zones/entities/bassin_versant.entity';
+import { Region } from '@shared/entities/region.entity';
+import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 
 @Injectable()
 export class DepartementsService {

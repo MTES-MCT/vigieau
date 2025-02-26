@@ -2,7 +2,7 @@ import { IsNumber, IsObject, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { FichierDto } from '../../fichier/dto/fichier.dto';
 import { FilterOperator, PaginateConfig } from 'nestjs-paginate';
-import { ArreteMunicipal } from '../entities/arrete_municipal.entity';
+import { ArreteMunicipal } from '@shared/entities/arrete_municipal.entity';
 
 export class ArreteMunicipalDto {
   @IsNumber()

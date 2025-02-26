@@ -1,10 +1,10 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { UsageFeedback, usageFeedbackPaginateConfig } from './entities/usage_feedback.entity';
-import { User } from '../user/entities/user.entity';
+import { UsageFeedback, usageFeedbackPaginateConfig } from '@shared/entities/usage_feedback.entity';
+import { User } from '@shared/entities/user.entity';
 import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
-import { ArreteCadre } from '../arrete_cadre/entities/arrete_cadre.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { arreteCadrePaginateConfig } from '../arrete_cadre/dto/arrete_cadre.dto';
 
 @Injectable()
@@ -57,7 +57,8 @@ export class UsageFeedbackService {
     const paginateToReturn = await paginate(
       query,
       this.usageFeedbackRepository,
-      paginateConfig,
+        // @ts-ignore
+        paginateConfig,
     );
 
     return paginateToReturn;

@@ -2,7 +2,7 @@ import { forwardRef, Module } from '@nestjs/common';
 import { ArreteCadreService } from './arrete_cadre.service';
 import { ArreteCadreController } from './arrete_cadre.controller';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ArreteCadre } from './entities/arrete_cadre.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { ArreteRestrictionModule } from '../arrete_restriction/arrete_restriction.module';
 import { SharedModule } from '../shared/shared.module';
 import { DepartementModule } from '../departement/departement.module';

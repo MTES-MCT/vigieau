@@ -6,7 +6,7 @@ import { pick } from 'lodash';
 import { ZonesService } from '../zones/zones.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { AbonnementMail } from '../zones/entities/abonnement_mail.entity';
+import { AbonnementMail } from '@shared/entities/abonnement_mail.entity';
 import { firstValueFrom } from 'rxjs';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { VigieauLogger } from '../logger/vigieau.logger';

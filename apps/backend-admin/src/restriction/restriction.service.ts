@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOneOptions, In, Not, Repository } from 'typeorm';
-import { Restriction } from './entities/restriction.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
 import { UsageService } from '../usage/usage.service';
 import { CreateUpdateArreteRestrictionDto } from '../arrete_restriction/dto/create_update_arrete_restriction.dto';
 import { CreateUpdateRestrictionDto } from './dto/create_update_restriction.dto';

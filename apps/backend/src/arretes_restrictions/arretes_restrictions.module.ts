@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ArreteRestriction } from '../zones/entities/arrete_restriction.entity';
+import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { ArretesRestrictionsController } from './arretes_restrictions.controller';
 import { ArretesRestrictionsService } from './arretes_restrictions.service';
 

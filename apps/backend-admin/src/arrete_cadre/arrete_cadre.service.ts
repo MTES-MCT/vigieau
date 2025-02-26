@@ -9,15 +9,15 @@ import {
   Like,
   Repository,
 } from 'typeorm';
-import { ArreteCadre } from './entities/arrete_cadre.entity';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { InjectRepository } from '@nestjs/typeorm';
-import { User } from '../user/entities/user.entity';
+import { User } from '@shared/entities/user.entity';
 import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
 import { CreateUpdateArreteCadreDto } from './dto/create_update_arrete_cadre.dto';
 import { arreteCadrePaginateConfig } from './dto/arrete_cadre.dto';
 import { testArretesCadre } from '../core/test/data';
 import { PublishArreteCadreDto } from './dto/publish_arrete_cadre.dto';
-import { StatutArreteCadre } from './type/arrete_cadre.type';
+import { StatutArreteCadre } from '@shared/types/arrete_cadre.type';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { RepealArreteCadreDto } from './dto/repeal_arrete_cadre.dto';
@@ -33,6 +33,7 @@ import moment from 'moment/moment';
 import {
   ArreteCadreZoneAlerteCommunesService,
 } from '../arrete_cadre_zone_alerte_communes/arrete_cadre_zone_alerte_communes.service';
+import {ConfigService} from "@nestjs/config";
 
 @Injectable()
 export class ArreteCadreService {
@@ -51,6 +52,7 @@ export class ArreteCadreService {
     private readonly restrictionService: RestrictionService,
     private readonly usageService: UsageService,
     private readonly arreteCadreZoneAlerteCommunesService: ArreteCadreZoneAlerteCommunesService,
+    private readonly configService: ConfigService,
   ) {
   }
 
@@ -688,7 +690,7 @@ export class ArreteCadreService {
         'finalisation_aci',
         {
           acNumero: newAc.numero,
-          acLien: `https://${process.env.DOMAIN_NAME}/arrete-cadre/${newAc.id}/edition`,
+          acLien: `https://${this.configService.get('DOMAIN_NAME')}/arrete-cadre/${newAc.id}/edition`,
         },
       );
       return;
@@ -720,7 +722,7 @@ export class ArreteCadreService {
         {
           departementNom: newAc.departementPilote.nom,
           acNumero: newAc.numero,
-          lien: `https://${process.env.DOMAIN_NAME}/arrete-cadre`,
+          lien: `https://${this.configService.get('DOMAIN_NAME')}/arrete-cadre`,
           departementsTermine: newDepsFinalise,
           departementsEnAttente: newDepsEnAttente,
         },
@@ -751,7 +753,7 @@ export class ArreteCadreService {
       {
         departementNom: newAc.departementPilote.nom,
         acNumero: newAc.numero,
-        acLien: `https://${process.env.DOMAIN_NAME}/arrete-cadre/${newAc.id}/edition`,
+        acLien: `https://${this.configService.get('DOMAIN_NAME')}/arrete-cadre/${newAc.id}/edition`,
       },
     );
   }
@@ -812,7 +814,7 @@ export class ArreteCadreService {
           joursFin: nbJoursFin,
           isAc: true,
           isAr: false,
-          arreteLien: `https://${process.env.DOMAIN_NAME}/arrete-cadre/${ac.id}/edition`,
+          arreteLien: `https://${this.configService.get('DOMAIN_NAME')}/arrete-cadre/${ac.id}/edition`,
         },
       );
     }

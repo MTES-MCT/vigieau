@@ -1,8 +1,8 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
-import { User } from '../user/entities/user.entity';
+import { User } from '@shared/entities/user.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, FindOneOptions, FindOptionsWhere, In, Repository } from 'typeorm';
-import { Parametres } from './entities/parametres.entity';
+import { Parametres } from '@shared/entities/parametres.entity';
 import { DepartementService } from '../departement/departement.service';
 import moment from 'moment/moment';
 

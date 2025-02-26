@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ArretesRestrictionsService } from './arretes_restrictions.service';
 import { IsNull, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { ArreteRestriction } from '../zones/entities/arrete_restriction.entity';
+import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { VigieauLogger } from '../logger/vigieau.logger';
 
 describe('ArretesRestrictionsService', () => {

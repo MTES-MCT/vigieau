@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, In, IsNull, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
-import { ArreteRestriction } from '../zones/entities/arrete_restriction.entity';
+import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 
 @Injectable()
 export class ArretesRestrictionsService {

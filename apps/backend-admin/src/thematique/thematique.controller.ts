@@ -5,7 +5,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { plainToInstance } from 'class-transformer';
 import camelcaseKeys from 'camelcase-keys';
 import { ThematiqueDto } from './dto/thematique.dto';
-import { Thematique } from './entities/thematique.entity';
+import { Thematique } from '@shared/entities/thematique.entity';
 
 @UseGuards(AuthenticatedGuard)
 @Controller('thematique')

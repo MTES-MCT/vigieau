@@ -1,8 +1,8 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { User } from './entities/user.entity';
+import { User } from '@shared/entities/user.entity';
 import { DeleteResult, In, Like, Repository } from 'typeorm';
-import { Departement } from '../departement/entities/departement.entity';
+import { Departement } from '@shared/entities/departement.entity';
 import moment from 'moment';
 
 @Injectable()
@@ -74,6 +74,7 @@ export class UserService {
   }
 
   async create(currentUser: User, user: User): Promise<User> {
+    // Check des droits
     if (
       currentUser.role === 'departement' &&
       (user.role !== 'departement' ||
@@ -123,8 +124,11 @@ export class UserService {
   }
 
   private _formatUser(user: User) {
-    if (user.role === 'mte') {
+    if (['mte', 'commune'].includes(user.role)) {
       user.role_departements = null;
+    }
+    if (['mte', 'departement'].includes(user.role)) {
+      user.role_communes = null;
     }
     return user;
   }

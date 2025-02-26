@@ -38,7 +38,7 @@ import { Utils } from '../core/utils';
 import { FileUploadDto } from '../core/dto/file_upload.dto';
 import { RepealArreteRestrictionDto } from './dto/repeal_arrete_restriction.dto';
 import { PublishArreteRestrictionDto } from './dto/publish_arrete_restriction.dto';
-import { ArreteRestriction } from './entities/arrete_restriction.entity';
+import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 
 @UseGuards(AuthenticatedGuard)
 @Controller('arrete-restriction')

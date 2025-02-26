@@ -7,7 +7,7 @@ import { ZonesService } from '../zones/zones.service';
 import { BrevoService } from '../brevo/brevo.service';
 import { MattermostService } from '../mattermost/mattermost.service';
 import { CronService } from '../cron/cron.service';
-import { AbonnementMail } from '../zones/entities/abonnement_mail.entity';
+import { AbonnementMail } from '@shared/entities/abonnement_mail.entity';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { of, throwError } from 'rxjs';
 import { HttpException, HttpStatus } from '@nestjs/common';

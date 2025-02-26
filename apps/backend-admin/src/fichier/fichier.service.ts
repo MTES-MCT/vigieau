@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeleteResult, Repository } from 'typeorm';
-import { Fichier } from './entities/fichier.entity';
+import { Fichier } from '@shared/entities/fichier.entity';
 import { S3Service } from '../shared/services/s3.service';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';

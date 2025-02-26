@@ -1,5 +1,5 @@
 import { IsArray, IsString } from 'class-validator';
-import { UserRole } from '../type/user-role.type';
+import { UserRole } from '@shared/types/user-role.type';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class UserDto {

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Like, Repository } from 'typeorm';
-import { AbonnementMail } from './entities/abonnement_mail.entity';
+import { AbonnementMail } from '@shared/entities/abonnement_mail.entity';
 
 @Injectable()
 export class AbonnementMailService {

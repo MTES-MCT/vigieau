@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { BassinVersant } from './entities/bassin_versant.entity';
+import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 

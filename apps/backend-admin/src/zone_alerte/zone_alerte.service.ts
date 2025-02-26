@@ -1,7 +1,7 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, FindManyOptions, In, IsNull, Not, Repository } from 'typeorm';
-import { ZoneAlerte } from './entities/zone_alerte.entity';
+import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { RegleauLogger } from '../logger/regleau.logger';

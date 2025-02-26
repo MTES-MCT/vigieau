@@ -1,13 +1,13 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, LessThan, Repository } from 'typeorm';
-import { StatisticCommune } from './entities/statistic_commune.entity';
-import { ZoneAlerteComputed } from '../zone_alerte_computed/entities/zone_alerte_computed.entity';
+import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { CommuneService } from '../commune/commune.service';
 import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
-import { Commune } from '../commune/entities/commune.entity';
+import { Commune } from '@shared/entities/commune.entity';
 import { Utils } from '../core/utils';
 import moment from 'moment/moment';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
