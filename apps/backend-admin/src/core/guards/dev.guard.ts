@@ -1,10 +1,10 @@
-import {CanActivate, ExecutionContext} from '@nestjs/common';
+import {CanActivate, ExecutionContext, Inject} from '@nestjs/common';
 import {Reflector} from '@nestjs/core';
 import {ConfigService} from "@nestjs/config";
 
 export class DevGuard implements CanActivate {
     constructor(private readonly reflector: Reflector,
-                private readonly configService: ConfigService,) {
+                @Inject(ConfigService) private readonly configService: ConfigService,) {
     }
 
     /**

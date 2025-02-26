@@ -5,11 +5,11 @@ import { Type } from 'class-transformer';
 
 export class UpdateUserDto {
   @IsString()
-  @Matches(/^mte$|^departement$/)
+  @Matches(/^mte$|^departement$|^commune$/)
   @IsNotEmpty()
   @ApiProperty({
     example: 'departement',
-    enum: ['mte', 'departement'],
+    enum: ['mte', 'departement', 'commune'],
     description: 'Rôle de l\'utilisateur',
   })
   role: UserRole;
@@ -21,7 +21,18 @@ export class UpdateUserDto {
   @ApiProperty({
     example: '["01"]',
     description:
-      'Départements associés à l\'utilisateur lorsque son rôle n\'est pas MTE',
+      'Départements associés à l\'utilisateur lorsque son rôle est departement',
   })
   roleDepartements: string[];
+
+  @ValidateIf((o) => o.role === 'departement')
+  @IsArray()
+  @IsNotEmpty()
+  @Matches('^(?:\\d{2}|2[AB])\\d{3}$', undefined, { each: true })
+  @ApiProperty({
+    example: '["01001"]',
+    description:
+        'Communes associés à l\'utilisateur lorsque son rôle est commune',
+  })
+  roleCommunes: string[];
 }

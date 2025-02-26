@@ -37,7 +37,7 @@ const generateRows = () => {
         d.email,
         `${UserRole[d.role]} ${d.role === 'departement' ? ` (${d.roleDepartements?.join(', ')})` : ''}
         ${d.role === 'commune' ? ` (${d.roleCommunes?.join(', ')})` : ''}`,
-        authStore.isMte && d.role !== 'commune'
+        authStore.isMte
           ? {
             component: 'DsfrButton',
             label: 'Modifier',

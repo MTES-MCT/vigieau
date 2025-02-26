@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import type { Ref } from 'vue';
-import { email, helpers, required, requiredIf } from '@vuelidate/validators';
+import type {Ref} from 'vue';
+import {email, helpers, required, requiredIf} from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
-import type { User } from '~/dto/user.dto';
-import { UserRole } from '~/dto/user.dto';
-import { useAuthStore } from '~/stores/auth';
+import type {User} from '~/dto/user.dto';
+import {UserRole} from '~/dto/user.dto';
+import {useAuthStore} from '~/stores/auth';
 import deburr from 'lodash.deburr';
-import { useRefDataStore } from '~/stores/refData';
-import type { Departement } from '~/dto/departement.dto';
+import {useRefDataStore} from '~/stores/refData';
+import type {Departement} from '~/dto/departement.dto';
+import type {Commune} from "~/dto/commune.dto";
 
 const props = defineProps<{
   user: User | null;
@@ -25,17 +26,17 @@ const refDataStore = useRefDataStore();
 const query: Ref<string> = ref('');
 const departementsTags: Ref<any> = ref([]);
 const departementsFiltered: Ref<any> = ref([]);
+const communesTags: Ref<any> = ref([]);
+const communesFiltered: Ref<any> = ref([]);
 
 for (const ur in UserRole) {
-  if (ur === 'commune') {
+  if (ur !== 'departement' && authStore.user.role === 'departement') {
     continue;
   }
-  if (!(ur === 'mte' && authStore.user.role === 'departement')) {
-    rolesAvailable.push({
-      text: UserRole[ur],
-      value: ur,
-    });
-  }
+  rolesAvailable.push({
+    text: UserRole[ur],
+    value: ur,
+  });
 }
 
 const formData = reactive({
@@ -43,7 +44,8 @@ const formData = reactive({
   firstName: props.user ? props.user.firstName : null,
   lastName: props.user ? props.user.lastName : null,
   role: props.user ? props.user.role : rolesAvailable.length > 1 ? null : rolesAvailable[0].value,
-  roleDepartements: props.user ? props.user.roleDepartements : authStore.user.role === 'departement' ? authStore.user.roleDepartements : [],
+  roleDepartements: props.user ? props.user.roleDepartements || [] : authStore.user.role === 'departement' ? authStore.user.roleDepartements : [],
+  roleCommunes: props.user ? props.user.roleCommunes || [] : [],
   isNewUser: !props.user,
 });
 const errorMessage: Ref<string> = ref('');
@@ -63,6 +65,12 @@ const rules = computed(() => {
       requiredIf: helpers.withMessage('Le département est obligatoire.', requiredIf(formData.role === 'departement')),
       $each: {
         regex: helpers.withMessage('Le département n\'existe pas', helpers.regex(/^([0|2][1-9]|[1|3-8][0-9]|9[0-5]|97[1-4]|2[AB]|976)$/)),
+      },
+    },
+    roleCommunes: {
+      requiredIf: helpers.withMessage('La commune est obligatoire.', requiredIf(formData.role === 'commune')),
+      $each: {
+        regex: helpers.withMessage('La commune n\'existe pas', helpers.regex(/^([0|2][1-9]|[1|3-8][0-9]|9[0-5]|97[1-4]|2[AB]|976)$/)),
       },
     },
   };
@@ -141,12 +149,46 @@ const computeDepartementsTags = () => {
 
 computeDepartementsTags();
 
+const selectCommune = (commune: string) => {
+  const inseeRegex = /^(?:\d{2}|2[AB])\d{3}$/;
+
+  if (!inseeRegex.test(commune)) {
+    return;
+  }
+  query.value = '';
+  formData.roleCommunes = [...formData.roleCommunes, commune];
+  computeCommunesTags();
+};
+
+const deleteCommune = (communeCode: string) => {
+  formData.roleCommunes = formData.roleCommunes.filter((c: string) => c !== communeCode);
+  computeCommunesTags();
+};
+
+const computeCommunesTags = () => {
+  communesTags.value = formData.roleCommunes.map((c) => {
+    return {
+      label: `${c}`,
+      class: authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(c) ? '' : 'fr-tag--dismiss',
+      tagName: 'button',
+      onclick: () => {
+        if (authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(c)) {
+          return;
+        }
+        deleteCommune(c);
+      },
+    };
+  });
+};
+
+computeCommunesTags();
+
 watch(
   query,
   useUtils().debounce(async () => {
     filterDepartements();
   }, 300),
-  { immediate: true },
+  {immediate: true},
 );
 
 defineExpose({
@@ -208,9 +250,9 @@ defineExpose({
           required
         />
       </div>
-      <div class="fr-mt-2w">
+      <div class="fr-mt-2w"
+           v-if="formData.role === 'departement'">
         <MixinsAutoComplete
-          v-if="formData.role === 'departement'"
           label="Ajouter un/des départements"
           data-cy="UserFormRoleDepartementInput"
           class="show-label"
@@ -227,7 +269,28 @@ defineExpose({
           :required="true"
         />
 
-        <DsfrTags class="fr-mt-2w" :tags="departementsTags" />
+        <DsfrTags class="fr-mt-2w" :tags="departementsTags"/>
+      </div>
+      <div class="fr-mt-2w"
+           v-if="formData.role === 'commune'">
+        <MixinsAutoComplete
+          label="Ajouter une/des communes"
+          data-cy="UserFormRoleCommuneInput"
+          class="show-label"
+          icon="ri-add-fill"
+          :labelVisible="true"
+          buttonText="Ajouter"
+          display-key="display"
+          v-model="query"
+          :options="communesFiltered"
+          placeholder="Rechercher une commune"
+          @update:modelValue="selectCommune($event)"
+          @search="selectCommune($event)"
+          :disabled="loading"
+          :required="true"
+        />
+
+        <DsfrTags class="fr-mt-2w" :tags="communesTags"/>
       </div>
     </DsfrInputGroup>
   </form>

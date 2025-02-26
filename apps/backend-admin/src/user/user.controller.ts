@@ -78,6 +78,9 @@ export class UserController {
     status: 201,
     type: UserDto,
   })
+
+  @UseGuards(RolesGuard)
+  @Roles(['mte', 'departement'])
   async create(@Req() req, @Body() createUserDto: CreateUserDto) {
     const user = await this.userService.create(
       req.session.user,
@@ -124,6 +127,8 @@ export class UserController {
 
   @Delete(':email')
   @ApiOperation({ summary: "Suppression d'un utilisateur" })
+  @UseGuards(RolesGuard)
+  @Roles(['mte', 'departement'])
   remove(@Req() req, @Param('email') email: string) {
     return this.userService.remove(req.session.user, email);
   }
