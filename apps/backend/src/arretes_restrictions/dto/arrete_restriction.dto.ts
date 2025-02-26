@@ -60,21 +60,21 @@ export class ArretesRestrictionsQueryDto {
   date?: string;
 
   @ApiPropertyOptional({
-    description: 'Bassin versant, si non précisée c\'est tout le territoire français qui est pris en compte',
+    description: 'ID Bassin versant, si non précisée c\'est tout le territoire français qui est pris en compte',
   })
   @IsOptional()
   @IsString()
   bassinVersant?: string;
 
   @ApiPropertyOptional({
-    description: 'Région, si non précisée c\'est tout le territoire français qui est pris en compte',
+    description: 'ID Région, si non précisée c\'est tout le territoire français qui est pris en compte',
   })
   @IsOptional()
   @IsString()
   region?: string;
 
   @ApiPropertyOptional({
-    description: 'Département, si non précisé c\'est tout le territoire français qui est pris en compte',
+    description: 'ID Département, si non précisé c\'est tout le territoire français qui est pris en compte',
   })
   @IsOptional()
   @IsString()

@@ -152,7 +152,7 @@ export class ZonesService {
   searchZonesByCommune(commune, allowMultiple = false) {
     const zones = this.zonesCommunesIndex[commune];
     const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
-    zones.forEach(zone => {
+    zones?.forEach(zone => {
       if (!zone.ressourceInfluencee) {
         zoneCounts[zone.type]++;
       }
