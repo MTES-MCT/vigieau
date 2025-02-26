@@ -36,12 +36,16 @@ const rules = computed(() => {
 
 const v$ = useVuelidate(rules, props.arreteRestriction);
 
-const zonesOptionsCheckBox = (ac: ArreteCadre, type: string) => {
+const zonesOptionsCheckBox = (ac: ArreteCadre, type: string, ressourceInfluencee?: boolean) => {
   const arsAssociated = ac.arretesRestriction.filter((ar) => ar.id !== props.arreteRestriction.id);
   //@ts-ignore
   return ac.zonesAlerteFiltered
-    ?.filter((z) => z.type === type)
-    .map((z) => {
+    ?.filter((z: any) => {
+      const matchType = z.type === type;
+      const matchRessource = ressourceInfluencee === undefined || z.ressourceInfluencee === ressourceInfluencee;
+      return matchType && matchRessource;
+    })
+    .map((z: any) => {
       return {
         id: z.id,
         name: z.id,
@@ -188,54 +192,66 @@ defineExpose({
             <div class="zone-alerte__body" v-if="zonesOptionsCheckBox(ac, 'SUP').length > 0">
               <p><b>Eaux superficielles</b></p>
               <div class="form-group fr-fieldset fr-mt-2w">
-                <DsfrCheckbox
-                  v-for="option in zonesOptionsCheckBox(ac, 'SUP')"
-                  :id="ac.id + ' ' + option.id"
-                  :key="option.id || option.name"
-                  :name="option.name"
-                  :model-value="zonesSelected.some((z) => z.zoneId === option.id && z.acId === ac.id)"
-                  :small="false"
-                  :disabled="zonesSelected.some((z) => z.zoneId === option.id && z.acId !== ac.id)"
-                  @update:model-value="onChange({ zoneId: option.id, checked: $event, acId: ac.id })"
-                >
-                  <template #label>
-                    {{ option.label }}
-                    <DsfrTooltip v-if="option.ressourceInfluencee"
-                                 on-hover
-                                 content="Ressource influencée">
-                      <DsfrBadge label="RI"
-                                 @click="$event.preventDefault();"
-                                 class="fr-ml-2w fr-badge--no-icon"/>
-                    </DsfrTooltip>
-                    <div class="checkbox-label-info" v-if="option.isArAssociated">
-                      <VIcon name="ri-information-fill" />
-                      Cette zone est utilisée dans un autre arrêté de restriction actif
-                    </div>
-                  </template>
-                </DsfrCheckbox>
+                <template v-for="ressourceInfluencee in [false, true]"
+                          :key="ressourceInfluencee">
+                  <p v-if="ressourceInfluencee" class="fr-ml-2w">
+                    <u>Ressources influencées</u>
+                  </p>
+                  <DsfrCheckbox
+                    v-for="option in zonesOptionsCheckBox(ac, 'SUP', ressourceInfluencee)"
+                    :id="ac.id + ' ' + option.id"
+                    :key="option.id || option.name"
+                    :name="option.name"
+                    :model-value="zonesSelected.some((z) => z.zoneId === option.id && z.acId === ac.id)"
+                    :small="false"
+                    :disabled="zonesSelected.some((z) => z.zoneId === option.id && z.acId !== ac.id)"
+                    @update:model-value="onChange({ zoneId: option.id, checked: $event, acId: ac.id })"
+                  >
+                    <template #label>
+                      {{ option.label }}
+                      <DsfrTooltip v-if="option.ressourceInfluencee"
+                                   on-hover
+                                   content="Ressource influencée">
+                        <DsfrBadge label="RI"
+                                   @click="$event.preventDefault();"
+                                   class="fr-ml-2w fr-badge--no-icon"/>
+                      </DsfrTooltip>
+                      <div class="checkbox-label-info" v-if="option.isArAssociated">
+                        <VIcon name="ri-information-fill" />
+                        Cette zone est utilisée dans un autre arrêté de restriction actif
+                      </div>
+                    </template>
+                  </DsfrCheckbox>
+                </template>
               </div>
             </div>
             <div class="zone-alerte__body" v-if="zonesOptionsCheckBox(ac, 'SOU').length > 0">
               <p><b>Eaux souterraines</b></p>
               <div class="form-group fr-fieldset fr-mt-2w">
-                <DsfrCheckbox
-                  v-for="option in zonesOptionsCheckBox(ac, 'SOU')"
-                  :id="ac.id + ' ' + option.id"
-                  :key="option.id || option.name"
-                  :name="option.name"
-                  :model-value="zonesSelected.some((z) => z.zoneId === option.id && z.acId === ac.id)"
-                  :small="false"
-                  :disabled="zonesSelected.some((z) => z.zoneId === option.id && z.acId !== ac.id)"
-                  @update:model-value="onChange({ zoneId: option.id, checked: $event, acId: ac.id })"
-                >
-                  <template #label>
-                    {{ option.label }}
-                    <div class="checkbox-label-info" v-if="option.isArAssociated">
-                      <VIcon name="ri-information-fill" />
-                      Cette zone est utilisée dans un autre arrêté de restriction en vigueur
-                    </div>
-                  </template>
-                </DsfrCheckbox>
+                <template v-for="ressourceInfluencee in [false, true]"
+                          :key="ressourceInfluencee">
+                  <p v-if="ressourceInfluencee" class="fr-ml-2w">
+                    <u>Ressources influencées</u>
+                  </p>
+                  <DsfrCheckbox
+                    v-for="option in zonesOptionsCheckBox(ac, 'SOU', ressourceInfluencee)"
+                    :id="ac.id + ' ' + option.id"
+                    :key="option.id || option.name"
+                    :name="option.name"
+                    :model-value="zonesSelected.some((z) => z.zoneId === option.id && z.acId === ac.id)"
+                    :small="false"
+                    :disabled="zonesSelected.some((z) => z.zoneId === option.id && z.acId !== ac.id)"
+                    @update:model-value="onChange({ zoneId: option.id, checked: $event, acId: ac.id })"
+                  >
+                    <template #label>
+                      {{ option.label }}
+                      <div class="checkbox-label-info" v-if="option.isArAssociated">
+                        <VIcon name="ri-information-fill" />
+                        Cette zone est utilisée dans un autre arrêté de restriction en vigueur
+                      </div>
+                    </template>
+                  </DsfrCheckbox>
+                </template>
               </div>
             </div>
           </div>
