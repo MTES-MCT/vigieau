@@ -1,5 +1,4 @@
 import type { Ref } from 'vue';
-import type { Thematique } from "~/dto/thematique.dto";
 
 export const useContextStore = defineStore('contextStore', () => {
   const departementFilter: Ref<number | null | undefined> = ref();

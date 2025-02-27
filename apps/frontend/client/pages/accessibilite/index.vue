@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Ref } from 'vue';
+import {Ref} from 'vue';
 
 definePageMeta({
   layout: 'basic',
@@ -13,12 +13,12 @@ useHead({
 });
 
 const domainName = useRuntimeConfig().public.domainName;
-const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Accessibilité' }]);
+const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessibilité'}]);
 </script>
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <DsfrBreadcrumb :links='links'/>
     <div>
       <h1>Déclaration d’accessibilité</h1>
       <p>Établie le <span>22 mai 2024</span>.</p>
@@ -38,15 +38,59 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Acce
           </li>
         </ul>
       </p>
-      <p>Cette déclaration d’accessibilité s’applique à <strong>{{ appName }}</strong><span> (<span>{{ domainName
+      <p>Cette déclaration d’accessibilité s’applique à <strong>{{ appName }}</strong><span> (<span>{{
+          domainName
         }}</span>)</span>.</p>
       <h2>État de conformité</h2>
       <p>
         <strong>{{ appName }}</strong> est
         <strong><span data-printfilter="lowercase">partiellement conforme</span></strong> avec le <abbr
-          title="Référentiel général d’amélioration de l’accessibilité">RGAA</abbr>.
+          title="Référentiel général d’amélioration de l’accessibilité">RGAA</abbr>.<br/>
       </p>
+      <h2>Résultats des tests</h2>
+      <p>
+        L’audit de conformité au RGAA version 4.1.2 réalisé en janvier 2025 par la société <a
+          href="https://www.temesis.com/"
+          title="https://www.temesis.com/ (nouvelle fenêtre)"
+          target="_blank"
+          rel="external">Temesis</a> révèle que sur l’échantillon :
+      </p>
+      <ul>
+        <li>
+          Le taux de conformité global est de 65,38%. Ce taux est obtenu en divisant le nombre de critères conformes par
+          le nombre de critères applicables.
+        </li>
+        <li>
+          Le taux de conformité moyen est de 80,12%. Ce taux est obtenu en faisant la moyenne des taux de conformité de
+          chaque page.
+        </li>
+      </ul>
       <h2>Contenus non accessibles</h2>
+      <h3>Non-conformité</h3>
+      <p>Parmis les points bloquants</p>
+      <ul>
+        <li>Présence des documents PDF non conforme aux normes d'accessibilité</li>
+        <li>a valeur de l’option en cours de sélection n’est pas exposée aux aides techniques</li>
+      </ul>
+      <p>Parmis les points majeurs</p>
+      <ul>
+        <li>Lien d'accès rapide est présent, mais n'est pas visible à la prise de focus clavier</li>
+        <li>Présence d’un contenu visible porteur d’information généré avec CSS</li>
+        <li>Le focus n’est pas capturé au sein de la modale</li>
+        <li>Absence de rôle sur l'élément</li>
+        <li>Absence d’indication de champ obligatoire</li>
+        <li>La mise à jour du nombre de suggestions n’est pas exposée aux aides techniques</li>
+      </ul>
+      <p>Parmis les points mineurs</p>
+      <ul>
+        <li>Présence de contenu qui n'est pas signalé par un élément sémantique</li>
+        <li>Présence de paragraphes vides &lt;p&gt;&lt;/p&gt;</li>
+        <li>Présence d’une image décorative non ignorée par les aides techniques</li>
+      </ul>
+      <h3>Contenus non soumis à l’obligation d’accessibilité</h3>
+      <ul>
+        <li>Carte géolocalisation</li>
+      </ul>
       <h2>Amélioration et contact</h2>
       <p>
         Si vous n’arrivez pas à accéder à un contenu ou à un service, vous pouvez contacter le
@@ -84,10 +128,10 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Acce
       <hr>
       <p>
         Cette déclaration d’accessibilité a été créé le <span>10 mai 2023</span> grâce au <a
-        href="https://betagouv.github.io/a11y-generateur-declaration/"
-        title="https://betagouv.github.io/a11y-generateur-declaration/ (nouvelle fenêtre)"
-        target="_blank"
-        rel="external">
+          href="https://betagouv.github.io/a11y-generateur-declaration/"
+          title="https://betagouv.github.io/a11y-generateur-declaration/ (nouvelle fenêtre)"
+          target="_blank"
+          rel="external">
         Générateur de Déclaration d’Accessibilité de BetaGouv
       </a>.
       </p>

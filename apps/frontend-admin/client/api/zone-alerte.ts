@@ -37,4 +37,11 @@ export class ZoneAlerteApi extends BaseApi {
       return res;
     });
   };
+
+  getMaxUpdatedAt = () => {
+    return useCustomFetch(`/${this.resource}/date`, {
+      method: 'GET',
+      baseURL: '/api',
+    });
+  }
 }

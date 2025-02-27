@@ -11,12 +11,22 @@ export default defineNuxtPlugin((nuxtApp) => {
 
   // CHARGEMENT DES DONNEES DE REFERENCE QUAND L'UTILISATEUR EST CONNECTE
   const loadGlobal = async () => {
-    if (authStore.isAuthenticated) {
+    if (await authStore.isAuthenticated) {
       const [
         fecthDep,
         fetchUsage,
         fetchThematique,
-        fetchCommune,] = await Promise.all([api.departement.list(), api.usage.list(), api.thematique.list(), api.commune.list()]);
+        fetchCommune,
+        fetchZoneAlerteMaxUpdatedAt,
+      ] = await Promise.all(
+        [
+          api.departement.list(),
+          api.usage.list(),
+          api.thematique.list(),
+          api.commune.list(),
+          api.zoneAlerte.getMaxUpdatedAt(),
+        ]
+      );
       if (fecthDep.data.value) {
         useRefDataStore().setDepartements(<Departement[]>fecthDep.data.value);
       }
@@ -28,6 +38,9 @@ export default defineNuxtPlugin((nuxtApp) => {
       }
       if (fetchCommune.data.value) {
         useRefDataStore().setCommunes(<Commune[]>fetchCommune.data.value);
+      }
+      if (fetchZoneAlerteMaxUpdatedAt.data.value) {
+        useRefDataStore().setZoneAlerteMaxUpdatedAt(<string>fetchZoneAlerteMaxUpdatedAt.data.value);
       }
     }
   }
