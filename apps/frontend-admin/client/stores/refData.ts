@@ -1,9 +1,10 @@
-import type { Ref } from 'vue';
-import type { Departement } from '~/dto/departement.dto';
-import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
-import type { Usage } from '~/dto/usage.dto';
-import type { Thematique } from '~/dto/thematique.dto';
+import type {Ref} from 'vue';
+import type {Departement} from '~/dto/departement.dto';
+import type {ZoneAlerte} from '~/dto/zone_alerte.dto';
+import type {Usage} from '~/dto/usage.dto';
+import type {Thematique} from '~/dto/thematique.dto';
 import type {Commune} from "~/dto/commune.dto";
+import moment, {Moment} from "moment";
 
 export const useRefDataStore = defineStore('refDataStore', () => {
   const departements: Ref<Departement[]> = ref([]);
@@ -11,6 +12,7 @@ export const useRefDataStore = defineStore('refDataStore', () => {
   const zonesAlerte: Ref<ZoneAlerte[]> = ref([]);
   const thematiques: Ref<Thematique[]> = ref([]);
   const communes: Ref<Commune[]> = ref([]);
+  const zoneAlerteMaxUpdatedAt: Ref<Moment | null> = ref(null);
 
   function setDepartements(value: Departement[]): void {
     departements.value = value;
@@ -29,5 +31,21 @@ export const useRefDataStore = defineStore('refDataStore', () => {
     communes.value = value;
   }
 
-  return { setDepartements, departements, zonesAlerte, setUsages, usages, setThematiques, thematiques, setCommunes, communes };
+  function setZoneAlerteMaxUpdatedAt(value: string): void {
+    zoneAlerteMaxUpdatedAt.value = value ? moment(value) : null;
+  }
+
+  return {
+    setDepartements,
+    departements,
+    zonesAlerte,
+    setUsages,
+    usages,
+    setThematiques,
+    thematiques,
+    setCommunes,
+    communes,
+    setZoneAlerteMaxUpdatedAt,
+    zoneAlerteMaxUpdatedAt
+  };
 });

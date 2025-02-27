@@ -126,6 +126,10 @@ watch(
     </NuxtLink>
     <div class="fr-col-12 fr-grid-row fr-grid-row--bottom fr-grid-row--gutters fr-mt-2w">
       <div class="fr-col-12 fr-col-md-6 fr-mb-2w">
+        <div class="fr-mb-1w">
+          Mise à jour des zones d'alerte&nbsp;:
+          {{ refDataStore.zoneAlerteMaxUpdatedAt?.format('DD/MM/YYYY') }}
+        </div>
         <DsfrSegmentedSet v-model="statusFilter" :inline="true" :options="statusOptions" />
       </div>
       <div class="fr-col-12 fr-col-md-3 fr-mb-2w">
