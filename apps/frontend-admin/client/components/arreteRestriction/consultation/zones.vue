@@ -37,7 +37,7 @@ const zonesType = [
         <p><b>{{ zoneType.label }}</b></p>
         <template v-for="ressourceInfluencee in [false, true]"
                   :key="ressourceInfluencee">
-          <p v-if="ressourceInfluencee" class="fr-ml-2w">
+          <p v-if="ressourceInfluencee && getRestrictionsByZoneTypeAndAc(zoneType.type, ac.id, ressourceInfluencee).length > 0" class="fr-ml-2w">
             <u>Ressources influencées</u>
           </p>
           <div v-for="r in getRestrictionsByZoneTypeAndAc(zoneType.type, ac.id, ressourceInfluencee)"
