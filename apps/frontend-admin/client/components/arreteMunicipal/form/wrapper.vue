@@ -56,7 +56,7 @@ const showErrors = (errors: any, title: string | null) => {
 
 const checkVisibilityOnVigiEau = async () => {
   const { data, error } = await api.vigiEau.getZonesByCommune(props.arreteMunicipal.communes[0]?.code);
-  if (data.value || (error?.value && error.value.statusCode === 409)) {
+  if ((data.value && data.value.length > 0) || (error?.value && error.value.statusCode === 409)) {
     return true;
   }
   modalOpened.value = true;

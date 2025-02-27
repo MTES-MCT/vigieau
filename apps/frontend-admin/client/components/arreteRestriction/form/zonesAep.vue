@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
+import type {ArreteRestriction} from '~/dto/arrete_restriction.dto';
 import useVuelidate from '@vuelidate/core';
-import { helpers, required } from '@vuelidate/validators';
-import type { Ref } from 'vue';
-import { Restriction } from '~/dto/restriction.dto';
-import type { Commune } from '~/dto/commune.dto';
+import {helpers, required} from '@vuelidate/validators';
+import type {Ref} from 'vue';
+import {Restriction} from '~/dto/restriction.dto';
+import type {Commune} from '~/dto/commune.dto';
+import {useRefDataStore} from "~/stores/refData";
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -36,6 +37,7 @@ const rules = computed(() => {
 
 const utils = useUtils();
 const api = useApi();
+const refDataStore = useRefDataStore();
 const communes: Ref<Commune[]> = ref([]);
 const doublonCommunes: Ref<Commune[]> = ref([]);
 const groupementToEdit: Ref<Restriction | undefined> = ref();
@@ -74,7 +76,7 @@ const createEditGroupementCommunes = (restriction = null, isFullDepartement = fa
   if (isFullDepartement) {
     r.nomGroupementAep = 'Zone AEP départementale';
     r.communes = communes.value.map((c) => {
-      return { id: c.id, code: c.code, nom: c.nom };
+      return {id: c.id, code: c.code, nom: c.nom};
     });
   }
   groupementToEdit.value = r;
@@ -99,7 +101,7 @@ const createEditGroupement = async (restriction: Restriction) => {
   utils.closeModal(modalCommunesOpened);
 };
 
-const onChange = ({ name, checked }: { name: string; checked: boolean }) => {
+const onChange = ({name, checked}: { name: string; checked: boolean }) => {
   zonesSelected.value = checked ? [...zonesSelected.value, name] : zonesSelected.value.filter((val) => val !== name);
 };
 
@@ -119,27 +121,27 @@ const sortCommunes = () => {
   props.arreteRestriction.restrictions
     .filter(r => r.communes)
     .forEach(r => {
-    r.communes = r.communes?.sort((a, b) => {
-      if (a.code < b.code) {
-        return -1;
-      }
-      if (a.code > b.code) {
-        return 1;
-      }
-      return 0;
+      r.communes = r.communes?.sort((a, b) => {
+        if (a.code < b.code) {
+          return -1;
+        }
+        if (a.code > b.code) {
+          return 1;
+        }
+        return 0;
+      });
     });
-  });
 };
 
 const showErrorMessage = computed(() => {
   let errorMessage = utils.showInputError(v$.value, 'restrictions');
-  if(doublonCommunes.value.length > 0) {
+  if (doublonCommunes.value.length > 0) {
     errorMessage += ` Les communes suivantes sont présentes dans plusieurs zones AEP : ${doublonCommunes.value.map(c => c.code + ' ' + c.nom).join(', ')}`;
   }
   return errorMessage;
 });
 
-const v$ = useVuelidate(rules, { isFullDepartement });
+const v$ = useVuelidate(rules, {isFullDepartement});
 
 defineExpose({
   v$,
@@ -148,20 +150,15 @@ defineExpose({
 watch(
   () => props.arreteRestriction.departement,
   async () => {
-    const query = `depCode=${props.arreteRestriction.departement?.code}`;
-    loading.value = true;
-    const { data, error } = await api.commune.list(query);
-    if (data.value) {
-      communes.value = data.value;
-      const restrictionsAep = props.arreteRestriction.restrictions.filter((r) => r.isAep);
-      if (restrictionsAep.length > 0) {
-        canComputeFullDepartement.value = false;
-        isFullDepartement.value = restrictionsAep.length < 2 && communesAssociated.value === communes.value.length;
-      }
+    const regex = new RegExp(`^(${props.arreteRestriction.departement?.code})`);
+    communes.value = refDataStore.communes.filter(c => regex.test(c.code));
+    const restrictionsAep = props.arreteRestriction.restrictions.filter((r) => r.isAep);
+    if (restrictionsAep.length > 0) {
+      canComputeFullDepartement.value = false;
+      isFullDepartement.value = restrictionsAep.length < 2 && communesAssociated.value === communes.value.length;
     }
-    loading.value = false;
   },
-  { immediate: true },
+  {immediate: true},
 );
 
 watch(zonesSelected, () => {
@@ -216,9 +213,9 @@ watch(zonesSelected, () => {
                 :expanded-id="expandedId"
                 @expand="expandedId = $event"
               >
-                <span v-for="c of r.communes"> {{ c.code }} - {{ c.nom }}<br /> </span>
+                <span v-for="c of r.communes"> {{ c.code }} - {{ c.nom }}<br/> </span>
               </DsfrAccordion>
-              <div class="divider fr-mb-2w" />
+              <div class="divider fr-mb-2w"/>
             </template>
           </DsfrInputGroup>
         </div>

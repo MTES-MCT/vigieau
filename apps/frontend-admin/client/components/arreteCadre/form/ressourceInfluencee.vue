@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
-import type { Ref } from 'vue';
-import type { Departement } from '~/dto/departement.dto';
-import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
-import { useRefDataStore } from '~/stores/refData';
-import type { Commune } from '~/dto/commune.dto';
+import type {ArreteCadre} from '~/dto/arrete_cadre.dto';
+import type {Ref} from 'vue';
+import type {Departement} from '~/dto/departement.dto';
+import type {ZoneAlerte} from '~/dto/zone_alerte.dto';
+import {useRefDataStore} from '~/stores/refData';
+import type {Commune} from '~/dto/commune.dto';
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
@@ -95,15 +95,10 @@ watch(
     );
     computeDepSelected();
 
-    const query = `depCode=${props.arreteCadre.departements?.map(d => d.code).join(',')}`;
-    loading.value = true;
-    const { data, error } = await api.commune.list(query);
-    if (data.value) {
-      communes.value = data.value;
-    }
-    loading.value = false;
+    const regex = new RegExp(`^(${props.arreteCadre.departements?.map(d => d.code).join('|')})`);
+    communes.value = refDataStore.communes.filter(c => regex.test(c.code));
   },
-  { immediate: true },
+  {immediate: true},
 );
 
 watch(
@@ -143,7 +138,7 @@ watch(
                              @expand="expandedId = $event"
                              :key="option.id + '-' + accordionKey"
               >
-                <span v-for="c of option.communes"> {{ c.code }} - {{ c.nom }}<br /> </span>
+                <span v-for="c of option.communes"> {{ c.code }} - {{ c.nom }}<br/> </span>
               </DsfrAccordion>
             </div>
           </div>
@@ -162,7 +157,7 @@ watch(
     <ArreteCadreFormGroupementCommunes :zoneAlerte="zoneToEdit"
                                        ref="groupementCommunesFormRef"
                                        :communes="communes"
-                                       @createEdit="createEditGroupement($event)" />
+                                       @createEdit="createEditGroupement($event)"/>
   </DsfrModal>
 </template>
 
