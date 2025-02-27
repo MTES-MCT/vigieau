@@ -100,6 +100,7 @@ export class ArreteCadreService {
           nom: true,
           type: true,
           disabled: true,
+          ressourceInfluencee: true,
           departement: {
             id: true,
             code: true,

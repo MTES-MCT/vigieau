@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { ArreteMunicipal } from '~/dto/arrete_municipal.dto';
-import { email, helpers, required, requiredIf } from '@vuelidate/validators';
+import type {ArreteMunicipal} from '~/dto/arrete_municipal.dto';
+import {email, helpers, required, requiredIf} from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
-import type { Ref } from 'vue';
-import { useAuthStore } from '~/stores/auth';
+import type {Ref} from 'vue';
+import {useAuthStore} from '~/stores/auth';
+import {useRefDataStore} from "~/stores/refData";
 
 const props = defineProps<{
   arreteMunicipal: ArreteMunicipal;
@@ -12,6 +13,7 @@ const props = defineProps<{
 const utils = useUtils();
 const api = useApi();
 const authStore = useAuthStore();
+const refDataStore = useRefDataStore();
 const hint = ref('');
 const communes: Ref<any> = ref([]);
 const communesText = ref(props.arreteMunicipal.communes?.map((c) => c.code).join('\n'));
@@ -63,13 +65,10 @@ const userFullName = computed(() => {
 const v$ = useVuelidate(rules, props.arreteMunicipal);
 
 const loadCommunes = async () => {
-  const { data, error } = await api.commune.list();
-  if (data.value) {
-    communes.value = data.value;
-    if(!props.arreteMunicipal.id && authStore.user?.role === 'commune') {
-      props.arreteMunicipal.communes = communes.value.filter((c: any) => authStore.user?.roleCommunes.includes(c.code));
-      communesText.value = props.arreteMunicipal.communes?.map((c) => c.code).join('\n');
-    }
+  communes.value = refDataStore.communes;
+  if (!props.arreteMunicipal.id && authStore.user?.role === 'commune') {
+    props.arreteMunicipal.communes = communes.value.filter((c: any) => authStore.user?.roleCommunes.includes(c.code));
+    communesText.value = props.arreteMunicipal.communes?.map((c) => c.code).join('\n');
   }
 }
 
@@ -153,7 +152,7 @@ defineExpose({
           class="fr-mb-2w">
           Pour créer votre arrêté vous allez devoir nous fournir les codes INSEE de chaque commune concernée. Copier / coller à partir
           de la liste des codes correspondant à un groupement.
-          <br /><a class="fr-link" href="https://www.insee.fr/fr/information/2560452" target="_blank">Liste des codes INSEE</a>
+          <br/><a class="fr-link" href="https://www.insee.fr/fr/information/2560452" target="_blank">Liste des codes INSEE</a>
         </DsfrAlert>
 
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'communes')">
@@ -170,13 +169,14 @@ defineExpose({
           />
           <p>
             {{ props.arreteMunicipal.communes?.length }} communes associées
-            <br />
+            <br/>
             {{ hint }}
           </p>
         </DsfrInputGroup>
 
         <p class="fr-mb-0">Choisissez la date d’entrée en vigueur de l’arrêté et sa date de fin</p>
-        <p class="fr-mb-1w">L’arrêté sera publié sur VigiEau entre sa date de début et sa date de fin. Vous pourrez toujours modifier la date de fin après la publication.</p>
+        <p class="fr-mb-1w">L’arrêté sera publié sur VigiEau entre sa date de début et sa date de fin. Vous pourrez toujours modifier la
+          date de fin après la publication.</p>
         <div class="fr-grid-row fr-grid-row--gutters">
           <div class="fr-col-12 fr-col-lg-6">
             <DsfrInputGroup :error-message="utils.showInputError(v$, 'dateDebut')">
@@ -224,7 +224,7 @@ defineExpose({
                             hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
                             :arreteCadrecept="['application/pdf']"
                             data-cy="PublishFormFileInput"
-                            @change="arreteMunicipal.file = $event[0]" />
+                            @change="arreteMunicipal.file = $event[0]"/>
           </DsfrInputGroup>
         </div>
       </div>

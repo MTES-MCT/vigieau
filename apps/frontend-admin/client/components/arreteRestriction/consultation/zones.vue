@@ -48,9 +48,6 @@ const zonesType = [
               <NiveauGraviteBadge v-if="r.niveauGravite"
                                   class="fr-ml-2w"
                                   :niveauGravite="r.niveauGravite"/>
-              <DsfrBadge v-if="r.zoneAlerte?.ressourceInfluencee"
-                         label="Ressource influencée"
-                         class="fr-ml-2w fr-badge--no-icon"/>
             </div>
             <DsfrAccordion v-if="r.usages.length"
                            :title="'Voir les ' + r.usages.length + ' usages'"

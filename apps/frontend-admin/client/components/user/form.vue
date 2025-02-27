@@ -23,7 +23,8 @@ const rolesAvailable = [];
 const authStore = useAuthStore();
 const refDataStore = useRefDataStore();
 
-const query: Ref<string> = ref('');
+const queryDep: Ref<string> = ref('');
+const queryCom: Ref<string> = ref('');
 const departementsTags: Ref<any> = ref([]);
 const departementsFiltered: Ref<any> = ref([]);
 const communesTags: Ref<any> = ref([]);
@@ -95,17 +96,17 @@ const filterDepartements = () => {
   let tmp = refDataStore.departements
     .filter((d) => !formData.roleDepartements?.includes(d.code))
     .filter(d => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code));
-  if (query.value) {
+  if (queryDep.value) {
     tmp = tmp.filter((d) => {
       return (deburr(d.nom)
           .replace(/[\s\-\_]/g, '')
           .toLowerCase()
           .includes(
-            deburr(query.value)
+            deburr(queryDep.value)
               .replace(/[\s\-\_]/g, '')
               .toLowerCase(),
           ) ||
-        d.code.toLowerCase().includes(query.value.toLowerCase())
+        d.code.toLowerCase().includes(queryDep.value.toLowerCase())
       );
     });
   }
@@ -120,7 +121,7 @@ const selectDepartement = (departement: Departement) => {
   if (typeof departement === 'string') {
     return;
   }
-  query.value = '';
+  queryDep.value = '';
   formData.roleDepartements = [...formData.roleDepartements, departement.code];
   computeDepartementsTags();
 };
@@ -149,14 +150,36 @@ const computeDepartementsTags = () => {
 
 computeDepartementsTags();
 
-const selectCommune = (commune: string) => {
-  const inseeRegex = /^(?:\d{2}|2[AB])\d{3}$/;
+const filtercommunes = () => {
+  let tmp = refDataStore.communes;
+  if (queryCom.value) {
+    tmp = tmp.filter((c) => {
+      return (deburr(c.nom)
+          .replace(/[\s\-\_]/g, '')
+          .toLowerCase()
+          .includes(
+            deburr(queryCom.value)
+              .replace(/[\s\-\_]/g, '')
+              .toLowerCase(),
+          ) ||
+        c.code.toLowerCase().includes(queryCom.value.toLowerCase())
+      );
+    });
+  }
+  tmp = tmp.filter((c) => !formData.roleCommunes?.includes(c.code));
+  tmp.map((c: any) => {
+    c.display = `${c.code} - ${c.nom}`;
+    return c;
+  });
+  communesFiltered.value = tmp;
+};
 
-  if (!inseeRegex.test(commune)) {
+const selectCommune = (commune: Commune) => {
+  if (typeof commune === 'string') {
     return;
   }
-  query.value = '';
-  formData.roleCommunes = [...formData.roleCommunes, commune];
+  queryCom.value = '';
+  formData.roleCommunes = [...formData.roleCommunes, commune.code];
   computeCommunesTags();
 };
 
@@ -167,12 +190,13 @@ const deleteCommune = (communeCode: string) => {
 
 const computeCommunesTags = () => {
   communesTags.value = formData.roleCommunes.map((c) => {
+    const commune = refDataStore.communes.find((com) => com.code === c);
     return {
-      label: `${c}`,
-      class: authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(c) ? '' : 'fr-tag--dismiss',
+      label: `${commune?.code} - ${commune?.nom}`,
+      class: authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(commune.code) ? '' : 'fr-tag--dismiss',
       tagName: 'button',
       onclick: () => {
-        if (authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(c)) {
+        if (authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(commune.code)) {
           return;
         }
         deleteCommune(c);
@@ -184,11 +208,20 @@ const computeCommunesTags = () => {
 computeCommunesTags();
 
 watch(
-  query,
+  queryDep,
   useUtils().debounce(async () => {
     filterDepartements();
   }, 300),
-  {immediate: true},
+);
+
+watch(
+  queryCom,
+  useUtils().debounce(async () => {
+    if (queryCom.value.length < 2) {
+      return;
+    }
+    filtercommunes();
+  }, 300),
 );
 
 defineExpose({
@@ -260,7 +293,7 @@ defineExpose({
           :labelVisible="true"
           buttonText="Ajouter"
           display-key="display"
-          v-model="query"
+          v-model="queryDep"
           :options="departementsFiltered"
           placeholder="Rechercher un département"
           @update:modelValue="selectDepartement($event)"
@@ -281,9 +314,9 @@ defineExpose({
           :labelVisible="true"
           buttonText="Ajouter"
           display-key="display"
-          v-model="query"
+          v-model="queryCom"
           :options="communesFiltered"
-          placeholder="Rechercher une commune"
+          placeholder="Rechercher une commune (nom ou code INSEE)"
           @update:modelValue="selectCommune($event)"
           @search="selectCommune($event)"
           :disabled="loading"
