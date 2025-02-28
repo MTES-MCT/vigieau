@@ -223,7 +223,7 @@ defineExpose({
               <div class="form-group fr-fieldset fr-mt-2w">
                 <template v-for="ressourceInfluencee in [false, true]"
                           :key="ressourceInfluencee">
-                  <p v-if="ressourceInfluencee" class="fr-ml-2w">
+                  <p v-if="ressourceInfluencee && zonesOptionsCheckBox(ac, 'SOU', ressourceInfluencee).length > 0" class="fr-ml-2w">
                     <u>Ressources influencées</u>
                   </p>
                   <DsfrCheckbox
