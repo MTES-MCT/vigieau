@@ -12,7 +12,7 @@ import {BassinVersantService} from '../bassin_versant/bassin_versant.service';
 import {MailService} from '../shared/services/mail.service';
 import {ArreteCadreService} from '../arrete_cadre/arrete_cadre.service';
 import {User} from "@shared/entities/user.entity";
-import {ArreteCadre} from "@shared/entities/arrete_cadre.entity";
+import { isMainThread } from 'worker_threads';
 
 @Injectable()
 export class ZoneAlerteService {
@@ -175,6 +175,9 @@ export class ZoneAlerteService {
      */
     @Cron(CronExpression.EVERY_10_MINUTES)
     async updateZones() {
+        if (!isMainThread) {
+            return;
+        }
         this.logger.log('MISE A JOUR DES ZONES D\'ALERTE - DEBUT');
         const departements = await this.departementService.findAllLight();
         try {
