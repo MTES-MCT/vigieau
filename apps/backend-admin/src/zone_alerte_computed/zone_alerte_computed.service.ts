@@ -744,70 +744,33 @@ DELETE FROM zone_alerte_computed
     const config = await this.configService.getConfig();
     if (config.computeMapDate && moment().diff(moment(config.computeMapDate, 'YYYY-MM-DD'), 'days') >= 1) {
       try {
-        if (moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29'))) {
-          const worker = new Worker(historicWorkerThreadFilePath, {
-            workerData: {
-              dateMin: config.computeMapDate,
-              dateStats: config.computeStatsDate,
-              type: 'maps'
-            }
-          });
-
-          await new Promise((resolve, reject) => {
-            worker.on('message', (result) => {
-              if (result.success) {
-                resolve(result.result);
-              } else {
-                reject(new Error(result.error));
-              }
-            });
-
-            worker.on('error', (error) => {
-              this.logger.error('COMPUTE HISTORIC MAPS WORKER ERROR', error.toString());
-              reject(error);
-            });
-
-            worker.on('exit', (code) => {
-              if (code !== 0) {
-                const errorMessage = `COMPUTE HISTORIC MAPS Worker stopped with exit code ${code}`;
-                this.logger.error(errorMessage, '');
-                reject(new Error(errorMessage));
-              }
-            });
-          });
-        }
-
-        const dateMin = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29')) ?
-          '2024-04-29' : config.computeMapDate;
+        const dateMin = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29')) ? 
+          config.computeMapDate : '2024-04-29';
+        const type = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29')) ?
+          'maps' : 'mapsComputed';
 
         const worker = new Worker(historicWorkerThreadFilePath, {
           workerData: {
             dateMin,
             dateStats: config.computeStatsDate,
-            type: 'mapsComputed'
+            type
           }
         });
 
         await new Promise((resolve, reject) => {
           worker.on('message', (result) => {
-            if (result.success) {
-              resolve(result.result);
-            } else {
-              reject(new Error(result.error));
-            }
+            resolve(result.result);
           });
 
           worker.on('error', (error) => {
-            this.logger.error('COMPUTE HISTORIC MAPS COMPUTED WORKER ERROR', error.toString());
+            this.logger.error(`COMPUTE HISTORIC ${type.toUpperCase()} WORKER ERROR`, error.toString());
             reject(error);
           });
 
           worker.on('exit', (code) => {
-            if (code !== 0) {
-              const errorMessage = `COMPUTE HISTORIC MAPS COMPUTED Worker stopped with exit code ${code}`;
-              this.logger.error(errorMessage, '');
-              reject(new Error(errorMessage));
-            }
+            const errorMessage = `COMPUTE HISTORIC ${type.toUpperCase()} Worker stopped with exit code ${code}`;
+            this.logger.error(errorMessage, '');
+            reject(new Error(errorMessage));
           });
         });
       } catch (error) {

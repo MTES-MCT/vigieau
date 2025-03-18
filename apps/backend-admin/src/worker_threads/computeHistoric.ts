@@ -13,18 +13,9 @@ interface WorkerData {
   type: 'maps' | 'mapsComputed';
 }
 
-async function cleanup(app: any) {
-  try {
-    await app.close();
-  } catch (error) {
-    logger.error('Error during cleanup', error.toString());
-  }
-}
-
 async function run() {
-  let app;
   try {
-    app = await NestFactory.createApplicationContext(AppModule);
+    const app = await NestFactory.createApplicationContext(AppModule);
     const zoneAlerteComputedHistoricService = app.get(ZoneAlerteComputedHistoricService);
 
     const { dateMin, dateStats, type } = workerData as WorkerData;
@@ -43,29 +34,12 @@ async function run() {
     if (parentPort) {
       parentPort.postMessage({ success: true, result });
     }
-
-    await cleanup(app);
-    process.exit(0);
   } catch (error) {
     logger.error('Error in compute historic worker', error.toString());
-    if (app) {
-      await cleanup(app);
-    }
     if (parentPort) {
       parentPort.postMessage({ success: false, error: error.toString() });
     }
-    process.exit(1);
   }
 }
-
-process.on('uncaughtException', (error) => {
-  logger.error('Uncaught Exception', error.toString());
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled Rejection', reason.toString());
-  process.exit(1);
-});
 
 run(); 
