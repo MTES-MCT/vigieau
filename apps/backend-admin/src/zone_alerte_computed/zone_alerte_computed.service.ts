@@ -23,6 +23,8 @@ import { StatisticCommuneService } from '../statistic_commune/statistic_commune.
 import { ConfigService } from '../config/config.service';
 import { exec } from 'child_process';
 import util from 'util';
+import { Worker } from 'worker_threads';
+import { workerThreadFilePath, historicWorkerThreadFilePath } from '../worker_threads/config';
 
 
 @Injectable()
@@ -92,11 +94,41 @@ export class ZoneAlerteComputedService {
     try {
       this.askForCompute = false;
       this.isComputing = true;
-      await this.computeAll([...new Set(this.departementsToUpdate)], computeHistoric);
+      
+      const uniqueDepsIds = [...new Set(this.departementsToUpdate)];
+      
+      const worker = new Worker(workerThreadFilePath, {
+        workerData: {
+          depsIds: uniqueDepsIds,
+          computeHistoric
+        }
+      });
+
+      return new Promise((resolve, reject) => {
+        worker.on('message', (result) => {
+          this.isComputing = false;
+          resolve(result);
+        });
+
+        worker.on('error', (error) => {
+          this.logger.error('COMPUTE ALL WORKER ERROR', error.toString());
+          this.isComputing = false;
+          reject(error);
+        });
+
+        worker.on('exit', (code) => {
+          if (code !== 0) {
+            const errorMessage = `COMPUTE ALL Worker stopped with exit code ${code}`;
+            this.logger.error(errorMessage, '');
+            reject(new Error(errorMessage));
+          }
+        });
+      });
+
     } catch (e) {
-      this.logger.error('COMPUTE ALL', e);
+      this.logger.error('COMPUTE ALL', e.toString());
+      this.isComputing = false;
     }
-    this.isComputing = false;
   }
 
   async findOneWithCommuneZone(id: number, communeId: number): Promise<any> {
@@ -711,18 +743,39 @@ DELETE FROM zone_alerte_computed
   async computeHistoric() {
     const config = await this.configService.getConfig();
     if (config.computeMapDate && moment().diff(moment(config.computeMapDate, 'YYYY-MM-DD'), 'days') >= 1) {
-      if (moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29'))) {
-        await this.zoneAlerteComputedHistoricService.computeHistoricMaps(
-          moment(config.computeMapDate, 'YYYY-MM-DD'),
-          config.computeStatsDate ? moment(config.computeStatsDate, 'YYYY-MM-DD') : null,
-        );
+      try {
+        const dateMin = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29')) ? 
+          config.computeMapDate : '2024-04-29';
+        const type = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29')) ?
+          'maps' : 'mapsComputed';
+
+        const worker = new Worker(historicWorkerThreadFilePath, {
+          workerData: {
+            dateMin,
+            dateStats: config.computeStatsDate,
+            type
+          }
+        });
+
+        await new Promise((resolve, reject) => {
+          worker.on('message', (result) => {
+            resolve(result.result);
+          });
+
+          worker.on('error', (error) => {
+            this.logger.error(`COMPUTE HISTORIC ${type.toUpperCase()} WORKER ERROR`, error.toString());
+            reject(error);
+          });
+
+          worker.on('exit', (code) => {
+            const errorMessage = `COMPUTE HISTORIC ${type.toUpperCase()} Worker stopped with exit code ${code}`;
+            this.logger.error(errorMessage, '');
+            reject(new Error(errorMessage));
+          });
+        });
+      } catch (error) {
+        this.logger.error('Error in computeHistoric', error.toString());
       }
-      const dateMin = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(moment('2024-04-29')) ?
-        '2024-04-29' : config.computeMapDate;
-      await this.zoneAlerteComputedHistoricService.computeHistoricMapsComputed(
-        moment(dateMin),
-        config.computeStatsDate ? moment(config.computeStatsDate, 'YYYY-MM-DD') : null,
-      );
     }
     await this.statisticCommuneService.computeByMonth(moment(config.computeMapDate, 'YYYY-MM-DD'));
   }

@@ -70,7 +70,7 @@ const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessi
       <p>Parmis les points bloquants</p>
       <ul>
         <li>Présence des documents PDF non conforme aux normes d'accessibilité</li>
-        <li>a valeur de l’option en cours de sélection n’est pas exposée aux aides techniques</li>
+        <li>La valeur de l’option en cours de sélection n’est pas exposée aux aides techniques</li>
       </ul>
       <p>Parmis les points majeurs</p>
       <ul>

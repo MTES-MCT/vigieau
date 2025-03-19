@@ -12,6 +12,7 @@ import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_c
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
+import { isMainThread } from 'worker_threads';
 
 @Injectable()
 export class StatisticDepartementService {
@@ -33,10 +34,12 @@ export class StatisticDepartementService {
     private readonly zoneAlerteService: ZoneAlerteService,
   ) {
     this.loadStatDep();
-    setTimeout(() => {
-        this.computeDepartementStatistics();
-      }, 5000,
-    );
+    if (isMainThread) {
+      setTimeout(() => {
+            this.computeDepartementStatistics();
+        }, 5000,
+      );
+    }
   }
 
   findAll(currentUser: User): StatisticDepartement[] {
