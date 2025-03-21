@@ -2,9 +2,8 @@
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { useRefDataStore } from '~/stores/refData';
 import type { Ref } from 'vue';
-import { helpers } from '@vuelidate/validators/dist';
+import { helpers } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
-import type { Departement } from '~/dto/departement.dto';
 import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 

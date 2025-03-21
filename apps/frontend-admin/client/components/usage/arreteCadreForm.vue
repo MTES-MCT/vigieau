@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import useVuelidate from '@vuelidate/core/dist';
-import { helpers, required, maxLength } from '@vuelidate/validators/dist';
+import { helpers, required, maxLength } from '@vuelidate/validators';
 import { UsageArreteCadre } from '~/dto/usage_arrete_cadre.dto';
 
 const props = defineProps<{

@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { helpers, required } from '@vuelidate/validators/dist';
 import useVuelidate from '@vuelidate/core';
 import { ArreteCadre } from '~/dto/arrete_cadre.dto';
-import { requiredIf } from "@vuelidate/validators";
+import { requiredIf, helpers, required } from "@vuelidate/validators";
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
