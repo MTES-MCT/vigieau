@@ -228,9 +228,9 @@ export class ZoneAlerteComputedHistoricService {
 
       const allZonesComputed = await this.computeGeoJson(m);
       if(dateStats && dateStats.isSameOrAfter(m, 'day')) {
-        await this.statisticDepartementService.computeDepartementStatisticsRestrictions(allZonesComputed, new Date(date.format('YYYY-MM-DD')), true);
-        await this.statisticCommuneService.computeCommuneStatisticsRestrictions(allZonesComputed, new Date(date.format('YYYY-MM-DD')), true);
-        await this.statisticService.computeDepartementsSituation(allZonesComputed, date.format('YYYY-MM-DD'));
+        await this.statisticDepartementService.computeDepartementStatisticsRestrictions(allZonesComputed, new Date(m.format('YYYY-MM-DD')), true);
+        await this.statisticCommuneService.computeCommuneStatisticsRestrictions(allZonesComputed, new Date(m.format('YYYY-MM-DD')), true);
+        await this.statisticService.computeDepartementsSituation(allZonesComputed, m.format('YYYY-MM-DD'));
         await this.configService.setConfig(null, m.format('YYYY-MM-DD'), null, true);
       }
       await this.zoneAlerteComputedHistoricRepository.update({}, { enabled: true });

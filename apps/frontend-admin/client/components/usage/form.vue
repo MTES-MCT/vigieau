@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import useVuelidate from '@vuelidate/core/dist';
-import { maxLength, required } from '@vuelidate/validators/dist';
+import useVuelidate from '@vuelidate/core';
 import { Usage } from '~/dto/usage.dto';
 import { useRefDataStore } from '~/stores/refData';
-import { helpers, or } from '@vuelidate/validators';
+import { helpers, maxLength, required } from '@vuelidate/validators';
 import { ThematiqueExamples } from '~/dto/thematique.dto';
 
 const props = defineProps<{

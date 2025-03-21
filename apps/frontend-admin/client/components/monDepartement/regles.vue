@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { helpers, required } from '@vuelidate/validators/dist';
+import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import { Parametres } from '~/dto/parametres.dto';
 import type { Ref } from 'vue';

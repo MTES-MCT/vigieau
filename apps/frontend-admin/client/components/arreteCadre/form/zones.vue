@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { helpers } from '@vuelidate/validators/dist';
 import useVuelidate from '@vuelidate/core';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 import { useRefDataStore } from '~/stores/refData';
 import type { Departement } from '~/dto/departement.dto';
 import type { Ref } from 'vue';
 import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
-import { required } from '@vuelidate/validators';
+import { required, helpers } from '@vuelidate/validators';
 import { useAuthStore } from '~/stores/auth';
 
 const props = defineProps<{

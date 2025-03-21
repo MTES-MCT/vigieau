@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { ArreteCadre } from '~/dto/arrete_cadre.dto';
-import { helpers, required } from '@vuelidate/validators/dist';
 import useVuelidate from '@vuelidate/core';
 import type { Ref } from 'vue';
 import type { Departement } from '~/dto/departement.dto';
 import { useAuthStore } from '~/stores/auth';
 import { useRefDataStore } from '~/stores/refData';
 import deburr from 'lodash.deburr';
-import { maxLength, requiredIf } from '@vuelidate/validators';
-import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
+import { maxLength, helpers, required } from '@vuelidate/validators';
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
