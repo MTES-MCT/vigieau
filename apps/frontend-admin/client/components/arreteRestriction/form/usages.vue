@@ -39,26 +39,27 @@ const modalActions = ref([
 const usageNameEdited: Ref<string | null> = ref(null);
 
 const arreteRestrictionUsages = computed(() => {
-  return props.arreteRestriction.restrictions.map((r) => r.usages).flat().filter((value, index, self) =>
-      index === self.findIndex((t) => (
-        t.nom === value.nom
-      )),
-  );
+  return props.arreteRestriction.restrictions
+    .map((r) => r.usages)
+    .flat()
+    .filter((value, index, self) => index === self.findIndex((t) => t.nom === value.nom))
+    .sort((a, b) => a.nom.localeCompare(b.nom));
 });
 
 const filterUsages = () => {
   let tmp: any[] = [];
-  tmp = query.value ? refDataStore.usages.filter((u) => {
-    const nom = deburr(u.nom)
-      .replace(/[\-\_]/g, '');
-    const queryWords = deburr(query.value)
-      .replace(/[\-\_]/g, '')
-      .split(' ')
-      .map(s => s.replace(/^/, '(').replace(/$/, ')'))
-      .join('*');
-    const regex = new RegExp(`${queryWords}`, 'gi');
-    return nom.match(regex);
-  }) : refDataStore.usages;
+  tmp = query.value
+    ? refDataStore.usages.filter((u) => {
+        const nom = deburr(u.nom).replace(/[\-\_]/g, '');
+        const queryWords = deburr(query.value)
+          .replace(/[\-\_]/g, '')
+          .split(' ')
+          .map((s) => s.replace(/^/, '(').replace(/$/, ')'))
+          .join('*');
+        const regex = new RegExp(`${queryWords}`, 'gi');
+        return nom.match(regex);
+      })
+    : refDataStore.usages;
   tmp = tmp.filter((u) => {
     return arreteRestrictionUsages.value.findIndex((uac) => uac.nom === u.nom) < 0;
   });
@@ -94,7 +95,7 @@ const askCreateEditUsage = (index: number | null = null, usage?: Usage) => {
 
 const createEditUsage = async (usage: Usage) => {
   if (!usageNameEdited.value) {
-    props.arreteRestriction.restrictions.forEach(r => {
+    props.arreteRestriction.restrictions.forEach((r) => {
       r.usages.push(usage);
     });
     alertStore.addAlert({
@@ -102,9 +103,9 @@ const createEditUsage = async (usage: Usage) => {
       type: 'success',
     });
   } else {
-    props.arreteRestriction.restrictions.forEach(r => {
-      const index = r.usages.findIndex(u => u.nom === usageNameEdited.value);
-      if(index >= 0) {
+    props.arreteRestriction.restrictions.forEach((r) => {
+      const index = r.usages.findIndex((u) => u.nom === usageNameEdited.value);
+      if (index >= 0) {
         r.usages[index] = usage;
       }
     });
@@ -149,9 +150,7 @@ defineExpose({
       <div class="fr-col-12 fr-col-lg-6">
         <div class="usage-card">
           <h6>Il manque un usage dans votre liste ?</h6>
-          <p>
-            Retrouvez les usages utilisés dans un arrêté précédent&nbsp;:
-          </p>
+          <p>Retrouvez les usages utilisés dans un arrêté précédent&nbsp;:</p>
           <DsfrInputGroup>
             <MixinsAutoComplete
               class="show-label"
@@ -165,14 +164,13 @@ defineExpose({
             />
           </DsfrInputGroup>
           <div class="fr-grid-row fr-grid-row--middle fr-mb-2w">
-            <div style="flex: 1;" class="divider" />
+            <div style="flex: 1" class="divider" />
             <span class="fr-mx-4w">ou</span>
-            <div style="flex: 1;" class="divider" />
+            <div style="flex: 1" class="divider" />
           </div>
           <div class="fr-grid-row fr-grid-row--middle fr-grid-row--space-between">
             <span>L'usage n'existe pas</span>
-            <DsfrButton label="Créer un nouvel usage"
-                        @click="askCreateEditUsage()" />
+            <DsfrButton label="Créer un nouvel usage" @click="askCreateEditUsage()" />
           </div>
         </div>
       </div>
@@ -183,7 +181,8 @@ defineExpose({
       :opened="modalOpened"
       title="Création / édition d'un usage"
       :actions="modalActions"
-      @close="modalOpened = utils.closeModal(modalOpened);">
+      @close="modalOpened = utils.closeModal(modalOpened)"
+    >
       <ArreteCadreFormCreateEditUsage
         v-if="modalOpened"
         ref="createEditUsageFormRef"

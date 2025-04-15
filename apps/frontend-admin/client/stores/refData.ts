@@ -1,10 +1,11 @@
-import type {Ref} from 'vue';
-import type {Departement} from '~/dto/departement.dto';
-import type {ZoneAlerte} from '~/dto/zone_alerte.dto';
-import type {Usage} from '~/dto/usage.dto';
-import type {Thematique} from '~/dto/thematique.dto';
-import type {Commune} from "~/dto/commune.dto";
-import moment, {Moment} from "moment";
+import type { Moment } from 'moment';
+import moment from 'moment';
+import type { Ref } from 'vue';
+import type { Commune } from '~/dto/commune.dto';
+import type { Departement } from '~/dto/departement.dto';
+import type { Thematique } from '~/dto/thematique.dto';
+import type { Usage } from '~/dto/usage.dto';
+import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
 
 export const useRefDataStore = defineStore('refDataStore', () => {
   const departements: Ref<Departement[]> = ref([]);
@@ -46,6 +47,6 @@ export const useRefDataStore = defineStore('refDataStore', () => {
     setCommunes,
     communes,
     setZoneAlerteMaxUpdatedAt,
-    zoneAlerteMaxUpdatedAt
+    zoneAlerteMaxUpdatedAt,
   };
 });

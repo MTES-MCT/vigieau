@@ -1,16 +1,26 @@
 import { Injectable } from '@nestjs/common';
-import { VigieauLogger } from '../logger/vigieau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindManyOptions, In, IsNull, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
+import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
+import {
+  FindManyOptions,
+  In,
+  IsNull,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+  Repository,
+} from 'typeorm';
+import { VigieauLogger } from '../logger/vigieau.logger';
 
 @Injectable()
 export class ArretesRestrictionsService {
   private readonly logger = new VigieauLogger('ArretesRestrictionsService');
 
-  constructor(@InjectRepository(ArreteRestriction)
-              private readonly arreteRestrictionRepository: Repository<ArreteRestriction>) {
-  }
+  constructor(
+    @InjectRepository(ArreteRestriction)
+    private readonly arreteRestrictionRepository: Repository<ArreteRestriction>,
+  ) {}
 
   /**
    * Récupère les arrêtés de restriction en fonction de la date et des filtres optionnels.
@@ -21,7 +31,12 @@ export class ArretesRestrictionsService {
    * @param departement Identifiant du département pour filtrer les arrêtés (facultatif).
    * @returns Une liste des arrêtés de restriction enrichie avec des informations calculées (`niveauGraviteMax`, `types`).
    */
-  async getByDate(date?: string, bassinVersant?: string, region?: string, departement?: string) {
+  async getByDate(
+    date?: string,
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ) {
     const whereClause: any = {
       statut: In(['publie', 'abroge']),
       dateDebut: LessThanOrEqual(date),
@@ -35,7 +50,9 @@ export class ArretesRestrictionsService {
     if (departement) {
       whereClause.departement = { id: departement };
     }
-    const findOptions: FindManyOptions<ArreteRestriction> = <FindManyOptions<ArreteRestriction>>{
+    const findOptions: FindManyOptions<ArreteRestriction> = <
+      FindManyOptions<ArreteRestriction>
+    >{
       select: {
         id: true,
         numero: true,
@@ -64,6 +81,9 @@ export class ArretesRestrictionsService {
         restrictions: {
           niveauGravite: true,
           zonesAlerteComputed: {
+            type: true,
+          },
+          zoneAlerte: {
             type: true,
           },
         },
@@ -110,17 +130,31 @@ export class ArretesRestrictionsService {
       ar.niveauGraviteMax = null;
 
       // Calcul de `niveauGraviteMax`
-      ar.restrictions?.forEach((r) => {
+      ar.restrictions?.forEach((r: Restriction) => {
         if (
           !ar.niveauGraviteMax ||
-          niveauGravitePriority[r.niveauGravite] > niveauGravitePriority[ar.niveauGraviteMax]
+          niveauGravitePriority[r.niveauGravite] >
+            niveauGravitePriority[ar.niveauGraviteMax]
         ) {
           ar.niveauGraviteMax = r.niveauGravite;
         }
       });
 
       // Déduplication et tri des `types`
-      ar.types = [...new Set(ar.restrictions?.map((r) => r.zonesAlerteComputed.map((z) => z.type)).flat())].sort();
+      ar.types = [
+        ...new Set(
+          ar.restrictions
+            ?.map((r: Restriction) =>
+              r.zonesAlerteComputed.map((z: ZoneAlerteComputed) => z.type),
+            )
+            .flat()
+            .concat(
+              ar.restrictions
+                ?.map((r: Restriction) => r.zoneAlerte.type)
+                .flat(),
+            ),
+        ),
+      ].sort();
 
       return ar;
     });
