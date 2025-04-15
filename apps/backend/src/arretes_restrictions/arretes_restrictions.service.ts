@@ -150,6 +150,7 @@ export class ArretesRestrictionsService {
             .flat()
             .concat(
               ar.restrictions
+                .filter((r: Restriction) => r.zoneAlerte)
                 ?.map((r: Restriction) => r.zoneAlerte.type)
                 .flat(),
             ),
