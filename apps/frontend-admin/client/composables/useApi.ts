@@ -1,13 +1,13 @@
-import { UserApi } from '~/api/user';
-import { ZoneAlerteApi } from '~/api/zone-alerte';
+import { ArreteCadreApi } from '~/api/arrete-cadre';
+import { ArreteMunicipalApi } from '~/api/arrete-municipal';
+import { ArreteRestrictionApi } from '~/api/arrete-restriction';
 import { BaseApi } from '~/api/base-api';
-import { ArreteCadreApi } from "~/api/arrete-cadre";
-import { ArreteRestrictionApi } from "~/api/arrete-restriction";
-import { ArreteMunicipalApi } from "~/api/arrete-municipal";
-import { ParametresApi } from "~/api/parametres";
-import { CommuneApi } from "~/api/commune";
 import { BaseApiPagination } from '~/api/base-api-pagination';
-import {VigiEauApi} from "~/api/vigieau";
+import { CommuneApi } from '~/api/commune';
+import { ParametresApi } from '~/api/parametres';
+import { UserApi } from '~/api/user';
+import { VigiEauApi } from '~/api/vigieau';
+import { ZoneAlerteApi } from '~/api/zone-alerte';
 
 export const useApi = () => {
   return {
@@ -16,7 +16,7 @@ export const useApi = () => {
     arreteMunicipal: new ArreteMunicipalApi('arrete-municipal'),
     zoneAlerte: new ZoneAlerteApi('zone-alerte'),
     user: new UserApi('user'),
-    departement: new UserApi('departement'),
+    departement: new BaseApi('departement'),
     usage: new BaseApi('usage'),
     thematique: new BaseApi('thematique'),
     commune: new CommuneApi('commune'),

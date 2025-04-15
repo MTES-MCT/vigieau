@@ -39,13 +39,13 @@ const generateRows = () => {
         ${d.role === 'commune' ? ` (${d.roleCommunes?.join(', ')})` : ''}`,
         authStore.isMte
           ? {
-            component: 'DsfrButton',
-            label: 'Modifier',
-            'data-cy': 'UserListEditBtn',
-            icon: 'ri-ball-pen-line',
-            iconOnly: true,
-            onclick: () => askEditUser(d),
-          }
+              component: 'DsfrButton',
+              label: 'Modifier',
+              'data-cy': 'UserListEditBtn',
+              icon: 'ri-ball-pen-line',
+              iconOnly: true,
+              onclick: () => askEditUser(d),
+            }
           : '',
         {
           component: 'DsfrButton',
@@ -72,7 +72,7 @@ if (data.value) {
 const askEditUser = (user) => {
   utils.closeModal(modalDeleteOpened);
   modalEditOpened.value = true;
-  modalTitle.value = 'Modification d\'un utilisateur';
+  modalTitle.value = "Modification d'un utilisateur";
   modalIcon.value = 'ri-ball-pen-line';
   userToEdit.value = user;
   modalActions.value = [
@@ -92,7 +92,7 @@ const askEditUser = (user) => {
 const askAddUser = () => {
   utils.closeModal(modalDeleteOpened);
   modalEditOpened.value = true;
-  modalTitle.value = 'Ajout d\'un utilisateur';
+  modalTitle.value = "Ajout d'un utilisateur";
   modalIcon.value = 'ri-ball-pen-line';
   userToEdit.value = null;
   modalActions.value = [
@@ -112,7 +112,7 @@ const askAddUser = () => {
 const askDeleteUser = (user) => {
   utils.closeModal(modalEditOpened);
   modalDeleteOpened.value = true;
-  modalTitle.value = 'Suppression d\'un utilisateur';
+  modalTitle.value = "Suppression d'un utilisateur";
   modalIcon.value = 'ri-delete-bin-5-fill';
   modalText.value = `<p>Êtes-vous sûr de vouloir supprimer l'utilisateur ${user.firstName || ''} ${user.lastName || ''} (${
     user.email
@@ -171,23 +171,25 @@ const validateEditUserForm = () => {
 };
 
 const filterUsers = () => {
-  usersFiltered.value = query.value ? users.value.filter((u) => {
-    const nom = deburr(u.lastName)
-      .replace(/[\-\_]/g, '');
-    const prenom = deburr(u.firstName)
-      .replace(/[\-\_]/g, '');
-    const queryWords = deburr(query.value)
-      .replace(/[\-\_]/g, '')
-      .split(' ')
-      .map(s => s.replace(/^/, '(').replace(/$/, ')'))
-      .join('*');
-    const regex = new RegExp(`${queryWords}`, 'gi');
-    return nom?.match(regex) || 
-      prenom?.match(regex) || 
-      u.roleDepartements?.join('').match(regex) || 
-      u.roleCommunes?.join('').match(regex) || 
-      u.email?.match(regex);
-  }) : users.value;
+  usersFiltered.value = query.value
+    ? users.value.filter((u) => {
+        const nom = deburr(u.lastName).replace(/[\-\_]/g, '');
+        const prenom = deburr(u.firstName).replace(/[\-\_]/g, '');
+        const queryWords = deburr(query.value)
+          .replace(/[\-\_]/g, '')
+          .split(' ')
+          .map((s) => s.replace(/^/, '(').replace(/$/, ')'))
+          .join('*');
+        const regex = new RegExp(`${queryWords}`, 'gi');
+        return (
+          nom?.match(regex) ||
+          prenom?.match(regex) ||
+          u.roleDepartements?.join('').match(regex) ||
+          u.roleCommunes?.join('').match(regex) ||
+          u.email?.match(regex)
+        );
+      })
+    : users.value;
   generateRows();
 };
 
@@ -198,29 +200,40 @@ watch(
   }, 300),
   { immediate: true },
 );
+
+const exportToCSV = () => {
+  const headers = ['Nom', 'Prénom', 'Email', 'Rôle'];
+  const csvContent = [
+    headers.join(','),
+    ...usersFiltered.value.map((u) => [u.lastName, u.firstName, u.email, u.role].map((cell) => `"${cell}"`).join(',')),
+  ].join('\n');
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  link.setAttribute('download', `utilisateurs_${new Date().toISOString().split('T')[0]}.csv`);
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
 </script>
 
 <template>
   <div class="fr-grid-row fr-grid-row--space-between fr-grid-row--middle fr-mb-2w">
     <h1 class="fr-my-0">Utilisateurs</h1>
-    <DsfrButton label="Ajouter un utilisateur"
-                data-cy="UserListAddUserButton"
-                @click="askAddUser()" />
+    <DsfrButton label="Ajouter un utilisateur" data-cy="UserListAddUserButton" @click="askAddUser()" />
   </div>
   <div class="fr-grid-row">
     <div class="fr-col-12 fr-col-lg-4">
-      <DsfrInput
-        placeholder="Rechercher un utilisateur"
-        buttonText="Chercher"
-        v-model="query"
-      />
+      <DsfrInput placeholder="Rechercher un utilisateur" buttonText="Chercher" v-model="query" />
     </div>
   </div>
-  <DsfrTable :headers="headers" 
-             :rows="rows" 
-             :no-caption="noCaption" 
-             :pagination="pagination" 
-             :key="componentKey" />
+  <DsfrTable :headers="headers" :rows="rows" :no-caption="noCaption" :pagination="pagination" :key="componentKey" />
+  <div class="fr-mt-4w fr-col-12 text-align-right">
+    <DsfrButton label="Export CSV" @click="exportToCSV()" />
+  </div>
   <DsfrModal :opened="modalEditOpened" :title="modalTitle" :icon="modalIcon" :actions="modalActions" @close="closeModal">
     <UserForm ref="userFormRef" :user="userToEdit" :loading="loading" @createEdit="createEditUser($event)" />
   </DsfrModal>

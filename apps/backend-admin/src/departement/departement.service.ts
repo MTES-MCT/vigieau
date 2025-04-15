@@ -1,13 +1,13 @@
-import { Injectable } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { HttpService } from '@nestjs/axios';
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { Departement } from '@shared/entities/departement.entity';
 import { firstValueFrom } from 'rxjs';
-import { ConfigService } from '@nestjs/config';
-import { RegleauLogger } from '../logger/regleau.logger';
+import { Repository } from 'typeorm';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
+import { RegleauLogger } from '../logger/regleau.logger';
 
 @Injectable()
 export class DepartementService {
@@ -43,22 +43,28 @@ export class DepartementService {
         'zonesAlerte.ressourceInfluencee',
         'arretesCadre.id',
       ])
-      .leftJoin('departement.zonesAlerte', 'zonesAlerte')
+      .leftJoin(
+        'departement.zonesAlerte',
+        'zonesAlerte',
+        'zonesAlerte.disabled = false',
+      )
       .leftJoin(
         'zonesAlerte.arretesCadre',
         'arretesCadre',
         'arretesCadre.statut IN (:...acStatut)',
         { acStatut: ['a_venir', 'publie'] },
       )
-      .where('zonesAlerte.disabled = false')
       .orderBy('departement.code', 'ASC')
       .addOrderBy('zonesAlerte.code', 'ASC')
       .getMany();
 
-    await Promise.all(this.departements.map(async d => {
-      d.subscriptions = await this.abonnementMailService.getCountByDepartement(d.code);
-      return d;
-    }))
+    await Promise.all(
+      this.departements.map(async (d) => {
+        d.subscriptions =
+          await this.abonnementMailService.getCountByDepartement(d.code);
+        return d;
+      }),
+    );
   }
 
   findAllLight(): Promise<Departement[]> {
