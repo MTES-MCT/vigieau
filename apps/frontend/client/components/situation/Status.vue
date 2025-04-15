@@ -11,7 +11,10 @@ const { profile, typeEau } = storeToRefs(addressStore);
 const { zones } = storeToRefs(zoneStore);
 const { resetAddress, adressString, getCodeDepartement } = addressStore;
 const { resetZones } = zoneStore;
-const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, { text: 'Votre situation' }]);
+const links: Ref<any[]> = ref([
+  { to: '/', text: 'Accueil' },
+  { text: 'Votre situation' },
+]);
 const zone = ref();
 const zoneModal = ref();
 const modalOpened: Ref<boolean> = ref(false);
@@ -27,7 +30,8 @@ const typesEauOptions = [
   {
     text: `d'un cours d'eau, d'une rivière`,
     value: 'SUP',
-  }, {
+  },
+  {
     text: 'des nappes (puits ou forage)',
     value: 'SOU',
   },
@@ -51,8 +55,9 @@ const profileOptions = [
   },
 ];
 const zonesOptions = computed(() => {
-  return zones.value.filter(z => z.type === typeEau.value)
-    .map(z => {
+  return zones.value
+    .filter((z) => z.type === typeEau.value)
+    .map((z) => {
       return {
         value: z.id,
         text: z.nom,
@@ -61,7 +66,7 @@ const zonesOptions = computed(() => {
 });
 
 const usagesByProfile = computed(() => {
-  return zone.value.usages.filter(u => {
+  return zone.value.usages.filter((u) => {
     switch (profile.value) {
       case 'particulier':
         return u.concerneParticulier;
@@ -76,95 +81,121 @@ const usagesByProfile = computed(() => {
 });
 
 const situationLabel = computed<string>(() => {
-  return utils.getShortSituationLabel(utils.getRestrictionRank(zone.value?.niveauGravite));
+  return utils.getShortSituationLabel(
+    utils.getRestrictionRank(zone.value?.niveauGravite),
+  );
 });
 
 const selectZone = () => {
-  zone.value = zones.value.find(z => z.id == zoneModal.value);
+  zone.value = zones.value.find((z) => z.id == zoneModal.value);
   zoneModal.value = null;
   modalOpened.value = false;
 };
 
 const updateZone = ($event) => {
-  zone.value = zones.value.find(z => z.id == $event);
-}
+  zone.value = zones.value.find((z) => z.id == $event);
+};
 
-const modalActions: Ref<any[]> = ref([{ label: 'Valider', onClick: selectZone }]);
+const modalActions: Ref<any[]> = ref([
+  { label: 'Valider', onClick: selectZone },
+]);
 
 onBeforeUnmount(() => {
   resetAddress();
   resetZones();
 });
 
-watch(() => typeEau.value, () => {
-  if (zonesOptions.value.length <= 1) {
-    zone.value = zones.value.find(z => z.type === typeEau.value);
-  } else {
-    modalOpened.value = true;
-  }
-}, { immediate: true });
+watch(
+  () => typeEau.value,
+  () => {
+    if (zonesOptions.value.length <= 1) {
+      zone.value = zones.value.find((z) => z.type === typeEau.value);
+    } else {
+      modalOpened.value = true;
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
-  <div class="situation-status fr-grid-row fr-grid-row--center fr-container"
-       v-if="addressToUse">
+  <div
+    class="situation-status fr-grid-row fr-grid-row--center fr-container"
+    v-if="addressToUse"
+  >
     <div class="fr-col-12">
-      <DsfrBreadcrumb class="fr-mb-0" :links='links' />
+      <DsfrBreadcrumb class="fr-mb-0" :links="links" />
     </div>
-    <fieldset class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w hide-sm">
+    <fieldset
+      class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w hide-sm"
+    >
       <legend>
         <p class="fr-mr-1w fr-mb-0">Les restrictions concernent l'eau</p>
       </legend>
-      <DsfrSelect id="type_eau"
-                  titile="Choisissez le type d’eau que vous consommez"
-                  v-model="typeEau"
-                  :options="typesEauOptions" />
+      <DsfrSelect
+        id="type_eau"
+        titile="Choisissez le type d’eau que vous consommez"
+        v-model="typeEau"
+        :options="typesEauOptions"
+      />
       <template v-if="zonesOptions.length > 1">
         <p class="fr-mx-1w fr-mb-0">issue de</p>
-        <DsfrSelect id="profile"
-                    title="Choisissez la zone d'alerte"
-                    :value="zone?.id"
-                    :options="zonesOptions"
-                    @update:modelValue="updateZone($event)" />
+        <DsfrSelect
+          id="profile"
+          title="Choisissez la zone d'alerte"
+          :value="zone?.id"
+          :options="zonesOptions"
+          @update:modelValue="updateZone($event)"
+        />
       </template>
       <p class="fr-mx-1w fr-mb-0">en tant que</p>
-      <DsfrSelect id="profile"
-                  title="Choisissez votre profil de consommateur d’eau"
-                  v-model="profile"
-                  :options="profileOptions" />
+      <DsfrSelect
+        id="profile"
+        title="Choisissez votre profil de consommateur d’eau"
+        v-model="profile"
+        :options="profileOptions"
+      />
     </fieldset>
 
-    <SituationHeader :address="addressToUse"
-                     :typeEau="typeEau"
-                     :zone="zone" />
+    <SituationHeader :address="addressToUse" :typeEau="typeEau" :zone="zone" />
 
-    <fieldset class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mt-1w show-sm">
+    <fieldset
+      class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mt-1w show-sm"
+    >
       <legend>
         <p class="fr-mr-1w fr-mb-0">Les restrictions concernent l'eau</p>
       </legend>
-      <DsfrSelect id="type_eau"
-                  titile="Choisissez le type d’eau que vous consommez"
-                  v-model="typeEau"
-                  :options="typesEauOptions" />
+      <DsfrSelect
+        id="type_eau"
+        titile="Choisissez le type d’eau que vous consommez"
+        v-model="typeEau"
+        :options="typesEauOptions"
+      />
       <template v-if="zonesOptions.length > 1">
         <p class="fr-mx-1w fr-mb-0">issue de</p>
-        <DsfrSelect id="profile"
-                    title="Choisissez la zone d'alerte"
-                    :value="zone?.id"
-                    :options="zonesOptions"
-                    @update:modelValue="updateZone($event)" />
+        <DsfrSelect
+          id="profile"
+          title="Choisissez la zone d'alerte"
+          :value="zone?.id"
+          :options="zonesOptions"
+          @update:modelValue="updateZone($event)"
+        />
       </template>
       <p class="fr-mx-1w fr-mb-0">en tant que</p>
-      <DsfrSelect id="profile"
-                  title="Choisissez votre profil de consommateur d’eau"
-                  v-model="profile"
-                  :options="profileOptions" />
+      <DsfrSelect
+        id="profile"
+        title="Choisissez votre profil de consommateur d’eau"
+        v-model="profile"
+        :options="profileOptions"
+      />
     </fieldset>
 
     <template v-if="utils.showRestrictions(zone)">
-      <SituationRestrictions :profile="profile"
-                             :zone="zone"
-                             :usages="usagesByProfile" />
+      <SituationRestrictions
+        :profile="profile"
+        :zone="zone"
+        :usages="usagesByProfile"
+      />
     </template>
     <template v-else-if="!zone || !zone.arreteMunicipalCheminFichier">
       <div class="fr-col-12">
@@ -181,16 +212,22 @@ watch(() => typeEau.value, () => {
       <MixinsShare :situationLabel="situationLabel" :address="addressToUse" />
     </div>
   </div>
-  <DsfrModal :opened="modalOpened"
-             title="Pour consulter les restrictions, veuillez sélectionner la ressource dans laquelle vous prélevez de l’eau."
-             @close="router.push('/')"
-             :actions="modalActions">
+  <DsfrModal
+    :opened="modalOpened"
+    title="Pour consulter les restrictions, veuillez sélectionner la ressource dans laquelle vous prélevez de l’eau."
+    @close="router.push('/')"
+    :actions="modalActions"
+  >
     <div>
-      <p class="fr-mx-1w fr-mb-0">Plusieurs cours d'eau sont référencés à cette adresse.</p>
-      <DsfrSelect id="profile"
-                  title="Choisissez la zone d'alerte"
-                  v-model="zoneModal"
-                  :options="zonesOptions" />
+      <p class="fr-mx-1w fr-mb-0">
+        Plusieurs cours d'eau sont référencés à cette adresse.
+      </p>
+      <DsfrSelect
+        id="profile"
+        title="Choisissez la zone d'alerte"
+        v-model="zoneModal"
+        :options="zonesOptions"
+      />
     </div>
   </DsfrModal>
 </template>

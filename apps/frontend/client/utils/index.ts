@@ -1,14 +1,12 @@
-import { Zone } from '../dto/zone.dto';
-import { Address } from '../dto/address.dto';
-import api from '../api';
-import { nextTick, Ref } from 'vue';
-import { useAddressStore } from '../store/address';
-import { useZoneStore } from '../store/zone';
 import { FetchError } from 'ofetch';
+import { Ref } from 'vue';
+import api from '../api';
+import { Address } from '../dto/address.dto';
 import { Geo } from '../dto/geo.dto';
 import niveauxGravite from '../dto/niveauGravite';
-
-
+import { Zone } from '../dto/zone.dto';
+import { useAddressStore } from '../store/address';
+import { useZoneStore } from '../store/zone';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 // We need to duplicate the base string to have a longer string
@@ -18,25 +16,27 @@ export const alphanum = alphanumBase.repeat(10);
 const index = {
   debounce(fn: Function, delay: number) {
     let timeoutID: any = null;
-    return function() {
+    return function () {
       clearTimeout(timeoutID);
       // eslint-disable-next-line prefer-rest-params
       const args = arguments;
       // @ts-ignore
       // eslint-disable-next-line @typescript-eslint/no-this-alias
       const that = this;
-      timeoutID = setTimeout(function() {
+      timeoutID = setTimeout(function () {
         fn.apply(that, args);
       }, delay);
     };
   },
 
   showRestrictions(zone: Zone): boolean {
-    const departement = ['59', '62'];
-    if (!zone || (zone.niveauGravite === 'vigilance' && !departement.includes(zone.departement))) {
+    if (!zone || zone.niveauGravite === 'vigilance') {
       return false;
     }
-    return (zone.usages && zone.usages.filter(u => u.thematique !== 'Autre').length > 0);
+    return (
+      zone.usages &&
+      zone.usages.filter((u) => u.thematique !== 'Autre').length > 0
+    );
   },
 
   getRestrictionRank(niveauGravite: string | undefined | null): number {
@@ -90,10 +90,10 @@ const index = {
     let label = '';
     switch (type) {
       case 'SOU':
-        label += 'Eau superficielle';
+        label += 'Eau souterraine';
         break;
       case 'SUP':
-        label += `Eau souterraine`;
+        label += `Eau superficielle`;
         break;
       case 'AEP':
         label += `Eau potable`;
@@ -102,15 +102,25 @@ const index = {
     return label;
   },
 
-  getProvenanceLabel(restriction: Zone, light: boolean = false, inverse: boolean = false): string | undefined {
-    const type = !inverse ? restriction.type : restriction.type === 'SUP' ? 'SOU' : 'SUP';
+  getProvenanceLabel(
+    restriction: Zone,
+    light: boolean = false,
+    inverse: boolean = false,
+  ): string | undefined {
+    const type = !inverse
+      ? restriction.type
+      : restriction.type === 'SUP'
+      ? 'SOU'
+      : 'SUP';
     switch (type) {
       case 'SOU':
-        return !light ? `Si j'utilise de l'eau qui provient de nappes souterraines (puits, forages ...) des restrictions différentes s'appliquent` :
-          `de nappes souterraines (puits, forages ...)`;
+        return !light
+          ? `Si j'utilise de l'eau qui provient de nappes souterraines (puits, forages ...) des restrictions différentes s'appliquent`
+          : `de nappes souterraines (puits, forages ...)`;
       case 'SUP':
-        return !light ? `Si j'utilise de l'eau qui provient des cours d'eau (rivières, mares, étangs ...) des restrictions différentes s'appliquent` :
-          `des cours d'eau (rivières, mares, étangs ...)`;
+        return !light
+          ? `Si j'utilise de l'eau qui provient des cours d'eau (rivières, mares, étangs ...) des restrictions différentes s'appliquent`
+          : `des cours d'eau (rivières, mares, étangs ...)`;
     }
   },
 
@@ -118,17 +128,19 @@ const index = {
     return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   },
 
-  async searchZones(address: Address | null,
-                    geo: Geo | null,
-                    profile: string,
-                    typeEau: string,
-                    router: any,
-                    modalTitle?: Ref<string>,
-                    modalText?: Ref<string>,
-                    modalIcon?: Ref<string>,
-                    modalActions?: Ref<any[]>,
-                    modalOpened?: Ref<boolean>,
-                    loadingRestrictions?: Ref<boolean>) {
+  async searchZones(
+    address: Address | null,
+    geo: Geo | null,
+    profile: string,
+    typeEau: string,
+    router: any,
+    modalTitle?: Ref<string>,
+    modalText?: Ref<string>,
+    modalIcon?: Ref<string>,
+    modalActions?: Ref<any[]>,
+    modalOpened?: Ref<boolean>,
+    loadingRestrictions?: Ref<boolean>,
+  ) {
     const addressStore = useAddressStore();
     const restrictionStore = useZoneStore();
     const { setAddress, setGeo } = addressStore;
@@ -136,27 +148,44 @@ const index = {
 
     if (loadingRestrictions) loadingRestrictions.value = true;
 
-    const { data, error } = address ? await api.searchZonesByAdress(address) : await api.searchZonesByGeo(geo);
+    const { data, error } = address
+      ? await api.searchZonesByAdress(address)
+      : await api.searchZonesByGeo(geo);
 
     // STATS MATOMO
     try {
-      window._paq.push(['trackEvent', 'API CALL', 'CODE INSEE', address ? address.properties.citycode : geo?.code, 1]);
-      window._paq.push(['trackEvent', 'API CALL', 'CODE DEPARTEMENT', address ? address.properties.citycode >= '97' ? address.properties.citycode.slice(0, 3) : address.properties.citycode.slice(0, 2) : geo.codeDepartement, 1]);
+      window._paq.push([
+        'trackEvent',
+        'API CALL',
+        'CODE INSEE',
+        address ? address.properties.citycode : geo?.code,
+        1,
+      ]);
+      window._paq.push([
+        'trackEvent',
+        'API CALL',
+        'CODE DEPARTEMENT',
+        address
+          ? address.properties.citycode >= '97'
+            ? address.properties.citycode.slice(0, 3)
+            : address.properties.citycode.slice(0, 2)
+          : geo.codeDepartement,
+        1,
+      ]);
       window._paq.push(['trackEvent', 'API CALL', 'PROFIL', profile, 1]);
-    } catch (e) {
-    }
+    } catch (e) {}
 
     if (loadingRestrictions) loadingRestrictions.value = false;
 
     // SI ERREUR
     if (error?.value && error.value.statusCode !== 404) {
       if (modalTitle && modalText && modalIcon && modalActions && modalOpened) {
-        const {
-          title,
-          text,
-          icon,
-          actions,
-        } = this.handleRestrictionError(error.value, data?.value, profile, modalOpened);
+        const { title, text, icon, actions } = this.handleRestrictionError(
+          error.value,
+          data?.value,
+          profile,
+          modalOpened,
+        );
         modalTitle.value = title;
         modalText.value = text;
         modalIcon.value = icon;
@@ -173,15 +202,22 @@ const index = {
     let query: any = {};
     query.profil = profile;
     query.typeEau = typeEau;
-    query.adresse = address ? address?.properties.label : `${geo?.nom}, ${geo?.codeDepartement}`;
+    query.adresse = address
+      ? address?.properties.label
+      : `${geo?.nom}, ${geo?.codeDepartement}`;
     router.push({ path: '/situation', query });
   },
 
-  handleRestrictionError(error: FetchError, data: Zone[], profile: string, modalOpened: Ref<boolean>): {
-    title: string,
-    text: string,
-    icon: string,
-    actions: any[]
+  handleRestrictionError(
+    error: FetchError,
+    data: Zone[],
+    profile: string,
+    modalOpened: Ref<boolean>,
+  ): {
+    title: string;
+    text: string;
+    icon: string;
+    actions: any[];
   } {
     // Déclaration des fonctions à utiliser dans la modale
     const _closeModal = (): void => {
@@ -203,10 +239,13 @@ const index = {
           title: `Nous avons besoin de plus de précision`,
           text: `Afin de vous communiquer des informations de qualité, nous avons besoin du : nom de votre rue, le code postal et le nom de votre ville.`,
           icon: `ri-map-pin-user-line`,
-          actions: [{
-            label: 'Entrer une adresse plus précise',
-            onClick: _closeModal,
-          }, { label: 'Fermer', onClick: _closeModal, secondary: true }],
+          actions: [
+            {
+              label: 'Entrer une adresse plus précise',
+              onClick: _closeModal,
+            },
+            { label: 'Fermer', onClick: _closeModal, secondary: true },
+          ],
         };
       default:
         return {
@@ -228,12 +267,16 @@ const index = {
       },
       onOpen: () => {
         document.getElementsByTagName('iframe')[0]?.focus();
-      }
+      },
     });
   },
 
-  generatePopupHtml(pmtilesData: any[], showRestrictionsBtn: boolean, address?: Address, geo?: Geo) {
-
+  generatePopupHtml(
+    pmtilesData: any[],
+    showRestrictionsBtn: boolean,
+    address?: Address,
+    geo?: Geo,
+  ) {
     let addressName = '';
     if (address?.properties?.label) {
       addressName = `Adresse proche&nbsp: ${address.properties.label}`;
@@ -244,12 +287,16 @@ const index = {
 
     if (pmtilesData && pmtilesData.length > 0) {
       pmtilesData.forEach((p, index) => {
-        const niveauGravite = niveauxGravite.find(n => n.niveauGravite === p.niveauGravite);
+        const niveauGravite = niveauxGravite.find(
+          (n) => n.niveauGravite === p.niveauGravite,
+        );
         if (index > 0) {
           popupHtml += '<div class="divider fr-my-1w"></div>';
         }
         popupHtml += `<div class="fr-mb-1w">
-<p class="fr-badge situation-level-bg-${this.getRestrictionRank(p.niveauGravite)}">${niveauGravite.text}</p>
+<p class="fr-badge situation-level-bg-${this.getRestrictionRank(
+          p.niveauGravite,
+        )}">${niveauGravite.text}</p>
 </div>
 <div class="map-popup-zone">Zone&nbsp;: ${p.nom}</div>`;
       });
@@ -292,11 +339,21 @@ Voir l'historique
     return `
 <div class="map-popup-zone">${communeName}</div>
 <ul class="text-align-left">
-  <li>Jours sans restrictions&nbsp: ${data.noDays} (${Math.round(data.noDays / data.nbDays * 100)}%)</li>
-  <li>Jours en vigilance&nbsp: ${data.vigilanceDays} (${Math.round(data.vigilanceDays / data.nbDays * 100)}%)</li>
-  <li>Jours en alerte&nbsp: ${data.alerteDays} (${Math.round(data.alerteDays / data.nbDays * 100)}%)</li>
-  <li>Jours en alerte renforcée&nbsp: ${data.alerteRenforceeDays} (${Math.round(data.alerteRenforceeDays / data.nbDays * 100)}%)</li>
-  <li>Jours en crise&nbsp: ${data.criseDays} (${Math.round(data.criseDays / data.nbDays * 100)}%)</li>
+  <li>Jours sans restrictions&nbsp: ${data.noDays} (${Math.round(
+      (data.noDays / data.nbDays) * 100,
+    )}%)</li>
+  <li>Jours en vigilance&nbsp: ${data.vigilanceDays} (${Math.round(
+      (data.vigilanceDays / data.nbDays) * 100,
+    )}%)</li>
+  <li>Jours en alerte&nbsp: ${data.alerteDays} (${Math.round(
+      (data.alerteDays / data.nbDays) * 100,
+    )}%)</li>
+  <li>Jours en alerte renforcée&nbsp: ${data.alerteRenforceeDays} (${Math.round(
+      (data.alerteRenforceeDays / data.nbDays) * 100,
+    )}%)</li>
+  <li>Jours en crise&nbsp: ${data.criseDays} (${Math.round(
+      (data.criseDays / data.nbDays) * 100,
+    )}%)</li>
 </ul>
 <div>
 <button class="fr-btn btn-map-popup">
@@ -313,7 +370,8 @@ Voir l'historique
         // to canvas.getContext(), causing the check to fail if hardware rendering is not available. See
         // https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
         // for more details.
-        const context = canvas.getContext('webgl2') || canvas.getContext('webgl');
+        const context =
+          canvas.getContext('webgl2') || canvas.getContext('webgl');
         if (context && typeof context.getParameter == 'function') {
           return true;
         }
@@ -339,9 +397,7 @@ Voir l'historique
   },
 
   getRandomString(length: number): string {
-    return Array.from({ length })
-      .map(this.getRandomAlphaNum)
-      .join('')
+    return Array.from({ length }).map(this.getRandomAlphaNum).join('');
   },
 };
 export default index;
