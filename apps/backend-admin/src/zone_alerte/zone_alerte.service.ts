@@ -249,7 +249,7 @@ export class ZoneAlerteService {
                 }
                 existingZone.idSandre = +f.properties.gid;
                 existingZone.nom = f.properties.LbZAS;
-                existingZone.code = f.properties.CdAltZAS;
+                existingZone.code = f.properties.CdAltZAS ? f.properties.CdAltZAS : '';
                 existingZone.type = f.properties.TypeZAS;
                 existingZone.numeroVersionSandre = f.properties.NumeroVersionZAS ? +f.properties.NumeroVersionZAS : null;
                 existingZone.geom = f.geometry;
