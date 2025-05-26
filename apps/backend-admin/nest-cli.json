@@ -3,13 +3,6 @@
   "collection": "@nestjs/schematics",
   "sourceRoot": "./apps/backend-admin/src",
   "compilerOptions": {
-    "assets": [
-      {
-        "include": "mail_templates/**/*",
-        "outDir": "mail_templates"
-      }
-    ],
-    "watchAssets": true,
     "deleteOutDir": true
   }
 }

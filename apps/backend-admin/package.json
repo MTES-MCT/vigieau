@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
-    "scalingo-postbuild": "nest build && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && sed -i 's/PREFIX ?= \\/usr\\/local/PREFIX ?= ..\\/tippecanoe_program/g' tippecanoe/Makefile && make install --directory=tippecanoe/ && rm -rf tippecanoe/",
+    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && sed -i 's/PREFIX ?= \\/usr\\/local/PREFIX ?= ..\\/tippecanoe_program/g' tippecanoe/Makefile && make install --directory=tippecanoe/ && rm -rf tippecanoe/",
     "postinstall": "cd ../../ && yarn install",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
