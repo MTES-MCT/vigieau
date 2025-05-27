@@ -14,11 +14,11 @@ const commputeCommuneMap = (e) => {
   const departementData = [];
 
   for (const commune of communesFiltered) {
-    const ponderation = commune.restrictions
+    const ponderation = commune.restrictions ? commune.restrictions
       .filter((r) => {
         return moment(r.d, 'YYYY-MM').isSameOrAfter(momentDateBegin) && moment(r.d, 'YYYY-MM').isSameOrBefore(momentDateEnd);
       })
-      .reduce((acc, value) => acc + (value.p ? value.p : 0), 0);
+      .reduce((acc, value) => acc + (value.p ? value.p : 0), 0) : 0;
 
     communeDataReturned.push({
       code: commune.code,
