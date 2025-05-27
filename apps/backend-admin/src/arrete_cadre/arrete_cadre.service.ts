@@ -1,4 +1,18 @@
-import { forwardRef, HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
+import {
+  forwardRef,
+  HttpException,
+  HttpStatus,
+  Inject,
+  Injectable,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { InjectRepository } from '@nestjs/typeorm';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
+import { User } from '@shared/entities/user.entity';
+import { StatutArreteCadre } from '@shared/types/arrete_cadre.type';
+import moment from 'moment/moment';
+import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
 import {
   DeleteResult,
   FindManyOptions,
@@ -9,31 +23,21 @@ import {
   Like,
   Repository,
 } from 'typeorm';
-import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
-import { InjectRepository } from '@nestjs/typeorm';
-import { User } from '@shared/entities/user.entity';
-import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
-import { CreateUpdateArreteCadreDto } from './dto/create_update_arrete_cadre.dto';
-import { arreteCadrePaginateConfig } from './dto/arrete_cadre.dto';
-import { testArretesCadre } from '../core/test/data';
-import { PublishArreteCadreDto } from './dto/publish_arrete_cadre.dto';
-import { StatutArreteCadre } from '@shared/types/arrete_cadre.type';
-import { Cron, CronExpression } from '@nestjs/schedule';
-import { RegleauLogger } from '../logger/regleau.logger';
-import { RepealArreteCadreDto } from './dto/repeal_arrete_cadre.dto';
+import { ArreteCadreZoneAlerteCommunesService } from '../arrete_cadre_zone_alerte_communes/arrete_cadre_zone_alerte_communes.service';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
+import { testArretesCadre } from '../core/test/data';
 import { DepartementService } from '../departement/departement.service';
-import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
-import { MailService } from '../shared/services/mail.service';
-import { UserService } from '../user/user.service';
 import { FichierService } from '../fichier/fichier.service';
+import { RegleauLogger } from '../logger/regleau.logger';
 import { RestrictionService } from '../restriction/restriction.service';
+import { MailService } from '../shared/services/mail.service';
 import { UsageService } from '../usage/usage.service';
-import moment from 'moment/moment';
-import {
-  ArreteCadreZoneAlerteCommunesService,
-} from '../arrete_cadre_zone_alerte_communes/arrete_cadre_zone_alerte_communes.service';
-import {ConfigService} from "@nestjs/config";
+import { UserService } from '../user/user.service';
+import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
+import { arreteCadrePaginateConfig } from './dto/arrete_cadre.dto';
+import { CreateUpdateArreteCadreDto } from './dto/create_update_arrete_cadre.dto';
+import { PublishArreteCadreDto } from './dto/publish_arrete_cadre.dto';
+import { RepealArreteCadreDto } from './dto/repeal_arrete_cadre.dto';
 
 @Injectable()
 export class ArreteCadreService {
@@ -53,8 +57,7 @@ export class ArreteCadreService {
     private readonly usageService: UsageService,
     private readonly arreteCadreZoneAlerteCommunesService: ArreteCadreZoneAlerteCommunesService,
     private readonly configService: ConfigService,
-  ) {
-  }
+  ) {}
 
   async findAll(query: PaginateQuery): Promise<Paginated<ArreteCadre>> {
     const paginateConfig = arreteCadrePaginateConfig;
@@ -156,26 +159,40 @@ export class ArreteCadreService {
   }
 
   async findOne(id: number, currentUser?: User) {
-    const whereClause: FindOptionsWhere<ArreteCadre> | null =
-      !currentUser || currentUser.role === 'mte'
-        ? { id }
-        : {
-          id,
-          departements: {
-            code: In(currentUser.role_departements),
-          },
-        };
-
-    const qb = this.arreteCadreRepository.createQueryBuilder('arreteCadre')
+    const qb = this.arreteCadreRepository
+      .createQueryBuilder('arreteCadre')
       .select([
-        'arreteCadre.id', 'arreteCadre.numero', 'arreteCadre.dateDebut', 'arreteCadre.dateFin', 'arreteCadre.statut',
-        'fichier.id', 'fichier.nom', 'fichier.url', 'fichier.size',
-        'departementPilote.id', 'departementPilote.code', 'departementPilote.nom',
-        'zonesAlerte.id', 'zonesAlerte.code', 'zonesAlerte.nom', 'zonesAlerte.type', 'zonesAlerte.disabled', 'zonesAlerte.ressourceInfluencee',
-        'departement.id', 'departement.code',
-        'arretesRestriction.id', 'arretesRestriction.numero', 'arretesRestriction.statut',
-        'arreteCadreAbroge.id', 'arreteCadreAbroge.numero', 'arreteCadreAbroge.dateDebut', 'arreteCadreAbroge.dateFin',
-        'aczac.id', 'communes.id', 'communes.code', 'communes.nom',
+        'arreteCadre.id',
+        'arreteCadre.numero',
+        'arreteCadre.dateDebut',
+        'arreteCadre.dateFin',
+        'arreteCadre.statut',
+        'fichier.id',
+        'fichier.nom',
+        'fichier.url',
+        'fichier.size',
+        'departementPilote.id',
+        'departementPilote.code',
+        'departementPilote.nom',
+        'zonesAlerte.id',
+        'zonesAlerte.code',
+        'zonesAlerte.nom',
+        'zonesAlerte.type',
+        'zonesAlerte.disabled',
+        'zonesAlerte.ressourceInfluencee',
+        'departement.id',
+        'departement.code',
+        'arretesRestriction.id',
+        'arretesRestriction.numero',
+        'arretesRestriction.statut',
+        'arreteCadreAbroge.id',
+        'arreteCadreAbroge.numero',
+        'arreteCadreAbroge.dateDebut',
+        'arreteCadreAbroge.dateFin',
+        'aczac.id',
+        'communes.id',
+        'communes.code',
+        'communes.nom',
       ])
       .leftJoin('arreteCadre.departementPilote', 'departementPilote')
       .leftJoin('arreteCadre.zonesAlerte', 'zonesAlerte')
@@ -183,25 +200,42 @@ export class ArreteCadreService {
       .leftJoin('arreteCadre.arretesRestriction', 'arretesRestriction')
       .leftJoin('arreteCadre.fichier', 'fichier')
       .leftJoin('arreteCadre.arreteCadreAbroge', 'arreteCadreAbroge')
-      .leftJoin('zonesAlerte.arreteCadreZoneAlerteCommunes', 'aczac', 'aczac.arreteCadreId = arreteCadre.id')
+      .leftJoin(
+        'zonesAlerte.arreteCadreZoneAlerteCommunes',
+        'aczac',
+        'aczac.arreteCadreId = arreteCadre.id',
+      )
       .leftJoin('aczac.communes', 'communes')
-      .where(whereClause)
+      .where({ id })
       .orderBy('zonesAlerte.code', 'ASC');
-    const [arreteCadre, usagesArreteCadre, departements]: any = await Promise.all(<any>[
-      qb.getOne(),
-      this.usageService.findByArreteCadre(id),
-      this.departementService.findByArreteCadreId(id),
-    ]);
-    if (!arreteCadre) {
+    const [arreteCadre, usagesArreteCadre, departements]: any =
+      await Promise.all(<any>[
+        qb.getOne(),
+        this.usageService.findByArreteCadre(id),
+        this.departementService.findByArreteCadreId(id),
+      ]);
+    if (
+      !arreteCadre ||
+      (currentUser &&
+        currentUser.role !== 'mte' &&
+        !departements.some((d) =>
+          currentUser.role_departements.includes(d.code),
+        ))
+    ) {
       throw new HttpException(
         `L'arrêté cadre n'existe pas ou vous n'avez pas les droits pour le consulter.`,
         HttpStatus.NOT_FOUND,
       );
     }
     arreteCadre.usages = usagesArreteCadre;
-    arreteCadre.zonesAlerte.map(za => {
-      if (za.arreteCadreZoneAlerteCommunes[0] && za.arreteCadreZoneAlerteCommunes[0].communes?.length > 0) {
-        za.communes = structuredClone(za.arreteCadreZoneAlerteCommunes[0].communes);
+    arreteCadre.zonesAlerte.map((za) => {
+      if (
+        za.arreteCadreZoneAlerteCommunes[0] &&
+        za.arreteCadreZoneAlerteCommunes[0].communes?.length > 0
+      ) {
+        za.communes = structuredClone(
+          za.arreteCadreZoneAlerteCommunes[0].communes,
+        );
       }
       delete za.arreteCadreZoneAlerteCommunes;
       return za;
@@ -314,10 +348,7 @@ export class ArreteCadreService {
         id: true,
         numero: true,
       },
-      relations: [
-        'departements',
-        'zonesAlerte',
-      ],
+      relations: ['departements', 'zonesAlerte'],
       where: {
         departements: {
           code: depCode,
@@ -338,8 +369,12 @@ export class ArreteCadreService {
     await this.checkAci(createArreteCadreDto, false, currentUser);
     const arreteCadre =
       await this.arreteCadreRepository.save(createArreteCadreDto);
-    arreteCadre.usages = await this.usageService.updateAllByArreteCadre(arreteCadre);
-    await this.arreteCadreZoneAlerteCommunesService.updateAllByArreteCadre(arreteCadre.id, createArreteCadreDto);
+    arreteCadre.usages =
+      await this.usageService.updateAllByArreteCadre(arreteCadre);
+    await this.arreteCadreZoneAlerteCommunesService.updateAllByArreteCadre(
+      arreteCadre.id,
+      createArreteCadreDto,
+    );
 
     this.sendAciMails(null, arreteCadre, currentUser);
     return arreteCadre;
@@ -362,8 +397,12 @@ export class ArreteCadreService {
       id,
       ...updateArreteCadreDto,
     });
-    arreteCadre.usages = await this.usageService.updateAllByArreteCadre(arreteCadre);
-    await this.arreteCadreZoneAlerteCommunesService.updateAllByArreteCadre(arreteCadre.id, updateArreteCadreDto);
+    arreteCadre.usages =
+      await this.usageService.updateAllByArreteCadre(arreteCadre);
+    await this.arreteCadreZoneAlerteCommunesService.updateAllByArreteCadre(
+      arreteCadre.id,
+      updateArreteCadreDto,
+    );
 
     await this.repercussionOnAr(oldAc, arreteCadre);
     this.sendAciMails(oldAc, arreteCadre, currentUser);
@@ -378,8 +417,10 @@ export class ArreteCadreService {
   ): Promise<ArreteCadre> {
     if (
       publishArreteCadreDto.dateFin &&
-      moment(publishArreteCadreDto.dateFin)
-        .isBefore(publishArreteCadreDto.dateDebut, 'day')
+      moment(publishArreteCadreDto.dateFin).isBefore(
+        publishArreteCadreDto.dateDebut,
+        'day',
+      )
     ) {
       throw new HttpException(
         `La date de fin doit être postérieure à la date de début.`,
@@ -429,7 +470,7 @@ export class ArreteCadreService {
     toSave =
       new Date(publishArreteCadreDto.dateDebut) <= new Date()
         ? publishArreteCadreDto.dateFin &&
-        new Date(publishArreteCadreDto.dateFin) <= new Date()
+          new Date(publishArreteCadreDto.dateFin) <= new Date()
           ? { ...toSave, ...{ statut: <StatutArreteCadre>'abroge' } }
           : { ...toSave, ...{ statut: <StatutArreteCadre>'publie' } }
         : { ...toSave, ...{ statut: <StatutArreteCadre>'a_venir' } };
@@ -438,7 +479,9 @@ export class ArreteCadreService {
     // Gestion des abrogations associées
     if (ac.arreteCadreAbroge) {
       const dateDebutAc = new Date(publishArreteCadreDto.dateDebut);
-      const dateFinAcAbroge = ac.arreteCadreAbroge.dateFin ? new Date(ac.arreteCadreAbroge.dateFin) : null;
+      const dateFinAcAbroge = ac.arreteCadreAbroge.dateFin
+        ? new Date(ac.arreteCadreAbroge.dateFin)
+        : null;
       if (
         !dateFinAcAbroge ||
         moment(dateFinAcAbroge).isSameOrAfter(moment(dateDebutAc), 'day')
@@ -465,7 +508,9 @@ export class ArreteCadreService {
         }
       }
     }
-    this.arreteRestrictionService.updateArreteRestrictionStatut(ac.departements);
+    this.arreteRestrictionService.updateArreteRestrictionStatut(
+      ac.departements,
+    );
     return toReturn;
   }
 
@@ -491,7 +536,9 @@ export class ArreteCadreService {
       toSave = { ...toSave, ...{ statut: <StatutArreteCadre>'abroge' } };
     }
     const toReturn = await this.arreteCadreRepository.save(toSave);
-    await this.arreteRestrictionService.updateArreteRestrictionStatut(ac.departements);
+    await this.arreteRestrictionService.updateArreteRestrictionStatut(
+      ac.departements,
+    );
     return toReturn;
   }
 
@@ -517,31 +564,32 @@ export class ArreteCadreService {
       (za) => !newAc.zonesAlerte.some((nza) => nza.id === za.id),
     );
     const usagesDeleted = oldAc.usages.filter(
-      (uac) =>
-        !newAc.usages.some((nuac) => nuac.id === uac.id),
+      (uac) => !newAc.usages.some((nuac) => nuac.id === uac.id),
     );
-    const usagesUpdated = newAc.usages.filter(
-      (nuac) => {
-        const oldUac = oldAc.usages.find(ouac => ouac.id === nuac.id);
-        if (!oldUac) {
-          return false;
-        }
-        return oldUac.nom !== nuac.nom
-          || oldUac.thematique.id !== nuac.thematique.id
-          || oldUac.concerneParticulier !== nuac.concerneParticulier
-          || oldUac.concerneEntreprise !== nuac.concerneEntreprise
-          || oldUac.concerneCollectivite !== nuac.concerneCollectivite
-          || oldUac.concerneExploitation !== nuac.concerneExploitation
-          || oldUac.concerneEso !== nuac.concerneEso
-          || oldUac.concerneEsu !== nuac.concerneEsu
-          || oldUac.concerneAep !== nuac.concerneAep
-          || oldUac.descriptionVigilance !== nuac.descriptionVigilance
-          || oldUac.descriptionAlerte !== nuac.descriptionAlerte
-          || oldUac.descriptionAlerteRenforcee !== nuac.descriptionAlerteRenforcee
-          || oldUac.descriptionCrise !== nuac.descriptionCrise;
-      },
+    const usagesUpdated = newAc.usages.filter((nuac) => {
+      const oldUac = oldAc.usages.find((ouac) => ouac.id === nuac.id);
+      if (!oldUac) {
+        return false;
+      }
+      return (
+        oldUac.nom !== nuac.nom ||
+        oldUac.thematique.id !== nuac.thematique.id ||
+        oldUac.concerneParticulier !== nuac.concerneParticulier ||
+        oldUac.concerneEntreprise !== nuac.concerneEntreprise ||
+        oldUac.concerneCollectivite !== nuac.concerneCollectivite ||
+        oldUac.concerneExploitation !== nuac.concerneExploitation ||
+        oldUac.concerneEso !== nuac.concerneEso ||
+        oldUac.concerneEsu !== nuac.concerneEsu ||
+        oldUac.concerneAep !== nuac.concerneAep ||
+        oldUac.descriptionVigilance !== nuac.descriptionVigilance ||
+        oldUac.descriptionAlerte !== nuac.descriptionAlerte ||
+        oldUac.descriptionAlerteRenforcee !== nuac.descriptionAlerteRenforcee ||
+        oldUac.descriptionCrise !== nuac.descriptionCrise
+      );
+    });
+    const oldUsagesUpdates = oldAc.usages.filter((u) =>
+      usagesUpdated.some((uu) => uu.id === u.id),
     );
-    const oldUsagesUpdates = oldAc.usages.filter(u => usagesUpdated.some(uu => uu.id === u.id));
     await Promise.all(<any>[
       this.restrictionService.deleteZonesByArreteCadreId(
         zonesDeleted.map((z) => z.id),
@@ -567,8 +615,8 @@ export class ArreteCadreService {
       arreteCadre &&
       (user.role === 'mte' ||
         (arreteCadre.statut !== 'abroge' &&
-          arreteCadre.departements.some(
-            (d) => user.role_departements.includes(d.code),
+          arreteCadre.departements.some((d) =>
+            user.role_departements.includes(d.code),
           ) &&
           !arreteCadre.zonesAlerte.some((za) => za.disabled)))
     );
@@ -582,12 +630,13 @@ export class ArreteCadreService {
      * et qu'il n'est lié à aucun AR en cours ou abrogé
      */
     return (
-      arrete &&
-      user.role === 'mte' || (
-        !arrete.arretesRestriction.some((ar) =>
-          ['a_venir', 'publie', 'abroge'].includes(ar.statut),
-        ) &&
-        arrete.departements.some((d) => user.role_departements.includes(d.code)))
+      (arrete && user.role === 'mte') ||
+      (!arrete.arretesRestriction.some((ar) =>
+        ['a_venir', 'publie', 'abroge'].includes(ar.statut),
+      ) &&
+        arrete.departements.some((d) =>
+          user.role_departements.includes(d.code),
+        ))
     );
   }
 
@@ -598,8 +647,10 @@ export class ArreteCadreService {
   ): Promise<boolean> {
     if (
       repealArreteCadre.dateFin &&
-      moment(repealArreteCadre.dateFin)
-        .isBefore(moment(arrete.dateDebut), 'day')
+      moment(repealArreteCadre.dateFin).isBefore(
+        moment(arrete.dateDebut),
+        'day',
+      )
     ) {
       throw new HttpException(
         `La date de fin doit être postérieure à la date de début.`,
@@ -610,7 +661,9 @@ export class ArreteCadreService {
       arrete &&
       ['a_venir', 'publie'].includes(arrete.statut) &&
       (user.role === 'mte' ||
-        arrete.departements.some((d) => user.role_departements.includes(d.code)))
+        arrete.departements.some((d) =>
+          user.role_departements.includes(d.code),
+        ))
     );
   }
 
