@@ -1,4 +1,4 @@
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class BaseApi {
   resource: string;
@@ -7,10 +7,14 @@ export class BaseApi {
   }
 
   list(queryParams?: string) {
-    return useCustomFetch(`/${this.resource}${queryParams ? '?' + queryParams : ''}`, {
-      method: 'GET',
-      baseURL: '/api',
-    });
+    return useCustomFetch(
+      `/${this.resource}${queryParams ? '?' + queryParams : ''}`,
+      {
+        method: 'GET',
+        baseURL: '/api',
+      },
+      30000,
+    );
   }
 
   create(payload: any) {
