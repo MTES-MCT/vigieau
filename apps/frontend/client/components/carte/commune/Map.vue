@@ -1,10 +1,10 @@
 <script setup lang="ts">
+import CommuneWorker from '@/assets/workers/communeMap?worker';
 import * as maplibregl from 'maplibre-gl';
+import moment, { Moment } from 'moment';
 import { Ref } from 'vue';
 import api from '../../../api';
-import moment, { Moment } from 'moment';
 import { useRefDataStore } from '../../../store/refData';
-import CommuneWorker from '@/assets/workers/communeMap?worker';
 
 const props = defineProps<{
   embedded: any,
@@ -706,7 +706,7 @@ h6 {
     border: 1px solid var(--grey-425-625);;
     border-radius: .25rem;
     display: inline-block;
-    pading: auto;
+    padding: auto;
   }
 
   :deep(.fr-link) {
