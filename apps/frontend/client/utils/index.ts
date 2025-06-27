@@ -30,7 +30,12 @@ const index = {
   },
 
   showRestrictions(zone: Zone): boolean {
-    if (!zone || zone.niveauGravite === 'vigilance') {
+    const ddtRestrictionsVigilance = ['59', '62'];
+    if (
+      !zone ||
+      (zone.niveauGravite === 'vigilance' &&
+        !ddtRestrictionsVigilance.includes(zone.departement))
+    ) {
       return false;
     }
     return (
