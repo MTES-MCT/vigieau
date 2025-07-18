@@ -1,10 +1,16 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
-import { User } from '@shared/entities/user.entity';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindManyOptions, FindOneOptions, FindOptionsWhere, In, Repository } from 'typeorm';
 import { Parametres } from '@shared/entities/parametres.entity';
-import { DepartementService } from '../departement/departement.service';
+import { User } from '@shared/entities/user.entity';
 import moment from 'moment/moment';
+import {
+  FindManyOptions,
+  FindOneOptions,
+  FindOptionsWhere,
+  In,
+  Repository,
+} from 'typeorm';
+import { DepartementService } from '../departement/departement.service';
 
 @Injectable()
 export class ParametresService {
@@ -12,21 +18,20 @@ export class ParametresService {
     @InjectRepository(Parametres)
     private readonly parametresRepository: Repository<Parametres>,
     private readonly departementService: DepartementService,
-  ) {
-  }
+  ) {}
 
   async findAll(currentUser?: User, enabled?: boolean): Promise<Parametres[]> {
     const whereClause: FindOptionsWhere<Parametres> | null =
       !currentUser || currentUser.role === 'mte'
         ? {
-          disabled: enabled ? false : null,
-        }
+            disabled: enabled ? false : null,
+          }
         : {
-          departement: {
-            code: In(currentUser.role_departements),
-          },
-          disabled: enabled ? false : null,
-        };
+            departement: {
+              code: In(currentUser.role_departements),
+            },
+            disabled: enabled ? false : null,
+          };
     return this.parametresRepository.find(<FindManyOptions>{
       select: {
         id: true,
@@ -72,12 +77,14 @@ export class ParametresService {
       !currentUser.role_departements.includes(depCode)
     ) {
       throw new HttpException(
-        'Vous n\'avez pas les droits pour modifier ces paramètres',
+        "Vous n'avez pas les droits pour modifier ces paramètres",
         HttpStatus.FORBIDDEN,
       );
     }
     const dep = await this.departementService.findByCode(depCode);
-    const existingParam = await this.parametresRepository.findOne(<FindOneOptions>{
+    const existingParam = await this.parametresRepository.findOne(<
+      FindOneOptions
+    >{
       where: {
         disabled: false,
         departement: {
@@ -86,11 +93,16 @@ export class ParametresService {
       },
     });
     // Si c'est la même règle que le paramètre en cours, on ne fait rien
-    if (existingParam && existingParam.superpositionCommune === parametresToCreate.superpositionCommune) {
+    if (
+      existingParam &&
+      existingParam.superpositionCommune ===
+        parametresToCreate.superpositionCommune
+    ) {
       return existingParam;
     }
     if (existingParam) {
       existingParam.dateFin = moment().format('YYYY-MM-DD');
+      existingParam.disabled = true;
       // Si le paramètre a été actif moins d'un jour, on le supprime.
       if (existingParam.dateDebut === existingParam.dateFin) {
         await this.parametresRepository.delete({ id: existingParam.id });
