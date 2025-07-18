@@ -1275,7 +1275,7 @@ DELETE FROM zone_alerte_computed
     try {
       // @ts-ignore
       const s3ResponseGeojson = await this.s3Service.uploadFile(
-        fileToTransferGeojson,
+        fileToTransferGeojson as Express.Multer.File,
         'geojson/',
       );
       const fileNameToSaveGeoJson = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.geojson`;
@@ -1315,7 +1315,7 @@ DELETE FROM zone_alerte_computed
       };
       // @ts-ignore
       const s3Response = await this.s3Service.uploadFile(
-        fileToTransfer,
+        fileToTransfer as Express.Multer.File,
         'pmtiles/',
       );
       try {
