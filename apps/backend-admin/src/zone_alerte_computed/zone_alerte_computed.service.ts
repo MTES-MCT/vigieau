@@ -388,7 +388,15 @@ export class ZoneAlerteComputedService {
           }
         }
         this.logger.log('ZONE WITH INTERSECTION');
-        this.logger.log(JSON.stringify(zonesWithIntersection));
+        this.logger.log(
+          JSON.stringify(
+            zonesWithIntersection.map((z) => {
+              const plep = structuredClone(z);
+              delete plep.geom;
+              return plep;
+            }),
+          ),
+        );
         for (const z of zonesWithIntersection) {
           // On construit les nouvelles géométries de zones
           z.geom = (await this.computeNewZone(z)).geom;
