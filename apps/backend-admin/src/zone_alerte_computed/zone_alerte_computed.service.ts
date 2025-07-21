@@ -360,15 +360,6 @@ export class ZoneAlerteComputedService {
           zonesWithIntersection.length,
         );
 
-        this.logger.log(
-          'ALL ZONES WITHOUT RESTRICTIONS',
-          zonesWithoutIntersection.length,
-        );
-        this.logger.log(
-          'ALL ZONES WITH RESTRICTIONS',
-          zonesWithIntersection.length,
-        );
-
         for (const z of allZones.filter(
           (z) => z.intersect && z.intersect.length > 0,
         )) {
@@ -408,17 +399,6 @@ export class ZoneAlerteComputedService {
             zi.intersect = zi.intersect.filter((iz) => iz.id !== z.id);
           }
         }
-
-        this.logger.log(
-          zonesWithIntersection.map((z) => {
-            return {
-              id: z.id,
-              type: z.type,
-              add: z.add,
-              remove: z.remove,
-            };
-          }),
-        );
 
         this.logger.log(
           zonesWithIntersection.map((z) => {
