@@ -322,6 +322,8 @@ export class ZoneAlerteComputedService {
           allZones = [...zonesEsu, ...zonesEso];
         }
 
+        this.logger.log('ALL ZONES', allZones.length);
+
         // On boucle sur toutes les zones et on stock un tableau intersect avec les autres zones
         if (allZones.length > 1) {
           for (const zone of allZones) {
@@ -348,6 +350,16 @@ export class ZoneAlerteComputedService {
             z.remove = [];
             return z;
           });
+
+        this.logger.log(
+          'ALL ZONES WITHOUT RESTRICTIONS',
+          zonesWithoutIntersection.length,
+        );
+        this.logger.log(
+          'ALL ZONES WITH RESTRICTIONS',
+          zonesWithIntersection.length,
+        );
+
         for (const z of allZones.filter(
           (z) => z.intersect && z.intersect.length > 0,
         )) {
@@ -387,6 +399,18 @@ export class ZoneAlerteComputedService {
             zi.intersect = zi.intersect.filter((iz) => iz.id !== z.id);
           }
         }
+
+        this.logger.log(
+          zonesWithIntersection.map((z) => {
+            return {
+              id: z.id,
+              type: z.type,
+              add: z.add,
+              remove: z.remove,
+            };
+          }),
+        );
+
         for (const z of zonesWithIntersection) {
           // On construit les nouvelles géométries de zones
           z.geom = (await this.computeNewZone(z)).geom;
