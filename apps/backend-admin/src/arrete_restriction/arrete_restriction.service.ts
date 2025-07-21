@@ -207,7 +207,6 @@ export class ArreteRestrictionService {
               code: In(currentUser.role_departements),
             },
           };
-    this.logger.log('FIND ONE');
     const [ar, acs] = await Promise.all(<any>[
       this.arreteRestrictionRepository.findOne(<FindOneOptions>{
         select: {
@@ -305,9 +304,7 @@ export class ArreteRestrictionService {
       }),
       this.arreteCadreService.findByArreteRestrictionId(id),
     ]);
-    this.logger.log('FIND ONE END REQUEST');
     ar.arretesCadre = acs;
-    this.logger.log('FIND ONE SET ACs');
     return ar;
   }
 
@@ -540,9 +537,7 @@ export class ArreteRestrictionService {
     updateArreteRestrictionDto: CreateUpdateArreteRestrictionDto,
     currentUser: User,
   ): Promise<ArreteRestriction> {
-    this.logger.log('UPDATE');
     const oldAr = await this.findOne(id, currentUser);
-    this.logger.log('FIND ONE');
     if (!(await this.canUpdateArreteRestriction(oldAr, currentUser))) {
       throw new HttpException(
         `Vous ne pouvez éditer un arrêté de restriction que si il est sur votre département et n'est pas abrogé.`,
@@ -566,7 +561,6 @@ export class ArreteRestrictionService {
         );
       }
     }
-    this.logger.log('CHECK BEFORE PUBLISH');
     // await this.checkAci(updateArreteRestrictionDto, true, currentUser);
     const arreteRestriction: ArreteRestriction =
       await this.arreteRestrictionRepository.save({
