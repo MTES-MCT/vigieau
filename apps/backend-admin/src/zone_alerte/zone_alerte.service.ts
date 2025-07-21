@@ -166,6 +166,10 @@ export class ZoneAlerteService {
   }
 
   async getMaxUpdatedDate(currentUser: User): Promise<string> {
+    if (currentUser.role === 'commune') {
+      return null;
+    }
+
     const whereClause: FindOptionsWhere<ZoneAlerte> | null =
       !currentUser || currentUser.role === 'mte'
         ? {}
