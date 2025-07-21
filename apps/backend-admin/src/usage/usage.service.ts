@@ -1,20 +1,19 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindManyOptions, In, Not, Repository } from 'typeorm';
+import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
 import { Usage } from '@shared/entities/usage.entity';
 import { User } from '@shared/entities/user.entity';
-import { CreateUpdateUsageDto } from './dto/create_usage.dto';
-import { Restriction } from '@shared/entities/restriction.entity';
-import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
+import { FindManyOptions, In, Not, Repository } from 'typeorm';
 import { FindOptionsWhere } from 'typeorm/find-options/FindOptionsWhere';
+import { CreateUpdateUsageDto } from './dto/create_usage.dto';
 
 @Injectable()
 export class UsageService {
   constructor(
     @InjectRepository(Usage)
     private readonly usageRepository: Repository<Usage>,
-  ) {
-  }
+  ) {}
 
   findOne(nom: string): Promise<Usage> {
     return this.usageRepository.findOne({
@@ -24,6 +23,10 @@ export class UsageService {
   }
 
   async findAll(curentUser: User): Promise<Usage[]> {
+    if (curentUser.role === 'commune') {
+      return [];
+    }
+
     return await this.usageRepository
       .createQueryBuilder('usage')
       .select()
@@ -33,7 +36,9 @@ export class UsageService {
       .leftJoin('arreteCadre.departements', 'departements')
       .where('usage."arreteCadreId" is not null')
       .andWhere(
-        curentUser.role === 'mte' ? '1 = 1' : 'departements.code IN(:...code_dep)',
+        curentUser.role === 'mte'
+          ? '1 = 1'
+          : 'departements.code IN(:...code_dep)',
         {
           code_dep: curentUser.role_departements,
         },
@@ -69,51 +74,47 @@ export class UsageService {
       .map((u) => u.id)
       .flat();
     // SUPPRESSION DES ANCIENS USAGES
-    if(usagesId.length > 0) {
-      await this.usageRepository.delete(<FindOptionsWhere<Usage>> {
+    if (usagesId.length > 0) {
+      await this.usageRepository.delete(<FindOptionsWhere<Usage>>{
         restriction: {
           id: restriction.id,
         },
         id: Not(In(usagesId)),
       });
     } else {
-      await this.usageRepository.delete(<FindOptionsWhere<Usage>> {
+      await this.usageRepository.delete(<FindOptionsWhere<Usage>>{
         restriction: {
           id: restriction.id,
         },
       });
     }
-    const usages: Usage[] =
-      restriction.usages.map((u) => {
-        // @ts-expect-error on ajoute seulement l'id
-        u.restriction = { id: restriction.id };
-        return u;
-      });
+    const usages: Usage[] = restriction.usages.map((u) => {
+      // @ts-expect-error on ajoute seulement l'id
+      u.restriction = { id: restriction.id };
+      return u;
+    });
     return this.usageRepository.save(usages);
   }
 
   async updateAllByArreteCadre(arreteCadre: ArreteCadre): Promise<Usage[]> {
-    const usagesId = arreteCadre.usages
-      .map((u) => u.id)
-      .flat();
+    const usagesId = arreteCadre.usages.map((u) => u.id).flat();
     // SUPPRESSION DES ANCIENS USAGES
-    await this.usageRepository.delete(<FindOptionsWhere<Usage>> {
+    await this.usageRepository.delete(<FindOptionsWhere<Usage>>{
       arreteCadre: {
         id: arreteCadre.id,
       },
       id: Not(In(usagesId)),
     });
-    const usages: Usage[] =
-      arreteCadre.usages.map((u) => {
-        // @ts-expect-error on ajoute seulement l'id
-        u.arreteCadre = { id: arreteCadre.id };
-        return u;
-      });
+    const usages: Usage[] = arreteCadre.usages.map((u) => {
+      // @ts-expect-error on ajoute seulement l'id
+      u.arreteCadre = { id: arreteCadre.id };
+      return u;
+    });
     return this.usageRepository.save(usages);
   }
 
   findByArreteCadre(arreteCadreId: number) {
-    return this.usageRepository.find(<FindManyOptions> {
+    return this.usageRepository.find(<FindManyOptions>{
       select: {
         id: true,
         nom: true,
@@ -145,11 +146,15 @@ export class UsageService {
     });
   }
 
-  async updateUsagesArByArreteCadreId(oldUsagesAc: Usage[], usagesAc: Usage[], acId: number) {
+  async updateUsagesArByArreteCadreId(
+    oldUsagesAc: Usage[],
+    usagesAc: Usage[],
+    acId: number,
+  ) {
     const updates = [];
     for (const u of usagesAc) {
-      const oldUsage = oldUsagesAc.find(ou => ou.id === u.id);
-      const tmp = await this.usageRepository.find(<FindManyOptions> {
+      const oldUsage = oldUsagesAc.find((ou) => ou.id === u.id);
+      const tmp = await this.usageRepository.find(<FindManyOptions>{
         where: {
           restriction: {
             arreteRestriction: {
@@ -175,9 +180,11 @@ export class UsageService {
         descriptionAlerte: u.descriptionAlerte,
         descriptionAlerteRenforcee: u.descriptionAlerteRenforcee,
         descriptionCrise: u.descriptionCrise,
-      }
+      };
       tmp.forEach((usageToUpdate) => {
-        updates.push(this.usageRepository.update(usageToUpdate.id, usageUpdated));
+        updates.push(
+          this.usageRepository.update(usageToUpdate.id, usageUpdated),
+        );
       });
     }
     await Promise.all(updates);
@@ -187,17 +194,16 @@ export class UsageService {
     if (usagesNom.length < 1) {
       return;
     }
-    const usagesArreteRestrictionsId =
-      await this.usageRepository
-        .createQueryBuilder('usage')
-        .select('usage.id')
-        .leftJoin('usage.restriction', 'restriction')
-        .leftJoin('restriction.arreteRestriction', 'arreteRestriction')
-        .leftJoin('arreteRestriction.arretesCadre', 'arretesCadre')
-        .where('arretesCadre.id = :acId', { acId: acId })
-        .andWhere('arreteRestriction.statut != :statut', { statut: 'abroge' })
-        .andWhere('usage.nom IN (:...usagesNom)', { usagesNom: usagesNom })
-        .getMany();
+    const usagesArreteRestrictionsId = await this.usageRepository
+      .createQueryBuilder('usage')
+      .select('usage.id')
+      .leftJoin('usage.restriction', 'restriction')
+      .leftJoin('restriction.arreteRestriction', 'arreteRestriction')
+      .leftJoin('arreteRestriction.arretesCadre', 'arretesCadre')
+      .where('arretesCadre.id = :acId', { acId: acId })
+      .andWhere('arreteRestriction.statut != :statut', { statut: 'abroge' })
+      .andWhere('usage.nom IN (:...usagesNom)', { usagesNom: usagesNom })
+      .getMany();
     return this.usageRepository.delete({
       id: In(usagesArreteRestrictionsId.map((u) => u.id)),
     });
