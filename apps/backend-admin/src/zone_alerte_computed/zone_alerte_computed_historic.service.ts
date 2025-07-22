@@ -195,7 +195,8 @@ export class ZoneAlerteComputedHistoricService {
           zas.map((z) => {
             // @ts-ignore
             z.restriction = z.restrictions[0];
-            return z;
+            // @ts-ignore
+            return z as ZoneAlerteComputed;
           }),
           new Date(m.format('YYYY-MM-DD')),
           true,
@@ -206,7 +207,8 @@ export class ZoneAlerteComputedHistoricService {
           zas.map((z) => {
             // @ts-ignore
             z.restriction = z.restrictions[0];
-            return z;
+            // @ts-ignore
+            return z as ZoneAlerteComputed;
           }),
           new Date(m.format('YYYY-MM-DD')),
           true,
