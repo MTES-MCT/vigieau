@@ -1160,7 +1160,7 @@ DELETE FROM zone_alerte_computed_historic
     try {
       // @ts-ignore
       const s3ResponseGeojson = await this.s3Service.uploadFile(
-        fileToTransferGeojson,
+        fileToTransferGeojson as Express.Multer.File,
         'geojson/',
       );
     } catch (e) {
