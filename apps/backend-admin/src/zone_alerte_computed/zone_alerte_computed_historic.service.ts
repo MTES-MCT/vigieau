@@ -1179,7 +1179,7 @@ DELETE FROM zone_alerte_computed_historic
       };
       // @ts-ignore
       const s3Response = await this.s3Service.uploadFile(
-        fileToTransfer,
+        fileToTransfer as Express.Multer.File,
         'pmtiles/',
       );
     } catch (e) {
