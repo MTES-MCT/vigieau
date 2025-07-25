@@ -166,7 +166,7 @@ export class ZoneAlerteComputedHistoricService {
       );
       try {
         await this.execPromise(
-          `${path}/tippecanoe_program/bin/tippecanoe -Z3 -z22 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/${fileNameToSave}.pmtiles ${path}/${fileNameToSave}.geojson`,
+          `${path}/tippecanoe_program/bin/tippecanoe -Z4 -zg -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/${fileNameToSave}.pmtiles ${path}/${fileNameToSave}.geojson`,
         );
         const dataPmtiles = fs.readFileSync(
           `${path}/${fileNameToSave}.pmtiles`,
@@ -1168,7 +1168,7 @@ DELETE FROM zone_alerte_computed_historic
     }
     try {
       await this.execPromise(
-        `${path}/tippecanoe_program/bin/tippecanoe -Z3 -z22 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles ${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
+        `${path}/tippecanoe_program/bin/tippecanoe -Z4 -zg -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles ${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
       );
       const data = fs.readFileSync(
         `${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
