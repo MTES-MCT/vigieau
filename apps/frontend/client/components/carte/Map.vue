@@ -82,6 +82,8 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
+    minZoom: 3,
+    maxZoom: 14,
   });
 
   // Add zoom and rotation controls to the map.
@@ -101,6 +103,11 @@ onMounted(() => {
   // Add fullscreen control to the map.
   map.value?.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
 
+  map.value?.on('zoom', function () {
+    const zoomLevel = map.value?.getZoom();
+    console.log('Zoom level:', zoomLevel);
+  });
+
   map.value?.on('load', () => {
     const layers = map.value.getStyle().layers;
     for (let i = 0; i < layers.length; i++) {
@@ -112,8 +119,6 @@ onMounted(() => {
     map.value?.addSource('decoupage-administratif', {
       type: 'vector',
       url: `https://openmaptiles.data.gouv.fr/data/decoupage-administratif.json`,
-      minzoom: 4,
-      maxzoom: 22, // Pour autoriser tous les zooms
     });
     addSourceAndLayerZones(PMTILES_URL);
   });
@@ -331,8 +336,6 @@ const addSourceAndLayerZones = (pmtilesUrl: string) => {
       source: 'zones',
       'source-layer': 'zones_arretes_en_vigueur',
       filter: ['==', 'type', selectedTypeEau.value],
-      minzoom: 4,
-      maxzoom: 22,
       paint: {
         'fill-color': [
           'match',
