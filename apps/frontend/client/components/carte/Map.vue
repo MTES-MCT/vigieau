@@ -112,7 +112,7 @@ onMounted(() => {
     map.value?.addSource('decoupage-administratif', {
       type: 'vector',
       url: `https://openmaptiles.data.gouv.fr/data/decoupage-administratif.json`,
-      minzoom: 3,
+      minzoom: 4,
       maxzoom: 22, // Pour autoriser tous les zooms
     });
     addSourceAndLayerZones(PMTILES_URL);
@@ -331,7 +331,7 @@ const addSourceAndLayerZones = (pmtilesUrl: string) => {
       source: 'zones',
       'source-layer': 'zones_arretes_en_vigueur',
       filter: ['==', 'type', selectedTypeEau.value],
-      minzoom: 3,
+      minzoom: 4,
       maxzoom: 22,
       paint: {
         'fill-color': [
