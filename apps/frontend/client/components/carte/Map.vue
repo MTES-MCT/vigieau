@@ -82,7 +82,7 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
-    minZoom: 3,
+    minZoom: 4,
     maxZoom: 14,
   });
 
@@ -102,11 +102,6 @@ onMounted(() => {
 
   // Add fullscreen control to the map.
   map.value?.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
-
-  map.value?.on('zoom', function () {
-    const zoomLevel = map.value?.getZoom();
-    console.log('Zoom level:', zoomLevel);
-  });
 
   map.value?.on('load', () => {
     const layers = map.value.getStyle().layers;
