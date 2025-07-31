@@ -82,7 +82,7 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
-    minZoom: 4,
+    minZoom: 6,
     maxZoom: 14,
   });
 
