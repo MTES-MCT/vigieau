@@ -882,7 +882,7 @@ DELETE FROM zone_alerte_computed
     }
     try {
       await this.execPromise(
-        `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --coalesce-densest-as-needed --extend-zooms-if-still-dropping -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=20 --output=${path}/zones_arretes_en_vigueur.pmtiles ${path}/zones_arretes_en_vigueur.geojson`,
+        `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --coalesce-densest-as-needed --extend-zooms-if-still-dropping -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=24 --output=${path}/zones_arretes_en_vigueur.pmtiles ${path}/zones_arretes_en_vigueur.geojson`,
       );
       const data = fs.readFileSync(`${path}/zones_arretes_en_vigueur.pmtiles`);
       const fileToTransfer = {
