@@ -166,7 +166,19 @@ export class ZoneAlerteComputedHistoricService {
       );
       try {
         await this.execPromise(
-          `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --coalesce-densest-as-needed --extend-zooms-if-still-dropping -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --drop-smallest-as-needed --simplification=28 --output=${path}/${fileNameToSave}.pmtiles ${path}/${fileNameToSave}.geojson`,
+          `${path}/tippecanoe_program/bin/tippecanoe \
+          -Z4 \
+          -zg \
+          --maximum-tile-byte=1000000 \
+          --force \
+          --read-parallel \
+          --detect-shared-borders \
+          --coalesce-densest-as-needed \
+          --simplification=28 \
+          --layer=zones_arretes_en_vigueur \
+          --output="${path}/${fileNameToSave}.pmtiles" \
+          "${path}/${fileNameToSave}.geojson"
+            `,
         );
         const dataPmtiles = fs.readFileSync(
           `${path}/${fileNameToSave}.pmtiles`,
