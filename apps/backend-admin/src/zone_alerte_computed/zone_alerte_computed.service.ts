@@ -852,6 +852,27 @@ DELETE FROM zone_alerte_computed
       `${path}/zones_arretes_en_vigueur.geojson`,
       JSON.stringify(geojson),
     );
+    await writeFile(
+      `${path}/zones_arretes_en_vigueur_SOU.geojson`,
+      JSON.stringify({
+        type: 'FeatureCollection',
+        features: allZones.filter((f) => f.properties.type === 'SOU'),
+      }),
+    );
+    await writeFile(
+      `${path}/zones_arretes_en_vigueur_SUP.geojson`,
+      JSON.stringify({
+        type: 'FeatureCollection',
+        features: allZones.filter((f) => f.properties.type === 'SUP'),
+      }),
+    );
+    await writeFile(
+      `${path}/zones_arretes_en_vigueur_AEP.geojson`,
+      JSON.stringify({
+        type: 'FeatureCollection',
+        features: allZones.filter((f) => f.properties.type === 'AEP'),
+      }),
+    );
     const dataGeojson = fs.readFileSync(
       `${path}/zones_arretes_en_vigueur.geojson`,
     );
@@ -885,15 +906,15 @@ DELETE FROM zone_alerte_computed
         `${path}/tippecanoe_program/bin/tippecanoe \
         -Z4 \
         -zg \
-        --maximum-tile-byte=1000000 \
         --force \
         --read-parallel \
-        --detect-shared-borders \
+        --no-simplification-of-shared-nodes \
+        --extend-zooms-if-still-dropping \
         --coalesce-densest-as-needed \
-        --simplification=28 \
-        --layer=zones_arretes_en_vigueur \
-        --output="${path}/zones_arretes_en_vigueur.pmtiles" \
-        "${path}/zones_arretes_en_vigueur.geojson"
+        -L SOU:${path}/zones_arretes_en_vigueur_SOU.geojson \
+        -L SUP:${path}/zones_arretes_en_vigueur_SUP.geojson \
+        -L AEP:${path}/zones_arretes_en_vigueur_AEP.geojson \
+        --output="${path}/zones_arretes_en_vigueur.pmtiles"
         `,
       );
       const data = fs.readFileSync(`${path}/zones_arretes_en_vigueur.pmtiles`);

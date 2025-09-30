@@ -82,7 +82,7 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
-    minZoom: 6,
+    minZoom: 4,
     maxZoom: 14,
   });
 
@@ -118,78 +118,99 @@ onMounted(() => {
     addSourceAndLayerZones(PMTILES_URL);
   });
 
-  map.value?.on('click', 'departements-overlay', async (e: any) => {
-    if (loading.value) {
-      return;
-    }
+  map.value?.on('click', async (e: any) => {
+    if (loading.value) return;
     loading.value = true;
-    const features = map.value?.queryRenderedFeatures(e.point, {
-      layers: ['zones-data'],
-    });
-    const coordinates = e.lngLat;
-    const properties = features?.map((f: any) => f.properties);
-    zonesSelected.value = properties ? properties.map((p: any) => p.id) : [];
 
-    const dataAddress = (
-      await api.searchAddressByLatlon(coordinates.lng, coordinates.lat)
-    ).data;
-    const dataGeo = (
-      await api.searchGeoByLatlon(coordinates.lng, coordinates.lat)
-    ).data;
+    try {
+      // 1) Identifier le layer "zones" actif selon le type sélectionné
+      const activeZoneLayerId =
+        selectedTypeEau.value === 'AEP'
+          ? 'zones-AEP'
+          : selectedTypeEau.value === 'SUP'
+          ? 'zones-SUP'
+          : 'zones-SOU';
 
-    const description = utils.generatePopupHtml(
-      properties,
-      showRestrictionsBtn.value,
-      dataAddress.value?.features[0],
-      dataGeo.value[0],
-    );
-    loading.value = false;
+      // 2) Récupérer les features cliquées sur ce layer
+      const features =
+        map.value?.queryRenderedFeatures(e.point, {
+          layers: [activeZoneLayerId],
+        }) ?? [];
+      const properties = features.map((f: any) => f.properties);
 
-    updateContourFilter();
+      // 3) Mettre à jour la sélection (ids) pour le contour
+      zonesSelected.value = properties.map((p: any) => p.id);
 
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
-    map.value.flyTo({
-      center: [
-        e.lngLat.lng - 0.5 / map.value.getZoom(),
-        e.lngLat.lat - 0.7 / (map.value.getZoom() + 5),
-      ],
-      essential: true,
-      speed: 0.2,
-    });
+      // 4) Géocodage inverse + données géo
+      const { lng, lat } = e.lngLat;
+      const [dataAddress, dataGeo] = await Promise.all([
+        api.searchAddressByLatlon(lng, lat).then((r: any) => r.data),
+        api.searchGeoByLatlon(lng, lat).then((r: any) => r.data),
+      ]);
 
-    const btn = document.getElementsByClassName('btn-map-popup')[0];
-    if (!btn) {
-      return;
-    }
-    btn.addEventListener('click', async () => {
-      // On modifie l'objet adresse car au clic sur la carte on veut vraiment le lon / lat exact
-      const address = {
-        geometry: {
-          coordinates: [coordinates.lng, coordinates.lat],
-        },
-        properties: {
-          citycode: dataAddress.value?.features[0]?.properties?.citycode
-            ? dataAddress.value.features[0].properties.citycode
-            : dataGeo.value[0]?.code
-            ? dataGeo.value[0].code
-            : null,
-          label: `${dataGeo.value[0]?.nom}, ${dataGeo.value[0]?.codeDepartement}`,
-        },
-      };
-      utils.searchZones(
-        address,
-        null,
-        props.profil,
-        selectedTypeEau.value,
-        router,
-        modalTitle,
-        modalText,
-        modalIcon,
-        modalActions,
-        modalOpened,
-        loadingZones,
+      // 5) Générer le HTML de la popup
+      const description = utils.generatePopupHtml(
+        properties,
+        showRestrictionsBtn.value,
+        dataAddress.value?.features?.[0],
+        dataGeo.value?.[0],
       );
-    });
+
+      // 6) Mettre à jour le contour (ne filtre que par id désormais)
+      updateContourFilter();
+
+      // 7) Afficher la popup + flyTo léger
+      popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+      map.value.flyTo({
+        center: [
+          lng - 0.5 / map.value.getZoom(),
+          lat - 0.7 / (map.value.getZoom() + 5),
+        ],
+        essential: true,
+        speed: 0.2,
+      });
+
+      // 8) Bouton de la popup : recherche détaillée
+      const btn = document.getElementsByClassName('btn-map-popup')[0] as
+        | HTMLElement
+        | undefined;
+      if (btn) {
+        btn.addEventListener(
+          'click',
+          async () => {
+            // On force l’adresse à la coordonnée exacte du clic
+            const address = {
+              geometry: { coordinates: [lng, lat] },
+              properties: {
+                citycode: dataAddress.value?.features?.[0]?.properties?.citycode
+                  ? dataAddress.value.features[0].properties.citycode
+                  : dataGeo.value?.[0]?.code ?? null,
+                label: `${dataGeo.value?.[0]?.nom}, ${dataGeo.value?.[0]?.codeDepartement}`,
+              },
+            };
+
+            utils.searchZones(
+              address,
+              null,
+              props.profil,
+              selectedTypeEau.value,
+              router,
+              modalTitle,
+              modalText,
+              modalIcon,
+              modalActions,
+              modalOpened,
+              loadingZones,
+            );
+          },
+          { once: true }, // évite les multiples handlers
+        );
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      loading.value = false;
+    }
   });
 
   map.value?.on('mouseenter', 'zones-data', () => {
@@ -278,16 +299,29 @@ const flyToLocation = (bounds: any) => {
   map.value?.fitBounds(bounds);
 };
 
-const updateLayerFilter = () => {
-  map.value?.setFilter('zones-data', ['==', 'type', selectedTypeEau.value]);
+const setLayerVisibility = (id: string, visible: boolean) => {
+  if (!map.value?.getLayer(id)) return;
+  map.value.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
+};
+
+const updateLayerVisibility = () => {
+  setLayerVisibility('zones-SOU', selectedTypeEau.value === 'SOU'); // adapte si inversion ESO/ESU
+  setLayerVisibility('zones-SUP', selectedTypeEau.value === 'SUP');
+  setLayerVisibility('zones-AEP', selectedTypeEau.value === 'AEP');
+
+  setLayerVisibility('zones-contour-SOU', selectedTypeEau.value === 'SOU');
+  setLayerVisibility('zones-contour-SUP', selectedTypeEau.value === 'SUP');
+  setLayerVisibility('zones-contour-AEP', selectedTypeEau.value === 'AEP');
 };
 
 const updateContourFilter = () => {
-  map.value?.setFilter('zones-contour', [
-    'all',
-    ['==', 'type', selectedTypeEau.value],
-    ['in', 'id', ...zonesSelected.value],
-  ]);
+  ['zones-contour-ESO', 'zones-contour-ESU', 'zones-contour-AEP'].forEach(
+    (id) => {
+      if (map.value?.getLayer(id)) {
+        map.value.setFilter(id, ['in', 'id', ...zonesSelected.value]);
+      }
+    },
+  );
 };
 
 const updateDepartementsContourFilter = () => {
@@ -303,60 +337,90 @@ const closeModal = () => {
 };
 
 const addSourceAndLayerZones = (pmtilesUrl: string) => {
-  if (map.value?.getLayer('zones-data')) {
-    map.value?.removeLayer('zones-data');
-  }
-  if (map.value?.getLayer('departements-data')) {
-    map.value?.removeLayer('departements-data');
-  }
-  if (map.value?.getLayer('departements-overlay')) {
-    map.value?.removeLayer('departements-overlay');
-  }
-  if (map.value?.getLayer('zones-contour')) {
-    map.value?.removeLayer('zones-contour');
-  }
-  if (map.value?.getSource('zones')) {
-    map.value?.removeSource('zones');
-  }
+  [
+    'zones-SOU',
+    'zones-SUP',
+    'zones-AEP',
+    'departements-data',
+    'departements-overlay',
+    'departements-contour',
+    'zones-contour-SOU',
+    'zones-contour-SUP',
+    'zones-contour-AEP',
+  ].forEach((id) => {
+    if (map.value?.getLayer(id)) map.value?.removeLayer(id);
+  });
+
+  if (map.value?.getSource('zones')) map.value?.removeSource('zones');
 
   map.value?.addSource('zones', {
     type: 'vector',
     url: `pmtiles://${pmtilesUrl}`,
+    maxZoom: 10,
   });
+
+  const visible = (t: string) =>
+    selectedTypeEau.value === t ? 'visible' : 'none';
+
+  const commonFillPaint: any = {
+    'fill-color': [
+      'match',
+      ['get', 'niveauGravite'],
+      'vigilance',
+      '#FFEDA0',
+      'alerte',
+      '#FEB24C',
+      'alerte_renforcee',
+      '#FC4E2A',
+      'crise',
+      '#B10026',
+      '#e8edff',
+    ],
+    'fill-opacity': {
+      stops: [
+        [5, 1],
+        [6, 0.8],
+        [7, 0.7],
+        [8, 0.6],
+        [9, 0.5],
+        [10, 0.4],
+        [11, 0.3],
+      ],
+    },
+  };
 
   map.value?.addLayer(
     {
-      id: 'zones-data',
+      id: 'zones-SOU',
       type: 'fill',
       source: 'zones',
-      'source-layer': 'zones_arretes_en_vigueur',
-      filter: ['==', 'type', selectedTypeEau.value],
-      paint: {
-        'fill-color': [
-          'match',
-          ['get', 'niveauGravite'],
-          'vigilance',
-          '#FFEDA0',
-          'alerte',
-          '#FEB24C',
-          'alerte_renforcee',
-          '#FC4E2A',
-          'crise',
-          '#B10026',
-          '#e8edff',
-        ],
-        'fill-opacity': {
-          stops: [
-            [5, 1],
-            [6, 0.8],
-            [7, 0.7],
-            [8, 0.6],
-            [9, 0.5],
-            [10, 0.4],
-            [11, 0.3],
-          ],
-        },
-      },
+      'source-layer': 'SOU',
+      layout: { visibility: visible('SOU') },
+      paint: commonFillPaint,
+    },
+    firstSymbolId,
+  );
+
+  map.value?.addLayer(
+    {
+      id: 'zones-SUP',
+      type: 'fill',
+      source: 'zones',
+      'source-layer': 'SUP',
+      layout: { visibility: visible('SUP') },
+      paint: commonFillPaint,
+    },
+    firstSymbolId,
+  );
+
+  map.value?.addLayer(
+    {
+      id: 'zones-AEP',
+      type: 'fill',
+      source: 'zones',
+      'source-layer': 'AEP',
+      layout: { visibility: visible('AEP') },
+      paint: commonFillPaint,
     },
     firstSymbolId,
   );
@@ -410,26 +474,48 @@ const addSourceAndLayerZones = (pmtilesUrl: string) => {
     firstSymbolId,
   );
 
+  // --- LAYERS CONTOUR (line) ---
+  const commonLinePaint: any = { 'line-color': '#000091', 'line-width': 3 };
+
   map.value?.addLayer(
     {
-      id: 'zones-contour',
+      id: 'zones-contour-SOU',
       type: 'line',
       source: 'zones',
-      'source-layer': 'zones_arretes_en_vigueur',
-      filter: [
-        'all',
-        ['==', 'type', selectedTypeEau.value],
-        ['in', 'id', ...zonesSelected.value],
-      ],
-      paint: {
-        'line-color': '#000091',
-        'line-width': 3,
-      },
+      'source-layer': 'SOU',
+      layout: { visibility: visible('SOU') },
+      // le filtre ne garde que les features sélectionnées
+      filter: ['in', 'id', ...zonesSelected.value],
+      paint: commonLinePaint,
     },
     firstSymbolId,
   );
 
-  // If date < vigieau admin, on affiche pas eau potable.
+  map.value?.addLayer(
+    {
+      id: 'zones-contour-SUP',
+      type: 'line',
+      source: 'zones',
+      'source-layer': 'SUP',
+      layout: { visibility: visible('SUP') },
+      filter: ['in', 'id', ...zonesSelected.value],
+      paint: commonLinePaint,
+    },
+    firstSymbolId,
+  );
+
+  map.value?.addLayer(
+    {
+      id: 'zones-contour-AEP',
+      type: 'line',
+      source: 'zones',
+      'source-layer': 'AEP',
+      layout: { visibility: visible('AEP') },
+      filter: ['in', 'id', ...zonesSelected.value],
+      paint: commonLinePaint,
+    },
+    firstSymbolId,
+  );
 };
 
 const resetZoneSelected = () => {
@@ -446,7 +532,7 @@ watch(
   () => props.typeEau,
   () => {
     selectedTypeEau.value = props.typeEau;
-    updateLayerFilter();
+    updateLayerVisibility();
   },
 );
 
@@ -454,6 +540,7 @@ watch(
   () => selectedTypeEau.value,
   () => {
     resetZoneSelected();
+    updateLayerVisibility();
   },
 );
 
@@ -554,8 +641,8 @@ watch(
           :small="true"
           class="fr-mb-1w"
           @update:modelValue="
-            selectedTypeEau = $event;
-            updateLayerFilter();
+            selectedTypeEau = $event as string;
+            updateLayerVisibility();
           "
         />
       </div>

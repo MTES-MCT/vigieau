@@ -164,20 +164,41 @@ export class ZoneAlerteComputedHistoricService {
         `${path}/${fileNameToSave}.geojson`,
         JSON.stringify(geojson),
       );
+      await writeFile(
+        `${path}/zones_arretes_en_vigueur_SOU.geojson`,
+        JSON.stringify({
+          type: 'FeatureCollection',
+          features: zasFormated.filter((f) => f.properties.type === 'SOU'),
+        }),
+      );
+      await writeFile(
+        `${path}/zones_arretes_en_vigueur_SUP.geojson`,
+        JSON.stringify({
+          type: 'FeatureCollection',
+          features: zasFormated.filter((f) => f.properties.type === 'SUP'),
+        }),
+      );
+      await writeFile(
+        `${path}/zones_arretes_en_vigueur_AEP.geojson`,
+        JSON.stringify({
+          type: 'FeatureCollection',
+          features: zasFormated.filter((f) => f.properties.type === 'AEP'),
+        }),
+      );
       try {
         await this.execPromise(
           `${path}/tippecanoe_program/bin/tippecanoe \
           -Z4 \
           -zg \
-          --maximum-tile-byte=1000000 \
           --force \
           --read-parallel \
-          --detect-shared-borders \
+          --no-simplification-of-shared-nodes \
+          --extend-zooms-if-still-dropping \
           --coalesce-densest-as-needed \
-          --simplification=28 \
-          --layer=zones_arretes_en_vigueur \
-          --output="${path}/${fileNameToSave}.pmtiles" \
-          "${path}/${fileNameToSave}.geojson"
+          -L SOU:${path}/zones_arretes_en_vigueur_SOU.geojson \
+          -L SUP:${path}/zones_arretes_en_vigueur_SUP.geojson \
+          -L AEP:${path}/zones_arretes_en_vigueur_AEP.geojson \
+          --output="${path}/${fileNameToSave}.pmtiles"
             `,
         );
         const dataPmtiles = fs.readFileSync(
