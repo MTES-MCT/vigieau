@@ -6,11 +6,12 @@ import { UsageFeedback } from '@shared/entities/usage_feedback.entity';
 
 @Injectable()
 export class UsageService {
-  constructor(@InjectRepository(Usage)
-              private readonly usageRepository: Repository<Usage>,
-              @InjectRepository(UsageFeedback)
-              private readonly usageFeedbackRepository: Repository<UsageFeedback>) {
-  }
+  constructor(
+    @InjectRepository(Usage)
+    private readonly usageRepository: Repository<Usage>,
+    @InjectRepository(UsageFeedback)
+    private readonly usageFeedbackRepository: Repository<UsageFeedback>,
+  ) {}
 
   /**
    * Enregistre un feedback pour un usage donné.
@@ -36,10 +37,7 @@ export class UsageService {
     });
 
     if (!usage) {
-      throw new HttpException(
-        `Usage non trouvé.`,
-        HttpStatus.NOT_FOUND,
-      );
+      throw new HttpException(`Usage non trouvé.`, HttpStatus.NOT_FOUND);
     }
 
     const descriptionMap = {

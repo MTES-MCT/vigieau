@@ -24,19 +24,32 @@ export class ArreteMunicipalDto {
   dateFin: string;
 
   @IsString()
-  @ApiProperty({ example: 'John', description: 'Prénom de l\'utilisateur qui a crée l\'arrêté municipal' })
+  @ApiProperty({
+    example: 'John',
+    description: "Prénom de l'utilisateur qui a crée l'arrêté municipal",
+  })
   userFirstName: string;
 
   @IsString()
-  @ApiProperty({ example: 'Doe', description: 'Nom de l\'utilisateur qui a crée l\'arrêté municipal' })
+  @ApiProperty({
+    example: 'Doe',
+    description: "Nom de l'utilisateur qui a crée l'arrêté municipal",
+  })
   userLastName: string;
 
   @IsString()
-  @ApiProperty({ example: 'john.doe@example.com', description: 'Email de l\'utilisateur qui a crée l\'arrêté municipal' })
+  @ApiProperty({
+    example: 'john.doe@example.com',
+    description: "Email de l'utilisateur qui a crée l'arrêté municipal",
+  })
   userEmail: string;
 
   @IsString()
-  @ApiProperty({ example: '(+33) 1 22 33 44 55', description: 'Numéro de téléphone de l\'utilisateur qui a crée l\'arrêté municipal' })
+  @ApiProperty({
+    example: '(+33) 1 22 33 44 55',
+    description:
+      "Numéro de téléphone de l'utilisateur qui a crée l'arrêté municipal",
+  })
   userPhone: string;
 
   @IsObject()
@@ -44,44 +57,36 @@ export class ArreteMunicipalDto {
   fichier: FichierDto;
 }
 
-export const arreteMunicipalPaginateConfig: PaginateConfig<ArreteMunicipal> =
-  {
-    select: [
-      'id',
-      'statut',
-      'dateDebut',
-      'dateFin',
-      'statut',
-      'userFirstName',
-      'userLastName',
-      'userEmail',
-      'userPhone',
-      'communes.id',
-      'communes.code',
-      'communes.nom',
-      'fichier.id',
-      'fichier.nom',
-      'fichier.url',
-      'fichier.size',
-    ],
-    sortableColumns: [
-      'dateDebut',
-      'communes.code'
-    ],
-    defaultSortBy: [
-      ['dateDebut', 'DESC'],
-      ['communes.code', 'ASC']
-    ],
-    nullSort: 'first',
-    relations: [
-      'communes',
-      'communes.departement',
-      'fichier',
-    ],
-    searchableColumns: [],
-    filterableColumns: {
-      statut: [FilterOperator.IN],
-      'communes.code': [FilterOperator.IN],
-      'communes.departement.code': [FilterOperator.IN],
-    },
-  };
+export const arreteMunicipalPaginateConfig: PaginateConfig<ArreteMunicipal> = {
+  select: [
+    'id',
+    'statut',
+    'dateDebut',
+    'dateFin',
+    'statut',
+    'userFirstName',
+    'userLastName',
+    'userEmail',
+    'userPhone',
+    'communes.id',
+    'communes.code',
+    'communes.nom',
+    'fichier.id',
+    'fichier.nom',
+    'fichier.url',
+    'fichier.size',
+  ],
+  sortableColumns: ['dateDebut', 'communes.code'],
+  defaultSortBy: [
+    ['dateDebut', 'DESC'],
+    ['communes.code', 'ASC'],
+  ],
+  nullSort: 'first',
+  relations: ['communes', 'communes.departement', 'fichier'],
+  searchableColumns: [],
+  filterableColumns: {
+    statut: [FilterOperator.IN],
+    'communes.code': [FilterOperator.IN],
+    'communes.departement.code': [FilterOperator.IN],
+  },
+};

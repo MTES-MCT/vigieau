@@ -53,7 +53,10 @@ describe('SubscriptionsController', () => {
       mockSubscriptionsService.create.mockResolvedValue(expectedResult);
 
       const result = await controller.create(
-        { user: { email: 'test@example.com' }, headers: { 'x-forwarded-for': '127.0.0.1' } } as any,
+        {
+          user: { email: 'test@example.com' },
+          headers: { 'x-forwarded-for': '127.0.0.1' },
+        } as any,
         createSubscriptionDto,
       );
 
@@ -66,7 +69,7 @@ describe('SubscriptionsController', () => {
   });
 
   describe('getAll', () => {
-    it('should return all subscriptions for the user\'s email', async () => {
+    it("should return all subscriptions for the user's email", async () => {
       const mockEmail = 'test@example.com';
       const expectedResult: SubscriptionDto[] = <any[]>[
         {
@@ -84,24 +87,36 @@ describe('SubscriptionsController', () => {
       ];
 
       // Mock du service
-      mockSubscriptionsService.getSubscriptionsByEmail.mockResolvedValue(expectedResult);
+      mockSubscriptionsService.getSubscriptionsByEmail.mockResolvedValue(
+        expectedResult,
+      );
 
-      const result = await controller.getAll({ user: { email: mockEmail } } as any);
+      const result = await controller.getAll({
+        user: { email: mockEmail },
+      } as any);
 
       expect(result).toEqual(expectedResult);
-      expect(mockSubscriptionsService.getSubscriptionsByEmail).toHaveBeenCalledWith(mockEmail);
+      expect(
+        mockSubscriptionsService.getSubscriptionsByEmail,
+      ).toHaveBeenCalledWith(mockEmail);
     });
 
     it('should return an empty array if no subscriptions are found', async () => {
       const mockEmail = 'unknown@example.com';
       const expectedResult: SubscriptionDto[] = [];
 
-      mockSubscriptionsService.getSubscriptionsByEmail.mockResolvedValue(expectedResult);
+      mockSubscriptionsService.getSubscriptionsByEmail.mockResolvedValue(
+        expectedResult,
+      );
 
-      const result = await controller.getAll({ user: { email: mockEmail } } as any);
+      const result = await controller.getAll({
+        user: { email: mockEmail },
+      } as any);
 
       expect(result).toEqual(expectedResult);
-      expect(mockSubscriptionsService.getSubscriptionsByEmail).toHaveBeenCalledWith(mockEmail);
+      expect(
+        mockSubscriptionsService.getSubscriptionsByEmail,
+      ).toHaveBeenCalledWith(mockEmail);
     });
   });
 
@@ -111,12 +126,19 @@ describe('SubscriptionsController', () => {
       const mockEmail = 'test@example.com';
 
       // Mock du service
-      mockSubscriptionsService.deleteSubscriptionById.mockResolvedValue(undefined);
+      mockSubscriptionsService.deleteSubscriptionById.mockResolvedValue(
+        undefined,
+      );
 
-      const result = await controller.remove({ user: { email: mockEmail } } as any, mockId);
+      const result = await controller.remove(
+        { user: { email: mockEmail } } as any,
+        mockId,
+      );
 
       expect(result).toBeUndefined(); // La méthode ne retourne rien (status 204)
-      expect(mockSubscriptionsService.deleteSubscriptionById).toHaveBeenCalledWith(mockId, mockEmail);
+      expect(
+        mockSubscriptionsService.deleteSubscriptionById,
+      ).toHaveBeenCalledWith(mockId, mockEmail);
     });
 
     it('should throw an error if the subscription does not exist', async () => {
@@ -130,7 +152,9 @@ describe('SubscriptionsController', () => {
       await expect(
         controller.remove({ user: { email: mockEmail } } as any, mockId),
       ).rejects.toThrow(NotFoundException);
-      expect(mockSubscriptionsService.deleteSubscriptionById).toHaveBeenCalledWith(mockId, mockEmail);
+      expect(
+        mockSubscriptionsService.deleteSubscriptionById,
+      ).toHaveBeenCalledWith(mockId, mockEmail);
     });
   });
 
@@ -139,23 +163,35 @@ describe('SubscriptionsController', () => {
       const mockEmail = 'test@example.com';
 
       // Mock du service
-      mockSubscriptionsService.deleteSubscriptionByEmail.mockResolvedValue(undefined);
+      mockSubscriptionsService.deleteSubscriptionByEmail.mockResolvedValue(
+        undefined,
+      );
 
-      const result = await controller.removeAll({ user: { email: mockEmail } } as any);
+      const result = await controller.removeAll({
+        user: { email: mockEmail },
+      } as any);
 
       expect(result).toBeUndefined(); // La méthode ne retourne rien (status 204)
-      expect(mockSubscriptionsService.deleteSubscriptionByEmail).toHaveBeenCalledWith(mockEmail);
+      expect(
+        mockSubscriptionsService.deleteSubscriptionByEmail,
+      ).toHaveBeenCalledWith(mockEmail);
     });
 
     it('should handle cases where there are no subscriptions to delete', async () => {
       const mockEmail = 'unknown@example.com';
 
-      mockSubscriptionsService.deleteSubscriptionByEmail.mockResolvedValue(undefined);
+      mockSubscriptionsService.deleteSubscriptionByEmail.mockResolvedValue(
+        undefined,
+      );
 
-      const result = await controller.removeAll({ user: { email: mockEmail } } as any);
+      const result = await controller.removeAll({
+        user: { email: mockEmail },
+      } as any);
 
       expect(result).toBeUndefined();
-      expect(mockSubscriptionsService.deleteSubscriptionByEmail).toHaveBeenCalledWith(mockEmail);
+      expect(
+        mockSubscriptionsService.deleteSubscriptionByEmail,
+      ).toHaveBeenCalledWith(mockEmail);
     });
   });
 });

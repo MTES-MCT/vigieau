@@ -181,6 +181,7 @@ dist
 # Nuxt build
 
 # Nuxt generate
+.output
 
 ### VisualStudioCode ###
 .vscode/*

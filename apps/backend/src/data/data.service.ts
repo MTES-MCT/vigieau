@@ -1,7 +1,12 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindManyOptions, FindOneOptions, Repository } from 'typeorm';
+import {
+  DataSource,
+  FindManyOptions,
+  FindOneOptions,
+  Repository,
+} from 'typeorm';
 import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
 import moment from 'moment';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -29,21 +34,21 @@ export class DataService {
   private readonly releaseDate = '2023-07-11';
   private readonly beginDate = '2013-01-01';
 
-  constructor(@InjectRepository(StatisticDepartement)
-              private readonly statisticDepartementRepository: Repository<StatisticDepartement>,
-              @InjectRepository(StatisticCommune)
-              private readonly statisticCommuneRepository: Repository<StatisticCommune>,
-              @InjectRepository(Commune)
-              private readonly communeRepository: Repository<Commune>,
-              @InjectRepository(Departement)
-              private readonly departementRepository: Repository<Departement>,
-              @InjectRepository(Region)
-              private readonly regionRepository: Repository<Region>,
-              @InjectRepository(BassinVersant)
-              private readonly bassinVersantRepository: Repository<BassinVersant>,
-              private dataSource: DataSource,
-  ) {
-  }
+  constructor(
+    @InjectRepository(StatisticDepartement)
+    private readonly statisticDepartementRepository: Repository<StatisticDepartement>,
+    @InjectRepository(StatisticCommune)
+    private readonly statisticCommuneRepository: Repository<StatisticCommune>,
+    @InjectRepository(Commune)
+    private readonly communeRepository: Repository<Commune>,
+    @InjectRepository(Departement)
+    private readonly departementRepository: Repository<Departement>,
+    @InjectRepository(Region)
+    private readonly regionRepository: Repository<Region>,
+    @InjectRepository(BassinVersant)
+    private readonly bassinVersantRepository: Repository<BassinVersant>,
+    private dataSource: DataSource,
+  ) {}
 
   /**
    * Retourne les données de référence pour les filtres (bassins versants, régions, départements).
@@ -51,9 +56,12 @@ export class DataService {
    */
   getRefData() {
     return {
-      bassinsVersants: this.formatEntities(this.bassinsVersants, 'departements'),
+      bassinsVersants: this.formatEntities(
+        this.bassinsVersants,
+        'departements',
+      ),
       regions: this.formatEntities(this.regions, 'departements'),
-      departements: this.departements.map(d => {
+      departements: this.departements.map((d) => {
         return {
           id: d.id,
           code: d.code,
@@ -72,8 +80,10 @@ export class DataService {
    */
   private formatEntities(entities: any[], relatedField: string) {
     return entities
-      .filter(entity => entity[relatedField] && entity[relatedField].length > 0)
-      .map(entity => ({
+      .filter(
+        (entity) => entity[relatedField] && entity[relatedField].length > 0,
+      )
+      .map((entity) => ({
         id: entity.id,
         code: entity.code,
         nom: entity.nom,
@@ -94,17 +104,33 @@ export class DataService {
    * @param departement - ID du département (optionnel).
    * @returns Les données filtrées selon les critères.
    */
-  areaFindByDate(dateDebut?: string, dateFin?: string, bassinVersant?: string, region?: string, departement?: string) {
+  areaFindByDate(
+    dateDebut?: string,
+    dateFin?: string,
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ) {
     // Filtrage des données par date
-    const filteredData = this.filterDataByDate(this.dataArea, dateDebut, dateFin);
+    const filteredData = this.filterDataByDate(
+      this.dataArea,
+      dateDebut,
+      dateFin,
+    );
 
     // Filtrer par bassin versant, région ou département
-    if (bassinVersant) return this.filterByEntity(filteredData, bassinVersant, 'bassinsVersants');
+    if (bassinVersant)
+      return this.filterByEntity(
+        filteredData,
+        bassinVersant,
+        'bassinsVersants',
+      );
     if (region) return this.filterByEntity(filteredData, region, 'regions');
-    if (departement) return this.filterByEntity(filteredData, departement, 'departements');
+    if (departement)
+      return this.filterByEntity(filteredData, departement, 'departements');
 
     // Données globales
-    return filteredData.map(d => ({
+    return filteredData.map((d) => ({
       date: d.date,
       ESO: d.ESO,
       ESU: d.ESU,
@@ -119,12 +145,15 @@ export class DataService {
    * @param field - Le champ correspondant à l'entité (ex : 'bassinsVersants', 'regions').
    */
   private filterByEntity(data: any[], entityId: string, field: string) {
-    const entity = this[field].find(e => e.id === +entityId);
+    const entity = this[field].find((e) => e.id === +entityId);
     if (!entity) {
-      throw new HttpException(`${field.slice(0, -1)} non trouvé.`, HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        `${field.slice(0, -1)} non trouvé.`,
+        HttpStatus.NOT_FOUND,
+      );
     }
 
-    return data.map(d => ({
+    return data.map((d) => ({
       date: d.date,
       ...d[field].find((item: any) => item.id === entity.id),
     }));
@@ -138,14 +167,16 @@ export class DataService {
    * @param dateFin - Date de fin de la plage de recherche (optionnelle).
    */
   private filterDataByDate(data: any[], dateDebut?: string, dateFin?: string) {
-    return structuredClone(data.filter(d =>
-      moment(d.date).isBetween(
-        moment(dateDebut || this.beginDate, 'YYYY-MM-DD'),
-        moment(dateFin || moment(), 'YYYY-MM-DD'),
-        undefined,
-        '[]',
+    return structuredClone(
+      data.filter((d) =>
+        moment(d.date).isBetween(
+          moment(dateDebut || this.beginDate, 'YYYY-MM-DD'),
+          moment(dateFin || moment(), 'YYYY-MM-DD'),
+          undefined,
+          '[]',
+        ),
       ),
-    ));
+    );
   }
 
   /**
@@ -165,13 +196,21 @@ export class DataService {
     region?: string,
     departement?: string,
   ) {
-    let dataDepartementFiltered = this.filterDataByDate(this.dataDepartement, dateDebut, dateFin);
+    let dataDepartementFiltered = this.filterDataByDate(
+      this.dataDepartement,
+      dateDebut,
+      dateFin,
+    );
 
-    const departementsToFilter = this.getDepartementsToFilter(bassinVersant, region, departement);
+    const departementsToFilter = this.getDepartementsToFilter(
+      bassinVersant,
+      region,
+      departement,
+    );
     if (departementsToFilter.length > 0) {
-      dataDepartementFiltered = dataDepartementFiltered.map(d => {
-        d.departements = d.departements.filter(dep =>
-          departementsToFilter.some(depf => depf.code === dep.code),
+      dataDepartementFiltered = dataDepartementFiltered.map((d) => {
+        d.departements = d.departements.filter((dep) =>
+          departementsToFilter.some((depf) => depf.code === dep.code),
         );
         return d;
       });
@@ -186,15 +225,25 @@ export class DataService {
    * @param departement - ID du département (optionnel).
    * @returns Une liste de départements correspondant aux critères.
    */
-  private getDepartementsToFilter(bassinVersant?: string, region?: string, departement?: string) {
+  private getDepartementsToFilter(
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ) {
     if (bassinVersant) {
-      return this.getEntityById(this.bassinsVersants, bassinVersant, 'Bassin versant').departements;
+      return this.getEntityById(
+        this.bassinsVersants,
+        bassinVersant,
+        'Bassin versant',
+      ).departements;
     }
     if (region) {
       return this.getEntityById(this.regions, region, 'Région').departements;
     }
     if (departement) {
-      return [this.getEntityById(this.departements, departement, 'Département')];
+      return [
+        this.getEntityById(this.departements, departement, 'Département'),
+      ];
     }
     return [];
   }
@@ -207,9 +256,12 @@ export class DataService {
    * @returns L'entité correspondante ou une erreur si elle n'est pas trouvée.
    */
   private getEntityById(collection: any[], id: string, entityName: string) {
-    const entity = collection.find(e => e.id === +id);
+    const entity = collection.find((e) => e.id === +id);
     if (!entity) {
-      throw new HttpException(`${entityName} non trouvé.`, HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        `${entityName} non trouvé.`,
+        HttpStatus.NOT_FOUND,
+      );
     }
     return entity;
   }
@@ -220,16 +272,19 @@ export class DataService {
    */
   computeDataArea() {
     this.logger.log('COMPUTE DATA AREA');
-    this.dataArea = this.data.map(data => {
+    this.dataArea = this.data.map((data) => {
       return {
         date: data.date,
         ESO: this.computeRestriction(data.departements, 'SOU', this.fullArea),
         ESU: this.computeRestriction(data.departements, 'SUP', this.fullArea),
         AEP: this.computeRestriction(data.departements, 'AEP', this.fullArea),
-        bassinsVersants: this.computeEntityRestrictions(data, this.bassinsVersants),
+        bassinsVersants: this.computeEntityRestrictions(
+          data,
+          this.bassinsVersants,
+        ),
         regions: this.computeEntityRestrictions(data, this.regions),
         departements: this.computeEntityRestrictions(data, this.departements),
-      }
+      };
     });
   }
 
@@ -237,13 +292,13 @@ export class DataService {
    * Calcule les restrictions pour un ensemble d'entités (bassins versants, régions, départements).
    */
   private computeEntityRestrictions(data: any, entities: any[]) {
-    return entities.map(entity => {
-      const filteredDeps = this.departements.filter(dep =>
-        entity.departements?.some(d => d.id === dep.id),
+    return entities.map((entity) => {
+      const filteredDeps = this.departements.filter((dep) =>
+        entity.departements?.some((d) => d.id === dep.id),
       );
       const area = filteredDeps.reduce((acc, dep) => acc + dep.area, 0);
-      const restrictions = data.departements.filter(dep =>
-        filteredDeps.some(d => d.code === dep.departement),
+      const restrictions = data.departements.filter((dep) =>
+        filteredDeps.some((d) => d.code === dep.departement),
       );
       return {
         id: entity.id,
@@ -257,10 +312,19 @@ export class DataService {
   /**
    * Calcule un pourcentage de restriction pour un type de zone (ex : SUP, SOU, AEP).
    */
-  private computeRestriction(restrictions: any[], zoneType: string, area: number) {
+  private computeRestriction(
+    restrictions: any[],
+    zoneType: string,
+    area: number,
+  ) {
     const compute = (key: string) =>
       (
-        (restrictions.reduce((acc, r) => acc + Number(r[zoneType]?.[key] || 0), 0) * 100) / area
+        (restrictions.reduce(
+          (acc, r) => acc + Number(r[zoneType]?.[key] || 0),
+          0,
+        ) *
+          100) /
+        area
       ).toFixed(2);
 
     return {
@@ -286,7 +350,11 @@ export class DataService {
    * @param dateFin - (Optionnel) Fin de la plage de dates (format YYYY-MM).
    * @returns Les statistiques de la commune, incluant les restrictions filtrées si applicable.
    */
-  async commune(code: string, dateDebut?: string, dateFin?: string): Promise<StatisticCommune> {
+  async commune(
+    code: string,
+    dateDebut?: string,
+    dateFin?: string,
+  ): Promise<StatisticCommune> {
     const stat = await this.statisticCommuneRepository.findOne(<FindOneOptions>{
       select: {
         id: true,
@@ -314,16 +382,23 @@ export class DataService {
     }
 
     if (dateDebut || dateFin) {
-      const dateBegin = dateDebut ? moment(dateDebut, 'YYYY-MM').startOf('month') : moment();
-      const dateEnd = dateFin ? moment(dateFin, 'YYYY-MM').endOf('month') : moment();
+      const dateBegin = dateDebut
+        ? moment(dateDebut, 'YYYY-MM').startOf('month')
+        : moment();
+      const dateEnd = dateFin
+        ? moment(dateFin, 'YYYY-MM').endOf('month')
+        : moment();
 
-      const r = await this.dataSource.query(`
+      const r = await this.dataSource.query(
+        `
       SELECT jsonb_agg(r) as filtered_restrictions
       FROM statistic_commune,
   jsonb_array_elements(restrictions) AS r
       WHERE statistic_commune.id = $1 
       AND (r->>'date')::date BETWEEN $2 AND $3
-    `, [stat.id, dateBegin.format('YYYY-MM-DD'), dateEnd.format('YYYY-MM-DD')]);
+    `,
+        [stat.id, dateBegin.format('YYYY-MM-DD'), dateEnd.format('YYYY-MM-DD')],
+      );
 
       stat.restrictions = r[0].filtered_restrictions;
     }
@@ -341,7 +416,10 @@ export class DataService {
     await this.loadRefData();
     this.logMemoryUsage();
 
-    this.data = this.generateDateRange(this.beginDate, moment().format('YYYY-MM-DD'));
+    this.data = this.generateDateRange(
+      this.beginDate,
+      moment().format('YYYY-MM-DD'),
+    );
 
     await this.loadDepartementData();
     this.data = [];
@@ -362,7 +440,11 @@ export class DataService {
     const dates = [];
 
     while (start.isSameOrBefore(end, 'day')) {
-      dates.push({ date: start.format('YYYY-MM-DD'), departements: [], communes: [] });
+      dates.push({
+        date: start.format('YYYY-MM-DD'),
+        departements: [],
+        communes: [],
+      });
       start.add(1, 'day');
     }
 
@@ -384,18 +466,18 @@ export class DataService {
         code: 'ASC',
       },
     });
-    this.departements = (await this.departementRepository
-      .createQueryBuilder('departement')
-      .select('departement.id', 'id')
-      .addSelect('departement.code', 'code')
-      .addSelect('departement.nom', 'nom')
-      .addSelect(
-        'ST_Area(departement.geom::geography)/1000000',
-        'area')
-      .addSelect('ST_Extent(departement.geom)', 'bounds')
-      .groupBy('id')
-      .orderBy('nom', 'ASC')
-      .getRawMany()).map(d => {
+    this.departements = (
+      await this.departementRepository
+        .createQueryBuilder('departement')
+        .select('departement.id', 'id')
+        .addSelect('departement.code', 'code')
+        .addSelect('departement.nom', 'nom')
+        .addSelect('ST_Area(departement.geom::geography)/1000000', 'area')
+        .addSelect('ST_Extent(departement.geom)', 'bounds')
+        .groupBy('id')
+        .orderBy('nom', 'ASC')
+        .getRawMany()
+    ).map((d) => {
       const bounds = {
         minLat: d.bounds.split('(')[1].split(' ')[0],
         maxLat: d.bounds.split(',')[1].split(' ')[0],
@@ -418,20 +500,23 @@ export class DataService {
       },
     });
     this.fullArea = this.departements.reduce((acc, d) => acc + d.area, 0);
-    this.metropoleArea = this.departements.filter(d => d.code.length < 3).reduce((acc, d) => acc + d.area, 0);
+    this.metropoleArea = this.departements
+      .filter((d) => d.code.length < 3)
+      .reduce((acc, d) => acc + d.area, 0);
   }
 
   /**
    * Charge les données départementales à partir de la base de données et les associe aux dates correspondantes.
    */
   async loadDepartementData() {
-    let statisticsDepartement = await this.statisticDepartementRepository.find({
-      relations: ['departement'],
-    });
+    const statisticsDepartement =
+      await this.statisticDepartementRepository.find({
+        relations: ['departement'],
+      });
 
     for (const statisticDepartement of statisticsDepartement) {
       for (const restriction of statisticDepartement.restrictions) {
-        const d = this.data.find(x => x.date === restriction.date);
+        const d = this.data.find((x) => x.date === restriction.date);
         d.departements.push({
           ...{ departement: statisticDepartement.departement.code },
           ...restriction,
@@ -462,7 +547,9 @@ export class DataService {
       for (const d of this.data) {
         d.communes = [];
       }
-      let statisticsCommune = await this.statisticCommuneRepository.find(<FindManyOptions> {
+      const statisticsCommune = await this.statisticCommuneRepository.find(<
+        FindManyOptions
+      >{
         select: {
           id: true,
           restrictionsByMonth: true,
@@ -496,13 +583,28 @@ export class DataService {
         date: d.date,
         departements: [],
       };
-      this.departements.forEach(departement => {
+      this.departements.forEach((departement) => {
         tmp.departements.push({
           code: departement.code,
-          niveauGravite: this.findMaxNiveauGravite(d.departements, departement.code),
-          niveauGraviteSup: this.findMaxNiveauGravite(d.departements, departement.code, 'SUP'),
-          niveauGraviteSou: this.findMaxNiveauGravite(d.departements, departement.code, 'SOU'),
-          niveauGraviteAep: this.findMaxNiveauGravite(d.departements, departement.code, 'AEP'),
+          niveauGravite: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+          ),
+          niveauGraviteSup: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+            'SUP',
+          ),
+          niveauGraviteSou: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+            'SOU',
+          ),
+          niveauGraviteAep: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+            'AEP',
+          ),
         });
       });
       this.dataDepartement.push(tmp);
@@ -515,12 +617,14 @@ export class DataService {
    * @param statisticsCommune - Les données statistiques des communes.
    */
   computeDataCommune(statisticsCommune) {
-    const communesFiltered = this.communes.filter(c => statisticsCommune.some(sc => sc.commune.code === c.code));
+    const communesFiltered = this.communes.filter((c) =>
+      statisticsCommune.some((sc) => sc.commune.code === c.code),
+    );
     this.logger.log('COMMUNES FILTERED', communesFiltered.length);
     for (const sc of statisticsCommune) {
       this.dataCommune.push({
         code: sc.commune.code,
-        restrictions: sc.restrictionsByMonth?.map(r => {
+        restrictions: sc.restrictionsByMonth?.map((r) => {
           return {
             d: r.date,
             p: r.ponderation,
@@ -538,14 +642,20 @@ export class DataService {
    * @param zoneType - (Optionnel) Type de zone spécifique (ex: 'SUP', 'SOU', 'AEP').
    * @returns Le niveau de gravité maximal trouvé ou `null` si aucune restriction n'est trouvée.
    */
-  findMaxNiveauGravite(restrictions: any[], departementCode: string, zoneType?: string) {
-    const restrictionsDepartement = restrictions.find(r => r.departement === departementCode);
+  findMaxNiveauGravite(
+    restrictions: any[],
+    departementCode: string,
+    zoneType?: string,
+  ) {
+    const restrictionsDepartement = restrictions.find(
+      (r) => r.departement === departementCode,
+    );
     if (!restrictionsDepartement) {
       return null;
     }
     let zonesType = ['SUP', 'SOU', 'AEP'];
     if (zoneType) {
-      zonesType = zonesType.filter(z => z === zoneType);
+      zonesType = zonesType.filter((z) => z === zoneType);
     }
     const niveauxGravite = ['crise', 'alerte_renforcee', 'alerte', 'vigilance'];
     for (const niveauGravite of niveauxGravite) {
@@ -565,7 +675,7 @@ export class DataService {
    * @returns Une chaîne de caractères représentant la taille en Mo (ex: '12.34 MB').
    */
   formatMemoryUsage(data) {
-    return `${Math.round(data / 1024 / 1024 * 100) / 100} MB`;
+    return `${Math.round((data / 1024 / 1024) * 100) / 100} MB`;
   }
 
   /**

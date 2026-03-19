@@ -49,7 +49,9 @@ describe('DepartementsController', () => {
         { code: '4', niveauGravite: 'alerte' },
       ];
 
-      mockDepartementsService.situationByDepartement.mockResolvedValue(expectedResult);
+      mockDepartementsService.situationByDepartement.mockResolvedValue(
+        expectedResult,
+      );
 
       // Act
       const result = await controller.situationByDepartement(query);
@@ -69,13 +71,20 @@ describe('DepartementsController', () => {
       const query: QueryDepartementDto = {}; // Aucun paramètre fourni
       const expectedResult: DepartementDto[] = [];
 
-      mockDepartementsService.situationByDepartement.mockResolvedValue(expectedResult);
+      mockDepartementsService.situationByDepartement.mockResolvedValue(
+        expectedResult,
+      );
 
       // Act
       const result = await controller.situationByDepartement(query);
 
       // Assert
-      expect(service.situationByDepartement).toHaveBeenCalledWith(undefined, undefined, undefined, undefined);
+      expect(service.situationByDepartement).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
       expect(result).toEqual(expectedResult);
     });
   });

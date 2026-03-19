@@ -74,7 +74,9 @@ describe('SubscriptionsService', () => {
     }).compile();
 
     service = <SubscriptionsService>module.get(SubscriptionsService);
-    abonnementMailRepository = <Repository<AbonnementMail>>module.get(getRepositoryToken(AbonnementMail));
+    abonnementMailRepository = <Repository<AbonnementMail>>(
+      module.get(getRepositoryToken(AbonnementMail))
+    );
     communesService = <CommunesService>module.get(CommunesService);
     zonesService = <ZonesService>module.get(ZonesService);
     brevoService = <BrevoService>module.get(BrevoService);
@@ -88,7 +90,9 @@ describe('SubscriptionsService', () => {
 
   describe('getAllLight', () => {
     it('should return all subscriptions with selected fields', async () => {
-      const mockData = [{ id: 1, email: 'test@test.com', createdAt: new Date() }];
+      const mockData = [
+        { id: 1, email: 'test@test.com', createdAt: new Date() },
+      ];
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'find').mockResolvedValue(mockData);
 
@@ -120,7 +124,9 @@ describe('SubscriptionsService', () => {
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(false);
       // @ts-ignore
-      jest.spyOn(abonnementMailRepository, 'save').mockResolvedValue(mockSavedSubscription as any);
+      jest
+        .spyOn(abonnementMailRepository, 'save')
+        .mockResolvedValue(mockSavedSubscription as any);
       // @ts-ignore
       jest.spyOn(brevoService, 'sendMail').mockResolvedValue(undefined);
 
@@ -156,23 +162,25 @@ describe('SubscriptionsService', () => {
       };
 
       // @ts-ignore
-      jest.spyOn(communesService, 'getCommune').mockReturnValue({ nom: 'Test Commune' });
+      jest
+        .spyOn(communesService, 'getCommune')
+        .mockReturnValue({ nom: 'Test Commune' });
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
       // @ts-ignore
-      jest.spyOn(abonnementMailRepository, 'update').mockResolvedValue(undefined);
+      jest
+        .spyOn(abonnementMailRepository, 'update')
+        .mockResolvedValue(undefined);
 
       const result = await service.create(mockSubscription as any, '127.0.0.1');
-      expect(result).toEqual(
-        {
-          email: 'test@test.com',
-          commune: '12345',
-          typesEau: ['AEP'],
-          ip: '127.0.0.1',
-          libelleLocalisation: 'Test Commune',
-          situation: {},
-        },
-      );
+      expect(result).toEqual({
+        email: 'test@test.com',
+        commune: '12345',
+        typesEau: ['AEP'],
+        ip: '127.0.0.1',
+        libelleLocalisation: 'Test Commune',
+        situation: {},
+      });
       expect(abonnementMailRepository.update).toHaveBeenCalled();
     });
 
@@ -189,7 +197,12 @@ describe('SubscriptionsService', () => {
   describe('resolveIdAdresse', () => {
     it('should resolve address ID successfully', async () => {
       const mockAddress = {
-        data: { commune: { code: '12345', nom: 'City' }, type: 'numero', numero: '10', voie: { nomVoie: 'Main St' } },
+        data: {
+          commune: { code: '12345', nom: 'City' },
+          type: 'numero',
+          numero: '10',
+          voie: { nomVoie: 'Main St' },
+        },
       };
 
       // @ts-ignore
@@ -204,20 +217,30 @@ describe('SubscriptionsService', () => {
 
     it('should throw an error if address ID is invalid', async () => {
       // @ts-ignore
-      jest.spyOn(httpService, 'get').mockReturnValue(throwError({ response: { statusCode: 404 } }));
+      jest
+        .spyOn(httpService, 'get')
+        .mockReturnValue(throwError({ response: { statusCode: 404 } }));
 
-      await expect(service.resolveIdAdresse('invalid')).rejects.toThrow(HttpException);
+      await expect(service.resolveIdAdresse('invalid')).rejects.toThrow(
+        HttpException,
+      );
     });
   });
 
   describe('computeNiveauxAlerte', () => {
     it('should compute alert levels for a location', () => {
       // @ts-ignore
-      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([
-        { type: 'AEP', niveauGravite: 'vigilance', idZone: 1 },
-      ]);
+      jest
+        .spyOn(zonesService, 'searchZonesByLonLat')
+        .mockReturnValue([
+          { type: 'AEP', niveauGravite: 'vigilance', idZone: 1 },
+        ]);
 
-      const result = service.computeNiveauxAlerte({ lon: 1, lat: 1, commune: '12345' });
+      const result = service.computeNiveauxAlerte({
+        lon: 1,
+        lat: 1,
+        commune: '12345',
+      });
       expect(result).toEqual({
         AEP: 'vigilance',
         SOU: 'pas_restriction',

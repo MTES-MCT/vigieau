@@ -18,15 +18,16 @@ import { CronService } from '../cron/cron.service';
 export class SubscriptionsService {
   private readonly logger = new VigieauLogger('SubscriptionsService');
 
-  constructor(@InjectRepository(AbonnementMail)
-              private readonly abonnementMailRepository: Repository<AbonnementMail>,
-              private readonly communesService: CommunesService,
-              private readonly httpService: HttpService,
-              private readonly zonesService: ZonesService,
-              private readonly brevoService: BrevoService,
-              private readonly mattermostService: MattermostService,
-              private readonly cronService: CronService) {
-  }
+  constructor(
+    @InjectRepository(AbonnementMail)
+    private readonly abonnementMailRepository: Repository<AbonnementMail>,
+    private readonly communesService: CommunesService,
+    private readonly httpService: HttpService,
+    private readonly zonesService: ZonesService,
+    private readonly brevoService: BrevoService,
+    private readonly mattermostService: MattermostService,
+    private readonly cronService: CronService,
+  ) {}
 
   /**
    * Récupère tous les abonnements dans une version légère.
@@ -44,7 +45,10 @@ export class SubscriptionsService {
    * @param ip - L'adresse IP de l'utilisateur à l'origine de la requête.
    * @returns L'abonnement nouvellement créé ou mis à jour.
    */
-  async create(createSubscriptionDto: CreateSubscriptionDto, ip: string): Promise<AbonnementMail> {
+  async create(
+    createSubscriptionDto: CreateSubscriptionDto,
+    ip: string,
+  ): Promise<AbonnementMail> {
     const subscription: any = { ...createSubscriptionDto, ip };
 
     if (subscription.commune) {
@@ -68,7 +72,9 @@ export class SubscriptionsService {
         );
       }
 
-      const { libelle, commune } = await this.resolveIdAdresse(subscription.idAdresse);
+      const { libelle, commune } = await this.resolveIdAdresse(
+        subscription.idAdresse,
+      );
 
       subscription.commune = commune;
       subscription.libelleLocalisation = libelle;
@@ -82,31 +88,34 @@ export class SubscriptionsService {
       subscription.situation = {};
     }
 
-    const whereClause = subscription.commune ? {
-      email: subscription.email,
-      commune: subscription.commune,
-      idAdresse: subscription.idAdresse,
-    } : {
-      lon: subscription.lon,
-      lat: subscription.lat,
-    };
+    const whereClause = subscription.commune
+      ? {
+          email: subscription.email,
+          commune: subscription.commune,
+          idAdresse: subscription.idAdresse,
+        }
+      : {
+          lon: subscription.lon,
+          lat: subscription.lat,
+        };
     const subscriptionExists = await this.abonnementMailRepository.exists({
       where: whereClause,
     });
     if (subscriptionExists) {
-      await this.abonnementMailRepository.update(whereClause, pick(subscription, 'profil', 'typesEau'));
+      await this.abonnementMailRepository.update(
+        whereClause,
+        pick(subscription, 'profil', 'typesEau'),
+      );
     } else {
       await this.abonnementMailRepository.save(subscription);
 
-      await this.brevoService.sendMail(
-        29,
-        subscription.email,
-        {
-          city: this.communesService.getCommune(subscription.commune).nom,
-          address: subscription.libelleLocalisation,
-          unsubscribeUrl: this.brevoService.computeUnsubscribeUrl(subscription.email),
-        },
-      );
+      await this.brevoService.sendMail(29, subscription.email, {
+        city: this.communesService.getCommune(subscription.commune).nom,
+        address: subscription.libelleLocalisation,
+        unsubscribeUrl: this.brevoService.computeUnsubscribeUrl(
+          subscription.email,
+        ),
+      });
     }
 
     return subscription;
@@ -120,7 +129,9 @@ export class SubscriptionsService {
   async resolveIdAdresse(idAdresse) {
     try {
       const result = await firstValueFrom(
-        this.httpService.get(`https://plateforme.adresse.data.gouv.fr/lookup/${idAdresse}`),
+        this.httpService.get(
+          `https://plateforme.adresse.data.gouv.fr/lookup/${idAdresse}`,
+        ),
       );
 
       return {
@@ -129,9 +140,15 @@ export class SubscriptionsService {
       };
     } catch (error) {
       if (error.response?.statusCode === 404) {
-        throw new HttpException(`L’adresse renseignée n’existe pas`, HttpStatus.BAD_REQUEST);
+        throw new HttpException(
+          `L’adresse renseignée n’existe pas`,
+          HttpStatus.BAD_REQUEST,
+        );
       }
-      throw new HttpException(`Une erreur inattendue est survenue`, HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        `Une erreur inattendue est survenue`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -161,15 +178,27 @@ export class SubscriptionsService {
    * @param param - Objet contenant les coordonnées géographiques ou le code commune.
    * @returns Un objet contenant les niveaux d'alerte pour AEP, SOU, et SUP.
    */
-  computeNiveauxAlerte({ lon, lat, commune }: { lon: number; lat: number; commune: string }) {
-    const zones = lon || lat
-      ? this.zonesService.searchZonesByLonLat({ lon, lat })
-      : this.zonesService.searchZonesByCommune(commune);
+  computeNiveauxAlerte({
+    lon,
+    lat,
+    commune,
+  }: {
+    lon: number;
+    lat: number;
+    commune: string;
+  }) {
+    const zones =
+      lon || lat
+        ? this.zonesService.searchZonesByLonLat({ lon, lat })
+        : this.zonesService.searchZonesByCommune(commune);
 
     return {
-      SUP: zones.find((z) => z.type === 'SUP')?.niveauGravite || 'pas_restriction',
-      SOU: zones.find((z) => z.type === 'SOU')?.niveauGravite || 'pas_restriction',
-      AEP: zones.find((z) => z.type === 'AEP')?.niveauGravite || 'pas_restriction',
+      SUP:
+        zones.find((z) => z.type === 'SUP')?.niveauGravite || 'pas_restriction',
+      SOU:
+        zones.find((z) => z.type === 'SOU')?.niveauGravite || 'pas_restriction',
+      AEP:
+        zones.find((z) => z.type === 'AEP')?.niveauGravite || 'pas_restriction',
       zones: zones.map((z) => z.idZone),
     };
   }
@@ -250,13 +279,27 @@ export class SubscriptionsService {
     };
 
     const subscriptions = await this.abonnementMailRepository.find({
-      select: ['id', 'email', 'commune', 'lon', 'lat', 'typesEau', 'profil', 'libelleLocalisation', 'situation', 'createdAt'],
+      select: [
+        'id',
+        'email',
+        'commune',
+        'lon',
+        'lat',
+        'typesEau',
+        'profil',
+        'libelleLocalisation',
+        'situation',
+        'createdAt',
+      ],
     });
     for (const subscription of subscriptions) {
       let situationUpdated = false;
 
-      if (subscription.createdAt &&
-        new Date(subscription.createdAt).getTime() > Date.now() - 24 * 60 * 60 * 1000) {
+      if (
+        subscription.createdAt &&
+        new Date(subscription.createdAt).getTime() >
+          Date.now() - 24 * 60 * 60 * 1000
+      ) {
         stats.nouveau++;
       }
 
@@ -265,22 +308,39 @@ export class SubscriptionsService {
         const { AEP, SOU, SUP } = this.computeNiveauxAlerte(subscription);
 
         // Vérifie les changements pour chaque type d'eau (AEP, SOU, SUP)
-        situationUpdated = this.checkAndUpdateSituation(stats, subscription, AEP, 'AEP');
-        situationUpdated = this.checkAndUpdateSituation(stats, subscription, SOU, 'SOU') || situationUpdated;
-        situationUpdated = this.checkAndUpdateSituation(stats, subscription, SUP, 'SUP') || situationUpdated;
+        situationUpdated = this.checkAndUpdateSituation(
+          stats,
+          subscription,
+          AEP,
+          'AEP',
+        );
+        situationUpdated =
+          this.checkAndUpdateSituation(stats, subscription, SOU, 'SOU') ||
+          situationUpdated;
+        situationUpdated =
+          this.checkAndUpdateSituation(stats, subscription, SUP, 'SUP') ||
+          situationUpdated;
 
         if (situationUpdated) {
           // TMP
-          this.logger.log(`CHECK SUBSCRIPTION - ${AEP} - ${SOU} - ${SUP} - ${JSON.stringify(subscription)}`);
+          this.logger.log(
+            `CHECK SUBSCRIPTION - ${AEP} - ${SOU} - ${SUP} - ${JSON.stringify(subscription)}`,
+          );
 
           await this.brevoService.sendSituationUpdate(
             subscription.email,
             AEP,
-            Boolean(subscription.situation?.AEP && subscription.situation.AEP !== AEP),
+            Boolean(
+              subscription.situation?.AEP && subscription.situation.AEP !== AEP,
+            ),
             SUP,
-            Boolean(subscription.situation?.SUP && subscription.situation.SUP !== SUP),
+            Boolean(
+              subscription.situation?.SUP && subscription.situation.SUP !== SUP,
+            ),
             SOU,
-            Boolean(subscription.situation?.SOU && subscription.situation.SOU !== SOU),
+            Boolean(
+              subscription.situation?.SOU && subscription.situation.SOU !== SOU,
+            ),
             subscription.commune,
             subscription.libelleLocalisation,
             subscription.profil,
@@ -297,7 +357,10 @@ export class SubscriptionsService {
         }
       } catch (error) {
         stats.erreur++;
-        this.logger.error(`MISE A JOUR SITUATION - ${JSON.stringify(subscription)} - `, error);
+        this.logger.error(
+          `MISE A JOUR SITUATION - ${JSON.stringify(subscription)} - `,
+          error,
+        );
       }
     }
     await this.sendMattermostNotification(stats);
@@ -313,8 +376,17 @@ export class SubscriptionsService {
    * @param waterType - Le type d'eau (AEP, SOU, SUP).
    * @returns True si la situation a changé, sinon False.
    */
-  private checkAndUpdateSituation(stats: any, subscription: any, newLevel: string, waterType: string): boolean {
-    if (subscription.typesEau.includes(waterType) && newLevel && subscription.situation?.[waterType] !== newLevel) {
+  private checkAndUpdateSituation(
+    stats: any,
+    subscription: any,
+    newLevel: string,
+    waterType: string,
+  ): boolean {
+    if (
+      subscription.typesEau.includes(waterType) &&
+      newLevel &&
+      subscription.situation?.[waterType] !== newLevel
+    ) {
       stats[newLevel]++;
       this.addStatDepartement(stats.departements, subscription.commune);
       return true; // La situation a changé
@@ -345,17 +417,42 @@ export class SubscriptionsService {
     const sentences = [];
 
     // Construction des messages pour Mattermost en fonction des statistiques
-    if (stats.mail_envoye) sentences.push(`- **${stats.mail_envoye}** emails envoyés 📧`);
-    if (stats.nouveau) sentences.push(`- **${stats.nouveau}** usagers se sont inscrits au cours des dernières 24h 🎊`);
-    if (stats.pas_restriction) sentences.push(`- **${stats.pas_restriction}** usagers n’ont plus de restrictions 🚰`);
-    if (stats.vigilance) sentences.push(`- **${stats.vigilance}** usagers sont passés en **Vigilance** 💧`);
-    if (stats.alerte) sentences.push(`- **${stats.alerte}** usagers sont passés en **Alerte** 😬`);
-    if (stats.alerte_renforcee) sentences.push(`- **${stats.alerte_renforcee}** usagers sont passés en **Alerte renforcée** 🥵`);
-    if (stats.crise) sentences.push(`- **${stats.crise}** usagers sont passés en **Crise** 🔥`);
-    if (stats.pas_changement) sentences.push(`- **${stats.pas_changement}** usagers n’ont pas de changement 👻`);
-    if (stats.erreur) sentences.push(`- **${stats.erreur}** usagers sont en erreur 🧨`);
+    if (stats.mail_envoye)
+      sentences.push(`- **${stats.mail_envoye}** emails envoyés 📧`);
+    if (stats.nouveau)
+      sentences.push(
+        `- **${stats.nouveau}** usagers se sont inscrits au cours des dernières 24h 🎊`,
+      );
+    if (stats.pas_restriction)
+      sentences.push(
+        `- **${stats.pas_restriction}** usagers n’ont plus de restrictions 🚰`,
+      );
+    if (stats.vigilance)
+      sentences.push(
+        `- **${stats.vigilance}** usagers sont passés en **Vigilance** 💧`,
+      );
+    if (stats.alerte)
+      sentences.push(
+        `- **${stats.alerte}** usagers sont passés en **Alerte** 😬`,
+      );
+    if (stats.alerte_renforcee)
+      sentences.push(
+        `- **${stats.alerte_renforcee}** usagers sont passés en **Alerte renforcée** 🥵`,
+      );
+    if (stats.crise)
+      sentences.push(
+        `- **${stats.crise}** usagers sont passés en **Crise** 🔥`,
+      );
+    if (stats.pas_changement)
+      sentences.push(
+        `- **${stats.pas_changement}** usagers n’ont pas de changement 👻`,
+      );
+    if (stats.erreur)
+      sentences.push(`- **${stats.erreur}** usagers sont en erreur 🧨`);
     if (stats.departements?.length > 0) {
-      sentences.push(`- **${stats.departements.join(', ')}** départements concernés 🗺️`);
+      sentences.push(
+        `- **${stats.departements.join(', ')}** départements concernés 🗺️`,
+      );
     }
 
     const message = sentences.join('\n');

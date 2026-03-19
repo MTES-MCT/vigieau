@@ -43,10 +43,12 @@ describe('StatisticsService', () => {
         {
           provide: SubscriptionsService,
           useValue: {
-            getAllLight: jest.fn().mockResolvedValue([
-              { createdAt: new Date().toISOString() },
-              { createdAt: new Date().toISOString() },
-            ]), // Mock the method returning subscriptions
+            getAllLight: jest
+              .fn()
+              .mockResolvedValue([
+                { createdAt: new Date().toISOString() },
+                { createdAt: new Date().toISOString() },
+              ]), // Mock the method returning subscriptions
           },
         },
         {
@@ -68,12 +70,16 @@ describe('StatisticsService', () => {
       ],
     }).compile();
 
-    service = <StatisticsService> module.get(StatisticsService);
-    statisticRepository = <Repository<Statistic>> module.get(getRepositoryToken(Statistic));
-    httpService = <HttpService> module.get(HttpService);
-    departementsService = <DepartementsService> module.get(DepartementsService);
-    subscriptionsService = <SubscriptionsService> module.get(SubscriptionsService);
-    configService = <ConfigService> module.get(ConfigService);
+    service = <StatisticsService>module.get(StatisticsService);
+    statisticRepository = <Repository<Statistic>>(
+      module.get(getRepositoryToken(Statistic))
+    );
+    httpService = <HttpService>module.get(HttpService);
+    departementsService = <DepartementsService>module.get(DepartementsService);
+    subscriptionsService = <SubscriptionsService>(
+      module.get(SubscriptionsService)
+    );
+    configService = <ConfigService>module.get(ConfigService);
   });
 
   it('should be defined', () => {
@@ -111,7 +117,9 @@ describe('StatisticsService', () => {
       ];
 
       // @ts-ignore
-      jest.spyOn(statisticRepository, 'find').mockResolvedValueOnce(mockStatistics);
+      jest
+        .spyOn(statisticRepository, 'find')
+        .mockResolvedValueOnce(mockStatistics);
 
       await service.loadStatistics();
 
@@ -125,8 +133,18 @@ describe('StatisticsService', () => {
         departementRepartition: { '01': 3 },
         regionRepartition: { AU: 3 },
         statsByDay: [
-          { date: '2023-07-11', visits: undefined, arreteDownloads: undefined, restrictionsSearch: undefined },
-          { date: '2023-07-12', visits: undefined, arreteDownloads: undefined, restrictionsSearch: undefined },
+          {
+            date: '2023-07-11',
+            visits: undefined,
+            arreteDownloads: undefined,
+            restrictionsSearch: undefined,
+          },
+          {
+            date: '2023-07-12',
+            visits: undefined,
+            arreteDownloads: undefined,
+            restrictionsSearch: undefined,
+          },
         ],
       });
     });
@@ -143,9 +161,13 @@ describe('StatisticsService', () => {
       };
 
       // @ts-ignore
-      jest.spyOn(statisticRepository, 'findOne').mockResolvedValueOnce(mockLastStat);
+      jest
+        .spyOn(statisticRepository, 'findOne')
+        .mockResolvedValueOnce(mockLastStat);
       // @ts-ignore
-      jest.spyOn(httpService, 'get').mockImplementation(() => of(mockMatomoData));
+      jest
+        .spyOn(httpService, 'get')
+        .mockImplementation(() => of(mockMatomoData));
       // @ts-ignore
       jest.spyOn(statisticRepository, 'save').mockResolvedValue([]);
       // @ts-ignore

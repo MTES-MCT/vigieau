@@ -1,7 +1,10 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { UsageFeedback, usageFeedbackPaginateConfig } from '@shared/entities/usage_feedback.entity';
+import {
+  UsageFeedback,
+  usageFeedbackPaginateConfig,
+} from '@shared/entities/usage_feedback.entity';
 import { User } from '@shared/entities/user.entity';
 import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
 import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
@@ -9,9 +12,10 @@ import { arreteCadrePaginateConfig } from '../arrete_cadre/dto/arrete_cadre.dto'
 
 @Injectable()
 export class UsageFeedbackService {
-  constructor(@InjectRepository(UsageFeedback)
-              private readonly usageFeedbackRepository: Repository<UsageFeedback>) {
-  }
+  constructor(
+    @InjectRepository(UsageFeedback)
+    private readonly usageFeedbackRepository: Repository<UsageFeedback>,
+  ) {}
 
   findAll(currentUser: any): any {
     const whereClause = {
@@ -45,7 +49,10 @@ export class UsageFeedbackService {
     });
   }
 
-  async paginate(currentUser: any, query: PaginateQuery): Promise<Paginated<UsageFeedback>> {
+  async paginate(
+    currentUser: any,
+    query: PaginateQuery,
+  ): Promise<Paginated<UsageFeedback>> {
     const paginateConfig = usageFeedbackPaginateConfig;
     if (currentUser && currentUser.role !== 'mte') {
       paginateConfig.where['arreteRestriction'] = {
@@ -57,8 +64,8 @@ export class UsageFeedbackService {
     const paginateToReturn = await paginate(
       query,
       this.usageFeedbackRepository,
-        // @ts-ignore
-        paginateConfig,
+      // @ts-ignore
+      paginateConfig,
     );
 
     return paginateToReturn;
@@ -74,8 +81,10 @@ export class UsageFeedbackService {
           },
         },
       };
-      const feedback = await this.usageFeedbackRepository.find({ where: whereClause });
-      if(!feedback) {
+      const feedback = await this.usageFeedbackRepository.find({
+        where: whereClause,
+      });
+      if (!feedback) {
         throw new HttpException(
           'Vous ne pouvez supprimer des feedbacks que sur vos départements.',
           HttpStatus.FORBIDDEN,

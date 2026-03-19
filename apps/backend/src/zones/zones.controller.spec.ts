@@ -37,8 +37,8 @@ describe('ZonesController', () => {
       providers: [{ provide: ZonesService, useValue: mockZonesService }],
     }).compile();
 
-    zonesController = <ZonesController> module.get(ZonesController);
-    zonesService = <ZonesService> module.get(ZonesService);
+    zonesController = <ZonesController>module.get(ZonesController);
+    zonesService = <ZonesService>module.get(ZonesService);
   });
 
   it('should be defined', () => {
@@ -50,10 +50,22 @@ describe('ZonesController', () => {
       const mockResult = [mockZone];
       mockZonesService.find.mockResolvedValue(mockResult);
 
-      const query = { lon: '2.123', lat: '48.123', commune: undefined, profil: undefined, zoneType: undefined };
+      const query = {
+        lon: '2.123',
+        lat: '48.123',
+        commune: undefined,
+        profil: undefined,
+        zoneType: undefined,
+      };
       const result = await zonesController.findAll(query);
 
-      expect(zonesService.find).toHaveBeenCalledWith(query.lon, query.lat, query.commune, query.profil, query.zoneType);
+      expect(zonesService.find).toHaveBeenCalledWith(
+        query.lon,
+        query.lat,
+        query.commune,
+        query.profil,
+        query.zoneType,
+      );
       expect(result).toEqual(mockResult);
     });
   });

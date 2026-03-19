@@ -1,7 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ArretesRestrictionsController } from './arretes_restrictions.controller';
 import { ArretesRestrictionsService } from './arretes_restrictions.service';
-import { ArreteRestrictionDto, ArretesRestrictionsQueryDto } from './dto/arrete_restriction.dto';
+import {
+  ArreteRestrictionDto,
+  ArretesRestrictionsQueryDto,
+} from './dto/arrete_restriction.dto';
 
 describe('ArretesRestrictionsController', () => {
   let controller: ArretesRestrictionsController;
@@ -20,7 +23,11 @@ describe('ArretesRestrictionsController', () => {
       dateFin: new Date('2023-12-31'),
       dateSignature: new Date('2023-01-01'),
       departement: { code: '75', nom: 'Paris' },
-      fichier: { nom: 'arrete.pdf', url: 'http://example.com/arrete.pdf', size: 1234 },
+      fichier: {
+        nom: 'arrete.pdf',
+        url: 'http://example.com/arrete.pdf',
+        size: 1234,
+      },
       types: ['ESO', 'ESU', 'AEP'],
       niveauGraviteMax: 'alerte',
     },
@@ -30,12 +37,19 @@ describe('ArretesRestrictionsController', () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ArretesRestrictionsController],
       providers: [
-        { provide: ArretesRestrictionsService, useValue: mockArretesRestrictionsService },
+        {
+          provide: ArretesRestrictionsService,
+          useValue: mockArretesRestrictionsService,
+        },
       ],
     }).compile();
 
-    controller = <ArretesRestrictionsController>module.get(ArretesRestrictionsController);
-    service = <ArretesRestrictionsService>module.get(ArretesRestrictionsService);
+    controller = <ArretesRestrictionsController>(
+      module.get(ArretesRestrictionsController)
+    );
+    service = <ArretesRestrictionsService>(
+      module.get(ArretesRestrictionsService)
+    );
   });
 
   afterEach(() => {
@@ -57,7 +71,9 @@ describe('ArretesRestrictionsController', () => {
         departement: '45',
       };
 
-      mockArretesRestrictionsService.getByDate.mockResolvedValue(mockArretesData);
+      mockArretesRestrictionsService.getByDate.mockResolvedValue(
+        mockArretesData,
+      );
 
       // Act
       const result = await controller.situationByDepartement(query);
@@ -76,7 +92,9 @@ describe('ArretesRestrictionsController', () => {
     it('should return a list of arretes when called without parameters', async () => {
       // Arrange
       const query: ArretesRestrictionsQueryDto = {}; // Aucun paramètre fourni
-      mockArretesRestrictionsService.getByDate.mockResolvedValue(mockArretesData);
+      mockArretesRestrictionsService.getByDate.mockResolvedValue(
+        mockArretesData,
+      );
 
       // Act
       const result = await controller.situationByDepartement(query);
@@ -95,10 +113,14 @@ describe('ArretesRestrictionsController', () => {
     it('should throw an error if the service throws an exception', async () => {
       // Arrange
       const query: ArretesRestrictionsQueryDto = { date: '2023-01-01' };
-      mockArretesRestrictionsService.getByDate.mockRejectedValue(new Error('Something went wrong'));
+      mockArretesRestrictionsService.getByDate.mockRejectedValue(
+        new Error('Something went wrong'),
+      );
 
       // Act & Assert
-      await expect(controller.situationByDepartement(query)).rejects.toThrow('Something went wrong');
+      await expect(controller.situationByDepartement(query)).rejects.toThrow(
+        'Something went wrong',
+      );
       expect(mockArretesRestrictionsService.getByDate).toHaveBeenCalledWith(
         query.date,
         undefined,

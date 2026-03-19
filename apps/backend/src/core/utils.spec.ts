@@ -29,8 +29,12 @@ describe('Utils', () => {
       expect(Utils.getNiveauInversed(1)).toBeUndefined();
       expect(Utils.getNiveauInversed(6)).toBeUndefined();
       expect(Utils.getNiveauInversed(-1)).toBeUndefined();
-      expect(Utils.getNiveauInversed(null as unknown as number)).toBeUndefined();
-      expect(Utils.getNiveauInversed(undefined as unknown as number)).toBeUndefined();
+      expect(
+        Utils.getNiveauInversed(null as unknown as number),
+      ).toBeUndefined();
+      expect(
+        Utils.getNiveauInversed(undefined as unknown as number),
+      ).toBeUndefined();
     });
   });
 });

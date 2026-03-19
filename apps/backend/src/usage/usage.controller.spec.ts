@@ -20,8 +20,8 @@ describe('UsageController', () => {
       ],
     }).compile();
 
-    controller = <UsageController> module.get(UsageController);
-    usageService = <UsageService> module.get(UsageService);
+    controller = <UsageController>module.get(UsageController);
+    usageService = <UsageService>module.get(UsageService);
   });
 
   it('should call usageService.feedback with correct parameters', async () => {
@@ -34,7 +34,10 @@ describe('UsageController', () => {
 
     const result = await controller.feedback(usageId, feedbackDto);
 
-    expect(usageService.feedback).toHaveBeenCalledWith(usageId, 'Test feedback');
+    expect(usageService.feedback).toHaveBeenCalledWith(
+      usageId,
+      'Test feedback',
+    );
     expect(result).toEqual(expectedResponse);
   });
 
@@ -45,6 +48,8 @@ describe('UsageController', () => {
     // @ts-ignore
     jest.spyOn(usageService, 'feedback').mockRejectedValue(new Error('Error'));
 
-    await expect(controller.feedback(usageId, feedbackDto)).rejects.toThrow('Error');
+    await expect(controller.feedback(usageId, feedbackDto)).rejects.toThrow(
+      'Error',
+    );
   });
 });

@@ -33,7 +33,7 @@ async function bootstrap() {
   // OpenAPI/Swagger
   const options = new DocumentBuilder()
     .setTitle('API VigiEau')
-    .setDescription('Documentation de l\'API VigiEau')
+    .setDescription("Documentation de l'API VigiEau")
     .setVersion('0.1')
     .build();
   const document = SwaggerModule.createDocument(app, options);

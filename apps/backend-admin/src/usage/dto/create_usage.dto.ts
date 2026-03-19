@@ -1,4 +1,11 @@
-import { IsBoolean, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString } from 'class-validator';
+import {
+  IsBoolean,
+  IsNotEmpty,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 import { ThematiqueDto } from '../../thematique/dto/thematique.dto';
 import { ApiProperty } from '@nestjs/swagger';
 

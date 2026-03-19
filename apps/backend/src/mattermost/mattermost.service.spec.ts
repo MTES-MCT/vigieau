@@ -43,7 +43,7 @@ describe('MattermostService', () => {
     }).compile();
 
     // Récupération de l'instance du service à tester
-    service = <MattermostService> module.get(MattermostService);
+    service = <MattermostService>module.get(MattermostService);
     (service as any).logger = mockLogger;
   });
 
@@ -65,11 +65,13 @@ describe('MattermostService', () => {
   });
 
   it('should send the message if MATTERMOST_WEBHOOK_URL is configured', async () => {
-
     await service.sendMessage('Test message');
 
     // Vérifie que le HttpService.post est appelé avec l'URL et le payload corrects
-    expect(httpServiceMock.post).toHaveBeenCalledWith('http://mock-webhook-url', { text: 'Test message' });
+    expect(httpServiceMock.post).toHaveBeenCalledWith(
+      'http://mock-webhook-url',
+      { text: 'Test message' },
+    );
     // Vérifie que le log confirme l'envoi
     expect(mockLogger.log).not.toHaveBeenCalledWith('Test message');
   });
@@ -78,13 +80,15 @@ describe('MattermostService', () => {
     const error = new Error('HTTP error');
     // Simule une erreur lors de l'appel HTTP
     // @ts-ignore
-    jest.spyOn(httpServiceMock, 'post').mockReturnValueOnce(throwError(() => error));
+    jest
+      .spyOn(httpServiceMock, 'post')
+      .mockReturnValueOnce(throwError(() => error));
 
     await service.sendMessage('Test message');
 
     // Vérifie que l'erreur est loggée
     expect(mockLogger.error).toHaveBeenCalledWith(
-      'Échec d\'envoi du message à Mattermost. Message',
+      "Échec d'envoi du message à Mattermost. Message",
       'HTTP error',
     );
   });

@@ -26,8 +26,8 @@ describe('DataController', () => {
       ],
     }).compile();
 
-    controller = <DataController> module.get(DataController);
-    service = <DataService> module.get(DataService);
+    controller = <DataController>module.get(DataController);
+    service = <DataService>module.get(DataService);
   });
 
   afterEach(() => {
@@ -41,7 +41,11 @@ describe('DataController', () => {
   describe('refData', () => {
     it('devrait appeler la méthode getRefData du service et retourner les données', async () => {
       // Arrange
-      const expectedResult = { regions: [], departements: [], bassinsVersants: [] };
+      const expectedResult = {
+        regions: [],
+        departements: [],
+        bassinsVersants: [],
+      };
       mockDataService.getRefData.mockReturnValue(expectedResult);
 
       // Act
@@ -63,7 +67,9 @@ describe('DataController', () => {
         region: '2',
         departement: '3',
       };
-      const expectedResult = [{ date: '2023-01-01', ESO: 10, ESU: 20, AEP: 30 }];
+      const expectedResult = [
+        { date: '2023-01-01', ESO: 10, ESU: 20, AEP: 30 },
+      ];
       mockDataService.areaFindByDate.mockReturnValue(expectedResult);
 
       // Act
@@ -154,10 +160,14 @@ describe('DataController', () => {
         dateDebut: '2023-01',
         dateFin: '2023-12',
       };
-      mockDataService.commune.mockRejectedValue(new Error('Erreur dans le service'));
+      mockDataService.commune.mockRejectedValue(
+        new Error('Erreur dans le service'),
+      );
 
       // Act & Assert
-      await expect(controller.commune(codeInsee, query)).rejects.toThrowError('Erreur dans le service');
+      await expect(controller.commune(codeInsee, query)).rejects.toThrowError(
+        'Erreur dans le service',
+      );
       expect(service.commune).toHaveBeenCalledWith(
         codeInsee,
         query.dateDebut,

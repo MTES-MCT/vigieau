@@ -1320,7 +1320,7 @@ export class ArreteRestrictionService {
   }
 
   private compare(original: any, copy: any) {
-    for (let [k, v] of Object.entries(original)) {
+    for (const [k, v] of Object.entries(original)) {
       if (typeof v === 'object' && v !== null) {
         if (!copy.hasOwnProperty(k)) {
           copy[k] = v;

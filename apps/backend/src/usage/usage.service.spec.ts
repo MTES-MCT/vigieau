@@ -26,10 +26,10 @@ describe('UsageService', () => {
       ],
     }).compile();
 
-    service = <UsageService> module.get(UsageService);
-    usageRepository = <Repository<Usage>> module.get(getRepositoryToken(Usage));
-    usageFeedbackRepository = <Repository<UsageFeedback>> module.get(
-      getRepositoryToken(UsageFeedback),
+    service = <UsageService>module.get(UsageService);
+    usageRepository = <Repository<Usage>>module.get(getRepositoryToken(Usage));
+    usageFeedbackRepository = <Repository<UsageFeedback>>(
+      module.get(getRepositoryToken(UsageFeedback))
     );
   });
 
@@ -66,6 +66,8 @@ describe('UsageService', () => {
     const result = await service.feedback(1, 'Test feedback');
 
     expect(result).toEqual(mockFeedback);
-    expect(usageFeedbackRepository.save).toHaveBeenCalledWith(expect.objectContaining(mockFeedback));
+    expect(usageFeedbackRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining(mockFeedback),
+    );
   });
 });

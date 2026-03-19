@@ -36,12 +36,21 @@ describe('DataService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DataService,
-        { provide: getRepositoryToken(StatisticDepartement), useValue: mockRepository },
-        { provide: getRepositoryToken(StatisticCommune), useValue: mockRepository },
+        {
+          provide: getRepositoryToken(StatisticDepartement),
+          useValue: mockRepository,
+        },
+        {
+          provide: getRepositoryToken(StatisticCommune),
+          useValue: mockRepository,
+        },
         { provide: getRepositoryToken(Commune), useValue: mockRepository },
         { provide: getRepositoryToken(Departement), useValue: mockRepository },
         { provide: getRepositoryToken(Region), useValue: mockRepository },
-        { provide: getRepositoryToken(BassinVersant), useValue: mockRepository },
+        {
+          provide: getRepositoryToken(BassinVersant),
+          useValue: mockRepository,
+        },
         { provide: DataSource, useValue: mockDataSource },
       ],
     }).compile();
@@ -56,10 +65,20 @@ describe('DataService', () => {
   describe('getRefData', () => {
     it('should return formatted reference data', () => {
       service['bassinsVersants'] = <BassinVersant[]>[
-        { id: 1, code: 1, nom: 'Bassin 1', departements: [{ id: 1, code: 'D01' }] },
+        {
+          id: 1,
+          code: 1,
+          nom: 'Bassin 1',
+          departements: [{ id: 1, code: 'D01' }],
+        },
       ];
       service['regions'] = <Region[]>[
-        { id: 2, code: 'R01', nom: 'Region 1', departements: [{ id: 2, code: 'D02' }] },
+        {
+          id: 2,
+          code: 'R01',
+          nom: 'Region 1',
+          departements: [{ id: 2, code: 'D02' }],
+        },
       ];
       service['departements'] = [
         { id: 1, code: 'D01', nom: 'Departement 1', bounds: 'bounds1' },
@@ -70,10 +89,20 @@ describe('DataService', () => {
 
       expect(result).toEqual({
         bassinsVersants: [
-          { id: 1, code: 1, nom: 'Bassin 1', departements: [{ id: 1, code: 'D01' }] },
+          {
+            id: 1,
+            code: 1,
+            nom: 'Bassin 1',
+            departements: [{ id: 1, code: 'D01' }],
+          },
         ],
         regions: [
-          { id: 2, code: 'R01', nom: 'Region 1', departements: [{ id: 2, code: 'D02' }] },
+          {
+            id: 2,
+            code: 'R01',
+            nom: 'Region 1',
+            departements: [{ id: 2, code: 'D02' }],
+          },
         ],
         departements: [
           { id: 1, code: 'D01', nom: 'Departement 1', bounds: 'bounds1' },
@@ -100,7 +129,9 @@ describe('DataService', () => {
     it('should throw an error if bassin versant is not found', () => {
       service['bassinsVersants'] = [];
 
-      expect(() => service.areaFindByDate(undefined, undefined, '1')).toThrow(HttpException);
+      expect(() => service.areaFindByDate(undefined, undefined, '1')).toThrow(
+        HttpException,
+      );
     });
   });
 
@@ -135,7 +166,11 @@ describe('DataService', () => {
       mockRepository.findOne.mockResolvedValue(mockStat);
       // @ts-ignore
       service['dataSource'] = {
-        query: jest.fn().mockResolvedValue([{ filtered_restrictions: [{ date: '2023-01-01' }] }]),
+        query: jest
+          .fn()
+          .mockResolvedValue([
+            { filtered_restrictions: [{ date: '2023-01-01' }] },
+          ]),
       };
 
       const result = await service.commune('12345', '2023-01', '2023-02');
@@ -160,7 +195,13 @@ describe('DataService', () => {
         { id: 1, code: 'D01', niveauGravite: 'alerte' },
       ];
 
-      const result = service.departementFindByDate('2023-01-01', '2023-01-31', undefined, undefined, '1');
+      const result = service.departementFindByDate(
+        '2023-01-01',
+        '2023-01-31',
+        undefined,
+        undefined,
+        '1',
+      );
 
       expect(result).toEqual([
         {
@@ -173,9 +214,15 @@ describe('DataService', () => {
     it('should throw an error if the departement is not found', () => {
       service['departements'] = [];
 
-      expect(() => service.departementFindByDate(undefined, undefined, undefined, undefined, '999')).toThrow(
-        HttpException,
-      );
+      expect(() =>
+        service.departementFindByDate(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          '999',
+        ),
+      ).toThrow(HttpException);
     });
   });
 });

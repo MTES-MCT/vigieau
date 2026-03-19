@@ -6,11 +6,8 @@ import { Usage } from '@shared/entities/usage.entity';
 import { UsageFeedback } from '@shared/entities/usage_feedback.entity';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([Usage, UsageFeedback]),
-  ],
+  imports: [TypeOrmModule.forFeature([Usage, UsageFeedback])],
   controllers: [UsageController],
   providers: [UsageService],
 })
-export class UsageModule {
-}
+export class UsageModule {}

@@ -16,7 +16,7 @@ const mockSendSmtpEmail = jest.fn();
 
 jest.mock('@getbrevo/brevo', () => ({
   TransactionalEmailsApi: jest.fn(() => mockTransactionalEmailsApi),
-  SendSmtpEmail:jest.fn(() => mockSendSmtpEmail),
+  SendSmtpEmail: jest.fn(() => mockSendSmtpEmail),
 }));
 
 describe('BrevoService', () => {
@@ -50,21 +50,25 @@ describe('BrevoService', () => {
         {
           provide: JwtService,
           useValue: {
-            sign: jest.fn((payload: any) => `signed-token-for-${payload.email}`), // Simule la génération d'un token JWT
+            sign: jest.fn(
+              (payload: any) => `signed-token-for-${payload.email}`,
+            ), // Simule la génération d'un token JWT
           },
         },
         {
           provide: CommunesService,
           useValue: {
-            getCommune: jest.fn((codeCommune: any) => ({ nom: `Commune-${codeCommune}` })), // Simule le service des communes
+            getCommune: jest.fn((codeCommune: any) => ({
+              nom: `Commune-${codeCommune}`,
+            })), // Simule le service des communes
           },
         },
       ],
     }).compile();
 
-    service = <BrevoService> module.get(BrevoService);
-    configService = <ConfigService> module.get(ConfigService);
-    jwtService = <JwtService> module.get(JwtService);
+    service = <BrevoService>module.get(BrevoService);
+    configService = <ConfigService>module.get(ConfigService);
+    jwtService = <JwtService>module.get(JwtService);
   });
 
   afterEach(() => {
@@ -73,7 +77,9 @@ describe('BrevoService', () => {
 
   describe('Initialisation', () => {
     it('devrait initialiser le service avec la clé API Brevo', () => {
-      expect(apiInstanceMock.authentications.apiKey.apiKey).toBe('test-api-key');
+      expect(apiInstanceMock.authentications.apiKey.apiKey).toBe(
+        'test-api-key',
+      );
     });
   });
 
@@ -114,7 +120,8 @@ describe('BrevoService', () => {
         expect.objectContaining({
           address: 'Rue de Rivoli, Paris',
           city: 'Commune-75001',
-          unsubscribeUrl: 'https://example.com/abonnements?token=signed-token-for-user@example.com',
+          unsubscribeUrl:
+            'https://example.com/abonnements?token=signed-token-for-user@example.com',
         }),
       );
       expect(result).toBe('Email sent');
@@ -157,15 +164,21 @@ describe('BrevoService', () => {
         },
       );
 
-      expect(result).toBe('https://example.com/abonnements?token=signed-token-for-user@example.com');
+      expect(result).toBe(
+        'https://example.com/abonnements?token=signed-token-for-user@example.com',
+      );
     });
   });
 
   describe('sendMail', () => {
     it('devrait envoyer un email via Brevo', async () => {
-      apiInstanceMock.sendTransacEmail.mockResolvedValueOnce({ messageId: '12345' });
+      apiInstanceMock.sendTransacEmail.mockResolvedValueOnce({
+        messageId: '12345',
+      });
 
-      const result = await service['sendMail'](65, 'user@example.com', { param1: 'value1' });
+      const result = await service['sendMail'](65, 'user@example.com', {
+        param1: 'value1',
+      });
 
       expect(apiInstanceMock.sendTransacEmail).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -178,9 +191,13 @@ describe('BrevoService', () => {
     });
 
     it('devrait gérer les erreurs lors de l’envoi d’email', async () => {
-      apiInstanceMock.sendTransacEmail.mockRejectedValueOnce(new Error('API Error'));
+      apiInstanceMock.sendTransacEmail.mockRejectedValueOnce(
+        new Error('API Error'),
+      );
 
-      await expect(service['sendMail'](65, 'user@example.com', { param1: 'value1' })).rejects.toThrow('API Error');
+      await expect(
+        service['sendMail'](65, 'user@example.com', { param1: 'value1' }),
+      ).rejects.toThrow('API Error');
     });
   });
 });

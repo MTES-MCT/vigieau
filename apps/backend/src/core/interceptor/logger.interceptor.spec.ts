@@ -51,9 +51,12 @@ describe('LoggerInterceptor', () => {
       const requestId = expect.any(String); // On ne connaît pas l'UUID exact
       const mockRequest = mockContext.switchToHttp().getRequest();
 
-      await lastValueFrom(interceptor.intercept(
-        mockContext as ExecutionContext,
-        mockHandler as CallHandler)); // Convertit l'observable en promesse pour attendre sa résolution
+      await lastValueFrom(
+        interceptor.intercept(
+          mockContext as ExecutionContext,
+          mockHandler as CallHandler,
+        ),
+      ); // Convertit l'observable en promesse pour attendre sa résolution
 
       // Vérifie le log de la requête
       expect(mockLogger.log).toHaveBeenNthCalledWith(
@@ -106,10 +109,9 @@ describe('LoggerInterceptor', () => {
         headers: { 'user-agent': 'TestAgent', host: 'localhost:3000' },
       });
 
-      await interceptor.intercept(
-        mockContext as ExecutionContext,
-        mockHandler as CallHandler,
-      ).toPromise();
+      await interceptor
+        .intercept(mockContext as ExecutionContext, mockHandler as CallHandler)
+        .toPromise();
 
       // Vérifie que le log de la requête est correctement formé même sans session
       expect(mockLogger.log).toHaveBeenCalledWith(
@@ -128,10 +130,9 @@ describe('LoggerInterceptor', () => {
         session: { user: { email: 'test@example.com' } },
       });
 
-      await interceptor.intercept(
-        mockContext as ExecutionContext,
-        mockHandler as CallHandler,
-      ).toPromise();
+      await interceptor
+        .intercept(mockContext as ExecutionContext, mockHandler as CallHandler)
+        .toPromise();
 
       // Vérifie que le log de la requête est correctement formé
       expect(mockLogger.log).toHaveBeenCalledWith(

@@ -14,35 +14,40 @@ export class DepartementDto {
   @ApiProperty({
     enum: ['vigilance', 'alerte', 'alerte_renforcee', 'crise'],
     example: 'alerte_renforcee',
-    description: 'Niveau de gravité maximum en vigueur sur le département, null si pas de zone d\'alerte en vigueur',
+    description:
+      "Niveau de gravité maximum en vigueur sur le département, null si pas de zone d'alerte en vigueur",
   })
   niveauGraviteMax: string;
 
   @ApiProperty({
     enum: ['vigilance', 'alerte', 'alerte_renforcee', 'crise'],
     example: 'alerte_renforcee',
-    description: 'Niveau de gravité maximum en vigueur sur le département pour les eaux de type superficielle, null si pas de zone d\'alerte en vigueur',
+    description:
+      "Niveau de gravité maximum en vigueur sur le département pour les eaux de type superficielle, null si pas de zone d'alerte en vigueur",
   })
   niveauGraviteSupMax: string;
 
   @ApiProperty({
     enum: ['vigilance', 'alerte', 'alerte_renforcee', 'crise'],
     example: 'alerte_renforcee',
-    description: 'Niveau de gravité maximum en vigueur sur le département pour les eaux de type souterraine, null si pas de zone d\'alerte en vigueur',
+    description:
+      "Niveau de gravité maximum en vigueur sur le département pour les eaux de type souterraine, null si pas de zone d'alerte en vigueur",
   })
   niveauGraviteSouMax: string;
 
   @ApiProperty({
     enum: ['vigilance', 'alerte', 'alerte_renforcee', 'crise'],
     example: 'alerte_renforcee',
-    description: 'Niveau de gravité maximum en vigueur sur le département pour les eaux potable, null si pas de zone d\'alerte en vigueur. Donnée disponible à partir du 28/04/2024.',
+    description:
+      "Niveau de gravité maximum en vigueur sur le département pour les eaux potable, null si pas de zone d'alerte en vigueur. Donnée disponible à partir du 28/04/2024.",
   })
   niveauGraviteAepMax: string;
 }
 
 export class QueryDepartementDto {
   @ApiProperty({
-    description: 'Date de recherche (format YYYY-MM-DD). Si non précisée, la date du jour sera utilisée.',
+    description:
+      'Date de recherche (format YYYY-MM-DD). Si non précisée, la date du jour sera utilisée.',
     required: false,
   })
   @IsOptional()
@@ -50,15 +55,19 @@ export class QueryDepartementDto {
   date?: string;
 
   @ApiProperty({
-    description: 'Bassin versant. Si non précisé, tout le territoire français sera pris en compte.',
+    description:
+      'Bassin versant. Si non précisé, tout le territoire français sera pris en compte.',
     required: false,
   })
   @IsOptional()
-  @IsString({ message: 'Le bassin versant doit être une chaîne de caractères.' })
+  @IsString({
+    message: 'Le bassin versant doit être une chaîne de caractères.',
+  })
   bassinVersant?: string;
 
   @ApiProperty({
-    description: 'Région. Si non précisée, tout le territoire français sera pris en compte.',
+    description:
+      'Région. Si non précisée, tout le territoire français sera pris en compte.',
     required: false,
   })
   @IsOptional()
@@ -66,7 +75,8 @@ export class QueryDepartementDto {
   region?: string;
 
   @ApiProperty({
-    description: 'Département. Si non précisé, tout le territoire français sera pris en compte.',
+    description:
+      'Département. Si non précisé, tout le territoire français sera pris en compte.',
     required: false,
   })
   @IsOptional()

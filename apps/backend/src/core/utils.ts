@@ -3,7 +3,7 @@ const NIVEAUX_INT: Record<string, number> = {
   crise: 5,
   alerte_renforcee: 4,
   alerte: 3,
-  vigilance: 2
+  vigilance: 2,
 };
 
 export class Utils {
@@ -24,6 +24,8 @@ export class Utils {
    * @returns Le niveau d'alerte sous forme de chaîne (ex: 'crise', 'alerte') ou `undefined` si la valeur n'est pas trouvée.
    */
   static getNiveauInversed(niveauAlerte) {
-    return Object.keys(NIVEAUX_INT).find(key => NIVEAUX_INT[key] === niveauAlerte)
+    return Object.keys(NIVEAUX_INT).find(
+      (key) => NIVEAUX_INT[key] === niveauAlerte,
+    );
   }
 }

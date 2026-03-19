@@ -46,8 +46,7 @@ import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 export class ArreteRestrictionController {
   constructor(
     private readonly arreteRestrictionService: ArreteRestrictionService,
-  ) {
-  }
+  ) {}
 
   @Get('/search')
   @ApiOperation({ summary: 'Retourne les arrêtés de restrictions paginés' })
@@ -97,7 +96,7 @@ export class ArreteRestrictionController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Création d\'un arrêté de restriction' })
+  @ApiOperation({ summary: "Création d'un arrêté de restriction" })
   @ApiResponse({
     status: 201,
     type: ArreteRestrictionDto,

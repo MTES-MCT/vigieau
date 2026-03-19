@@ -12,8 +12,7 @@ export class RestrictionService {
     @InjectRepository(Restriction)
     private readonly restrictionRepository: Repository<Restriction>,
     private readonly usageService: UsageService,
-  ) {
-  }
+  ) {}
 
   async updateAll(
     arreteRestriction: CreateUpdateArreteRestrictionDto,
@@ -28,8 +27,8 @@ export class RestrictionService {
       },
       id: Not(In(restrictionsId)),
     });
-    const restrictions: CreateUpdateRestrictionDto[] = arreteRestriction.restrictions.map(
-      (r) => {
+    const restrictions: CreateUpdateRestrictionDto[] =
+      arreteRestriction.restrictions.map((r) => {
         if (r.isAep) {
           r.zoneAlerte = null;
         } else {
@@ -38,14 +37,12 @@ export class RestrictionService {
         // @ts-expect-error on ajoute seulement l'id
         r.arreteRestriction = { id: arId };
         return r;
-      },
-    );
+      });
     const rToReturn: Restriction[] =
       await this.restrictionRepository.save(restrictions);
     await Promise.all(
       rToReturn.map(async (r) => {
-        r.usages =
-          await this.usageService.updateAllByRestriction(r);
+        r.usages = await this.usageService.updateAllByRestriction(r);
         return r;
       }),
     );
@@ -71,8 +68,10 @@ export class RestrictionService {
     });
   }
 
-  async findOneByZoneAlerteComputed(zoneAlerteComputedId: number): Promise<Restriction> {
-    return this.restrictionRepository.findOne(<FindOneOptions> {
+  async findOneByZoneAlerteComputed(
+    zoneAlerteComputedId: number,
+  ): Promise<Restriction> {
+    return this.restrictionRepository.findOne(<FindOneOptions>{
       relations: ['arreteRestriction', 'zonesAlerteComputed'],
       where: {
         zonesAlerteComputed: {
@@ -82,8 +81,10 @@ export class RestrictionService {
     });
   }
 
-  async findOneByZoneAlerteComputedHistoric(zoneAlerteComputedId: number): Promise<Restriction> {
-    return this.restrictionRepository.findOne(<FindOneOptions> {
+  async findOneByZoneAlerteComputedHistoric(
+    zoneAlerteComputedId: number,
+  ): Promise<Restriction> {
+    return this.restrictionRepository.findOne(<FindOneOptions>{
       relations: ['arreteRestriction', 'zonesAlerteComputedHistoric'],
       where: {
         zonesAlerteComputedHistoric: {

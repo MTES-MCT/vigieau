@@ -18,5 +18,4 @@ import { Statistic } from '@shared/entities/statistic.entity';
   providers: [StatisticsService],
   exports: [StatisticsService],
 })
-export class StatisticsModule {
-}
+export class StatisticsModule {}

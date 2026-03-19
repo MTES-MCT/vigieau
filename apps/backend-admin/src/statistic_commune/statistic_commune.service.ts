@@ -35,14 +35,22 @@ export class StatisticCommuneService {
   }
 
   async getStatisticCommuneStream() {
-    return this.statisticCommuneRepository.createQueryBuilder('sc')
+    return this.statisticCommuneRepository
+      .createQueryBuilder('sc')
       .leftJoinAndSelect('sc.commune', 'commune')
       .stream();
   }
 
-  async computeCommuneStatisticsRestrictions(zones: ZoneAlerteComputed[], date: Date, historic?: boolean, historicNotComputed?: boolean) {
+  async computeCommuneStatisticsRestrictions(
+    zones: ZoneAlerteComputed[],
+    date: Date,
+    historic?: boolean,
+    historicNotComputed?: boolean,
+  ) {
     const dateString = date.toISOString().split('T')[0];
-    this.logger.log(`COMPUTING COMMUNE STATISTICS RESTRICTIONS - ${dateString}`);
+    this.logger.log(
+      `COMPUTING COMMUNE STATISTICS RESTRICTIONS - ${dateString}`,
+    );
 
     const batchSize = 1000;
     const communeSize = await this.communeService.count();
@@ -50,48 +58,80 @@ export class StatisticCommuneService {
       this.logger.log(`BATCH ${i}`);
       const communes = await this.communeService.findWithStats(batchSize, i);
 
-      await Promise.all(communes.map(async (c: Commune) => {
-        let statCommune = c.statisticCommune;
-        if (!statCommune) {
-          // @ts-ignore
-          statCommune = {
-            commune: c,
-            restrictions: [],
+      await Promise.all(
+        communes.map(async (c: Commune) => {
+          let statCommune = c.statisticCommune;
+          if (!statCommune) {
+            // @ts-ignore
+            statCommune = {
+              commune: c,
+              restrictions: [],
+            };
+            statCommune =
+              await this.statisticCommuneRepository.save(statCommune);
+          }
+
+          const restriction = {
+            date: date.toISOString().split('T')[0],
+            SOU: null,
+            SUP: null,
+            AEP: null,
           };
-          statCommune = await this.statisticCommuneRepository.save(statCommune);
-        }
+          const zonesDep = zones.filter(
+            (z) => z.departement.code === c.departement.code,
+          );
+          let zonesCommune;
+          if (!historicNotComputed) {
+            zonesCommune =
+              zonesDep.length > 0
+                ? historic
+                  ? await this.zoneAlerteComputedHistoricService.getZonesIntersectedWithCommune(
+                      zonesDep,
+                      c.id,
+                    )
+                  : await this.zoneAlerteComputedService.getZonesIntersectedWithCommune(
+                      zonesDep,
+                      c.id,
+                    )
+                : [];
+          } else {
+            zonesCommune =
+              zonesDep.length > 0
+                ? await this.zoneAlerteService.getZonesIntersectedWithCommune(
+                    <any>zonesDep,
+                    c.id,
+                  )
+                : [];
+          }
+          zonesCommune = zonesDep.filter((z) =>
+            zonesCommune.some((zc) => zc.id === z.id),
+          );
+          const zonesType = ['SUP', 'SOU', 'AEP'];
+          const niveauxGravite = [
+            'vigilance',
+            'alerte',
+            'alerte_renforcee',
+            'crise',
+          ];
 
-        const restriction = {
-          date: date.toISOString().split('T')[0],
-          SOU: null,
-          SUP: null,
-          AEP: null,
-        };
-        const zonesDep = zones.filter(z => z.departement.code === c.departement.code);
-        let zonesCommune;
-        if (!historicNotComputed) {
-          zonesCommune = zonesDep.length > 0 ? historic ?
-            await this.zoneAlerteComputedHistoricService.getZonesIntersectedWithCommune(zonesDep, c.id) :
-            await this.zoneAlerteComputedService.getZonesIntersectedWithCommune(zonesDep, c.id) : [];
-        } else {
-          zonesCommune = zonesDep.length > 0 ? await this.zoneAlerteService.getZonesIntersectedWithCommune(<any>zonesDep, c.id) : [];
-        }
-        zonesCommune = zonesDep.filter(z => zonesCommune.some(zc => zc.id === z.id));
-        const zonesType = ['SUP', 'SOU', 'AEP'];
-        const niveauxGravite = ['vigilance', 'alerte', 'alerte_renforcee', 'crise'];
+          zonesType.forEach((zoneType) => {
+            const zonesCommuneType = zonesCommune.filter(
+              (z) => z.type === zoneType,
+            );
 
-        zonesType.forEach(zoneType => {
-          const zonesCommuneType = zonesCommune.filter(z => z.type === zoneType);
-
-          niveauxGravite.forEach(niveauGravite => {
-            if (zonesCommuneType.some(z => z.restriction?.niveauGravite === niveauGravite)) {
-              restriction[zoneType] = niveauGravite;
-            }
+            niveauxGravite.forEach((niveauGravite) => {
+              if (
+                zonesCommuneType.some(
+                  (z) => z.restriction?.niveauGravite === niveauGravite,
+                )
+              ) {
+                restriction[zoneType] = niveauGravite;
+              }
+            });
           });
-        });
 
-        const qb =
-          this.statisticCommuneRepository.createQueryBuilder('statistic_commune')
+          const qb = this.statisticCommuneRepository
+            .createQueryBuilder('statistic_commune')
             .update()
             .set({
               restrictions: () => `
@@ -118,9 +158,10 @@ export class StatisticCommuneService {
               `,
             })
             .where('id = :id', { id: statCommune.id });
-        await qb.execute();
-        return;
-      }));
+          await qb.execute();
+          return;
+        }),
+      );
     }
   }
 
@@ -130,7 +171,11 @@ export class StatisticCommuneService {
     const dateDebut = date ? date : moment('01/01/2013', 'DD/MM/YYYY');
     const dateFin = moment();
 
-    for (let m = moment(dateDebut); m.diff(dateFin, 'days') <= 0; m.add(1, 'month')) {
+    for (
+      let m = moment(dateDebut);
+      m.diff(dateFin, 'days') <= 0;
+      m.add(1, 'month')
+    ) {
       this.logger.log(`COMPUTE STAT BY MONTH ${m.format('YYYY-MM')}`);
       await this.computeCommuneStatisticsRestrictionsByMonth(m.toDate());
     }
@@ -145,36 +190,39 @@ export class StatisticCommuneService {
       this.logger.log(`BATCH ${i}`);
       const communes = await this.communeService.findWithStats(batchSize, i);
 
-      await Promise.all(communes.map(async (c: Commune) => {
-        let statCommune = c.statisticCommune;
-        if (!statCommune) {
-          return;
-        }
+      await Promise.all(
+        communes.map(async (c: Commune) => {
+          const statCommune = c.statisticCommune;
+          if (!statCommune) {
+            return;
+          }
 
-        const restrictionByMonth = {
-          date: dateMoment.format('YYYY-MM'),
-          ponderation: 0,
-        };
-        const allRestrictionsByMonth = (await this.dataSource.query(`
+          const restrictionByMonth = {
+            date: dateMoment.format('YYYY-MM'),
+            ponderation: 0,
+          };
+          const allRestrictionsByMonth = (
+            await this.dataSource.query(`
         SELECT  r
 FROM  statistic_commune sc, jsonb_array_elements(sc.restrictions) r
 where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dateMoment.format('YYYY-MM')}';
-        `)).map(r => r.r);
-        for (const restriction of allRestrictionsByMonth) {
-          const niveauGraviteMax = [
-            Utils.getNiveau(restriction.AEP),
-            Utils.getNiveau(restriction.SOU),
-            Utils.getNiveau(restriction.SUP),
-          ]
-            .reduce((prev, current) => {
+        `)
+          ).map((r) => r.r);
+          for (const restriction of allRestrictionsByMonth) {
+            const niveauGraviteMax = [
+              Utils.getNiveau(restriction.AEP),
+              Utils.getNiveau(restriction.SOU),
+              Utils.getNiveau(restriction.SUP),
+            ].reduce((prev, current) => {
               return prev > current ? prev : current;
             });
 
-          restrictionByMonth.ponderation += this.getPonderation(niveauGraviteMax);
-        }
+            restrictionByMonth.ponderation +=
+              this.getPonderation(niveauGraviteMax);
+          }
 
-        const qb =
-          this.statisticCommuneRepository.createQueryBuilder('statistic_commune')
+          const qb = this.statisticCommuneRepository
+            .createQueryBuilder('statistic_commune')
             .update()
             .set({
               restrictionsByMonth: () => `
@@ -201,19 +249,20 @@ where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dat
               `,
             })
             .where('id = :id', { id: statCommune.id });
-        await qb.execute();
-        return;
-      }));
+          await qb.execute();
+          return;
+        }),
+      );
     }
   }
 
   async sortStatCommune() {
     this.logger.log(`SORTING COMMUNE STATISTICS RESTRICTIONS`);
-    const qb =
-      this.statisticCommuneRepository.createQueryBuilder('statistic_commune')
-        .update()
-        .set({
-          restrictions: () => `
+    const qb = this.statisticCommuneRepository
+      .createQueryBuilder('statistic_commune')
+      .update()
+      .set({
+        restrictions: () => `
               (
         SELECT jsonb_agg(r)
     FROM (
@@ -222,16 +271,15 @@ where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dat
       ORDER BY (r->>'date')::date
     ) as sorted
              )`,
-        })
-        .where(`"restrictions" is not null`);
+      })
+      .where(`"restrictions" is not null`);
     await qb.execute();
 
-
-    const qbBis =
-      this.statisticCommuneRepository.createQueryBuilder('statistic_commune')
-        .update()
-        .set({
-          restrictionsByMonth: () => `
+    const qbBis = this.statisticCommuneRepository
+      .createQueryBuilder('statistic_commune')
+      .update()
+      .set({
+        restrictionsByMonth: () => `
               (
         SELECT jsonb_agg(r)
     FROM (
@@ -240,8 +288,8 @@ where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dat
       ORDER BY TO_DATE((r->>'date'), 'YYYY-MM')
     ) as sorted
               )`,
-        })
-        .where(`"restrictionsByMonth" is not null`);
+      })
+      .where(`"restrictionsByMonth" is not null`);
     await qbBis.execute();
     return;
   }
