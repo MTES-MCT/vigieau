@@ -27,40 +27,42 @@ export class DatagouvService {
   private datagouvApiUrl: string;
   private datagouvApiKey: string;
   private datagouvResources = {
-    'arretes': 'f425cfa6-ccd1-438e-bb03-9d90ab527851',
-    'arretes_2012': 'c4e90996-fbdd-4496-9c56-af253900c7bf',
-    'arretes_2013': '6ac72ce0-8508-40db-b4bb-91464ae86937',
-    'arretes_2014': 'b1a43321-4218-400a-b795-61f956c536a7',
-    'arretes_2015': 'a24fc145-bebe-471f-ab01-660c160a19f6',
-    'arretes_2016': 'db90caca-ec1c-4b34-8e17-fd7693bd1d35',
-    'arretes_2017': 'c1de03e2-f948-4a8b-8d76-cfbaca9d071f',
-    'arretes_2018': '2b35ce5f-1539-4909-9473-2b6901447be9',
-    'arretes_2019': '1740aa06-2b91-4630-a05b-a46b611dfcbd',
-    'arretes_2020': 'a55dda0c-2088-41e2-96a0-2fda3875b7ec',
-    'arretes_2021': 'c88b5dcb-7975-4509-865a-5e5d6b3cde97',
-    'arretes_2022': '4489197f-63ce-4c8c-aff1-d2e1b02d2943',
-    'arretes_2023': '9091f47f-b5b9-4569-b3c9-252f2eae185e',
-    'arretes_2024': 'dcfdafd4-5f42-4445-9ee7-f4589e05c641',
-    'pmtiles': 'a101ef59-0999-4b9a-a682-6f9b79d53c7e',
-    'geojson': 'bfba7898-aed3-40ec-aa74-abb73b92a363',
-    'restrictions': 'e403a885-5eaf-411d-a03e-751a9c22930d',
-    'pmtiles_archive': '9b5a883c-1b44-493e-9b4a-472b47f63e8f',
-    'geojson_archive': 'f386e124-3dcc-435a-a368-427ac51fbe97',
-    'arretes_cadre': '0732e970-c12c-4e6a-adca-5ac9dbc3fdfa',
-    'historique_communes': '4322064e-cfb4-4c8a-8200-7620f491ccdb',
+    arretes: 'f425cfa6-ccd1-438e-bb03-9d90ab527851',
+    arretes_2012: 'c4e90996-fbdd-4496-9c56-af253900c7bf',
+    arretes_2013: '6ac72ce0-8508-40db-b4bb-91464ae86937',
+    arretes_2014: 'b1a43321-4218-400a-b795-61f956c536a7',
+    arretes_2015: 'a24fc145-bebe-471f-ab01-660c160a19f6',
+    arretes_2016: 'db90caca-ec1c-4b34-8e17-fd7693bd1d35',
+    arretes_2017: 'c1de03e2-f948-4a8b-8d76-cfbaca9d071f',
+    arretes_2018: '2b35ce5f-1539-4909-9473-2b6901447be9',
+    arretes_2019: '1740aa06-2b91-4630-a05b-a46b611dfcbd',
+    arretes_2020: 'a55dda0c-2088-41e2-96a0-2fda3875b7ec',
+    arretes_2021: 'c88b5dcb-7975-4509-865a-5e5d6b3cde97',
+    arretes_2022: '4489197f-63ce-4c8c-aff1-d2e1b02d2943',
+    arretes_2023: '9091f47f-b5b9-4569-b3c9-252f2eae185e',
+    arretes_2024: 'dcfdafd4-5f42-4445-9ee7-f4589e05c641',
+    pmtiles: 'a101ef59-0999-4b9a-a682-6f9b79d53c7e',
+    geojson: 'bfba7898-aed3-40ec-aa74-abb73b92a363',
+    restrictions: 'e403a885-5eaf-411d-a03e-751a9c22930d',
+    pmtiles_archive: '9b5a883c-1b44-493e-9b4a-472b47f63e8f',
+    geojson_archive: 'f386e124-3dcc-435a-a368-427ac51fbe97',
+    arretes_cadre: '0732e970-c12c-4e6a-adca-5ac9dbc3fdfa',
+    historique_communes: '4322064e-cfb4-4c8a-8200-7620f491ccdb',
   };
 
-  constructor(private readonly httpService: HttpService,
-              @Inject(forwardRef(() => ArreteRestrictionService))
-              private readonly arreteRestrictionService: ArreteRestrictionService,
-              @Inject(forwardRef(() => ArreteCadreService))
-              private readonly arreteCadreService: ArreteCadreService,
-              private readonly configService: ConfigService,
-              @Inject(forwardRef(() => ZoneAlerteComputedService))
-              private readonly zoneAlerteComputedService: ZoneAlerteComputedService,
-              private readonly s3Service: S3Service,
-              private readonly departementService: DepartementService,
-              private readonly statisticCommuneService: StatisticCommuneService) {
+  constructor(
+    private readonly httpService: HttpService,
+    @Inject(forwardRef(() => ArreteRestrictionService))
+    private readonly arreteRestrictionService: ArreteRestrictionService,
+    @Inject(forwardRef(() => ArreteCadreService))
+    private readonly arreteCadreService: ArreteCadreService,
+    private readonly configService: ConfigService,
+    @Inject(forwardRef(() => ZoneAlerteComputedService))
+    private readonly zoneAlerteComputedService: ZoneAlerteComputedService,
+    private readonly s3Service: S3Service,
+    private readonly departementService: DepartementService,
+    private readonly statisticCommuneService: StatisticCommuneService,
+  ) {
     this.path = this.configService.get('PATH_TO_WRITE_FILE');
     this.datagouvApiKey = this.configService.get('API_DATAGOUV_KEY');
     this.datagouvApiUrl = `${this.configService.get('API_DATAGOUV')}/datasets/${this.configService.get('API_DATAGOUV_DATASET')}`;
@@ -99,7 +101,10 @@ export class DatagouvService {
       await this.updateMaps();
       await this.updateCommunes();
     } catch (error) {
-      this.logger.error('Erreur lors de la mise à jour des données Datagouv', error);
+      this.logger.error(
+        'Erreur lors de la mise à jour des données Datagouv',
+        error,
+      );
     }
 
     this.logger.log('MISE A JOUR DATAGOUV - FIN');
@@ -126,7 +131,10 @@ export class DatagouvService {
    * @param departements - Liste des départements pour enrichir les données.
    * @returns Tableau formaté pour l'export.
    */
-  private formatArretesData(arretes: ArreteRestriction[], departements: any[]): any[] {
+  private formatArretesData(
+    arretes: ArreteRestriction[],
+    departements: any[],
+  ): any[] {
     return arretes.map((arrete) => ({
       id: arrete.id,
       numero: arrete.numero,
@@ -147,17 +155,24 @@ export class DatagouvService {
       })),
       zones_alerte: arrete.restrictions.map((restriction) => ({
         id: restriction.zoneAlerte?.id,
-        type: restriction.communes.length > 0 ? 'AEP' : restriction.zoneAlerte.type,
+        type:
+          restriction.communes.length > 0 ? 'AEP' : restriction.zoneAlerte.type,
         code: restriction.zoneAlerte?.code,
-        nom: restriction.communes.length > 0 ? restriction.nomGroupementAep : restriction.zoneAlerte.nom,
+        nom:
+          restriction.communes.length > 0
+            ? restriction.nomGroupementAep
+            : restriction.zoneAlerte.nom,
         niveau_gravite: restriction.niveauGravite,
         id_sandre: restriction.zoneAlerte?.idSandre,
         communes: restriction.communes.map((c) => c.code),
       })),
-      regle_gestion: departements.find(d => d.code === arrete.departement.code)
-        .parametres.find(p =>
-          moment(arrete.dateDebut).isSameOrAfter(moment(p.dateDebut))
-          && (!p.dateFin || moment(arrete.dateDebut).isSameOrBefore(moment(p.dateFin))),
+      regle_gestion: departements
+        .find((d) => d.code === arrete.departement.code)
+        .parametres.find(
+          (p) =>
+            moment(arrete.dateDebut).isSameOrAfter(moment(p.dateDebut)) &&
+            (!p.dateFin ||
+              moment(arrete.dateDebut).isSameOrBefore(moment(p.dateFin))),
         )?.superpositionCommune,
     }));
   }
@@ -180,16 +195,27 @@ export class DatagouvService {
     const departements = await this.departementService.findAllLight();
 
     for (let year = yearBegin; year < currentYear; year++) {
-      let formatArretes = arretes
-        .filter(arrete => {
-          const startDate = moment(`01/01/${year}`, 'DD/MM/YYYY');
-          const endDate = moment(`31/12/${year}`, 'DD/MM/YYYY');
-          return moment(arrete.dateDebut).isBetween(startDate, endDate, 'days', '[]') ||
-            (arrete.dateFin && moment(arrete.dateFin).isBetween(startDate, endDate, 'days', '[]'));
-        });
+      let formatArretes = arretes.filter((arrete) => {
+        const startDate = moment(`01/01/${year}`, 'DD/MM/YYYY');
+        const endDate = moment(`31/12/${year}`, 'DD/MM/YYYY');
+        return (
+          moment(arrete.dateDebut).isBetween(
+            startDate,
+            endDate,
+            'days',
+            '[]',
+          ) ||
+          (arrete.dateFin &&
+            moment(arrete.dateFin).isBetween(startDate, endDate, 'days', '[]'))
+        );
+      });
       formatArretes = this.formatArretesData(formatArretes, departements);
       await this.writeCsv(`arretes_${year}.csv`, formatArretes);
-      await this.uploadToDatagouv(`arretes_${year}`, `arretes_${year}.csv`, `Arrêtés ${year}`);
+      await this.uploadToDatagouv(
+        `arretes_${year}`,
+        `arretes_${year}.csv`,
+        `Arrêtés ${year}`,
+      );
     }
 
     this.logger.log('MISE A JOUR DATAGOUV - HISTORIQUE ARRETES - FIN');
@@ -202,17 +228,19 @@ export class DatagouvService {
     this.logger.log('MISE A JOUR DATAGOUV - ARRETES CADRE - DEBUT');
 
     const arretes = await this.arreteCadreService.findDatagouv();
-    const formatArretes = arretes.map(arrete => {
+    const formatArretes = arretes.map((arrete) => {
       return {
         id: arrete.id,
         numero: arrete.numero,
         date_debut: arrete.dateDebut,
         date_fin: arrete.dateFin,
         statut: arrete.statut,
-        departement_pilote: arrete.departementPilote ? arrete.departementPilote.code : '',
-        departements: arrete.departements.map(d => d.code),
+        departement_pilote: arrete.departementPilote
+          ? arrete.departementPilote.code
+          : '',
+        departements: arrete.departements.map((d) => d.code),
         chemin_fichier: arrete.fichier ? arrete.fichier?.url : '',
-        zones_alerte: arrete.zonesAlerte.map(zone => {
+        zones_alerte: arrete.zonesAlerte.map((zone) => {
           return {
             id: zone.id,
             type: zone.type,
@@ -225,7 +253,11 @@ export class DatagouvService {
     });
 
     await this.writeCsv('arretes_cadre.csv', formatArretes);
-    await this.uploadToDatagouv('arretes_cadre', 'arretes_cadre.csv', 'Arrêtés Cadre');
+    await this.uploadToDatagouv(
+      'arretes_cadre',
+      'arretes_cadre.csv',
+      'Arrêtés Cadre',
+    );
 
     this.logger.log('MISE A JOUR DATAGOUV - ARRETES CADRE - FIN');
   }
@@ -236,9 +268,10 @@ export class DatagouvService {
   async updateRestrictions() {
     this.logger.log('MISE A JOUR DATAGOUV - RESTRICTIONS - DEBUT');
 
-    const zonesAlertesComputed = await this.zoneAlerteComputedService.findDatagouv();
+    const zonesAlertesComputed =
+      await this.zoneAlerteComputedService.findDatagouv();
     const formatRestrictions = [];
-    zonesAlertesComputed.forEach(zoneAlerte => {
+    zonesAlertesComputed.forEach((zoneAlerte) => {
       const restriction = {
         zone: {
           nom: zoneAlerte.nom,
@@ -252,7 +285,7 @@ export class DatagouvService {
         },
       };
       const usages = zoneAlerte.restriction.usages
-        .filter(usage => {
+        .filter((usage) => {
           if (zoneAlerte.type === 'SUP') {
             return usage.concerneEsu;
           } else if (zoneAlerte.type === 'SOU') {
@@ -262,7 +295,7 @@ export class DatagouvService {
           }
           return false;
         })
-        .map(usage => {
+        .map((usage) => {
           let description = '';
           switch (zoneAlerte.niveauGravite) {
             case 'vigilance':
@@ -288,7 +321,7 @@ export class DatagouvService {
             description: description,
           };
         });
-      usages.forEach(u => {
+      usages.forEach((u) => {
         formatRestrictions.push({
           ...restriction,
           usage: {
@@ -303,7 +336,11 @@ export class DatagouvService {
     });
 
     await writeFile(`${this.path}/restrictions.csv`, csv, 'utf8');
-    await this.uploadToDatagouv('restrictions', 'restrictions.csv', 'Restrictions');
+    await this.uploadToDatagouv(
+      'restrictions',
+      'restrictions.csv',
+      'Restrictions',
+    );
 
     this.logger.log('MISE A JOUR DATAGOUV - RESTRICTIONS - FIN');
   }
@@ -321,11 +358,17 @@ export class DatagouvService {
     }
   }
 
-  async generateMapsArchive(dateDebut: moment.Moment, year: number, geojson?: boolean) {
+  async generateMapsArchive(
+    dateDebut: moment.Moment,
+    year: number,
+    geojson?: boolean,
+  ) {
     const path = this.configService.get('PATH_TO_WRITE_FILE');
     const geojsonOrPmtiles = geojson ? 'geojson' : 'pmtiles';
 
-    this.logger.log(`GENERATION DE L'ARCHIVE ${geojsonOrPmtiles} DE L'ANNEE ${year}`);
+    this.logger.log(
+      `GENERATION DE L'ARCHIVE ${geojsonOrPmtiles} DE L'ANNEE ${year}`,
+    );
     // On récupère le zip existant, si il n'existe pas on le crée
     let dataZip;
     try {
@@ -337,18 +380,24 @@ export class DatagouvService {
       );
       dataZip = data;
     } catch (e) {
-      this.logger.error(`ARCHIVE ${this.configService.get('S3_VHOST')}${this.configService.get('S3_PREFIX') ? this.configService.get('S3_PREFIX') : ''}${geojsonOrPmtiles}/zones_${geojsonOrPmtiles}_${year}.zip non accessible`, e);
+      this.logger.error(
+        `ARCHIVE ${this.configService.get('S3_VHOST')}${this.configService.get('S3_PREFIX') ? this.configService.get('S3_PREFIX') : ''}${geojsonOrPmtiles}/zones_${geojsonOrPmtiles}_${year}.zip non accessible`,
+        e,
+      );
     }
     const zip = dataZip ? await JSZip.loadAsync(dataZip) : new JSZip();
 
-    for (let m = dateDebut;
-         m.diff(moment(), 'days', true) <= 0 && m.year() === year;
-         m.add(1, 'days')) {
+    for (
+      let m = dateDebut;
+      m.diff(moment(), 'days', true) <= 0 && m.year() === year;
+      m.add(1, 'days')
+    ) {
       const fileName = `zones_arretes_en_vigueur_${m.format('YYYY-MM-DD')}.${geojsonOrPmtiles}`;
       try {
-        const filePath = m.diff(moment(), 'days', true) === 0 ?
-          `${path}/zones_arretes_en_vigueur.${geojsonOrPmtiles}` :
-          `${path}/${fileName}`;
+        const filePath =
+          m.diff(moment(), 'days', true) === 0
+            ? `${path}/zones_arretes_en_vigueur.${geojsonOrPmtiles}`
+            : `${path}/${fileName}`;
         this.logger.log(`ADDING ${filePath} to ZIP`);
         const fileData = fs.readFileSync(filePath);
         zip.remove(fileName);
@@ -364,9 +413,19 @@ export class DatagouvService {
       buffer: newZipData,
     };
     // @ts-ignore
-    const s3Response = await this.s3Service.uploadFile(fileToTransfer, `${geojsonOrPmtiles}/`);
-    await this.uploadToDatagouv(geojson ? 'geojson_archive' : 'pmtiles_archive', s3Response.Location, `Cartes des zones et arrêtés en vigueur - ${geojson ? 'GEOJSON' : 'PMTILES'} - Année en cours`, true);
-    this.logger.log(`FIN GENERATION DE L'ARCHIVE ${geojsonOrPmtiles} DE L'ANNEE ${year}`);
+    const s3Response = await this.s3Service.uploadFile(
+      fileToTransfer,
+      `${geojsonOrPmtiles}/`,
+    );
+    await this.uploadToDatagouv(
+      geojson ? 'geojson_archive' : 'pmtiles_archive',
+      s3Response.Location,
+      `Cartes des zones et arrêtés en vigueur - ${geojson ? 'GEOJSON' : 'PMTILES'} - Année en cours`,
+      true,
+    );
+    this.logger.log(
+      `FIN GENERATION DE L'ARCHIVE ${geojsonOrPmtiles} DE L'ANNEE ${year}`,
+    );
   }
 
   /**
@@ -376,7 +435,12 @@ export class DatagouvService {
    * @param title - Titre de la ressource.
    * @param isUrl - Indique si le fichier est une URL.
    */
-  async uploadToDatagouv(resource: string, fileName: string, title: string, isUrl = false): Promise<void> {
+  async uploadToDatagouv(
+    resource: string,
+    fileName: string,
+    title: string,
+    isUrl = false,
+  ): Promise<void> {
     this.logger.log(`ENVOI VERS DATAGOUV - ${resource}`);
 
     if (!this.datagouvResources[resource]) {
@@ -390,33 +454,47 @@ export class DatagouvService {
       const formData = new FormData();
       formData.append('file', new Blob([data]), fileName);
 
-      await lastValueFrom(this.httpService.post(`${url}/upload`, formData, {
-        headers: {
-          'Accept': 'application/json',
-          'X-Api-Key': this.datagouvApiKey,
-        },
-      }).pipe(
-        catchError((error: AxiosError) => {
-          this.logger.error('ERREUR DANS L\'ENVOI VERS DATAGOUV', JSON.stringify(error));
-          throw error;
-        }),
-      ));
+      await lastValueFrom(
+        this.httpService
+          .post(`${url}/upload`, formData, {
+            headers: {
+              Accept: 'application/json',
+              'X-Api-Key': this.datagouvApiKey,
+            },
+          })
+          .pipe(
+            catchError((error: AxiosError) => {
+              this.logger.error(
+                "ERREUR DANS L'ENVOI VERS DATAGOUV",
+                JSON.stringify(error),
+              );
+              throw error;
+            }),
+          ),
+      );
     }
 
     const body: any = { title };
     if (isUrl) body.url = fileName;
 
-    await lastValueFrom(this.httpService.put(url, body, {
-      headers: {
-        'Accept': 'application/json',
-        'X-Api-Key': this.datagouvApiKey,
-      },
-    }).pipe(
-      catchError((error: AxiosError) => {
-        this.logger.error('ERREUR DANS LA MISE A JOUR DES METADONNEES DATAGOUV', JSON.stringify(error));
-        throw error;
-      }),
-    ));
+    await lastValueFrom(
+      this.httpService
+        .put(url, body, {
+          headers: {
+            Accept: 'application/json',
+            'X-Api-Key': this.datagouvApiKey,
+          },
+        })
+        .pipe(
+          catchError((error: AxiosError) => {
+            this.logger.error(
+              'ERREUR DANS LA MISE A JOUR DES METADONNEES DATAGOUV',
+              JSON.stringify(error),
+            );
+            throw error;
+          }),
+        ),
+    );
   }
 
   async updateCommunes() {
@@ -447,7 +525,8 @@ export class DatagouvService {
       },
     });
 
-    const stream = await this.statisticCommuneService.getStatisticCommuneStream();
+    const stream =
+      await this.statisticCommuneService.getStatisticCommuneStream();
 
     stream.pipe(transformStream).pipe(fileStream);
 
@@ -469,7 +548,9 @@ export class DatagouvService {
     const archive = archiver('zip', { zlib: { level: 9 } });
 
     archive.pipe(zipStream);
-    archive.append(fs.createReadStream(filePath), { name: 'historique_communes.json' });
+    archive.append(fs.createReadStream(filePath), {
+      name: 'historique_communes.json',
+    });
 
     await archive.finalize(); // Finalisation de l'archive
 
@@ -480,7 +561,11 @@ export class DatagouvService {
 
     this.logger.log(`Fichier ZIP disponible : ${zipFilePath}`);
 
-    await this.uploadToDatagouv('historique_communes', 'historique_communes.zip', 'Historique Communes');
+    await this.uploadToDatagouv(
+      'historique_communes',
+      'historique_communes.zip',
+      'Historique Communes',
+    );
 
     this.logger.log('MISE A JOUR DATAGOUV - COMMUNES - FIN');
   }

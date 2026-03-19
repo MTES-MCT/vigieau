@@ -18,11 +18,10 @@ import { CronModule } from '../cron/cron.module';
     ZonesModule,
     BrevoModule,
     MattermostModule,
-    CronModule
+    CronModule,
   ],
   controllers: [SubscriptionsController],
   providers: [SubscriptionsService],
   exports: [SubscriptionsService],
 })
-export class SubscriptionsModule {
-}
+export class SubscriptionsModule {}

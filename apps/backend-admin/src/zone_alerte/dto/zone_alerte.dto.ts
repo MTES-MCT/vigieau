@@ -3,8 +3,10 @@ import {
   IsBoolean,
   IsJSON,
   IsNumber,
-  IsObject, IsOptional,
-  IsString, ValidateNested,
+  IsObject,
+  IsOptional,
+  IsString,
+  ValidateNested,
 } from 'class-validator';
 import { DepartementDto } from '../../departement/dto/departement.dto';
 import { ApiProperty } from '@nestjs/swagger';
@@ -31,7 +33,8 @@ export class ZoneAlerteDto {
   @IsBoolean()
   @ApiProperty({
     example: false,
-    description: "Est-ce que la zone d'alerte est une ressource stockéee / regulée ?",
+    description:
+      "Est-ce que la zone d'alerte est une ressource stockéee / regulée ?",
   })
   ressourceInfluencee: boolean;
 

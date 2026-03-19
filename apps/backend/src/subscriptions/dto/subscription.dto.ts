@@ -6,7 +6,7 @@ export class SubscriptionDto extends CreateSubscriptionDto {
   @IsString()
   @ApiProperty({
     example: 'xxx.xxx.xxx.xxx',
-    description: 'IP utilisée lors de l\'inscription',
+    description: "IP utilisée lors de l'inscription",
   })
   ip: string;
 

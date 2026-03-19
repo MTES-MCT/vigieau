@@ -10,17 +10,18 @@ import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
 import { Commune } from '@shared/entities/commune.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([
-    StatisticDepartement,
-    StatisticCommune,
-    Commune,
-    Departement,
-    Region,
-    BassinVersant,
-  ])],
+  imports: [
+    TypeOrmModule.forFeature([
+      StatisticDepartement,
+      StatisticCommune,
+      Commune,
+      Departement,
+      Region,
+      BassinVersant,
+    ]),
+  ],
   controllers: [DataController],
   providers: [DataService],
-  exports: [DataService]
+  exports: [DataService],
 })
-export class DataModule {
-}
+export class DataModule {}

@@ -37,10 +37,12 @@ describe('CronService', () => {
   });
 
   describe('constructor', () => {
-    it('devrait appeler freeLocks lors de l\'initialisation', async () => {
+    it("devrait appeler freeLocks lors de l'initialisation", async () => {
       // Crée un mock partiel pour CronService
       //@ts-ignore
-      const spyFreeLocks = jest.spyOn(CronService.prototype as any, 'freeLocks').mockResolvedValueOnce(undefined);
+      const spyFreeLocks = jest
+        .spyOn(CronService.prototype as any, 'freeLocks')
+        .mockResolvedValueOnce(undefined);
 
       // Instancie le service (le constructeur appellera automatiquement freeLocks)
       const service = new CronService(mockDataSource as any);
@@ -60,14 +62,22 @@ describe('CronService', () => {
       // Appelle explicitement la méthode freeLocks
       await service['freeLocks']();
 
-      expect(mockDataSource.query).toHaveBeenCalledWith(`SELECT pg_advisory_unlock(${lockId})`);
-      expect(mockLogger.log).toHaveBeenCalledWith('LIBERATION DES LOCKS CRON - BEGIN');
-      expect(mockLogger.log).toHaveBeenCalledWith('LIBERATION DES LOCKS CRON - END');
+      expect(mockDataSource.query).toHaveBeenCalledWith(
+        `SELECT pg_advisory_unlock(${lockId})`,
+      );
+      expect(mockLogger.log).toHaveBeenCalledWith(
+        'LIBERATION DES LOCKS CRON - BEGIN',
+      );
+      expect(mockLogger.log).toHaveBeenCalledWith(
+        'LIBERATION DES LOCKS CRON - END',
+      );
     });
 
     it('devrait logger une erreur si la libération des locks échoue', async () => {
       // @ts-ignore
-      jest.spyOn(mockDataSource, 'query').mockRejectedValueOnce(new Error('SQL Error'));
+      jest
+        .spyOn(mockDataSource, 'query')
+        .mockRejectedValueOnce(new Error('SQL Error'));
 
       // Appelle explicitement la méthode freeLocks
       await service['freeLocks']();
@@ -83,7 +93,9 @@ describe('CronService', () => {
     it('devrait acquérir un lock si le nom est valide', async () => {
       const lockId = 5944578563374335; // ID défini dans cronNames
       // @ts-ignore
-      jest.spyOn(mockDataSource, 'query').mockResolvedValueOnce([{ should_run: true }]);
+      jest
+        .spyOn(mockDataSource, 'query')
+        .mockResolvedValueOnce([{ should_run: true }]);
 
       const result = await service.askForLock('emails');
 
@@ -110,7 +122,9 @@ describe('CronService', () => {
 
       await service.unlock('emails');
 
-      expect(mockDataSource.query).toHaveBeenCalledWith(`SELECT pg_advisory_unlock(${lockId})`);
+      expect(mockDataSource.query).toHaveBeenCalledWith(
+        `SELECT pg_advisory_unlock(${lockId})`,
+      );
     });
 
     it('devrait retourner false si le nom est invalide', async () => {

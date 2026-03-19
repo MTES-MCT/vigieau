@@ -291,7 +291,7 @@ export class ZoneAlerteComputedService {
       await this.getZonesAlerteComputedByDepartement(departement);
     let zonesToSave = [];
     for (const ar of arretesRestrictions) {
-      let zonesAr = zonesDepartement.filter(
+      const zonesAr = zonesDepartement.filter(
         (z) => z.restriction.arreteRestriction.id === ar.id,
       );
       if (
@@ -541,7 +541,7 @@ export class ZoneAlerteComputedService {
           zonesSameType[0].niveauGravite !== maxNiveauGravite
         ) {
           // Si il n'y a qu'une zone et que ce n'est pas son niveau de gravité de base, on la duplique pour avoir la zone au niveau de la commune avec le bon niveau de gravité
-          let zoneToDuplicate = await this.findOneWithCommuneZone(
+          const zoneToDuplicate = await this.findOneWithCommuneZone(
             zonesSameType[0].id,
             commune.id,
           );
@@ -571,7 +571,7 @@ export class ZoneAlerteComputedService {
             zoneToKeep = zoneToKeep[0];
           }
           if (zoneToKeep.niveauGravite !== maxNiveauGravite) {
-            let zoneToDuplicate = await this.findOneWithCommuneZone(
+            const zoneToDuplicate = await this.findOneWithCommuneZone(
               zoneToKeep.id,
               commune.id,
             );
@@ -730,7 +730,7 @@ DELETE FROM zone_alerte_computed
   }
 
   async computeGeoJson(computeHistoric?: boolean) {
-    let allZonesComputed: any = await this.zoneAlerteComputedRepository.find(<
+    const allZonesComputed: any = await this.zoneAlerteComputedRepository.find(<
       FindManyOptions
     >{
       select: {

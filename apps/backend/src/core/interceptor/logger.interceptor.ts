@@ -40,7 +40,9 @@ export class LoggerInterceptor implements NestInterceptor {
     // Intercepte et log la réponse
     return next.handle().pipe(
       tap(() => {
-        this._logger.log(`RESPONSE - ID: ${requestId}, URL: ${originalUrl}, User: ${userEmail}`);
+        this._logger.log(
+          `RESPONSE - ID: ${requestId}, URL: ${originalUrl}, User: ${userEmail}`,
+        );
       }),
     );
   }

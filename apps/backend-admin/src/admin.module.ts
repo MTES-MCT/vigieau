@@ -6,7 +6,7 @@ import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { Departement } from '@shared/entities/departement.entity';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { Region } from '@shared/entities/region.entity';
-import {ConfigModule, ConfigService} from "@nestjs/config";
+import { ConfigModule, ConfigService } from '@nestjs/config';
 
 /**
  * Désactivé pour l'instant car au final pas utilisé
@@ -65,7 +65,8 @@ const buildAdminOptions = (configService: ConfigService) => {
       return AdminModule.createAdminAsync({
         imports: [ConfigModule],
         inject: [ConfigService],
-        useFactory: async (configService: ConfigService) => buildAdminOptions(configService),
+        useFactory: async (configService: ConfigService) =>
+          buildAdminOptions(configService),
       });
     }),
   ],

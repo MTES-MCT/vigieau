@@ -38,7 +38,9 @@ export class UsageController {
     status: 201,
     type: UsageDto,
   })
-  async create(@Body() createUsageDto: CreateUpdateUsageDto): Promise<UsageDto> {
+  async create(
+    @Body() createUsageDto: CreateUpdateUsageDto,
+  ): Promise<UsageDto> {
     const usage = await this.usageService.create(createUsageDto);
     return plainToInstance(UsageDto, camelcaseKeys(<any>usage, { deep: true }));
   }

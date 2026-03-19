@@ -34,15 +34,24 @@ describe('DepartementsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DepartementsService,
-        { provide: getRepositoryToken(Departement), useValue: mockDepartementRepository },
-        { provide: getRepositoryToken(Statistic), useValue: mockStatisticRepository },
+        {
+          provide: getRepositoryToken(Departement),
+          useValue: mockDepartementRepository,
+        },
+        {
+          provide: getRepositoryToken(Statistic),
+          useValue: mockStatisticRepository,
+        },
         { provide: getRepositoryToken(Region), useValue: mockRegionRepository },
-        { provide: getRepositoryToken(BassinVersant), useValue: mockBassinVersantRepository },
+        {
+          provide: getRepositoryToken(BassinVersant),
+          useValue: mockBassinVersantRepository,
+        },
         VigieauLogger,
       ],
     }).compile();
 
-    service = <DepartementsService> module.get(DepartementsService);
+    service = <DepartementsService>module.get(DepartementsService);
   });
 
   afterEach(() => {
@@ -55,7 +64,9 @@ describe('DepartementsService', () => {
         { id: 1, code: '75', region: { id: 1, code: 'IDF' } },
         { id: 2, code: '33', region: { id: 2, code: 'NAQ' } },
       ];
-      mockDepartementRepository.find = jest.fn().mockResolvedValue(mockDepartements);
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockDepartements);
 
       const result = await service.getAllLight();
 
@@ -91,7 +102,7 @@ describe('DepartementsService', () => {
       };
 
       service['situationDepartements'] = [mockSituation];
-      service['bassinsVersants'] = <any> [mockBassinVersant];
+      service['bassinsVersants'] = <any>[mockBassinVersant];
 
       const result = service.situationByDepartement('2023-01-01', '1');
 
@@ -122,9 +133,13 @@ describe('DepartementsService', () => {
       };
 
       service['situationDepartements'] = [mockSituation];
-      service['regions'] = <any> [mockRegion];
+      service['regions'] = <any>[mockRegion];
 
-      const result = service.situationByDepartement('2023-01-01', undefined, '1');
+      const result = service.situationByDepartement(
+        '2023-01-01',
+        undefined,
+        '1',
+      );
 
       expect(result).toEqual([{ code: '75', niveauGraviteMax: 'Alerte' }]);
     });
@@ -137,9 +152,9 @@ describe('DepartementsService', () => {
       service['situationDepartements'] = [mockSituation];
       service['regions'] = [];
 
-      expect(() => service.situationByDepartement('2023-01-01', undefined, '999')).toThrow(
-        new HttpException('Région non trouvée.', HttpStatus.NOT_FOUND),
-      );
+      expect(() =>
+        service.situationByDepartement('2023-01-01', undefined, '999'),
+      ).toThrow(new HttpException('Région non trouvée.', HttpStatus.NOT_FOUND));
     });
 
     it('should filter by departement', () => {
@@ -152,7 +167,12 @@ describe('DepartementsService', () => {
       service['situationDepartements'] = [mockSituation];
       service['departements'] = [mockDepartement];
 
-      const result = service.situationByDepartement('2023-01-01', undefined, undefined, '1');
+      const result = service.situationByDepartement(
+        '2023-01-01',
+        undefined,
+        undefined,
+        '1',
+      );
 
       expect(result).toEqual([{ code: '75', niveauGraviteMax: 'Alerte' }]);
     });
@@ -165,7 +185,14 @@ describe('DepartementsService', () => {
       service['situationDepartements'] = [mockSituation];
       service['departements'] = [];
 
-      expect(() => service.situationByDepartement('2023-01-01', undefined, undefined, '999')).toThrow(
+      expect(() =>
+        service.situationByDepartement(
+          '2023-01-01',
+          undefined,
+          undefined,
+          '999',
+        ),
+      ).toThrow(
         new HttpException('Département non trouvé.', HttpStatus.NOT_FOUND),
       );
     });
@@ -187,12 +214,20 @@ describe('DepartementsService', () => {
   describe('loadRefData', () => {
     it('should load reference data (departements, regions, bassins versants)', async () => {
       const mockDepartements = [{ id: 1, nom: 'Paris' }];
-      const mockRegions = [{ id: 1, nom: 'Île-de-France', departements: mockDepartements }];
-      const mockBassinsVersants = [{ id: 1, nom: 'Bassin 1', departements: mockDepartements }];
+      const mockRegions = [
+        { id: 1, nom: 'Île-de-France', departements: mockDepartements },
+      ];
+      const mockBassinsVersants = [
+        { id: 1, nom: 'Bassin 1', departements: mockDepartements },
+      ];
 
-      mockDepartementRepository.find = jest.fn().mockResolvedValue(mockDepartements);
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockDepartements);
       mockRegionRepository.find = jest.fn().mockResolvedValue(mockRegions);
-      mockBassinVersantRepository.find = jest.fn().mockResolvedValue(mockBassinsVersants);
+      mockBassinVersantRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockBassinsVersants);
 
       await service.loadRefData();
 
@@ -200,7 +235,9 @@ describe('DepartementsService', () => {
       expect(service['regions']).toEqual(mockRegions);
       expect(service['bassinsVersants']).toEqual(mockBassinsVersants);
 
-      expect(mockDepartementRepository.find).toHaveBeenCalledWith({ order: { nom: 'ASC' } });
+      expect(mockDepartementRepository.find).toHaveBeenCalledWith({
+        order: { nom: 'ASC' },
+      });
       expect(mockRegionRepository.find).toHaveBeenCalledWith({
         relations: ['departements'],
         order: { nom: 'ASC' },
@@ -214,19 +251,32 @@ describe('DepartementsService', () => {
 
   describe('loadSituation', () => {
     it('should load departement situations based on statistics and current zones', async () => {
-      const mockDepartements = [{ code: '75', nom: 'Paris', region: { nom: 'Île-de-France' } }];
+      const mockDepartements = [
+        { code: '75', nom: 'Paris', region: { nom: 'Île-de-France' } },
+      ];
       const mockStatistics = [
         {
           date: '2023-01-01',
           departementSituation: {
-            '75': { max: 'Alerte', sup: 'Alerte', sou: 'Alerte', aep: 'Alerte' },
+            '75': {
+              max: 'Alerte',
+              sup: 'Alerte',
+              sou: 'Alerte',
+              aep: 'Alerte',
+            },
           },
         },
       ];
-      const mockCurrentZones = [{ departement: '75', niveauGravite: 'Alerte', type: 'SUP' }];
+      const mockCurrentZones = [
+        { departement: '75', niveauGravite: 'Alerte', type: 'SUP' },
+      ];
 
-      mockDepartementRepository.find = jest.fn().mockResolvedValue(mockDepartements);
-      mockStatisticRepository.find = jest.fn().mockResolvedValue(mockStatistics);
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockDepartements);
+      mockStatisticRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockStatistics);
 
       await service.loadSituation(mockCurrentZones);
 

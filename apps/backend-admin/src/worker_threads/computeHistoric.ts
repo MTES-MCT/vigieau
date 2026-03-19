@@ -16,21 +16,32 @@ interface WorkerData {
 async function run() {
   try {
     const app = await NestFactory.createApplicationContext(AppModule);
-    const zoneAlerteComputedHistoricService = app.get(ZoneAlerteComputedHistoricService);
+    const zoneAlerteComputedHistoricService = app.get(
+      ZoneAlerteComputedHistoricService,
+    );
 
     const { dateMin, dateStats, type } = workerData as WorkerData;
     const dateMinMoment = moment(dateMin);
     const dateStatsMoment = dateStats ? moment(dateStats) : null;
 
-    logger.log(`Starting compute historic ${type} with dateMin: ${dateMin} and dateStats: ${dateStats}`);
-    
+    logger.log(
+      `Starting compute historic ${type} with dateMin: ${dateMin} and dateStats: ${dateStats}`,
+    );
+
     let result;
     if (type === 'maps') {
-      result = await zoneAlerteComputedHistoricService.computeHistoricMaps(dateMinMoment, dateStatsMoment);
+      result = await zoneAlerteComputedHistoricService.computeHistoricMaps(
+        dateMinMoment,
+        dateStatsMoment,
+      );
     } else {
-      result = await zoneAlerteComputedHistoricService.computeHistoricMapsComputed(dateMinMoment, dateStatsMoment);
+      result =
+        await zoneAlerteComputedHistoricService.computeHistoricMapsComputed(
+          dateMinMoment,
+          dateStatsMoment,
+        );
     }
-    
+
     if (parentPort) {
       parentPort.postMessage({ success: true, result });
     }
@@ -42,4 +53,4 @@ async function run() {
   }
 }
 
-run(); 
+run();

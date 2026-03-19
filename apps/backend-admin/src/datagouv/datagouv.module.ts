@@ -16,11 +16,10 @@ import { StatisticCommuneModule } from '../statistic_commune/statistic_commune.m
     forwardRef(() => ZoneAlerteComputedModule),
     SharedModule,
     DepartementModule,
-    StatisticCommuneModule
+    StatisticCommuneModule,
   ],
   controllers: [],
   providers: [DatagouvService],
   exports: [DatagouvService],
 })
-export class DatagouvModule {
-}
+export class DatagouvModule {}

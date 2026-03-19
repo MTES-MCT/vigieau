@@ -46,11 +46,16 @@ export class CronService {
 
     // Valide que le nom du cron existe
     if (!id) {
-      this.logger.error(`Le nom du cron "${name}" n'existe pas dans cronNames.`, '');
+      this.logger.error(
+        `Le nom du cron "${name}" n'existe pas dans cronNames.`,
+        '',
+      );
       return false;
     }
 
-    const result = await this.dataSource.query(`SELECT pg_try_advisory_lock(${id}) AS "should_run"`);
+    const result = await this.dataSource.query(
+      `SELECT pg_try_advisory_lock(${id}) AS "should_run"`,
+    );
     return result[0].should_run;
   }
 
@@ -64,11 +69,13 @@ export class CronService {
 
     // Valide que le nom du cron existe
     if (!id) {
-      this.logger.error(`Le nom du cron "${name}" n'existe pas dans cronNames.`, '');
+      this.logger.error(
+        `Le nom du cron "${name}" n'existe pas dans cronNames.`,
+        '',
+      );
       return false;
     }
 
     await this.dataSource.query(`SELECT pg_advisory_unlock(${id})`);
   }
-
 }

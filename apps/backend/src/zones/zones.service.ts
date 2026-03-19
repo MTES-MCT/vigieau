@@ -30,16 +30,18 @@ export class ZonesService {
   lastUpdateAm = null;
   loading = false;
 
-  constructor(@InjectRepository(ZoneAlerteComputed)
-              private readonly zoneAlerteComputedRepository: Repository<ZoneAlerteComputed>,
-              private readonly departementsService: DepartementsService,
-              private readonly statisticsService: StatisticsService,
-              private readonly dataService: DataService,
-              private readonly communesService: CommunesService,
-              @InjectRepository(ArreteMunicipal)
-              private readonly arreteMunicipalRepository: Repository<ArreteMunicipal>,
-              @InjectRepository(Config)
-              private readonly configRepository: Repository<Config>) {
+  constructor(
+    @InjectRepository(ZoneAlerteComputed)
+    private readonly zoneAlerteComputedRepository: Repository<ZoneAlerteComputed>,
+    private readonly departementsService: DepartementsService,
+    private readonly statisticsService: StatisticsService,
+    private readonly dataService: DataService,
+    private readonly communesService: CommunesService,
+    @InjectRepository(ArreteMunicipal)
+    private readonly arreteMunicipalRepository: Repository<ArreteMunicipal>,
+    @InjectRepository(Config)
+    private readonly configRepository: Repository<Config>,
+  ) {
     this.loadAllZones(true);
   }
 
@@ -51,12 +53,25 @@ export class ZonesService {
    * @param profil - Profil utilisateur
    * @param zoneType - Type de zone
    */
-  find(queryLon?: string, queryLat?: string, commune?: string, profil?: string, zoneType?: string): any[] {
+  find(
+    queryLon?: string,
+    queryLat?: string,
+    commune?: string,
+    profil?: string,
+    zoneType?: string,
+  ): any[] {
     if (queryLon && queryLat) {
       const lon = parseFloat(queryLon);
       const lat = parseFloat(queryLat);
 
-      if (isNaN(lon) || isNaN(lat) || lon <= -180 || lon >= 180 || lat <= -85 || lat >= 85) {
+      if (
+        isNaN(lon) ||
+        isNaN(lat) ||
+        lon <= -180 ||
+        lon >= 180 ||
+        lat <= -85 ||
+        lat >= 85
+      ) {
         throw new HttpException(
           `lon/lat are not valid.`,
           HttpStatus.BAD_REQUEST,
@@ -84,7 +99,7 @@ export class ZonesService {
    * @returns La zone formatée ou une exception si introuvable
    */
   async findOne(id: number): Promise<any> {
-    const z = this.allZonesWithRestrictions.find(zone => zone.id === id);
+    const z = this.allZonesWithRestrictions.find((zone) => zone.id === id);
     if (z) {
       return this.formatZone(z);
     }
@@ -101,9 +116,11 @@ export class ZonesService {
    * @returns Liste des zones formatées ou une exception si aucune zone n'est trouvée
    */
   async findByDepartement(depCode: string): Promise<any> {
-    const zones = this.allZonesWithRestrictions.filter(zone => zone.departement === depCode);
+    const zones = this.allZonesWithRestrictions.filter(
+      (zone) => zone.departement === depCode,
+    );
     if (zones.length > 0) {
-      return zones.map(z => this.formatZone(z));
+      return zones.map((z) => this.formatZone(z));
     }
 
     throw new HttpException(
@@ -118,22 +135,28 @@ export class ZonesService {
    * @param allowMultiple - Autoriser plusieurs zones du même type
    * @returns Les zones correspondant aux coordonnées
    */
-  searchZonesByLonLat(coords: { lon: number; lat: number }, allowMultiple = false): any[] {
+  searchZonesByLonLat(
+    coords: { lon: number; lat: number },
+    allowMultiple = false,
+  ): any[] {
     const { lon, lat } = coords;
     const zones = this.zoneTree
       .search(lon, lat, lon, lat)
-      .map(idx => this.zonesFeatures[idx])
-      .filter(feature => booleanPointInPolygon([lon, lat], feature))
-      .map(feature => this.zonesIndex[feature.properties.idZone]);
+      .map((idx) => this.zonesFeatures[idx])
+      .filter((feature) => booleanPointInPolygon([lon, lat], feature))
+      .map((feature) => this.zonesIndex[feature.properties.idZone]);
 
     const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
-    zones.forEach(zone => {
+    zones.forEach((zone) => {
       if (!zone.ressourceInfluencee) {
         zoneCounts[zone.type]++;
       }
     });
 
-    if (!allowMultiple && (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)) {
+    if (
+      !allowMultiple &&
+      (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)
+    ) {
       throw new HttpException(
         `Un problème avec les données ne permet pas de répondre à votre demande.`,
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -152,14 +175,20 @@ export class ZonesService {
   searchZonesByCommune(commune, allowMultiple = false) {
     const zones = this.zonesCommunesIndex[commune];
     const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
-    zones?.forEach(zone => {
+    zones?.forEach((zone) => {
       if (!zone.ressourceInfluencee) {
         zoneCounts[zone.type]++;
       }
     });
 
-    if (!allowMultiple && (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)) {
-      throw new HttpException(`La commune comporte plusieurs zones d’alerte de même type.`, HttpStatus.CONFLICT);
+    if (
+      !allowMultiple &&
+      (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)
+    ) {
+      throw new HttpException(
+        `La commune comporte plusieurs zones d’alerte de même type.`,
+        HttpStatus.CONFLICT,
+      );
     }
 
     return zones;
@@ -179,8 +208,8 @@ export class ZonesService {
       await this.loadZonesCommunes(zonesWithGeom); // Étape 3 : Associer les zones à leurs communes.
 
       // @ts-ignore
-      this.allZonesWithRestrictions = zonesWithGeom.map(z => {
-        const usages = z.restriction?.usages?.filter(u => {
+      this.allZonesWithRestrictions = zonesWithGeom.map((z) => {
+        const usages = z.restriction?.usages?.filter((u) => {
           if (z.type === 'SUP') {
             return u.concerneEsu;
           } else if (z.type === 'SOU') {
@@ -206,7 +235,7 @@ export class ZonesService {
             cheminFichier: z.restriction?.arreteRestriction?.fichier?.url,
             cheminFichierArreteCadre: z.restriction?.arreteCadre?.fichier?.url,
           },
-          usages: usages?.map(u => {
+          usages: usages?.map((u) => {
             let description = '';
             switch (z.niveauGravite) {
               case 'vigilance':
@@ -265,7 +294,10 @@ export class ZonesService {
       .addSelect('zone_alerte_computed.code', 'code')
       .addSelect('zone_alerte_computed.nom', 'nom')
       .addSelect('zone_alerte_computed.type', 'type')
-      .addSelect('zone_alerte_computed.ressourceInfluencee', 'ressourceInfluencee')
+      .addSelect(
+        'zone_alerte_computed.ressourceInfluencee',
+        'ressourceInfluencee',
+      )
       .addSelect('zone_alerte_computed.niveauGravite', 'niveauGravite')
       .addSelect(
         'ST_AsGeoJSON(ST_TRANSFORM(zone_alerte_computed.geom, 4326))',
@@ -276,7 +308,7 @@ export class ZonesService {
     this.lastUpdate = new Date();
 
     // Mapping initial des zones avec des restrictions vides pour les enrichir plus tard.
-    const toReturn = rawZones.map(zone => ({
+    const toReturn = rawZones.map((zone) => ({
       ...zone,
       communes: [],
       restriction: [],
@@ -295,31 +327,37 @@ export class ZonesService {
     const batchSize = 1000;
     for (let i = 0; i < zones.length; i += batchSize) {
       const batch = zones.slice(i, i + batchSize);
-      this.logger.log(`LOADING ALL ZONES & COMMUNES - MAPPING RESTRICTION - BATCH ${i}`);
-      await Promise.all(batch.map(async (zone) => {
-        const z = await this.zoneAlerteComputedRepository.findOne(<FindOneOptions>{
-          where: {
-            id: zone.id,
-            restriction: {
-              arreteRestriction: {
-                statut: 'publie',
+      this.logger.log(
+        `LOADING ALL ZONES & COMMUNES - MAPPING RESTRICTION - BATCH ${i}`,
+      );
+      await Promise.all(
+        batch.map(async (zone) => {
+          const z = await this.zoneAlerteComputedRepository.findOne(<
+            FindOneOptions
+          >{
+            where: {
+              id: zone.id,
+              restriction: {
+                arreteRestriction: {
+                  statut: 'publie',
+                },
               },
             },
-          },
-          relations: [
-            'restriction',
-            'restriction.arreteRestriction',
-            'restriction.arreteRestriction.fichier',
-            'restriction.arreteRestriction.departement',
-            'restriction.arreteCadre',
-            'restriction.arreteCadre.fichier',
-            'restriction.usages',
-            'restriction.usages.thematique',
-          ],
-        });
-        zone.restriction = z ? z.restriction : [];
-        return zone;
-      }));
+            relations: [
+              'restriction',
+              'restriction.arreteRestriction',
+              'restriction.arreteRestriction.fichier',
+              'restriction.arreteRestriction.departement',
+              'restriction.arreteCadre',
+              'restriction.arreteCadre.fichier',
+              'restriction.usages',
+              'restriction.usages.thematique',
+            ],
+          });
+          zone.restriction = z ? z.restriction : [];
+          return zone;
+        }),
+      );
     }
   }
 
@@ -333,9 +371,11 @@ export class ZonesService {
     for (let i = 0; i < zones.length; i += batchSize) {
       const batch = zones.slice(i, i + batchSize);
 
-      this.logger.log(`LOADING ALL ZONES & COMMUNES - MAPPING COMMUNE - BATCH ${i}`);
+      this.logger.log(
+        `LOADING ALL ZONES & COMMUNES - MAPPING COMMUNE - BATCH ${i}`,
+      );
       await Promise.all(
-        batch.map(async zone => {
+        batch.map(async (zone) => {
           const z = await this.zoneAlerteComputedRepository.findOne({
             where: { id: zone.id },
             relations: ['communes'],
@@ -360,7 +400,7 @@ export class ZonesService {
     this.zonesIndex = keyBy(this.allZonesWithRestrictions, 'id');
 
     for (const zone of this.allZonesWithRestrictions) {
-      const fullZone = zones.find(z => z.id === zone.id);
+      const fullZone = zones.find((z) => z.id === zone.id);
       const geojson = JSON.parse(fullZone.geom);
       geojson.properties = {
         idZone: zone.id,
@@ -393,8 +433,11 @@ export class ZonesService {
   private async updateArreteMunicipaux(): Promise<void> {
     this.logger.log('MISE A JOUR DES ARRETES MUNICIPAUX');
     this.lastUpdateAm = new Date();
-    this.communeArretesMunicipaux = await this.communesService.findArretesMunicipaux();
-    this.logger.log(`LOADED ${this.communeArretesMunicipaux?.length} ARRETES MUNICIPAUX.`);
+    this.communeArretesMunicipaux =
+      await this.communesService.findArretesMunicipaux();
+    this.logger.log(
+      `LOADED ${this.communeArretesMunicipaux?.length} ARRETES MUNICIPAUX.`,
+    );
   }
 
   /**
@@ -405,25 +448,36 @@ export class ZonesService {
    * @param commune - Code commune pour récupérer les arrêtés municipaux (facultatif)
    * @returns Liste des zones formatées ou une zone unique si `zoneType` est fourni
    */
-  formatZones(zones: any[], profil?: string, zoneType?: string, commune?: string): any[] {
+  formatZones(
+    zones: any[],
+    profil?: string,
+    zoneType?: string,
+    commune?: string,
+  ): any[] {
     if (!zones || zones.length === 0) {
       return [];
     }
 
-    const communeArreteMunicipal = commune ?
-      this.communeArretesMunicipaux?.find(c => c.code === this.communesService.normalizeCodeCommune(commune))?.arretesMunicipaux[0]
+    const communeArreteMunicipal = commune
+      ? this.communeArretesMunicipaux?.find(
+          (c) => c.code === this.communesService.normalizeCodeCommune(commune),
+        )?.arretesMunicipaux[0]
       : null;
 
     if (zoneType) {
-      const toReturn = zones.find(z => z.type === zoneType);
-      return toReturn ? [this.formatZone(toReturn, profil, communeArreteMunicipal)] : [];
+      const toReturn = zones.find((z) => z.type === zoneType);
+      return toReturn
+        ? [this.formatZone(toReturn, profil, communeArreteMunicipal)]
+        : [];
     }
 
-    const formattedZones = zones.map(z => this.formatZone(z, profil, communeArreteMunicipal));
+    const formattedZones = zones.map((z) =>
+      this.formatZone(z, profil, communeArreteMunicipal),
+    );
 
     if (communeArreteMunicipal?.fichier?.url) {
-      ['AEP', 'SOU', 'SUP'].forEach(zoneType => {
-        if (!formattedZones.some(zone => zone.type === zoneType)) {
+      ['AEP', 'SOU', 'SUP'].forEach((zoneType) => {
+        if (!formattedZones.some((zone) => zone.type === zoneType)) {
           formattedZones.push({
             id: null,
             type: zoneType,
@@ -446,19 +500,23 @@ export class ZonesService {
   formatZone(zone: any, profil?: string, arreteMunicipal?: ArreteMunicipal) {
     if (!zone) {
       return arreteMunicipal?.fichier?.url
-        ? { id: null, arreteMunicipalCheminFichier: arreteMunicipal.fichier.url }
+        ? {
+            id: null,
+            arreteMunicipalCheminFichier: arreteMunicipal.fichier.url,
+          }
         : null;
     }
 
     // Ajout de l'arrêté municipal si présent
     const formattedZone = {
       ...zone,
-      arreteMunicipalCheminFichier: arreteMunicipal?.fichier?.url || zone.arreteMunicipalCheminFichier,
+      arreteMunicipalCheminFichier:
+        arreteMunicipal?.fichier?.url || zone.arreteMunicipalCheminFichier,
     };
 
     // Filtrage des usages en fonction du profil
     if (profil && Array.isArray(zone.usages)) {
-      formattedZone.usages = zone.usages.filter(u => {
+      formattedZone.usages = zone.usages.filter((u) => {
         const mapping = {
           particulier: u.concerneParticulier,
           entreprise: u.concerneEntreprise,
@@ -490,7 +548,9 @@ export class ZonesService {
     const count = await this.configRepository
       .createQueryBuilder('config')
       .where({
-        computeZoneAlerteComputedDate: MoreThan(this.lastUpdate.toLocaleString('sv')),
+        computeZoneAlerteComputedDate: MoreThan(
+          this.lastUpdate.toLocaleString('sv'),
+        ),
       })
       .getCount();
     if (count > 0) {

@@ -25,7 +25,7 @@ import { Config } from '@shared/entities/config.entity';
       ArreteCadre,
       Fichier,
       ArreteMunicipal,
-      Config
+      Config,
     ]),
     DepartementsModule,
     DataModule,
@@ -36,5 +36,4 @@ import { Config } from '@shared/entities/config.entity';
   providers: [ZonesService],
   exports: [ZonesService],
 })
-export class ZonesModule {
-}
+export class ZonesModule {}

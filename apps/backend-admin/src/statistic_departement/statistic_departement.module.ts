@@ -21,5 +21,4 @@ import { AbonnementMailModule } from '../abonnement_mail/abonnement_mail.module'
   exports: [StatisticDepartementService],
   controllers: [StatisticDepartementController],
 })
-export class StatisticDepartementModule {
-}
+export class StatisticDepartementModule {}

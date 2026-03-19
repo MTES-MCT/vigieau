@@ -87,7 +87,7 @@ export class ZoneAlerteComputedHistoricService {
       m.add(1, 'days')
     ) {
       const ars = await this.arreteResrictionService.findByDate(m);
-      let zas: ZoneAlerte[] = <ZoneAlerte[]>(
+      const zas: ZoneAlerte[] = <ZoneAlerte[]>(
         await this.zoneAlerteService.findByArreteRestriction(
           ars.map((ar) => ar.id),
         )
@@ -249,7 +249,7 @@ export class ZoneAlerteComputedHistoricService {
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - BEGIN`,
       );
-      let departements = await this.departementService.findAllLight();
+      const departements = await this.departementService.findAllLight();
 
       for (const departement of departements) {
         const param = departement.parametres.find(
@@ -437,7 +437,7 @@ export class ZoneAlerteComputedHistoricService {
       await this.getZonesAlerteComputedByDepartement(departement);
     let zonesToSave = [];
     for (const ar of arretesRestrictions) {
-      let zonesAr = zonesDepartement.filter(
+      const zonesAr = zonesDepartement.filter(
         (z) => z.restriction?.arreteRestriction.id === ar.id,
       );
       if (
@@ -686,7 +686,7 @@ export class ZoneAlerteComputedHistoricService {
           zonesSameType[0].niveauGravite !== maxNiveauGravite
         ) {
           // Si il n'y a qu'une zone et que ce n'est pas son niveau de gravité de base, on la duplique pour avoir la zone au niveau de la commune avec le bon niveau de gravité
-          let zoneToDuplicate = await this.findOneWithCommuneZone(
+          const zoneToDuplicate = await this.findOneWithCommuneZone(
             zonesSameType[0].id,
             commune.id,
           );
@@ -716,7 +716,7 @@ export class ZoneAlerteComputedHistoricService {
             zoneToKeep = zoneToKeep[0];
           }
           if (zoneToKeep.niveauGravite !== maxNiveauGravite) {
-            let zoneToDuplicate = await this.findOneWithCommuneZone(
+            const zoneToDuplicate = await this.findOneWithCommuneZone(
               zoneToKeep.id,
               commune.id,
             );
@@ -1042,7 +1042,7 @@ DELETE FROM zone_alerte_computed_historic
   }
 
   async computeGeoJson(date: Moment) {
-    let allZonesComputed: any =
+    const allZonesComputed: any =
       await this.zoneAlerteComputedHistoricRepository.find(<FindManyOptions>{
         select: {
           id: true,

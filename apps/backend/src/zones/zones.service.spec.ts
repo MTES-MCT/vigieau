@@ -85,13 +85,15 @@ describe('ZonesService', () => {
     }).compile();
 
     service = <ZonesService>module.get(ZonesService);
-    zoneAlerteComputedRepository = <Repository<ZoneAlerteComputed>>module.get(
-      getRepositoryToken(ZoneAlerteComputed),
+    zoneAlerteComputedRepository = <Repository<ZoneAlerteComputed>>(
+      module.get(getRepositoryToken(ZoneAlerteComputed))
     );
-    arreteMunicipalRepository = <Repository<ArreteMunicipal>>module.get(
-      getRepositoryToken(ArreteMunicipal),
+    arreteMunicipalRepository = <Repository<ArreteMunicipal>>(
+      module.get(getRepositoryToken(ArreteMunicipal))
     );
-    configRepository = <Repository<Config>>module.get(getRepositoryToken(Config));
+    configRepository = <Repository<Config>>(
+      module.get(getRepositoryToken(Config))
+    );
   });
 
   it('should be defined', () => {
@@ -110,7 +112,10 @@ describe('ZonesService', () => {
       jest.spyOn(service, 'formatZones').mockReturnValue([]);
 
       service.find('2.123', '48.123');
-      expect(service.searchZonesByLonLat).toHaveBeenCalledWith({ lon: 2.123, lat: 48.123 });
+      expect(service.searchZonesByLonLat).toHaveBeenCalledWith({
+        lon: 2.123,
+        lat: 48.123,
+      });
     });
 
     it('should call searchZonesByCommune if commune is provided', () => {
@@ -154,7 +159,9 @@ describe('ZonesService', () => {
 
     it('should throw a 404 error if no zones are found for the department', async () => {
       service.allZonesWithRestrictions = [];
-      await expect(service.findByDepartement('01')).rejects.toThrow(HttpException);
+      await expect(service.findByDepartement('01')).rejects.toThrow(
+        HttpException,
+      );
     });
   });
 
@@ -188,9 +195,16 @@ describe('ZonesService', () => {
       // @ts-ignore
       jest.spyOn(service, 'formatZone');
       // @ts-ignore
-      jest.spyOn(mockCommunesService, 'normalizeCodeCommune').mockReturnValue('12345');
+      jest
+        .spyOn(mockCommunesService, 'normalizeCodeCommune')
+        .mockReturnValue('12345');
 
-      const result = service.formatZones(mockZones, undefined, undefined, '12345');
+      const result = service.formatZones(
+        mockZones,
+        undefined,
+        undefined,
+        '12345',
+      );
       expect(result).toEqual([
         {
           id: 1,
@@ -200,8 +214,16 @@ describe('ZonesService', () => {
           CdZAS: undefined,
           TypeZAS: 'SUP',
         },
-        { id: null, type: 'AEP', arreteMunicipalCheminFichier: 'example.com/file.pdf' },
-        { id: null, type: 'SOU', arreteMunicipalCheminFichier: 'example.com/file.pdf' },
+        {
+          id: null,
+          type: 'AEP',
+          arreteMunicipalCheminFichier: 'example.com/file.pdf',
+        },
+        {
+          id: null,
+          type: 'SOU',
+          arreteMunicipalCheminFichier: 'example.com/file.pdf',
+        },
       ]);
     });
   });
@@ -214,10 +236,18 @@ describe('ZonesService', () => {
 
     it('should include municipal decree if provided', () => {
       const mockZone = { id: 1, type: 'SUP' };
-      const mockArreteMunicipal = <ArreteMunicipal>{ fichier: { url: 'example.com/file.pdf' } };
+      const mockArreteMunicipal = <ArreteMunicipal>{
+        fichier: { url: 'example.com/file.pdf' },
+      };
 
-      const result = service.formatZone(mockZone, undefined, mockArreteMunicipal);
-      expect(result.arreteMunicipalCheminFichier).toEqual('example.com/file.pdf');
+      const result = service.formatZone(
+        mockZone,
+        undefined,
+        mockArreteMunicipal,
+      );
+      expect(result.arreteMunicipalCheminFichier).toEqual(
+        'example.com/file.pdf',
+      );
     });
   });
 });

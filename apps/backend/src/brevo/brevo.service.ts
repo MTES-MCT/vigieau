@@ -10,9 +10,11 @@ export class BrevoService {
   private readonly logger = new VigieauLogger('BrevoService');
   private readonly apiInstance;
 
-  constructor(private readonly jwtService: JwtService,
-              private readonly configService: ConfigService,
-              private readonly communesService: CommunesService) {
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private readonly communesService: CommunesService,
+  ) {
     this.apiInstance = new Brevo.TransactionalEmailsApi();
     const apiKey = this.apiInstance.authentications['apiKey'];
     apiKey.apiKey = this.configService.get<string>('BREVO_API_KEY');
@@ -45,12 +47,15 @@ export class BrevoService {
     libelleLocalisation: string,
     profil: string,
   ) {
-    const isEmailEnabled = this.configService.get<string>('EMAIL_NOTIFICATIONS_ENABLED') === '1';
+    const isEmailEnabled =
+      this.configService.get<string>('EMAIL_NOTIFICATIONS_ENABLED') === '1';
     if (!isEmailEnabled) {
       return;
     }
 
-    const recipient = this.configService.get<string>('EMAIL_NOTIFICATIONS_DEV_RECIPIENT') || email;
+    const recipient =
+      this.configService.get<string>('EMAIL_NOTIFICATIONS_DEV_RECIPIENT') ||
+      email;
 
     const params = {
       address: libelleLocalisation,
@@ -119,10 +124,13 @@ export class BrevoService {
    * @returns URL de désinscription avec le token JWT.
    */
   computeUnsubscribeUrl(email: string): string {
-    const token = this.jwtService.sign({ email }, {
-      secret: this.configService.get<string>('JWT_SECRET'),
-      expiresIn: '7d',
-    });
+    const token = this.jwtService.sign(
+      { email },
+      {
+        secret: this.configService.get<string>('JWT_SECRET'),
+        expiresIn: '7d',
+      },
+    );
     return `${this.configService.get<string>('WEBSITE_URL')}/abonnements?token=${token}`;
   }
 

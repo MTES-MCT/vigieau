@@ -31,7 +31,11 @@ export class CommuneService {
     }
   }
 
-  async find(depCodes?: string[], withGeom?: boolean, user?: User): Promise<Commune[]> {
+  async find(
+    depCodes?: string[],
+    withGeom?: boolean,
+    user?: User,
+  ): Promise<Commune[]> {
     const qb = this.communeRepository
       .createQueryBuilder('commune')
       .select('commune.id', 'id')
@@ -48,20 +52,27 @@ export class CommuneService {
       qb.where('departement.code IN(:...depCodes)', { depCodes });
     }
 
-    if ((!depCodes || depCodes.length < 1) && user && user.role === 'departement') {
-      qb.where('departement.code IN (:...depCodes)', { depCodes: user.role_departements });
+    if (
+      (!depCodes || depCodes.length < 1) &&
+      user &&
+      user.role === 'departement'
+    ) {
+      qb.where('departement.code IN (:...depCodes)', {
+        depCodes: user.role_departements,
+      });
     }
 
     if ((!depCodes || depCodes.length < 1) && user && user.role === 'commune') {
-      qb.where('commune.code IN (:...communesCode)', { communesCode: user.role_communes });
+      qb.where('commune.code IN (:...communesCode)', {
+        communesCode: user.role_communes,
+      });
     }
 
-    return qb
-      .getRawMany();
+    return qb.getRawMany();
   }
 
   findAllLight(): Promise<Commune[]> {
-    return this.communeRepository.find(<FindManyOptions> {
+    return this.communeRepository.find(<FindManyOptions>{
       select: {
         id: true,
         code: true,
@@ -79,7 +90,7 @@ export class CommuneService {
   }
 
   findWithStats(take: number, skip: number): Promise<Commune[]> {
-    return this.communeRepository.find(<FindManyOptions> {
+    return this.communeRepository.find(<FindManyOptions>{
       select: {
         id: true,
         code: true,
@@ -121,8 +132,13 @@ export class CommuneService {
   getUnionGeomOfCommunes(communes: Commune[]): Promise<any> {
     return this.communeRepository
       .createQueryBuilder('commune')
-      .select('ST_AsGeoJSON(ST_UNION(ST_TRANSFORM(commune.geom, 4326)))', 'geom')
-      .where('commune.id IN(:...communesId)', { communesId: communes.map((c) => c.id) })
+      .select(
+        'ST_AsGeoJSON(ST_UNION(ST_TRANSFORM(commune.geom, 4326)))',
+        'geom',
+      )
+      .where('commune.id IN(:...communesId)', {
+        communesId: communes.map((c) => c.id),
+      })
       .getRawOne();
   }
 
@@ -139,8 +155,15 @@ export class CommuneService {
       .addSelect('zac.niveauGravite', 'zac_niveau_gravite')
       .addSelect('ST_Area(commune.geom)', 'area')
       .addSelect('ST_Area(zac.geom)', 'zac_area')
-      .addSelect('ST_Area(ST_Intersection(zac.geom, commune.geom))', 'zac_commune_area')
-      .leftJoin('zone_alerte_computed', 'zac', `zac."departementId" = commune."departementId" and ST_Intersects(zac.geom, commune.geom)`)
+      .addSelect(
+        'ST_Area(ST_Intersection(zac.geom, commune.geom))',
+        'zac_commune_area',
+      )
+      .leftJoin(
+        'zone_alerte_computed',
+        'zac',
+        `zac."departementId" = commune."departementId" and ST_Intersects(zac.geom, commune.geom)`,
+      )
       .where('commune."departementId" = :depId', { depId })
       .andWhere('zac.id IS NOT NULL')
       .getRawMany();
@@ -183,8 +206,15 @@ export class CommuneService {
       .addSelect('zac.niveauGravite', 'zac_niveau_gravite')
       .addSelect('ST_Area(commune.geom)', 'area')
       .addSelect('ST_Area(zac.geom)', 'zac_area')
-      .addSelect('ST_Area(ST_Intersection(zac.geom, commune.geom))', 'zac_commune_area')
-      .leftJoin('zone_alerte_computed_historic', 'zac', `zac."departementId" = commune."departementId" and ST_Intersects(zac.geom, commune.geom)`)
+      .addSelect(
+        'ST_Area(ST_Intersection(zac.geom, commune.geom))',
+        'zac_commune_area',
+      )
+      .leftJoin(
+        'zone_alerte_computed_historic',
+        'zac',
+        `zac."departementId" = commune."departementId" and ST_Intersects(zac.geom, commune.geom)`,
+      )
       .where('commune."departementId" = :depId', { depId })
       .andWhere('zac.id IS NOT NULL')
       .getRawMany();
@@ -214,19 +244,21 @@ export class CommuneService {
   }
 
   async getUserCommunes(user: User, communes: Commune[]) {
-    const communesIds = communes.map(c => c.id);
+    const communesIds = communes.map((c) => c.id);
     const whereClause: FindOptionsWhere<Commune> | null =
       !user || user.role === 'mte'
         ? { id: In(communesIds) }
-        : user.role === 'departement' ? {
-          id: In(communesIds),
-          departement: {
-            code: In(user.role_departements),
-          },
-        } : {
-          id: In(communesIds),
-          code: In(user.role_communes),
-        };
+        : user.role === 'departement'
+          ? {
+              id: In(communesIds),
+              departement: {
+                code: In(user.role_departements),
+              },
+            }
+          : {
+              id: In(communesIds),
+              code: In(user.role_communes),
+            };
 
     return this.communeRepository.find({
       select: {
@@ -248,30 +280,32 @@ export class CommuneService {
     for (const d of departements) {
       const url = `${this.configService.get('API_GEO')}/departements/${d.code}/communes?fields=code,nom,contour,population,siren`;
       const { data } = await firstValueFrom(this.httpService.get(url));
-      await Promise.all(data.map(async c => {
-        const communeExisting = await this.communeRepository.findOne({
-          where: { code: c.code },
-        });
-        if (communeExisting) {
-          communeExisting.nom = c.nom;
-          communeExisting.departement = d;
-          communeExisting.population = c.population;
-          communeExisting.siren = c.siren;
-          communeExisting.geom = c.contour;
-          await this.communeRepository.save(communeExisting);
-          communesUpdated++;
-        } else {
-          await this.communeRepository.save({
-            code: c.code,
-            nom: c.nom,
-            population: c.population,
-            siren: c.siren,
-            geom: c.contour,
-            departement: d,
+      await Promise.all(
+        data.map(async (c) => {
+          const communeExisting = await this.communeRepository.findOne({
+            where: { code: c.code },
           });
-          communesAdded++;
-        }
-      }));
+          if (communeExisting) {
+            communeExisting.nom = c.nom;
+            communeExisting.departement = d;
+            communeExisting.population = c.population;
+            communeExisting.siren = c.siren;
+            communeExisting.geom = c.contour;
+            await this.communeRepository.save(communeExisting);
+            communesUpdated++;
+          } else {
+            await this.communeRepository.save({
+              code: c.code,
+              nom: c.nom,
+              population: c.population,
+              siren: c.siren,
+              geom: c.contour,
+              departement: d,
+            });
+            communesAdded++;
+          }
+        }),
+      );
     }
     this.logger.log(`${communesUpdated} COMMUNES MIS A JOUR`);
     this.logger.log(`${communesAdded} COMMUNES AJOUTEES`);

@@ -10,7 +10,7 @@ import { AbonnementMailModule } from '../abonnement_mail/abonnement_mail.module'
   imports: [
     TypeOrmModule.forFeature([Departement]),
     HttpModule,
-    AbonnementMailModule
+    AbonnementMailModule,
   ],
   providers: [DepartementService],
   exports: [DepartementService],
