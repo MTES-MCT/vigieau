@@ -3,7 +3,7 @@ import { useScheme } from '@gouvminint/vue-dsfr';
 
 const route = useRoute();
 
-const logoText: string[] = ['Gouvernement'];
+const logoText: string[] = ['République', 'Française'];
 const operatorImgSrc: string = '/logo_vigie_eau.svg';
 const operatorImgAlt: string = `${useRuntimeConfig().public.appName}`;
 const operatorImgStyle: any = {
@@ -11,34 +11,39 @@ const operatorImgStyle: any = {
 };
 const a11yCompliance: string = 'Partiellement conforme';
 let quickLinks: any[] = [];
-const mandatoryLinks: any[] = [{
-  label: `Accessibilité : ${a11yCompliance}`,
-  to: '/accessibilite',
-}, {
-  label: 'Mentions légales',
-  to: '/mentions-legales',
-}, {
-  label: 'Données personnelles',
-  to: '/donnees-personnelles',
-}, {
-  label: 'Cookies',
-  to: '/cookies',
-}];
+const mandatoryLinks: any[] = [
+  {
+    label: `Accessibilité : ${a11yCompliance}`,
+    to: '/accessibilite',
+  },
+  {
+    label: 'Mentions légales',
+    to: '/mentions-legales',
+  },
+  {
+    label: 'Données personnelles',
+    to: '/donnees-personnelles',
+  },
+  {
+    label: 'Cookies',
+    to: '/cookies',
+  },
+];
 const ecosystemLinks: any[] = [
   {
     label: 'beta.gouv.fr',
     href: 'https://beta.gouv.fr',
-    title: 'beta.gouv.fr (nouvelle fenêtre)'
+    title: 'beta.gouv.fr (nouvelle fenêtre)',
   },
   {
     label: 'gouvernement.fr',
     href: 'https://gouvernement.fr',
-    title: 'gouvernement.fr (nouvelle fenêtre)'
+    title: 'gouvernement.fr (nouvelle fenêtre)',
   },
   {
     label: 'data.gouv.fr',
     href: 'https://data.gouv.fr',
-    title: 'data.gouv.fr (nouvelle fenêtre)'
+    title: 'data.gouv.fr (nouvelle fenêtre)',
   },
 ];
 const key = ref(0);
@@ -61,46 +66,65 @@ onMounted(() => {
 
   watchEffect(() => setScheme(preferences.scheme));
 
-  watch(() => route.path, newPath => {
-      quickLinks = newPath === '/situation' ? [{
-        label: 'Données sécheresse',
-        icon: 'ri-water-percent-line',
-        to: '/donnees',
-      }, {
-        label: 'Effectuer une nouvelle recherche',
-        icon: 'ri-search-line',
-        to: '/',
-      }, {
-        label: 'Donner mon avis',
-        icon: 'ri-survey-line',
-        button: true,
-        onclick: utils.openTally,
-      }] : [{
-        label: 'Données sécheresse',
-        icon: 'ri-water-percent-line',
-        to: '/donnees',
-      }];
+  watch(
+    () => route.path,
+    (newPath) => {
+      quickLinks =
+        newPath === '/situation'
+          ? [
+              {
+                label: 'Données sécheresse',
+                icon: 'ri-water-percent-line',
+                to: '/donnees',
+              },
+              {
+                label: 'Effectuer une nouvelle recherche',
+                icon: 'ri-search-line',
+                to: '/',
+              },
+              {
+                label: 'Donner mon avis',
+                icon: 'ri-survey-line',
+                button: true,
+                onclick: utils.openTally,
+              },
+            ]
+          : [
+              {
+                label: 'Données sécheresse',
+                icon: 'ri-water-percent-line',
+                to: '/donnees',
+              },
+            ];
       key.value++;
       skipLink.value?.focus();
-    }, { immediate: true },
+    },
+    { immediate: true },
   );
 });
 </script>
 
 <template>
   <!-- Lien d'évitement -->
-  <a href="#main-content" class="skip-link fr-sr-only" ref="skipLink">Passer au contenu principal</a>
+  <a href="#main-content" class="skip-link fr-sr-only" ref="skipLink"
+    >Passer au contenu principal</a
+  >
 
-  <DsfrHeader :logo-text="logoText"
-              :operatorImgSrc="operatorImgSrc"
-              :operatorImgAlt="operatorImgAlt"
-              :operatorImgStyle="operatorImgStyle"
-              :quickLinks="quickLinks"
-              menuModalLabel="Menu"
-              :key="key"
-              :show-beta="runTimeConfig.domainName !== 'vigieau.gouv.fr' || runTimeConfig.domainProdNotActivated === 'true'"
-              :serviceTitle="runTimeConfig.domainName"
-              serviceDescription="S'informer sur les restrictions d'eau en période de sécheresse">
+  <DsfrHeader
+    :logo-text="logoText"
+    :operatorImgSrc="operatorImgSrc"
+    :operatorImgAlt="operatorImgAlt"
+    :operatorImgStyle="operatorImgStyle"
+    :quickLinks="quickLinks"
+    menuModalLabel="Menu"
+    :key="key"
+    :show-beta="
+      runTimeConfig.domainName !== 'vigieau.gouv.fr' ||
+      runTimeConfig.domainProdNotActivated === 'true'
+    "
+    :serviceTitle="runTimeConfig.domainName"
+    serviceDescription="S'informer sur les restrictions d'eau en période de sécheresse"
+  >
   </DsfrHeader>
   <main role="main" id="main-content">
     <div class="fr-mb-8w">
@@ -115,15 +139,16 @@ onMounted(() => {
       <slot />
     </div>
   </main>
-  <DsfrFooter :logo-text="logoText"
-              :mandatoryLinks="mandatoryLinks"
-              :operatorImgSrc="operatorImgSrc"
-              :operatorImgAlt="operatorImgAlt"
-              :operatorImgStyle="operatorImgStyle"
-              :ecosystemLinks="ecosystemLinks"
-              homeTitle="Accueil VigiEau">
+  <DsfrFooter
+    :logo-text="logoText"
+    :mandatoryLinks="mandatoryLinks"
+    :operatorImgSrc="operatorImgSrc"
+    :operatorImgAlt="operatorImgAlt"
+    :operatorImgStyle="operatorImgStyle"
+    :ecosystemLinks="ecosystemLinks"
+    homeTitle="Accueil VigiEau"
+  >
   </DsfrFooter>
 </template>
 
-<style scoped lang="scss">
-</style>
+<style scoped lang="scss"></style>
