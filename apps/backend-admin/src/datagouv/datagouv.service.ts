@@ -1,24 +1,24 @@
-import { forwardRef, Inject, Injectable } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
-import { RegleauLogger } from '../logger/regleau.logger';
-import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
-import { json2csv } from 'json-2-csv';
-import { ConfigService } from '@nestjs/config';
-import { writeFile } from 'node:fs/promises';
 import { HttpService } from '@nestjs/axios';
-import fs from 'fs';
-import { catchError, firstValueFrom, lastValueFrom } from 'rxjs';
-import { AxiosError } from 'axios';
-import moment from 'moment';
-import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
-import { S3Service } from '../shared/services/s3.service';
-import JSZip from 'jszip';
-import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
+import { forwardRef, Inject, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
+import archiver from 'archiver';
+import { AxiosError } from 'axios';
+import fs from 'fs';
+import { json2csv } from 'json-2-csv';
+import JSZip from 'jszip';
+import moment from 'moment';
+import { writeFile } from 'node:fs/promises';
+import { catchError, firstValueFrom, lastValueFrom } from 'rxjs';
+import { Readable, Transform } from 'stream';
+import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
+import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { DepartementService } from '../departement/departement.service';
+import { RegleauLogger } from '../logger/regleau.logger';
+import { S3Service } from '../shared/services/s3.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
-import { pipeline, Transform } from 'stream';
-const archiver = require('archiver');
+import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
 
 @Injectable()
 export class DatagouvService {
@@ -408,11 +408,18 @@ export class DatagouvService {
     }
 
     const newZipData = await zip.generateAsync({ type: 'nodebuffer' });
-    const fileToTransfer = {
+    const fileToTransfer: Express.Multer.File = {
+      fieldname: 'file',
       originalname: `zones_${geojsonOrPmtiles}_${year}.zip`,
+      encoding: '7bit',
+      mimetype: 'application/zip',
+      size: newZipData.length,
+      destination: '',
+      filename: `zones_${geojsonOrPmtiles}_${year}.zip`,
+      path: '',
+      stream: Readable.from(newZipData),
       buffer: newZipData,
     };
-    // @ts-ignore
     const s3Response = await this.s3Service.uploadFile(
       fileToTransfer,
       `${geojsonOrPmtiles}/`,
