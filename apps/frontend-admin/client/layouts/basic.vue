@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { useScheme } from '@gouvminint/vue-dsfr';
-import { useAuthStore } from '~/stores/auth';
 import type { Ref } from 'vue';
+import { useAuthStore } from '~/stores/auth';
 import { useContextStore } from '~/stores/context';
 
 const runTimeConfig = useRuntimeConfig().public;
 const authStore = useAuthStore();
 const contextStore = useContextStore();
 const serviceTitle = <string>runTimeConfig.appName;
-const logoText = ['Ministère', 'de la transition', 'écologique', 'et de la cohésion', 'des territoires'];
+const logoText = ['Gouvernement'];
 const modalSchemeOpened = ref(false);
 const schemeFormRef = ref(null);
 const { theme, scheme, setScheme } = <any>useScheme();
@@ -18,7 +18,7 @@ const showAlerts = route.path !== '/connexion' && route.path !== '/';
 const quickLinks: Ref<any[]> = ref([]);
 const navItems: Ref<any[]> = ref([]);
 
-const logout = function() {
+const logout = function () {
   authStore.logout();
   contextStore.resetContext();
   navigateTo('/api/auth/logout', { external: true });
@@ -44,7 +44,7 @@ const accountOptions = (icon: boolean) => {
     });
   }
   links.push({
-    text: 'Paramètres d\'affichage',
+    text: "Paramètres d'affichage",
     onclick: () => {
       modalSchemeOpened.value = true;
     },
@@ -85,7 +85,7 @@ const loadQuickLinks = async () => {
           if (!buttons || !menu || !menuWidth) {
             return;
           }
-          menu.style['right'] = (document.body.clientWidth - buttons.getBoundingClientRect().right + menuWidth) + 'px';
+          menu.style['right'] = document.body.clientWidth - buttons.getBoundingClientRect().right + menuWidth + 'px';
         });
       },
     });
@@ -210,24 +210,20 @@ onUnmounted(() => {
   document.removeEventListener('keydown', onKeyDown);
 });
 
-watch(authStore.user, async () => {
-  await loadQuickLinks();
-  await loadNavItems();
-}, { immediate: true });
+watch(
+  authStore.user,
+  async () => {
+    await loadQuickLinks();
+    await loadNavItems();
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
-  <DsfrHeader
-    :service-title="serviceTitle"
-    :logo-text="logoText"
-    :quickLinks="quickLinks"
-    :show-beta="!+runTimeConfig.isProd"
-    home-to="/"
-  >
+  <DsfrHeader :service-title="serviceTitle" :logo-text="logoText" :quickLinks="quickLinks" :show-beta="!+runTimeConfig.isProd" home-to="/">
     <template #mainnav>
-      <DsfrNavigation
-        :nav-items="navItems"
-      />
+      <DsfrNavigation :nav-items="navItems" />
     </template>
   </DsfrHeader>
   <div v-show="accountOpened" id="account-menu-list" class="fr-header__menu-list-link">
@@ -235,8 +231,13 @@ watch(authStore.user, async () => {
       <ul class="fr-menu__list">
         <template v-for="action of accountOptions(true)">
           <li>
-            <a class="fr-nav__link"
-               @click="action.onclick(); accountOpened = false;">
+            <a
+              class="fr-nav__link"
+              @click="
+                action.onclick();
+                accountOpened = false;
+              "
+            >
               <VIcon :name="action.icon" class="fr-mr-1w" />
               {{ action.text }}
             </a>
