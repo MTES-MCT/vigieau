@@ -1,19 +1,19 @@
 import { UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import { Commune } from '@shared/entities/commune.entity';
 import {
-  Strategy,
   Client,
-  UserinfoResponse,
-  TokenSet,
   Issuer,
+  Strategy,
+  TokenSet,
+  UserinfoResponse,
   generators,
 } from 'openid-client';
+import { CommuneService } from '../commune/commune.service';
+import { RegleauLogger } from '../logger/regleau.logger';
 import { UserService } from '../user/user.service';
 import random = generators.random;
-import { RegleauLogger } from '../logger/regleau.logger';
-import { CommuneService } from '../commune/commune.service';
-import { Commune } from '@shared/entities/commune.entity';
-import { ConfigService } from '@nestjs/config';
 
 export const buildOpenIdClient = async (configService: ConfigService) => {
   const issuerUrl = configService.get<string>(
@@ -57,7 +57,11 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
         scope: configService.get<string>(
           'OAUTH2_CLIENT_REGISTRATION_LOGIN_SCOPE',
         ),
-        acr_values: client.acr_values,
+        // openid-client types expect a string; keep undefined if not provided.
+        acr_values:
+          typeof (client as any).acr_values === 'string'
+            ? ((client as any).acr_values as string)
+            : undefined,
       },
       usePKCE: false,
     });
