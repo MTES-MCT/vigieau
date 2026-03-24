@@ -1,5 +1,4 @@
-import { Controller, Delete, Get, Param, Req } from '@nestjs/common';
-import { UsageFeedbackService } from './usage_feedback.service';
+import { Controller, Delete, Get, Param, Req, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiResponse } from '@nestjs/swagger';
 import {
   UsageFeedback,
@@ -11,7 +10,10 @@ import {
   PaginatedSwaggerDocs,
   PaginateQuery,
 } from 'nestjs-paginate';
+import { AuthenticatedGuard } from '../core/guards/authenticated.guard';
+import { UsageFeedbackService } from './usage_feedback.service';
 
+@UseGuards(AuthenticatedGuard)
 @Controller('usage_feedback')
 export class UsageFeedbackController {
   constructor(private readonly usageFeedbackService: UsageFeedbackService) {}
