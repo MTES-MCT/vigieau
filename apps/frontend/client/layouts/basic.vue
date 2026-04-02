@@ -31,23 +31,33 @@ const mandatoryLinks: any[] = [
 ];
 const ecosystemLinks: any[] = [
   {
-    label: 'beta.gouv.fr',
-    href: 'https://beta.gouv.fr',
-    title: 'beta.gouv.fr (nouvelle fenêtre)',
+    label: 'legifrance.gouv.fr',
+    href: 'https://legifrance.gouv.fr',
+    title: 'Légifrance, nouvelle fenêtre',
   },
   {
-    label: 'gouvernement.fr',
-    href: 'https://gouvernement.fr',
-    title: 'gouvernement.fr (nouvelle fenêtre)',
+    label: 'info.gouv.fr',
+    href: 'https://info.gouv.fr',
+    title: 'Informations gouvernementales, nouvelle fenêtre',
+  },
+  {
+    label: 'service-public.gouv.fr',
+    href: 'https://service-public.gouv.fr',
+    title: 'Informations et démarches administratives, nouvelle fenêtre',
   },
   {
     label: 'data.gouv.fr',
     href: 'https://data.gouv.fr',
-    title: 'data.gouv.fr (nouvelle fenêtre)',
+    title: 'Plateforme des données publiques, nouvelle fenêtre',
   },
 ];
 const key = ref(0);
-const skipLink = ref<HTMLElement | null>(null);
+const skipLinkContainer = ref<HTMLElement | null>(null);
+
+const skipLinks = [
+  { id: 'main-content', text: 'Contenu' },
+  { id: 'footer', text: 'Pied de page' },
+];
 
 const preferences = reactive({
   theme: undefined,
@@ -97,7 +107,7 @@ onMounted(() => {
               },
             ];
       key.value++;
-      skipLink.value?.focus();
+      skipLinkContainer.value?.querySelector('a')?.focus();
     },
     { immediate: true },
   );
@@ -105,10 +115,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <!-- Lien d'évitement -->
-  <a href="#main-content" class="skip-link fr-sr-only" ref="skipLink"
-    >Passer au contenu principal</a
-  >
+  <div ref="skipLinkContainer">
+    <DsfrSkipLinks :links="skipLinks" />
+  </div>
 
   <DsfrHeader
     :logo-text="logoText"
@@ -139,16 +148,18 @@ onMounted(() => {
       <slot />
     </div>
   </main>
-  <DsfrFooter
-    :logo-text="logoText"
-    :mandatoryLinks="mandatoryLinks"
-    :operatorImgSrc="operatorImgSrc"
-    :operatorImgAlt="operatorImgAlt"
-    :operatorImgStyle="operatorImgStyle"
-    :ecosystemLinks="ecosystemLinks"
-    homeTitle="Accueil VigiEau"
-  >
-  </DsfrFooter>
+  <div id="footer">
+    <DsfrFooter
+      :logo-text="logoText"
+      :mandatoryLinks="mandatoryLinks"
+      :operatorImgSrc="operatorImgSrc"
+      :operatorImgAlt="operatorImgAlt"
+      :operatorImgStyle="operatorImgStyle"
+      :ecosystemLinks="ecosystemLinks"
+      homeTitle="Accueil VigiEau"
+    >
+    </DsfrFooter>
+  </div>
 </template>
 
 <style scoped lang="scss"></style>
