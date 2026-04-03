@@ -52,7 +52,6 @@ const ecosystemLinks: any[] = [
   },
 ];
 const key = ref(0);
-const skipLinkContainer = ref<HTMLElement | null>(null);
 
 const skipLinks = [
   { id: 'main-content', text: 'Contenu' },
@@ -107,7 +106,6 @@ onMounted(() => {
               },
             ];
       key.value++;
-      skipLinkContainer.value?.querySelector('a')?.focus();
     },
     { immediate: true },
   );
@@ -115,9 +113,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div ref="skipLinkContainer">
-    <DsfrSkipLinks :links="skipLinks" />
-  </div>
+  <DsfrSkipLinks :links="skipLinks" />
 
   <DsfrHeader
     :logo-text="logoText"
