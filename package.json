@@ -2,6 +2,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "dev:services": "docker compose up -d",
     "dev:public-backend": "yarn workspace vigieau_backend run start:dev",
     "dev:public-frontend": "yarn workspace vigieau_frontend run dev",
     "dev:admin-backend": "yarn workspace vigieau_admin_backend run start:dev",
