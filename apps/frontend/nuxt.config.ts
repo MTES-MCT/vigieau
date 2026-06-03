@@ -167,5 +167,5 @@ export default defineNuxtConfig({
         url: `https://${process.env.DOMAIN_NAME}`
     },
 
-    compatibilityDate: '2024-08-19'
+    compatibilityDate: '2024-08-19',
 })

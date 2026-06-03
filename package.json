@@ -1,15 +1,30 @@
 {
   "version": "1.0.0",
   "private": true,
+  "workspaces": [
+    "apps/backend",
+    "apps/backend-admin",
+    "apps/frontend",
+    "apps/frontend-admin"
+  ],
   "scripts": {
     "dev:services": "docker compose up -d",
     "dev:public-backend": "yarn workspace vigieau_backend run start:dev",
-    "dev:public-frontend": "yarn workspace vigieau_frontend run dev",
+    "dev:public-frontend": "yarn workspace vigieau_frontend run dev -- --port 3000",
     "dev:admin-backend": "yarn workspace vigieau_admin_backend run start:dev",
-    "dev:admin-frontend": "yarn workspace vigieau_admin_frontend run dev",
+    "dev:admin-frontend": "yarn workspace vigieau_admin_frontend run dev -- --port 3003",
     "dev:public": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\"",
     "dev:admin": "concurrently \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\"",
-    "dev": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\" \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\""
+    "dev": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\" \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\"",
+    "build": "yarn workspaces run build",
+    "test:backend": "yarn workspace vigieau_backend run test",
+    "test:admin-backend": "yarn workspace vigieau_admin_backend run test",
+    "test": "yarn test:backend && yarn test:admin-backend",
+    "lint:backend": "yarn workspace vigieau_backend run lint",
+    "lint:admin-backend": "yarn workspace vigieau_admin_backend run lint",
+    "lint:public-frontend": "yarn workspace vigieau_frontend run lint",
+    "lint:admin-frontend": "yarn workspace vigieau_admin_frontend run lint",
+    "lint": "yarn lint:backend && yarn lint:admin-backend && yarn lint:public-frontend && yarn lint:admin-frontend"
   },
   "devDependencies": {
     "concurrently": "^7.0.0"

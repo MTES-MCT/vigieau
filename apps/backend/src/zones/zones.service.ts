@@ -153,6 +153,17 @@ export class ZonesService {
       }
     });
 
+    console.table(
+      zones.map((zone) => ({
+        id: zone.id,
+        code: zone.code,
+        nom: zone.nom,
+        type: zone.type,
+        ressourceInfluencee: zone.ressourceInfluencee,
+        niveauGravite: zone.niveauGravite,
+      })),
+    );
+
     if (
       !allowMultiple &&
       (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)
