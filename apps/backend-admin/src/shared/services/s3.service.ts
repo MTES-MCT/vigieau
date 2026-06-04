@@ -10,9 +10,14 @@ export class S3Service {
   private readonly client: S3;
 
   constructor(private readonly configService: ConfigService) {
+    const forcePathStyle =
+      this.configService.get<string>('S3_FORCE_PATH_STYLE') === 'true' ||
+      this.configService.get<string>('NODE_ENV') === 'local';
+
     this.client = new S3(<any>{
       region: this.configService.get<string>('S3_REGION'),
       endpoint: this.configService.get<string>('S3_ENDPOINT'),
+      forcePathStyle,
       credentials: {
         accessKeyId: this.configService.get<string>('S3_ACCESS_KEY'),
         secretAccessKey: this.configService.get<string>('S3_SECRET_KEY'),

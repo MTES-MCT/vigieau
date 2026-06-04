@@ -65,6 +65,8 @@ export default defineNuxtConfig({
       apiUrl: process.env.API_URL,
       email: 'contact.vigieau@beta.gouv.fr',
       apiSecheresseUrl: process.env.API_SECHERESSE_URL,
+      sentryDsn: process.env.SENTRY_DSN,
+      sentryEnv: process.env.SENTRY_ENV || (process.env.IS_PROD === '1' ? 'prod' : 'local'),
     },
   },
 

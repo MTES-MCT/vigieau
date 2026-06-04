@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { HealthModule } from './health/health.module';
 import { ArreteCadreModule } from './arrete_cadre/arrete_cadre.module';
 import { AuthModule } from './auth/auth.module';
@@ -34,9 +34,13 @@ import { StatisticModule } from './statistic/statistic.module';
 import { ArreteMunicipalModule } from './arrete_municipal/arrete_municipal.module';
 import { AbonnementMailModule } from './abonnement_mail/abonnement_mail.module';
 import * as path from 'path';
+import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
+
+const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 
 @Module({
   imports: [
+    ...(isSentryEnabled() ? [SentryModule.forRoot()] : []),
     ConfigModule.forRoot({
       envFilePath: path.resolve(__dirname, '../../../../.env'),
       isGlobal: true,
@@ -118,6 +122,14 @@ import * as path from 'path';
   ],
   controllers: [AppController],
   providers: [
+    ...(isSentryEnabled()
+      ? [
+          {
+            provide: APP_FILTER,
+            useClass: SentryGlobalFilter,
+          },
+        ]
+      : []),
     {
       provide: APP_INTERCEPTOR,
       useClass: LoggerInterceptor,

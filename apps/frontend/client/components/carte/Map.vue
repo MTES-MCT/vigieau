@@ -59,8 +59,11 @@ maplibregl.addProtocol('pmtiles', (request) => {
     protocol.tile(request, callback);
   });
 });
-const PMTILES_URL = `${runtimeConfig.public.s3vhost}pmtiles/zones_arretes_en_vigueur.pmtiles`;
-const PMTILES_URL_TRUNC = `${runtimeConfig.public.s3vhost}pmtiles/zones_arretes_en_vigueur`;
+const DEFAULT_PMTILES_URL = `${runtimeConfig.public.s3vhost}pmtiles/zones_arretes_en_vigueur.pmtiles`;
+const PMTILES_URL = String(
+  runtimeConfig.public.pmtilesUrl || DEFAULT_PMTILES_URL,
+).trim();
+const PMTILES_URL_TRUNC = PMTILES_URL.replace(/\.pmtiles$/, '');
 const p = new PMTiles(PMTILES_URL);
 // this is so we share one instance across the JS code and the map renderer
 protocol.add(p);
@@ -171,8 +174,8 @@ onMounted(() => {
           citycode: dataAddress.value?.features[0]?.properties?.citycode
             ? dataAddress.value.features[0].properties.citycode
             : dataGeo.value[0]?.code
-            ? dataGeo.value[0].code
-            : null,
+              ? dataGeo.value[0].code
+              : null,
           label: `${dataGeo.value[0]?.nom}, ${dataGeo.value[0]?.codeDepartement}`,
         },
       };

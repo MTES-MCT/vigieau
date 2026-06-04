@@ -38,6 +38,8 @@ services:
     depends_on:
       minio:
         condition: service_started
+    volumes:
+      - ./docker/minio:/seed:ro
     entrypoint:
       - /bin/sh
       - -c
@@ -50,6 +52,16 @@ services:
 
       mc mb --ignore-existing local/vigieau
       mc anonymous set download local/vigieau
+
+      if [ -f /seed/cors.json ]; then
+        mc cors set local/vigieau /seed/cors.json
+      fi
+
+      if [ -f /seed/zones_arretes_en_vigueur.pmtiles ]; then
+        mc cp /seed/zones_arretes_en_vigueur.pmtiles local/vigieau/local/pmtiles/zones_arretes_en_vigueur.pmtiles
+      else
+        echo "Pas de /seed/zones_arretes_en_vigueur.pmtiles : le frontend utilisera PMTILES_URL si renseigné."
+      fi
     restart: "no"
 
   mailpit:

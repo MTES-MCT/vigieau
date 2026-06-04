@@ -20,6 +20,7 @@
     "@nuxtjs/robots": "^5.2.8",
     "@nuxtjs/sitemap": "^7.2.9",
     "@pinia/nuxt": "^0.5.3",
+    "@sentry/vue": "^10.55.0",
     "@vuelidate/core": "^2.0.3",
     "@vuelidate/validators": "^2.0.3",
     "chart.js": "^4.4.0",
