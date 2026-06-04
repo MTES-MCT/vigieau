@@ -17,7 +17,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "scalingo-postbuild": "nest build && if [ -d ../../node_modules ]; then rm -rf node_modules && cp -a ../../node_modules ./node_modules; fi"
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
@@ -92,5 +93,9 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
+  },
+  "engines": {
+    "node": "24.x",
+    "yarn": "1.x"
   }
 }

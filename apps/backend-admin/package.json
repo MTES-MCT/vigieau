@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
-    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && sed -i 's/PREFIX ?= \/usr\/local/PREFIX ?= ..\/tippecanoe_program/g' tippecanoe/Makefile && make install --directory=tippecanoe/ && rm -rf tippecanoe/",
+    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && rm -rf tippecanoe/ && if [ -d ../../node_modules ]; then rm -rf node_modules && cp -a ../../node_modules ./node_modules; fi",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
@@ -29,7 +29,7 @@
     "@adminjs/typeorm": "^5.0.0",
     "@aws-sdk/client-s3": "^3.663.0",
     "@aws-sdk/lib-storage": "^3.663.0",
-    "@nestjs-modules/mailer": "^2.0.2",
+    "@nestjs-modules/mailer": "2.0.2",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.1.17",
     "@nestjs/config": "^4.0.3",
@@ -120,5 +120,9 @@
   "resolutions": {
     "wrap-ansi": "7.0.0",
     "string-width": "4.1.0"
+  },
+  "engines": {
+    "node": "24.x",
+    "yarn": "1.x"
   }
 }

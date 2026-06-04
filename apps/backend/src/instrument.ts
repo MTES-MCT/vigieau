@@ -1,14 +1,17 @@
 import path from 'path';
-import * as dotenv from 'dotenv';
 import * as Sentry from '@sentry/nestjs';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
-[
-  path.resolve(process.cwd(), '.env'),
-  path.resolve(process.cwd(), 'apps/backend/.env'),
-].forEach((envFile) => {
-  dotenv.config({ path: envFile, override: false });
-});
+try {
+  const dotenv = require('dotenv');
+
+  [
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(process.cwd(), 'apps/backend/.env'),
+  ].forEach((envFile) => {
+    dotenv.config({ path: envFile, override: false });
+  });
+} catch {}
 
 const sentryDsn = process.env.SENTRY_DSN?.trim();
 
