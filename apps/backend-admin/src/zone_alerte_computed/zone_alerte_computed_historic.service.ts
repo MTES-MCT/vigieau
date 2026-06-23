@@ -10,7 +10,7 @@ import fs from 'fs';
 import moment, { Moment } from 'moment';
 import { writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
-import util from 'util';
+import * as util from 'util';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '../config/config.service';
@@ -78,8 +78,7 @@ export class ZoneAlerteComputedHistoricService {
 
   async computeHistoricMaps(date?: Moment, dateStats?: Moment) {
     const dateDebut = date ? date : moment();
-    // const dateFin = moment('2024-04-28');
-    const dateFin = moment('2023-12-31');
+    const dateFin = moment('2024-04-28');
 
     for (
       let m = moment(dateDebut);
@@ -201,7 +200,7 @@ export class ZoneAlerteComputedHistoricService {
       } catch (e) {
         this.logger.error('ERROR GENERATING PMTILES', e);
       }
-      if (dateStats && dateStats.isSameOrAfter(m, 'day')) {
+      if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
         // @ts-ignore
         await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
           zas.map((z) => {
@@ -230,9 +229,19 @@ export class ZoneAlerteComputedHistoricService {
           zas,
           m.format('YYYY-MM-DD'),
         );
-        await this.configService.setConfig(null, m.format('YYYY-MM-DD'));
+        await this.configService.setConfig(
+          null,
+          m.format('YYYY-MM-DD'),
+          null,
+          true,
+        );
       }
-      await this.configService.setConfig(m.format('YYYY-MM-DD'));
+      await this.configService.setConfig(
+        m.format('YYYY-MM-DD'),
+        null,
+        null,
+        true,
+      );
     }
   }
 
@@ -292,7 +301,7 @@ export class ZoneAlerteComputedHistoricService {
       );
 
       const allZonesComputed = await this.computeGeoJson(m);
-      if (dateStats && dateStats.isSameOrAfter(m, 'day')) {
+      if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
         await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
           allZonesComputed,
           new Date(m.format('YYYY-MM-DD')),

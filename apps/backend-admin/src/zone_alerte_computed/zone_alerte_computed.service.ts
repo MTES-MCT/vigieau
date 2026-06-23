@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import moment from 'moment';
 import { writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
-import util from 'util';
+import * as util from 'util';
 import { Worker } from 'worker_threads';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { CommuneService } from '../commune/commune.service';
@@ -35,6 +35,7 @@ export class ZoneAlerteComputedService {
   private isComputing = false;
   private askForCompute = false;
   private departementsToUpdate = [];
+  private readonly historicComputedStartDate = '2024-04-29';
   // Promisifier exec
   private execPromise = util.promisify(exec);
 
@@ -989,56 +990,94 @@ DELETE FROM zone_alerte_computed
 
   async computeHistoric() {
     const config = await this.configService.getConfig();
-    if (
-      config.computeMapDate &&
-      moment().diff(moment(config.computeMapDate, 'YYYY-MM-DD'), 'days') >= 1
-    ) {
+    const dirtyDates = [config.computeMapDate, config.computeStatsDate]
+      .filter(Boolean)
+      .map((date) => moment(date, 'YYYY-MM-DD'));
+    const dirtyDate = dirtyDates.reduce((minDate, date) => {
+      return date.isBefore(minDate, 'day') ? date : minDate;
+    }, dirtyDates[0]);
+
+    if (dirtyDate && moment().diff(dirtyDate, 'days') >= 1) {
       try {
-        const dateMin = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(
-          moment('2024-04-29'),
-        )
-          ? config.computeMapDate
-          : '2024-04-29';
-        const type = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(
-          moment('2024-04-29'),
-        )
-          ? 'maps'
-          : 'mapsComputed';
+        const computedStartDate = moment(
+          this.historicComputedStartDate,
+          'YYYY-MM-DD',
+        );
+        const dirtyDateString = dirtyDate.format('YYYY-MM-DD');
 
-        const worker = new Worker(historicWorkerThreadFilePath, {
-          workerData: {
-            dateMin,
-            dateStats: config.computeStatsDate,
-            type,
-          },
-        });
+        if (dirtyDate.isBefore(computedStartDate, 'day')) {
+          await this.runHistoricWorker(
+            'maps',
+            dirtyDateString,
+            config.computeStatsDate,
+          );
 
-        await new Promise((resolve, reject) => {
-          worker.on('message', (result) => {
-            resolve(result.result);
-          });
-
-          worker.on('error', (error) => {
-            this.logger.error(
-              `COMPUTE HISTORIC ${type.toUpperCase()} WORKER ERROR`,
-              error.toString(),
+          if (moment().diff(computedStartDate, 'days') >= 1) {
+            await this.runHistoricWorker(
+              'mapsComputed',
+              this.historicComputedStartDate,
+              config.computeStatsDate,
             );
-            reject(error);
-          });
-
-          worker.on('exit', (code) => {
-            const errorMessage = `COMPUTE HISTORIC ${type.toUpperCase()} Worker stopped with exit code ${code}`;
-            this.logger.error(errorMessage, '');
-            reject(new Error(errorMessage));
-          });
-        });
+          }
+        } else {
+          await this.runHistoricWorker(
+            'mapsComputed',
+            dirtyDateString,
+            config.computeStatsDate,
+          );
+        }
       } catch (error) {
         this.logger.error('Error in computeHistoric', error.toString());
       }
     }
-    await this.statisticCommuneService.computeByMonth(
-      moment(config.computeMapDate, 'YYYY-MM-DD'),
-    );
+    const statsMonthDate =
+      config.computeStatsDate || dirtyDate?.format('YYYY-MM-DD');
+    if (statsMonthDate) {
+      await this.statisticCommuneService.computeByMonth(
+        moment(statsMonthDate, 'YYYY-MM-DD'),
+      );
+    }
+  }
+
+  private async runHistoricWorker(
+    type: 'maps' | 'mapsComputed',
+    dateMin: string,
+    dateStats?: string,
+  ) {
+    const worker = new Worker(historicWorkerThreadFilePath, {
+      workerData: {
+        dateMin,
+        dateStats,
+        type,
+      },
+    });
+
+    await new Promise((resolve, reject) => {
+      worker.on('message', (result) => {
+        if (result?.success === false) {
+          reject(new Error(result.error));
+          return;
+        }
+        resolve(result?.result);
+      });
+
+      worker.on('error', (error) => {
+        this.logger.error(
+          `COMPUTE HISTORIC ${type.toUpperCase()} WORKER ERROR`,
+          error.toString(),
+        );
+        reject(error);
+      });
+
+      worker.on('exit', (code) => {
+        if (code === 0) {
+          return;
+        }
+        const errorMessage = `COMPUTE HISTORIC ${type.toUpperCase()} Worker stopped with exit code ${code}`;
+        this.logger.error(errorMessage, '');
+        reject(new Error(errorMessage));
+      });
+    });
   }
 
   async getZonesAlerteComputedByDepartement(
