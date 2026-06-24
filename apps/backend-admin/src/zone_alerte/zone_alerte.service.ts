@@ -326,6 +326,7 @@ export class ZoneAlerteService {
         ),
       );
       await Promise.all(promises);
+      await this.departementService.getAll();
       this.logger.log(`${zonesUpdates} ZONES D'ALERTES MIS A JOUR`);
       this.logger.log(`${zonesAdded} ZONES D'ALERTES AJOUTEES`);
       if (zonesAdded > 0) {

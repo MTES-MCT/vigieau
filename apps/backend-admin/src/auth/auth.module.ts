@@ -12,6 +12,19 @@ import { CommuneModule } from '../commune/commune.module';
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '@nestjs/config';
 
+const isAbsoluteUrl = (value?: string): boolean => {
+  if (!value) {
+    return false;
+  }
+
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const OidcStrategyFactory = {
   inject: [UserService, CommuneService, ConfigService],
   provide: 'OidcStrategy',
@@ -20,14 +33,28 @@ const OidcStrategyFactory = {
     communeService: CommuneService,
     configService: ConfigService,
   ) => {
-    const client = await buildOpenIdClient(configService); // secret sauce! build the dynamic client before injecting it into the strategy for use in the constructor super call.
-    const strategy = new OidcStrategy(
-      userService,
-      communeService,
-      configService,
-      client,
+    const nodeEnv = configService.get<string>('NODE_ENV');
+    const issuer = configService.get<string>(
+      'OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER',
     );
-    return strategy;
+
+    if (!isAbsoluteUrl(issuer)) {
+      if (nodeEnv === 'local') {
+        console.warn(
+          '[AuthModule] OIDC désactivé en local : OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER est vide ou invalide.',
+        );
+
+        return null;
+      }
+
+      throw new Error(
+        'OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER doit être une URL absolue, par exemple https://example.com',
+      );
+    }
+
+    const client = await buildOpenIdClient(configService);
+
+    return new OidcStrategy(userService, communeService, configService, client);
   },
 };
 

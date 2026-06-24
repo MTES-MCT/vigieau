@@ -83,6 +83,8 @@ export default defineNuxtConfig({
             domainProdNotActivated: process.env.DOMAIN_PROD_NOT_ACTIVATED,
             pmtilesUrl: process.env.PMTILES_URL,
             s3vhost: process.env.S3_VHOST,
+            sentryDsn: process.env.SENTRY_DSN,
+            sentryEnv: process.env.SENTRY_ENV || process.env.APP_ENV || 'local',
             appName: appName,
             appEnv: process.env.APP_ENV,
             email: 'contact.vigieau@beta.gouv.fr',
@@ -167,5 +169,5 @@ export default defineNuxtConfig({
         url: `https://${process.env.DOMAIN_NAME}`
     },
 
-    compatibilityDate: '2024-08-19'
+    compatibilityDate: '2024-08-19',
 })

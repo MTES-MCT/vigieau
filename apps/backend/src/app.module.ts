@@ -4,7 +4,7 @@ import { LoggerModule } from './logger/logger.module';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { LoggerInterceptor } from './core/interceptor/logger.interceptor';
 import { DataSource } from 'typeorm';
 import { TypeOrmModule, TypeOrmModuleAsyncOptions } from '@nestjs/typeorm';
@@ -18,9 +18,13 @@ import AuthModule from './auth/auth.module';
 import { ArretesRestrictionsModule } from './arretes_restrictions/arretes_restrictions.module';
 import { DataModule } from './data/data.module';
 import path from 'path';
+import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
+
+const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 
 @Module({
   imports: [
+    ...(isSentryEnabled() ? [SentryModule.forRoot()] : []),
     ConfigModule.forRoot({
       envFilePath: path.resolve(__dirname, '../../../../.env'),
       isGlobal: true,
@@ -85,6 +89,14 @@ import path from 'path';
   ],
   controllers: [AppController],
   providers: [
+    ...(isSentryEnabled()
+      ? [
+          {
+            provide: APP_FILTER,
+            useClass: SentryGlobalFilter,
+          },
+        ]
+      : []),
     {
       provide: APP_INTERCEPTOR,
       useClass: LoggerInterceptor,

@@ -7,7 +7,6 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
-    "postinstall": "cd ../../ && yarn install",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch --max-old-space-size=4096",
@@ -18,7 +17,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "scalingo-postbuild": "nest build && if [ -d ../../node_modules ]; then rm -rf node_modules && cp -a ../../node_modules ./node_modules; fi"
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
@@ -33,11 +33,14 @@
     "@nestjs/swagger": "^11.2.6",
     "@nestjs/throttler": "^6.5.0",
     "@nestjs/typeorm": "^11.0.0",
+    "@sentry/nestjs": "^10.55.0",
+    "@sentry/profiling-node": "^10.55.0",
     "@turf/bbox": "^7.1.0",
     "@turf/boolean-point-in-polygon": "^7.1.0",
     "axios": "^1.7.3",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "dotenv": "^17.4.2",
     "flatbush": "^4.4.0",
     "helmet": "^8.0.0",
     "lodash": "^4.17.21",
@@ -90,5 +93,9 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
+  },
+  "engines": {
+    "node": "24.x",
+    "yarn": "1.x"
   }
 }
