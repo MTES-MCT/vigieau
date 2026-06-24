@@ -67,6 +67,9 @@ export default defineNuxtConfig({
       apiSecheresseUrl: process.env.API_SECHERESSE_URL,
       sentryDsn: process.env.SENTRY_DSN,
       sentryEnv: process.env.SENTRY_ENV || (process.env.IS_PROD === '1' ? 'prod' : 'local'),
+      sentryTracesSampleRate: process.env.SENTRY_TRACES_SAMPLE_RATE || '0.1',
+      sentryProfilesSampleRate: process.env.SENTRY_PROFILES_SAMPLE_RATE || '0',
+      sentrySendDefaultPii: process.env.SENTRY_SEND_DEFAULT_PII || 'false',
     },
   },
 

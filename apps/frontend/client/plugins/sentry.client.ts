@@ -2,8 +2,7 @@ import * as Sentry from '@sentry/vue';
 
 type SentryInitOptions = Parameters<typeof Sentry.init>[0] & {
   enableLogs?: boolean;
-  profileSessionSampleRate?: number;
-  profileLifecycle?: 'trace';
+  profilesSampleRate?: number;
 };
 
 const toTrimmedString = (value: unknown) => {
@@ -14,6 +13,19 @@ const toTrimmedString = (value: unknown) => {
   return String(value).trim();
 };
 
+const toNumber = (value: unknown, fallback: number): number => {
+  const stringValue = toTrimmedString(value);
+  if (!stringValue) {
+    return fallback;
+  }
+
+  const parsed = Number(stringValue);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const toBoolean = (value: unknown): boolean =>
+  toTrimmedString(value).toLowerCase() === 'true';
+
 export default defineNuxtPlugin((nuxtApp) => {
   const runtimeConfig = useRuntimeConfig();
   const sentryDsn = toTrimmedString(runtimeConfig.public.sentryDsn);
@@ -23,6 +35,14 @@ export default defineNuxtPlugin((nuxtApp) => {
   }
 
   const router = useRouter();
+  const tracesSampleRate = toNumber(
+    runtimeConfig.public.sentryTracesSampleRate,
+    0.1,
+  );
+  const profilesSampleRate = toNumber(
+    runtimeConfig.public.sentryProfilesSampleRate,
+    0,
+  );
   const integrations: any[] = [];
 
   const browserTracingIntegration = (Sentry as any).browserTracingIntegration;
@@ -30,8 +50,12 @@ export default defineNuxtPlugin((nuxtApp) => {
     integrations.push(browserTracingIntegration({ router }));
   }
 
-  const browserProfilingIntegration = (Sentry as any).browserProfilingIntegration;
-  if (typeof browserProfilingIntegration === 'function') {
+  const browserProfilingIntegration = (Sentry as any)
+    .browserProfilingIntegration;
+  if (
+    profilesSampleRate > 0 &&
+    typeof browserProfilingIntegration === 'function'
+  ) {
     integrations.push(browserProfilingIntegration());
   }
 
@@ -44,9 +68,8 @@ export default defineNuxtPlugin((nuxtApp) => {
       'local',
     integrations,
     enableLogs: true,
-    tracesSampleRate: 1.0,
-    profileSessionSampleRate: 1.0,
-    profileLifecycle: 'trace',
-    sendDefaultPii: true,
+    tracesSampleRate,
+    profilesSampleRate,
+    sendDefaultPii: toBoolean(runtimeConfig.public.sentrySendDefaultPii),
   } as SentryInitOptions);
 });

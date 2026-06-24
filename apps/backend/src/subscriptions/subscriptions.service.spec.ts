@@ -164,7 +164,7 @@ describe('SubscriptionsService', () => {
       // @ts-ignore
       jest
         .spyOn(communesService, 'getCommune')
-        .mockReturnValue({ nom: 'Test Commune' });
+        .mockReturnValue({ nom: 'Test Commune' } as any);
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
       // @ts-ignore

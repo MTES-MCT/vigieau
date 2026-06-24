@@ -119,7 +119,7 @@ describe('StatisticsService', () => {
       // @ts-ignore
       jest
         .spyOn(statisticRepository, 'find')
-        .mockResolvedValueOnce(mockStatistics);
+        .mockResolvedValueOnce(mockStatistics as any);
 
       await service.loadStatistics();
 
@@ -163,11 +163,11 @@ describe('StatisticsService', () => {
       // @ts-ignore
       jest
         .spyOn(statisticRepository, 'findOne')
-        .mockResolvedValueOnce(mockLastStat);
+        .mockResolvedValueOnce(mockLastStat as any);
       // @ts-ignore
       jest
         .spyOn(httpService, 'get')
-        .mockImplementation(() => of(mockMatomoData));
+        .mockImplementation(() => of(mockMatomoData as any));
       // @ts-ignore
       jest.spyOn(statisticRepository, 'save').mockResolvedValue([]);
       // @ts-ignore

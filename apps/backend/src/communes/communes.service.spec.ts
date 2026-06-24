@@ -124,7 +124,7 @@ describe('CommunesService', () => {
       // @ts-ignore
       jest
         .spyOn(communeRepository, 'find')
-        .mockResolvedValueOnce(mockArretesMunicipaux);
+        .mockResolvedValueOnce(mockArretesMunicipaux as any);
 
       const result = await service.findArretesMunicipaux();
 
