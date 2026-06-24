@@ -128,7 +128,13 @@ describe('ZoneAlerteComputedHistoricService', () => {
   let statisticService: { computeDepartementsSituation: jest.Mock };
   let configService: { setConfig: jest.Mock };
   let dataGouvService: { updateMaps: jest.Mock };
-  let zoneAlerteComputedHistoricRepository: { update: jest.Mock };
+  let zoneAlerteComputedHistoricRepository: { createQueryBuilder: jest.Mock };
+  let updateAllHistoricZonesQuery: {
+    update: jest.Mock;
+    set: jest.Mock;
+    where: jest.Mock;
+    execute: jest.Mock;
+  };
 
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
@@ -154,8 +160,25 @@ describe('ZoneAlerteComputedHistoricService', () => {
     dataGouvService = {
       updateMaps: jest.fn().mockResolvedValue(undefined),
     };
+    updateAllHistoricZonesQuery = {
+      update: jest.fn(),
+      set: jest.fn(),
+      where: jest.fn(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    updateAllHistoricZonesQuery.update.mockReturnValue(
+      updateAllHistoricZonesQuery,
+    );
+    updateAllHistoricZonesQuery.set.mockReturnValue(
+      updateAllHistoricZonesQuery,
+    );
+    updateAllHistoricZonesQuery.where.mockReturnValue(
+      updateAllHistoricZonesQuery,
+    );
     zoneAlerteComputedHistoricRepository = {
-      update: jest.fn().mockResolvedValue(undefined),
+      createQueryBuilder: jest
+        .fn()
+        .mockReturnValue(updateAllHistoricZonesQuery),
     };
 
     service = new ZoneAlerteComputedHistoricService(
@@ -233,5 +256,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
       null,
       true,
     );
+    expect(updateAllHistoricZonesQuery.set).toHaveBeenCalledWith({
+      enabled: true,
+    });
+    expect(updateAllHistoricZonesQuery.where).toHaveBeenCalledWith('1 = 1');
   });
 });

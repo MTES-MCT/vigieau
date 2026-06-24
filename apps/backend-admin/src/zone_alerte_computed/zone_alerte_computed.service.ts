@@ -927,7 +927,12 @@ DELETE FROM zone_alerte_computed
     } catch (e) {
       this.logger.error('ERROR GENERATING PMTILES', e);
     }
-    await this.zoneAlerteComputedRepository.update({}, { enabled: true });
+    await this.zoneAlerteComputedRepository
+      .createQueryBuilder()
+      .update()
+      .set({ enabled: true })
+      .where('1 = 1')
+      .execute();
     await this.configService.setConfig(null, null, new Date());
     await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
       allZonesComputed,

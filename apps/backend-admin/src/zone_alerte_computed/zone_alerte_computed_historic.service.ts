@@ -323,10 +323,12 @@ export class ZoneAlerteComputedHistoricService {
           true,
         );
       }
-      await this.zoneAlerteComputedHistoricRepository.update(
-        {},
-        { enabled: true },
-      );
+      await this.zoneAlerteComputedHistoricRepository
+        .createQueryBuilder()
+        .update()
+        .set({ enabled: true })
+        .where('1 = 1')
+        .execute();
       await this.configService.setConfig(
         m.format('YYYY-MM-DD'),
         null,
