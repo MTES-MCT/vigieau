@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
-    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && rm -rf tippecanoe/ && if [ -d ../../node_modules ]; then rm -rf node_modules && cp -a ../../node_modules ./node_modules; fi",
+    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && rm -rf tippecanoe/",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
@@ -58,6 +58,7 @@
     "helmet": "^8.0.0",
     "json-2-csv": "^5.5.5",
     "jszip": "^3.10.1",
+    "lodash": "^4.17.21",
     "moment": "^2.30.1",
     "nestjs-paginate": "^11.1.1",
     "nodemailer": "^6.9.8",
@@ -73,6 +74,7 @@
     "typeorm": "^0.3.17"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
     "@nestjs/cli": "^11.0.16",
     "@nestjs/schematics": "^11.0.9",
     "@nestjs/testing": "^11.1.17",

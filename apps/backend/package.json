@@ -18,7 +18,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "scalingo-postbuild": "nest build && if [ -d ../../node_modules ]; then rm -rf node_modules && cp -a ../../node_modules ./node_modules; fi"
+    "scalingo-postbuild": "nest build"
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
@@ -41,6 +41,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "dotenv": "^17.4.2",
+    "express": "5.2.1",
     "flatbush": "^4.4.0",
     "helmet": "^8.0.0",
     "lodash": "^4.17.21",
@@ -54,6 +55,7 @@
     "typeorm": "^0.3.20"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
     "@nestjs/cli": "^11.0.16",
     "@nestjs/schematics": "^11.0.9",
     "@nestjs/testing": "^11.1.17",
