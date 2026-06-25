@@ -4,8 +4,8 @@ Monorepo contenant les applications VigiEau (`frontend`, `backend`) et VigiEau A
 
 ## Pré-requis
 
-- Node.js 20 ou supérieur
-- Yarn
+- Node.js 24.x
+- npm 11.x
 - Docker avec Docker Compose
 
 Node n’est pas dockerisé : les applications Node/Nuxt/Nest se lancent en local. Docker ne sert ici qu’à lancer les dépendances nécessaires au développement local.
@@ -32,8 +32,10 @@ Le fichier `compose.yaml` à la racine lance :
 
 ```bash
 docker compose up -d
-yarn install
+npm install
 ```
+
+Le monorepo utilise npm workspaces. `package-lock.json` est le lockfile de référence ; ne recréez pas de `yarn.lock`.
 
 ## Variables d’environnement
 
@@ -140,25 +142,25 @@ Pour les cartes historiques : il faut les fichiers historiques correspondants ou
 Terminal 1 :
 
 ```bash
-yarn dev:admin-backend
+npm run dev:admin-backend
 ```
 
 Terminal 2 :
 
 ```bash
-yarn dev:public-backend
+npm run dev:public-backend
 ```
 
 Terminal 3 :
 
 ```bash
-yarn dev:public-frontend
+npm run dev:public-frontend
 ```
 
 Terminal 4 :
 
 ```bash
-yarn dev:admin-frontend
+npm run dev:admin-frontend
 ```
 
 ## URLs

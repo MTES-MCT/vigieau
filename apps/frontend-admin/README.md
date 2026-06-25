@@ -6,7 +6,7 @@
 
 ### Pré-requis
 
-Vous aurez besoin de [NodeJS](https://nodejs.org/) v18+ et [Yarn](https://yarnpkg.com/) pour lancer ce projet.
+Vous aurez besoin de [NodeJS](https://nodejs.org/) 24.x et npm 11.x pour lancer ce projet.
 
 Nous vous recommandons de regarder la [documentation de Nuxt 3](https://v3.nuxtjs.org)
 et la [documentation de VueDsfr](https://vue-dsfr.netlify.app).
@@ -20,7 +20,7 @@ cp env.example .env
 ### Installation des dépendances
 
 ```bash
-yarn install
+npm install
 ```
 
 ### Lancer nuxt en mode développement
@@ -28,7 +28,7 @@ yarn install
 Démarre le serveur sur http://localhost:3000
 
 ```bash
-yarn dev
+npm run dev --workspace=vigieau_admin_frontend
 ```
 
 ### Générer le code de production
@@ -36,7 +36,7 @@ yarn dev
 Génère le code de production de l’application:
 
 ```bash
-yarn build
+npm run build --workspace=vigieau_admin_frontend
 ```
 
 Regarder ensuite la [documentation de Nuxt concernant le déploiement](https://v3.nuxtjs.org/docs/deployment).

@@ -6,7 +6,7 @@
 
 ### Pré-requis
 
-Vous aurez besoin de [NodeJS](https://nodejs.org/) v18+ et [Yarn](https://yarnpkg.com/) pour lancer ce projet.
+Vous aurez besoin de [NodeJS](https://nodejs.org/) 24.x et npm 11.x pour lancer ce projet.
 
 Nous vous recommandons de regarder la [documentation de NestJS](https://nestjs.com/).
 
@@ -34,7 +34,7 @@ cp env.example .env
 ### Installation des dépendances
 
 ```bash
-yarn install
+npm install
 ```
 
 ### Lancer nuxt en mode développement
@@ -42,7 +42,7 @@ yarn install
 Démarre le serveur sur http://localhost:3001
 
 ```bash
-yarn start:dev
+npm run start:dev --workspace=vigieau_admin_backend
 ```
 
 ### Générer le code de production
@@ -50,7 +50,7 @@ yarn start:dev
 Génère le code de production de l’application:
 
 ```bash
-yarn build
+npm run build --workspace=vigieau_admin_backend
 ```
 
 ## Contribution

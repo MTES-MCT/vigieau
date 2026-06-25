@@ -11,7 +11,7 @@ l'information concernant les restrictions en vigueur lors d'épisodes d'alertes 
 
 ### Pré-requis
 
-Vous aurez besoin de [NodeJS](https://nodejs.org/) v18+ et [Yarn](https://yarnpkg.com/) pour lancer ce projet.
+Vous aurez besoin de [NodeJS](https://nodejs.org/) 24.x et npm 11.x pour lancer ce projet.
 
 Nous vous recommandons de regarder la [documentation de Nuxt 3](https://v3.nuxtjs.org)
 et la [documentation de VueDsfr](https://vue-dsfr.netlify.app).
@@ -31,7 +31,7 @@ Doc [API Sécheresse](https://github.com/MTES-MCT/secheresse-api)
 ### Installation des dépendances
 
 ```bash
-yarn install
+npm install
 ```
 
 ### Lancer nuxt en mode développement
@@ -39,7 +39,7 @@ yarn install
 Démarre le serveur sur http://localhost:3000
 
 ```bash
-yarn dev
+npm run dev --workspace=vigieau_frontend
 ```
 
 ### Générer le code de production
@@ -47,7 +47,7 @@ yarn dev
 Génère le code de production de l’application:
 
 ```bash
-yarn build
+npm run build --workspace=vigieau_frontend
 ```
 
 Regarder ensuite la [documentation de Nuxt concernant le déploiement](https://v3.nuxtjs.org/docs/deployment).
@@ -59,19 +59,19 @@ Regarder la documentation de [Cypress](https://www.cypress.io/)
 Pour ouvrir l'interface de Cypress
 
 ```bash
-yarn cy:open
+npm run cy:open --workspace=vigieau_frontend
 ```
 
 Si l'application est lancée
 
 ```bash
-yarn cy:run
+npm run cy:run --workspace=vigieau_frontend
 ```
 
 Pour lancer l'application et les tests
 
 ```bash
-yarn cy:e2e
+npm run cy:e2e --workspace=vigieau_frontend
 ```
 
 ## Contribution

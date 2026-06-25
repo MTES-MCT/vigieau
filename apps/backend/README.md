@@ -6,20 +6,20 @@ Elle se base sur les données de VigiEau Admin.
 
 ## Pré-requis
 
-- Node.js 18.12 ou supérieur
-- Yarn
+- Node.js 24.x
+- npm 11.x
 
 ## Utilisation
 
 ```bash
 # Installation des dépendances
-yarn
+npm install
 
 # watch mode
-$ yarn run start:dev
+npm run start:dev --workspace=vigieau_backend
 
 # production mode
-$ yarn run start:prod
+npm run start:prod --workspace=vigieau_backend
 ```
 
 ## API
