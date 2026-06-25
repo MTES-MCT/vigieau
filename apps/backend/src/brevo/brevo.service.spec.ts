@@ -23,6 +23,7 @@ describe('BrevoService', () => {
   let service: BrevoService;
   let configService: ConfigService;
   let jwtService: JwtService;
+  let communesService: CommunesService;
   let apiInstanceMock: any;
 
   beforeEach(async () => {
@@ -69,6 +70,7 @@ describe('BrevoService', () => {
     service = <BrevoService>module.get(BrevoService);
     configService = <ConfigService>module.get(ConfigService);
     jwtService = <JwtService>module.get(JwtService);
+    communesService = <CommunesService>module.get(CommunesService);
   });
 
   afterEach(() => {
@@ -125,6 +127,34 @@ describe('BrevoService', () => {
         }),
       );
       expect(result).toBe('Email sent');
+    });
+
+    it('devrait utiliser le libellé de localisation si la commune est introuvable', async () => {
+      // @ts-ignore
+      jest.spyOn(communesService, 'getCommune').mockReturnValueOnce(undefined);
+      // @ts-ignore
+      jest.spyOn(service, 'sendMail').mockResolvedValueOnce('Email sent');
+
+      await service.sendSituationUpdate(
+        'user@example.com',
+        'alerte',
+        true,
+        'pas_restriction',
+        false,
+        'vigilance',
+        true,
+        '75001',
+        'Rue de Rivoli, Paris',
+        'user_profile',
+      );
+
+      expect(service.sendMail).toHaveBeenCalledWith(
+        65,
+        'dev@example.com',
+        expect.objectContaining({
+          city: 'Rue de Rivoli, Paris',
+        }),
+      );
     });
 
     it('ne devrait pas envoyer d’email si les notifications sont désactivées', async () => {

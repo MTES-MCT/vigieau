@@ -108,6 +108,7 @@ describe('SubscriptionsService', () => {
     it('should create a subscription and send a confirmation email', async () => {
       const mockSubscription = {
         email: 'test@test.com',
+        profil: 'particulier',
         commune: '12345',
         typesEau: ['AEP'],
       };
@@ -157,6 +158,7 @@ describe('SubscriptionsService', () => {
     it('should update an existing subscription if it already exists', async () => {
       const mockSubscription = {
         email: 'test@test.com',
+        profil: 'particulier',
         commune: '12345',
         typesEau: ['AEP'],
       };
@@ -175,6 +177,7 @@ describe('SubscriptionsService', () => {
       const result = await service.create(mockSubscription as any, '127.0.0.1');
       expect(result).toEqual({
         email: 'test@test.com',
+        profil: 'particulier',
         commune: '12345',
         typesEau: ['AEP'],
         ip: '127.0.0.1',
@@ -182,6 +185,90 @@ describe('SubscriptionsService', () => {
         situation: {},
       });
       expect(abonnementMailRepository.update).toHaveBeenCalled();
+    });
+
+    it('should use the address commune name when the commune is not loaded locally', async () => {
+      const mockSubscription = {
+        email: 'test@test.com',
+        profil: 'particulier',
+        idAdresse: 'address-id',
+        lon: 2.3522,
+        lat: 48.8566,
+        typesEau: ['AEP'],
+      };
+      const mockAddress = {
+        data: {
+          commune: { code: '75056', nom: 'Paris' },
+          type: 'numero',
+          numero: '10',
+          voie: { nomVoie: 'Rue de Rivoli' },
+        },
+      };
+
+      // @ts-ignore
+      jest.spyOn(httpService, 'get').mockReturnValue(of(mockAddress));
+      // @ts-ignore
+      jest.spyOn(communesService, 'getCommune').mockReturnValue(undefined);
+      // @ts-ignore
+      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([]);
+      // @ts-ignore
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(false);
+      // @ts-ignore
+      jest.spyOn(abonnementMailRepository, 'save').mockResolvedValue({
+        ...mockSubscription,
+        commune: '75056',
+        libelleLocalisation: '10, Rue de Rivoli, Paris',
+      } as any);
+      // @ts-ignore
+      jest.spyOn(brevoService, 'sendMail').mockResolvedValue(undefined);
+
+      const result = await service.create(mockSubscription as any, '127.0.0.1');
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          commune: '75056',
+          libelleLocalisation: '10, Rue de Rivoli, Paris',
+        }),
+      );
+      expect(brevoService.sendMail).toHaveBeenCalledWith(
+        29,
+        'test@test.com',
+        expect.objectContaining({
+          city: 'Paris',
+          address: '10, Rue de Rivoli, Paris',
+        }),
+      );
+    });
+
+    it('should create a coordinate subscription without a commune name', async () => {
+      const mockSubscription = {
+        email: 'test@test.com',
+        profil: 'particulier',
+        lon: 2.3522,
+        lat: 48.8566,
+        typesEau: ['AEP'],
+      };
+
+      // @ts-ignore
+      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([]);
+      // @ts-ignore
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(false);
+      // @ts-ignore
+      jest
+        .spyOn(abonnementMailRepository, 'save')
+        .mockResolvedValue(mockSubscription as any);
+      // @ts-ignore
+      jest.spyOn(brevoService, 'sendMail').mockResolvedValue(undefined);
+
+      await service.create(mockSubscription as any, '127.0.0.1');
+
+      expect(brevoService.sendMail).toHaveBeenCalledWith(
+        29,
+        'test@test.com',
+        expect.objectContaining({
+          city: '',
+        }),
+      );
     });
 
     it('should throw an error if commune is invalid', async () => {
@@ -212,6 +299,7 @@ describe('SubscriptionsService', () => {
       expect(result).toEqual({
         libelle: '10, Main St, City',
         commune: '12345',
+        communeNom: 'City',
       });
     });
 

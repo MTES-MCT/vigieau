@@ -133,8 +133,9 @@ describe('ZonesService', () => {
     it('should return a service unavailable error while the zone tree is not ready', () => {
       service.zoneTree = undefined;
 
-      expect(() => service.searchZonesByLonLat({ lon: 2.123, lat: 48.123 }))
-        .toThrow(HttpException);
+      expect(() =>
+        service.searchZonesByLonLat({ lon: 2.123, lat: 48.123 }),
+      ).toThrow(HttpException);
     });
   });
 

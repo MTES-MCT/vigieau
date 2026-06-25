@@ -50,6 +50,7 @@ export class SubscriptionsService {
     ip: string,
   ): Promise<AbonnementMail> {
     const subscription: any = { ...createSubscriptionDto, ip };
+    let communeNom: string | undefined;
 
     if (subscription.commune) {
       const commune = this.communesService.getCommune(subscription.commune);
@@ -61,7 +62,8 @@ export class SubscriptionsService {
         );
       }
 
-      subscription.libelleLocalisation = commune.nom;
+      communeNom = commune.nom;
+      subscription.libelleLocalisation = communeNom;
     }
 
     if (subscription.idAdresse) {
@@ -72,12 +74,18 @@ export class SubscriptionsService {
         );
       }
 
-      const { libelle, commune } = await this.resolveIdAdresse(
-        subscription.idAdresse,
-      );
+      const {
+        libelle,
+        commune,
+        communeNom: adresseCommuneNom,
+      } = await this.resolveIdAdresse(subscription.idAdresse);
 
       subscription.commune = commune;
       subscription.libelleLocalisation = libelle;
+      communeNom =
+        this.getCommuneNom(subscription.commune) ||
+        adresseCommuneNom ||
+        communeNom;
     }
 
     subscription.typesEau = [...new Set(subscription.typesEau)].sort();
@@ -110,7 +118,11 @@ export class SubscriptionsService {
       await this.abonnementMailRepository.save(subscription);
 
       await this.brevoService.sendMail(29, subscription.email, {
-        city: this.communesService.getCommune(subscription.commune).nom,
+        city:
+          communeNom ||
+          this.getCommuneNom(subscription.commune) ||
+          subscription.libelleLocalisation ||
+          '',
         address: subscription.libelleLocalisation,
         unsubscribeUrl: this.brevoService.computeUnsubscribeUrl(
           subscription.email,
@@ -137,6 +149,7 @@ export class SubscriptionsService {
       return {
         libelle: this.buildLibelle(result.data),
         commune: result.data.commune.code,
+        communeNom: result.data.commune.nom,
       };
     } catch (error) {
       if (error.response?.statusCode === 404) {
@@ -170,6 +183,14 @@ export class SubscriptionsService {
       `Une erreur inattendue est survenue`,
       HttpStatus.INTERNAL_SERVER_ERROR,
     );
+  }
+
+  private getCommuneNom(codeCommune?: string): string | undefined {
+    if (!codeCommune) {
+      return undefined;
+    }
+
+    return this.communesService.getCommune(codeCommune)?.nom;
   }
 
   /**

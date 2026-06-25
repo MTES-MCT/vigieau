@@ -59,7 +59,9 @@ export class BrevoService {
 
     const params = {
       address: libelleLocalisation,
-      city: this.communesService.getCommune(codeCommune).nom,
+      city:
+        this.communesService.getCommune(codeCommune)?.nom ||
+        libelleLocalisation,
       unsubscribeUrl: this.computeUnsubscribeUrl(email),
       niveauGraviteAep: this.getniveauGraviteFr(niveauGraviteAep),
       changementAep,
