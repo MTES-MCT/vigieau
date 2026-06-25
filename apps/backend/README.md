@@ -16,10 +16,10 @@ Elle se base sur les données de VigiEau Admin.
 npm install
 
 # watch mode
-npm run start:dev --workspace=vigieau_backend
+npm run start:dev
 
 # production mode
-npm run start:prod --workspace=vigieau_backend
+npm run start:prod
 ```
 
 ## API

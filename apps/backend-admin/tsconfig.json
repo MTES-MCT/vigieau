@@ -19,7 +19,11 @@
     "forceConsistentCasingInFileNames": false,
     "noFallthroughCasesInSwitch": false,
     "paths": {
-      "@shared/*": ["../../global_shared/*"]
+      "@shared/*": ["../../global_shared/*"],
+      "connect-typeorm": ["node_modules/connect-typeorm"],
+      "nestjs-paginate": ["node_modules/nestjs-paginate"],
+      "typeorm": ["node_modules/typeorm"],
+      "typeorm/*": ["node_modules/typeorm/*"]
     }
   }
 }

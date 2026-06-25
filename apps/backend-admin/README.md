@@ -42,7 +42,7 @@ npm install
 Démarre le serveur sur http://localhost:3001
 
 ```bash
-npm run start:dev --workspace=vigieau_admin_backend
+npm run start:dev
 ```
 
 ### Générer le code de production
@@ -50,7 +50,7 @@ npm run start:dev --workspace=vigieau_admin_backend
 Génère le code de production de l’application:
 
 ```bash
-npm run build --workspace=vigieau_admin_backend
+npm run build
 ```
 
 ## Contribution

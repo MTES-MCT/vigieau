@@ -33,11 +33,12 @@ Le fichier `compose.yaml` à la racine lance :
 ```bash
 docker compose up -d
 npm install
+npm run install:apps
 ```
 
-Le monorepo utilise npm workspaces. `package-lock.json` est le lockfile de référence ; ne recréez pas de `yarn.lock`.
+Le dépôt utilise npm, sans npm workspaces. La racine sert à piloter les apps avec `npm --prefix`, et chaque application garde son propre `package-lock.json`.
 
-Les applications Scalingo sont construites depuis leur `PROJECT_DIR` (`apps/backend`, `apps/backend-admin`, `apps/frontend`, `apps/frontend-admin`). Une dépendance utilisée au runtime par une app doit donc être déclarée dans le `package.json` de cette app, pas seulement à la racine du monorepo. Le `package.json` racine sert au pilotage des workspaces et ne doit pas compenser une dépendance manquante côté app.
+Les applications Scalingo sont construites depuis leur `PROJECT_DIR` (`apps/backend`, `apps/backend-admin`, `apps/frontend`, `apps/frontend-admin`). Une dépendance utilisée au runtime par une app doit donc être déclarée dans le `package.json` de cette app, et verrouillée par le `package-lock.json` de cette app. Le `package.json` racine ne doit pas compenser une dépendance manquante côté app.
 
 ## Variables d’environnement
 

@@ -39,7 +39,7 @@ npm install
 Démarre le serveur sur http://localhost:3000
 
 ```bash
-npm run dev --workspace=vigieau_frontend
+npm run dev
 ```
 
 ### Générer le code de production
@@ -47,7 +47,7 @@ npm run dev --workspace=vigieau_frontend
 Génère le code de production de l’application:
 
 ```bash
-npm run build --workspace=vigieau_frontend
+npm run build
 ```
 
 Regarder ensuite la [documentation de Nuxt concernant le déploiement](https://v3.nuxtjs.org/docs/deployment).
@@ -59,19 +59,19 @@ Regarder la documentation de [Cypress](https://www.cypress.io/)
 Pour ouvrir l'interface de Cypress
 
 ```bash
-npm run cy:open --workspace=vigieau_frontend
+npm run cy:open
 ```
 
 Si l'application est lancée
 
 ```bash
-npm run cy:run --workspace=vigieau_frontend
+npm run cy:run
 ```
 
 Pour lancer l'application et les tests
 
 ```bash
-npm run cy:e2e --workspace=vigieau_frontend
+npm run cy:e2e
 ```
 
 ## Contribution

@@ -28,7 +28,7 @@ npm install
 Démarre le serveur sur http://localhost:3000
 
 ```bash
-npm run dev --workspace=vigieau_admin_frontend
+npm run dev
 ```
 
 ### Générer le code de production
@@ -36,7 +36,7 @@ npm run dev --workspace=vigieau_admin_frontend
 Génère le code de production de l’application:
 
 ```bash
-npm run build --workspace=vigieau_admin_frontend
+npm run build
 ```
 
 Regarder ensuite la [documentation de Nuxt concernant le déploiement](https://v3.nuxtjs.org/docs/deployment).
