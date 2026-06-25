@@ -20,18 +20,17 @@ export class ParametresService {
     private readonly departementService: DepartementService,
   ) {}
 
-  async findAll(currentUser?: User, enabled?: boolean): Promise<Parametres[]> {
-    const whereClause: FindOptionsWhere<Parametres> | null =
-      !currentUser || currentUser.role === 'mte'
-        ? {
-            disabled: enabled ? false : null,
-          }
-        : {
-            departement: {
-              code: In(currentUser.role_departements),
-            },
-            disabled: enabled ? false : null,
-          };
+  async findAll(currentUser?: User): Promise<Parametres[]> {
+    const whereClause: FindOptionsWhere<Parametres> = {
+      disabled: false,
+    };
+
+    if (currentUser && currentUser.role !== 'mte') {
+      whereClause.departement = {
+        code: In(currentUser.role_departements),
+      };
+    }
+
     return this.parametresRepository.find(<FindManyOptions>{
       select: {
         id: true,
@@ -43,6 +42,11 @@ export class ParametresService {
       },
       relations: ['departement'],
       where: whereClause,
+      order: {
+        departement: {
+          code: 'ASC',
+        },
+      },
     });
   }
 
