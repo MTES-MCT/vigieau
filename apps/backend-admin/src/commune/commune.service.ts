@@ -89,8 +89,12 @@ export class CommuneService {
     });
   }
 
-  findWithStats(take: number, skip: number): Promise<Commune[]> {
-    return this.communeRepository.find(<FindManyOptions>{
+  findWithStats(
+    take: number,
+    skip: number,
+    departementCodes?: string[],
+  ): Promise<Commune[]> {
+    const options: FindManyOptions<Commune> = {
       select: {
         id: true,
         code: true,
@@ -109,7 +113,15 @@ export class CommuneService {
       },
       take: take,
       skip: skip,
-    });
+    };
+    if (departementCodes?.length > 0) {
+      options.where = {
+        departement: {
+          code: In(departementCodes),
+        },
+      };
+    }
+    return this.communeRepository.find(options);
   }
 
   findBySiren(siren: string) {
@@ -125,8 +137,17 @@ export class CommuneService {
     });
   }
 
-  count(): Promise<number> {
-    return this.communeRepository.count();
+  count(departementCodes?: string[]): Promise<number> {
+    if (!departementCodes?.length) {
+      return this.communeRepository.count();
+    }
+    return this.communeRepository.count({
+      where: {
+        departement: {
+          code: In(departementCodes),
+        },
+      },
+    });
   }
 
   getUnionGeomOfCommunes(communes: Commune[]): Promise<any> {

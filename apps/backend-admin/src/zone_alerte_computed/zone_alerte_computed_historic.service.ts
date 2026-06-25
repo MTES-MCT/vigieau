@@ -9,7 +9,7 @@ import { exec } from 'child_process';
 import fs from 'fs';
 import moment, { Moment } from 'moment';
 import { writeFile } from 'node:fs/promises';
-import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
+import { DataSource, FindManyOptions, In, IsNull, Repository } from 'typeorm';
 import * as util from 'util';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { CommuneService } from '../commune/commune.service';
@@ -258,43 +258,7 @@ export class ZoneAlerteComputedHistoricService {
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - BEGIN`,
       );
-      const departements = await this.departementService.findAllLight();
-
-      for (const departement of departements) {
-        const param = departement.parametres.find(
-          (p) =>
-            m.isSameOrAfter(moment(p.dateDebut)) &&
-            (!p.dateFin || m.isSameOrBefore(moment(p.dateFin))),
-        )?.superpositionCommune;
-        const zonesSaved = await this.computeRegleAr(departement, m);
-        if (zonesSaved.length > 0) {
-          switch (param) {
-            case 'no':
-            case 'no_all':
-              break;
-            case 'yes_all':
-              await this.computeYesDistinct(departement, false);
-              await this.computeYesAll(departement, false);
-              break;
-            case 'yes_only_aep':
-              await this.computeYesDistinct(departement, true);
-              break;
-            case 'yes_except_aep':
-              await this.computeYesDistinct(departement, false);
-              await this.computeYesAll(departement, true);
-              break;
-            case 'yes_distinct':
-              await this.computeYesDistinct(departement, false);
-              break;
-            default:
-              this.logger.error(
-                `COMPUTING ${departement.code} - ${departement.nom} - ${param} not implemented`,
-                '',
-              );
-          }
-        }
-        await this.computeCommunesIntersected(departement);
-      }
+      await this.computeZonesForDate(m);
       // On récupère toutes les restrictions en cours
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - END`,
@@ -339,6 +303,73 @@ export class ZoneAlerteComputedHistoricService {
     await this.statisticCommuneService.sortStatCommune();
     await this.statisticDepartementService.sortStatDepartement();
     await this.dataGouvService.updateMaps(dateDebut);
+  }
+
+  async computeZonesForDate(date: Moment, departements?: Departement[]) {
+    const departementsToCompute =
+      departements ?? (await this.departementService.findAllLight());
+
+    for (const departement of departementsToCompute) {
+      const param = departement.parametres.find(
+        (p) =>
+          date.isSameOrAfter(moment(p.dateDebut)) &&
+          (!p.dateFin || date.isSameOrBefore(moment(p.dateFin))),
+      )?.superpositionCommune;
+      const zonesSaved = await this.computeRegleAr(departement, date);
+      if (zonesSaved.length > 0) {
+        switch (param) {
+          case 'no':
+          case 'no_all':
+            break;
+          case 'yes_all':
+            await this.computeYesDistinct(departement, false);
+            await this.computeYesAll(departement, false);
+            break;
+          case 'yes_only_aep':
+            await this.computeYesDistinct(departement, true);
+            break;
+          case 'yes_except_aep':
+            await this.computeYesDistinct(departement, false);
+            await this.computeYesAll(departement, true);
+            break;
+          case 'yes_distinct':
+            await this.computeYesDistinct(departement, false);
+            break;
+          default:
+            this.logger.error(
+              `COMPUTING ${departement.code} - ${departement.nom} - ${param} not implemented`,
+              '',
+            );
+        }
+      }
+      await this.computeCommunesIntersected(departement);
+    }
+  }
+
+  findZonesForStatistics(departementCodes?: string[]) {
+    const options: FindManyOptions<ZoneAlerteComputedHistoric> = {
+      select: {
+        id: true,
+        type: true,
+        departement: {
+          code: true,
+        },
+        restriction: {
+          niveauGravite: true,
+        },
+      },
+      relations: ['departement', 'restriction'],
+    };
+
+    if (departementCodes?.length > 0) {
+      options.where = {
+        departement: {
+          code: In(departementCodes),
+        },
+      };
+    }
+
+    return this.zoneAlerteComputedHistoricRepository.find(options);
   }
 
   async computeRegleAr(departement: Departement, date: Moment) {

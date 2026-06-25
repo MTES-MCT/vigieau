@@ -46,6 +46,7 @@ export class StatisticCommuneService {
     date: Date,
     historic?: boolean,
     historicNotComputed?: boolean,
+    departementCodes?: string[],
   ) {
     const dateString = date.toISOString().split('T')[0];
     this.logger.log(
@@ -53,10 +54,14 @@ export class StatisticCommuneService {
     );
 
     const batchSize = 1000;
-    const communeSize = await this.communeService.count();
+    const communeSize = await this.communeService.count(departementCodes);
     for (let i = 0; i < communeSize; i += batchSize) {
       this.logger.log(`BATCH ${i}`);
-      const communes = await this.communeService.findWithStats(batchSize, i);
+      const communes = await this.communeService.findWithStats(
+        batchSize,
+        i,
+        departementCodes,
+      );
 
       await Promise.all(
         communes.map(async (c: Commune) => {
@@ -165,7 +170,7 @@ export class StatisticCommuneService {
     }
   }
 
-  async computeByMonth(date?: Moment) {
+  async computeByMonth(date?: Moment, departementCodes?: string[]) {
     this.logger.log('COMPUTE BY MONTH');
 
     const dateDebut = date ? date : moment('01/01/2013', 'DD/MM/YYYY');
@@ -177,18 +182,28 @@ export class StatisticCommuneService {
       m.add(1, 'month')
     ) {
       this.logger.log(`COMPUTE STAT BY MONTH ${m.format('YYYY-MM')}`);
-      await this.computeCommuneStatisticsRestrictionsByMonth(m.toDate());
+      await this.computeCommuneStatisticsRestrictionsByMonth(
+        m.toDate(),
+        departementCodes,
+      );
     }
   }
 
-  async computeCommuneStatisticsRestrictionsByMonth(date: Date) {
+  async computeCommuneStatisticsRestrictionsByMonth(
+    date: Date,
+    departementCodes?: string[],
+  ) {
     const dateMoment = moment(date);
 
     const batchSize = 1000;
-    const communeSize = await this.communeService.count();
+    const communeSize = await this.communeService.count(departementCodes);
     for (let i = 0; i < communeSize; i += batchSize) {
       this.logger.log(`BATCH ${i}`);
-      const communes = await this.communeService.findWithStats(batchSize, i);
+      const communes = await this.communeService.findWithStats(
+        batchSize,
+        i,
+        departementCodes,
+      );
 
       await Promise.all(
         communes.map(async (c: Commune) => {
@@ -256,7 +271,7 @@ where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dat
     }
   }
 
-  async sortStatCommune() {
+  async sortStatCommune(departementCodes?: string[]) {
     this.logger.log(`SORTING COMMUNE STATISTICS RESTRICTIONS`);
     const qb = this.statisticCommuneRepository
       .createQueryBuilder('statistic_commune')
@@ -270,9 +285,20 @@ where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dat
       FROM jsonb_array_elements(restrictions) AS r
       ORDER BY (r->>'date')::date
     ) as sorted
-             )`,
+              )`,
       })
       .where(`"restrictions" is not null`);
+    if (departementCodes?.length > 0) {
+      qb.andWhere(
+        `"communeId" IN (
+          SELECT commune.id
+          FROM commune
+          JOIN departement ON departement.id = commune."departementId"
+          WHERE departement.code IN (:...departementCodes)
+        )`,
+        { departementCodes },
+      );
+    }
     await qb.execute();
 
     const qbBis = this.statisticCommuneRepository
@@ -290,6 +316,17 @@ where id = ${statCommune.id} and to_char((r->>'date')::date, 'YYYY-MM') = '${dat
               )`,
       })
       .where(`"restrictionsByMonth" is not null`);
+    if (departementCodes?.length > 0) {
+      qbBis.andWhere(
+        `"communeId" IN (
+          SELECT commune.id
+          FROM commune
+          JOIN departement ON departement.id = commune."departementId"
+          WHERE departement.code IN (:...departementCodes)
+        )`,
+        { departementCodes },
+      );
+    }
     await qbBis.execute();
     return;
   }
