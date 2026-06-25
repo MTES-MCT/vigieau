@@ -37,7 +37,6 @@ const showRestrictionsBtn = ref(true);
 const showError = ref(false);
 const refDataStore = useRefDataStore();
 const depsSelected = ref([]);
-const loading = ref(false);
 
 const initialState = [
   [-7.075195, 41.211722],
@@ -68,6 +67,7 @@ const p = new PMTiles(PMTILES_URL);
 // this is so we share one instance across the JS code and the map renderer
 protocol.add(p);
 let firstSymbolId: any;
+let mapPopupRequestId = 0;
 
 // Create a popup, but don't add it to the map yet.
 const popup = new maplibregl.Popup({
@@ -122,35 +122,16 @@ onMounted(() => {
   });
 
   map.value?.on('click', 'departements-overlay', async (e: any) => {
-    if (loading.value) {
-      return;
-    }
-    loading.value = true;
+    const requestId = ++mapPopupRequestId;
     const features = map.value?.queryRenderedFeatures(e.point, {
       layers: ['zones-data'],
     });
     const coordinates = e.lngLat;
-    const properties = features?.map((f: any) => f.properties);
+    const properties = features ? features.map((f: any) => f.properties) : [];
     zonesSelected.value = properties ? properties.map((p: any) => p.id) : [];
 
-    const dataAddress = (
-      await api.searchAddressByLatlon(coordinates.lng, coordinates.lat)
-    ).data;
-    const dataGeo = (
-      await api.searchGeoByLatlon(coordinates.lng, coordinates.lat)
-    ).data;
-
-    const description = utils.generatePopupHtml(
-      properties,
-      showRestrictionsBtn.value,
-      dataAddress.value?.features[0],
-      dataGeo.value[0],
-    );
-    loading.value = false;
-
     updateContourFilter();
-
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    renderMapPopup(coordinates, properties);
     map.value.flyTo({
       center: [
         e.lngLat.lng - 0.5 / map.value.getZoom(),
@@ -160,39 +141,20 @@ onMounted(() => {
       speed: 0.2,
     });
 
-    const btn = document.getElementsByClassName('btn-map-popup')[0];
-    if (!btn) {
+    const [addressResult, geoResult] = await Promise.allSettled([
+      api.searchAddressByLatlon(coordinates.lng, coordinates.lat),
+      api.searchGeoByLatlon(coordinates.lng, coordinates.lat),
+    ]);
+    if (requestId !== mapPopupRequestId) {
       return;
     }
-    btn.addEventListener('click', async () => {
-      // On modifie l'objet adresse car au clic sur la carte on veut vraiment le lon / lat exact
-      const address = {
-        geometry: {
-          coordinates: [coordinates.lng, coordinates.lat],
-        },
-        properties: {
-          citycode: dataAddress.value?.features[0]?.properties?.citycode
-            ? dataAddress.value.features[0].properties.citycode
-            : dataGeo.value[0]?.code
-              ? dataGeo.value[0].code
-              : null,
-          label: `${dataGeo.value[0]?.nom}, ${dataGeo.value[0]?.codeDepartement}`,
-        },
-      };
-      utils.searchZones(
-        address,
-        null,
-        props.profil,
-        selectedTypeEau.value,
-        router,
-        modalTitle,
-        modalText,
-        modalIcon,
-        modalActions,
-        modalOpened,
-        loadingZones,
-      );
-    });
+    const address =
+      addressResult.status === 'fulfilled'
+        ? addressResult.value.data.value?.features?.[0]
+        : null;
+    const geo =
+      geoResult.status === 'fulfilled' ? geoResult.value.data.value?.[0] : null;
+    renderMapPopup(coordinates, properties, address, geo);
   });
 
   map.value?.on('mouseenter', 'zones-data', () => {
@@ -304,6 +266,68 @@ const updateDepartementsContourFilter = () => {
 const closeModal = () => {
   modalOpened.value = false;
 };
+
+function renderMapPopup(
+  coordinates: { lng: number; lat: number },
+  properties: any[],
+  address?: any,
+  geo?: any,
+) {
+  const description = utils.generatePopupHtml(
+    properties,
+    showRestrictionsBtn.value,
+    address,
+    geo,
+  );
+
+  popup.setLngLat(coordinates).setHTML(description).addTo(map.value);
+  bindMapPopupButton(coordinates, address, geo);
+}
+
+function bindMapPopupButton(
+  coordinates: { lng: number; lat: number },
+  address?: any,
+  geo?: any,
+) {
+  const btn = popup
+    .getElement()
+    ?.querySelector<HTMLButtonElement>('.btn-map-popup');
+  if (!btn) {
+    return;
+  }
+
+  btn.addEventListener('click', async () => {
+    // On garde le lon/lat exact du clic, même quand le libellé vient d'un service externe.
+    const selectedAddress = {
+      geometry: {
+        coordinates: [coordinates.lng, coordinates.lat],
+      },
+      properties: {
+        postcode: address?.properties?.postcode || '',
+        label:
+          geo?.nom && geo?.codeDepartement
+            ? `${geo.nom}, ${geo.codeDepartement}`
+            : address?.properties?.label || 'Point sélectionné sur la carte',
+        type: 'coordinates',
+        citycode: address?.properties?.citycode || geo?.code || '',
+        context: address?.properties?.context || '',
+      },
+    };
+    utils.searchZones(
+      selectedAddress,
+      null,
+      props.profil,
+      selectedTypeEau.value,
+      router,
+      modalTitle,
+      modalText,
+      modalIcon,
+      modalActions,
+      modalOpened,
+      loadingZones,
+    );
+  });
+}
 
 const addSourceAndLayerZones = (pmtilesUrl: string) => {
   if (map.value?.getLayer('zones-data')) {
@@ -584,7 +608,6 @@ watch(
     <div
       class="map-wrap"
       :class="{
-        'map-wrap--loading': loading,
         'map-wrap--full-actions': !hideTypeEau,
       }"
     >
@@ -654,9 +677,6 @@ watch(
     border-radius: 15px;
   }
 
-  &--loading :deep(.maplibregl-canvas-container.maplibregl-interactive) {
-    cursor: wait;
-  }
 }
 
 .map-pre-actions,

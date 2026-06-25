@@ -31,9 +31,21 @@ const index = {
 
   searchZonesByAdress(address: Address): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    let options = ['municipality'].includes(address.properties.type) ?
-      `/zones?commune=${address.properties.citycode}` :
-      `/zones?lon=${address.geometry.coordinates[0]}&lat=${address.geometry.coordinates[1]}&commune=${address.properties.citycode}`;
+    const citycode = address.properties.citycode;
+    const coordinates = address.geometry?.coordinates;
+    const params = new URLSearchParams();
+    if (['municipality'].includes(address.properties.type) && citycode) {
+      params.set('commune', citycode);
+    } else {
+      if (coordinates?.length >= 2) {
+        params.set('lon', String(coordinates[0]));
+        params.set('lat', String(coordinates[1]));
+      }
+      if (citycode) {
+        params.set('commune', citycode);
+      }
+    }
+    const options = `/zones?${params.toString()}`;
     return useFetch(options, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
