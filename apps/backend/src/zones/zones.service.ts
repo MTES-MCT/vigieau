@@ -29,6 +29,7 @@ export class ZonesService {
   lastUpdate = null;
   lastUpdateAm = null;
   loading = false;
+  private zonesLoadPromise: Promise<void> | null = null;
 
   constructor(
     @InjectRepository(ZoneAlerteComputed)
@@ -53,13 +54,15 @@ export class ZonesService {
    * @param profil - Profil utilisateur
    * @param zoneType - Type de zone
    */
-  find(
+  async find(
     queryLon?: string,
     queryLat?: string,
     commune?: string,
     profil?: string,
     zoneType?: string,
-  ): any[] {
+  ): Promise<any[]> {
+    await this.refreshZonesIfStale();
+
     if (queryLon && queryLat) {
       const lon = parseFloat(queryLon);
       const lat = parseFloat(queryLat);
@@ -99,6 +102,8 @@ export class ZonesService {
    * @returns La zone formatée ou une exception si introuvable
    */
   async findOne(id: number): Promise<any> {
+    await this.refreshZonesIfStale();
+
     const z = this.allZonesWithRestrictions.find((zone) => zone.id === id);
     if (z) {
       return this.formatZone(z);
@@ -116,6 +121,8 @@ export class ZonesService {
    * @returns Liste des zones formatées ou une exception si aucune zone n'est trouvée
    */
   async findByDepartement(depCode: string): Promise<any> {
+    await this.refreshZonesIfStale();
+
     const zones = this.allZonesWithRestrictions.filter(
       (zone) => zone.departement === depCode,
     );
@@ -181,6 +188,13 @@ export class ZonesService {
    * @returns Les zones correspondant à la commune
    */
   searchZonesByCommune(commune, allowMultiple = false) {
+    if (!this.zoneTree) {
+      throw new HttpException(
+        `Les données des zones sont en cours de chargement.`,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
     const zones = this.zonesCommunesIndex[commune];
     const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
     zones?.forEach((zone) => {
@@ -207,6 +221,18 @@ export class ZonesService {
    * @param onInit - Indique si le chargement est effectué à l'initialisation
    */
   async loadAllZones(onInit = false): Promise<void> {
+    if (this.zonesLoadPromise) {
+      return this.zonesLoadPromise;
+    }
+
+    this.zonesLoadPromise = this.loadAllZonesInternal(onInit).finally(() => {
+      this.zonesLoadPromise = null;
+    });
+
+    return this.zonesLoadPromise;
+  }
+
+  private async loadAllZonesInternal(onInit = false): Promise<void> {
     this.loading = true;
     try {
       this.logger.log('LOADING ALL ZONES & COMMUNES - BEGIN');
@@ -277,6 +303,7 @@ export class ZonesService {
       await this.updateArreteMunicipaux(); // Étape 5 : Mettre à jour les arrêtés municipaux.
 
       this.loading = false;
+      this.lastUpdate = new Date();
       this.logger.log('LOADING ALL ZONES & COMMUNES - END');
       this.departementsService.loadSituation(this.allZonesWithRestrictions);
     } catch (e) {
@@ -288,6 +315,29 @@ export class ZonesService {
       this.statisticsService.loadStatistics();
       this.dataService.loadData();
     }
+  }
+
+  private async refreshZonesIfStale(): Promise<void> {
+    if (!this.lastUpdate) {
+      return;
+    }
+
+    if (await this.hasNewZoneComputation()) {
+      await this.loadAllZones();
+    }
+  }
+
+  private async hasNewZoneComputation(): Promise<boolean> {
+    const count = await this.configRepository
+      .createQueryBuilder('config')
+      .where({
+        computeZoneAlerteComputedDate: MoreThan(
+          this.lastUpdate.toLocaleString('sv'),
+        ),
+      })
+      .getCount();
+
+    return count > 0;
   }
 
   /**
@@ -312,8 +362,6 @@ export class ZonesService {
         'geom',
       )
       .getRawMany();
-
-    this.lastUpdate = new Date();
 
     // Mapping initial des zones avec des restrictions vides pour les enrichir plus tard.
     const toReturn = rawZones.map((zone) => ({
@@ -553,16 +601,8 @@ export class ZonesService {
     if (this.loading || !this.lastUpdate) {
       return;
     }
-    const count = await this.configRepository
-      .createQueryBuilder('config')
-      .where({
-        computeZoneAlerteComputedDate: MoreThan(
-          this.lastUpdate.toLocaleString('sv'),
-        ),
-      })
-      .getCount();
-    if (count > 0) {
-      this.loadAllZones();
+    if (await this.hasNewZoneComputation()) {
+      await this.loadAllZones();
     }
     return;
   }

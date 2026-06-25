@@ -40,7 +40,7 @@ describe('ZonesService', () => {
   const mockConfigRepository = {
     createQueryBuilder: jest.fn(() => ({
       where: jest.fn().mockReturnThis(),
-      getCount: jest.fn(),
+      getCount: jest.fn().mockResolvedValue(0),
     })),
   };
 
@@ -101,30 +101,56 @@ describe('ZonesService', () => {
   });
 
   describe('find', () => {
-    it('should throw an error if both lon/lat and commune are missing', () => {
-      expect(() => service.find()).toThrowError(HttpException);
+    beforeEach(() => {
+      service.lastUpdate = new Date();
     });
 
-    it('should call searchZonesByLonLat if lon/lat are provided', () => {
+    it('should throw an error if both lon/lat and commune are missing', async () => {
+      await expect(service.find()).rejects.toThrow(HttpException);
+    });
+
+    it('should call searchZonesByLonLat if lon/lat are provided', async () => {
       // @ts-ignore
       jest.spyOn(service, 'searchZonesByLonLat').mockReturnValue([]);
       // @ts-ignore
       jest.spyOn(service, 'formatZones').mockReturnValue([]);
 
-      service.find('2.123', '48.123');
+      await service.find('2.123', '48.123');
       expect(service.searchZonesByLonLat).toHaveBeenCalledWith({
         lon: 2.123,
         lat: 48.123,
       });
     });
 
-    it('should call searchZonesByCommune if commune is provided', () => {
+    it('should call searchZonesByCommune if commune is provided', async () => {
       // @ts-ignore
       jest.spyOn(service, 'searchZonesByCommune').mockReturnValue([]);
       // @ts-ignore
       jest.spyOn(service, 'formatZones').mockReturnValue([]);
 
-      service.find(undefined, undefined, '12345');
+      await service.find(undefined, undefined, '12345');
+      expect(service.searchZonesByCommune).toHaveBeenCalledWith('12345');
+    });
+
+    it('should reload zones before lookup when a newer computation is available', async () => {
+      const queryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        getCount: jest.fn().mockResolvedValue(1),
+      };
+      jest
+        .spyOn(configRepository, 'createQueryBuilder')
+        // @ts-ignore
+        .mockReturnValue(queryBuilder);
+      // @ts-ignore
+      jest.spyOn(service, 'loadAllZones').mockResolvedValue(undefined);
+      // @ts-ignore
+      jest.spyOn(service, 'searchZonesByCommune').mockReturnValue([]);
+      // @ts-ignore
+      jest.spyOn(service, 'formatZones').mockReturnValue([]);
+
+      await service.find(undefined, undefined, '12345');
+
+      expect(service.loadAllZones).toHaveBeenCalled();
       expect(service.searchZonesByCommune).toHaveBeenCalledWith('12345');
     });
   });
@@ -142,6 +168,7 @@ describe('ZonesService', () => {
   describe('findOne', () => {
     it('should return a formatted zone if it exists', async () => {
       const mockZone = { id: 1 };
+      service.lastUpdate = null;
       service.allZonesWithRestrictions = [mockZone];
       // @ts-ignore
       jest.spyOn(service, 'formatZone').mockReturnValue(mockZone);
@@ -151,6 +178,7 @@ describe('ZonesService', () => {
     });
 
     it('should throw a 404 error if the zone does not exist', async () => {
+      service.lastUpdate = null;
       service.allZonesWithRestrictions = [];
       await expect(service.findOne(1)).rejects.toThrow(HttpException);
     });
@@ -159,6 +187,7 @@ describe('ZonesService', () => {
   describe('findByDepartement', () => {
     it('should return formatted zones for a valid department code', async () => {
       const mockZone = { id: 1, departement: '01' };
+      service.lastUpdate = null;
       service.allZonesWithRestrictions = [mockZone];
       // @ts-ignore
       jest.spyOn(service, 'formatZone').mockReturnValue(mockZone);
@@ -168,6 +197,7 @@ describe('ZonesService', () => {
     });
 
     it('should throw a 404 error if no zones are found for the department', async () => {
+      service.lastUpdate = null;
       service.allZonesWithRestrictions = [];
       await expect(service.findByDepartement('01')).rejects.toThrow(
         HttpException,
