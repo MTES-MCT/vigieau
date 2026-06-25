@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
-    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && rm -rf tippecanoe/ && npm install --omit=dev --package-lock=false --ignore-scripts",
+    "scalingo-postbuild": "nest build && cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/ && git clone https://github.com/felt/tippecanoe.git && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && rm -rf tippecanoe/ && yarn --cwd ../.. install --frozen-lockfile --non-interactive && rm -rf node_modules && cp -a ../../node_modules ./node_modules && node -e \"['dotenv','@sentry/nestjs','@sentry/nestjs/setup','@sentry/profiling-node','express-session','connect-typeorm','lodash'].forEach(require.resolve)\"",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
