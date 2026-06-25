@@ -18,7 +18,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "scalingo-postbuild": "nest build"
+    "scalingo-postbuild": "nest build && npm install --omit=dev --package-lock=false --ignore-scripts"
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
