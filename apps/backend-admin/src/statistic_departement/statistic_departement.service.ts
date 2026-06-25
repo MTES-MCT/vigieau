@@ -34,7 +34,10 @@ export class StatisticDepartementService {
     private readonly zoneAlerteService: ZoneAlerteService,
   ) {
     this.loadStatDep();
-    if (isMainThread) {
+    if (
+      isMainThread &&
+      process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS !== 'true'
+    ) {
       setTimeout(() => {
         this.computeDepartementStatistics();
       }, 5000);

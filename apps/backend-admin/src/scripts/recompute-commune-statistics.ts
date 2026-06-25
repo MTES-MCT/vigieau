@@ -6,6 +6,8 @@ import { DepartementService } from '../departement/departement.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 
+process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
+
 function parseDates(): string[] {
   const dates = new Set<string>();
 
@@ -134,8 +136,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error('[recompute-commune-statistics] failed');
-  console.error(error);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error('[recompute-commune-statistics] failed');
+    console.error(error);
+    process.exit(1);
+  });
