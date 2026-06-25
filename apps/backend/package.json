@@ -18,7 +18,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "scalingo-postbuild": "nest build && rm -rf node_modules && cp -a ../../node_modules ./node_modules && node -e \"['@sentry/nestjs','@sentry/nestjs/setup','@sentry/profiling-node','@turf/bbox','@turf/boolean-point-in-polygon','dotenv'].forEach((pkg) => require.resolve(pkg))\""
+    "scalingo-postbuild": "npm run build"
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",

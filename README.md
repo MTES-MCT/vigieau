@@ -37,6 +37,8 @@ npm install
 
 Le monorepo utilise npm workspaces. `package-lock.json` est le lockfile de référence ; ne recréez pas de `yarn.lock`.
 
+Les applications Scalingo sont construites depuis leur `PROJECT_DIR` (`apps/backend`, `apps/backend-admin`, `apps/frontend`, `apps/frontend-admin`). Une dépendance utilisée au runtime par une app doit donc être déclarée dans le `package.json` de cette app, pas seulement à la racine du monorepo. Le `package.json` racine sert au pilotage des workspaces et ne doit pas compenser une dépendance manquante côté app.
+
 ## Variables d’environnement
 
 ```bash

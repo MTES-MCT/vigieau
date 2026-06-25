@@ -29,11 +29,6 @@
   "devDependencies": {
     "concurrently": "^7.0.0"
   },
-  "dependencies": {
-    "connect-typeorm": "^2.0.0",
-    "nestjs-paginate": "^11.0.1",
-    "typeorm": "^0.3.20"
-  },
   "packageManager": "npm@11.17.0",
   "engines": {
     "node": "24.x",
