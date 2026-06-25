@@ -139,12 +139,20 @@ export class ZonesService {
     coords: { lon: number; lat: number },
     allowMultiple = false,
   ): any[] {
+    if (!this.zoneTree) {
+      throw new HttpException(
+        `Les données des zones sont en cours de chargement.`,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
     const { lon, lat } = coords;
     const zones = this.zoneTree
       .search(lon, lat, lon, lat)
       .map((idx) => this.zonesFeatures[idx])
       .filter((feature) => booleanPointInPolygon([lon, lat], feature))
-      .map((feature) => this.zonesIndex[feature.properties.idZone]);
+      .map((feature) => this.zonesIndex[feature.properties.idZone])
+      .filter(Boolean);
 
     const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
     zones.forEach((zone) => {
@@ -254,7 +262,7 @@ export class ZonesService {
             return {
               id: u.id,
               nom: u.nom,
-              thematique: u.thematique.nom,
+              thematique: u.thematique?.nom,
               description: description,
               concerneParticulier: u.concerneParticulier,
               concerneEntreprise: u.concerneEntreprise,

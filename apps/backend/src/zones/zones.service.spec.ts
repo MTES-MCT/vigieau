@@ -129,6 +129,15 @@ describe('ZonesService', () => {
     });
   });
 
+  describe('searchZonesByLonLat', () => {
+    it('should return a service unavailable error while the zone tree is not ready', () => {
+      service.zoneTree = undefined;
+
+      expect(() => service.searchZonesByLonLat({ lon: 2.123, lat: 48.123 }))
+        .toThrow(HttpException);
+    });
+  });
+
   describe('findOne', () => {
     it('should return a formatted zone if it exists', async () => {
       const mockZone = { id: 1 };
