@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import moment from 'moment';
 import { json2csv } from 'json-2-csv';
+import { sortByDateDesc } from '../../utils/date-sort';
 
 const props = defineProps<{
   dataDepartement: any,
@@ -15,7 +16,7 @@ const rows = ref([]);
 const componentKey = ref(0);
 
 async function downloadCsv() {
-  const formatData = props.dataDepartement
+  const formatData = sortByDateDesc(props.dataDepartement)
     .map((stat: any) => {
       return {
         date: stat.date,
@@ -56,7 +57,7 @@ watch(() => [props.typeEau, props.dataDepartement], () => {
   if (!props.dataDepartement) {
     return;
   }
-  rows.value = props.dataDepartement.map(s => {
+  rows.value = sortByDateDesc(props.dataDepartement).map(s => {
     return [
       moment(s.date).format('DD/MM/YYYY'),
       s.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'vigilance' ? 1 : 0), 0),

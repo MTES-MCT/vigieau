@@ -2,6 +2,7 @@
 import moment from 'moment';
 import { json2csv } from 'json-2-csv';
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
+import { sortByDateDesc } from '../../utils/date-sort';
 
 const props = defineProps<{
   dataCommune: any,
@@ -15,7 +16,7 @@ const rows = ref([]);
 const componentKey = ref(0);
 
 async function downloadCsv() {
-  const formatData = props.dataCommune
+  const formatData = sortByDateDesc(props.dataCommune)
     .map((stat: any) => {
       return {
         date: stat.date,
@@ -42,7 +43,7 @@ watch(() => [props.dataCommune], () => {
   if(!props.dataCommune) {
     return;
   }
-  rows.value = props.dataCommune.map(s => {
+  rows.value = sortByDateDesc(props.dataCommune).map(s => {
     return [
       moment(s.date).format('DD/MM/YYYY'),
       s.AEP ? RestrictionNiveauGraviteFr[s.AEP] : 'Pas de restrictions',
