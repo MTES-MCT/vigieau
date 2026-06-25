@@ -169,7 +169,7 @@ describe('StatisticsService', () => {
         .spyOn(httpService, 'get')
         .mockImplementation(() => of(mockMatomoData as any));
       // @ts-ignore
-      jest.spyOn(statisticRepository, 'save').mockResolvedValue([]);
+      jest.spyOn(statisticRepository, 'upsert').mockResolvedValue({} as any);
       // @ts-ignore
       jest.spyOn(statisticRepository, 'update').mockResolvedValue([]);
       // @ts-ignore
@@ -182,7 +182,11 @@ describe('StatisticsService', () => {
         order: { date: 'DESC' },
       });
 
-      expect(statisticRepository.save).toHaveBeenCalled(); // Ensure stats are saved
+      expect(statisticRepository.upsert).toHaveBeenCalledWith(
+        expect.any(Array),
+        ['date'],
+      );
+      expect(statisticRepository.update).not.toHaveBeenCalled();
     });
   });
 

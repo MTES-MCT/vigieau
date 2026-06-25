@@ -16,7 +16,8 @@ import { json, urlencoded } from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  app.useLogger(app.get(RegleauLogger));
+  const logger = app.get(RegleauLogger);
+  app.useLogger(logger);
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -65,11 +66,14 @@ async function bootstrap() {
         domain: configService.get('DOMAIN'),
       },
       // @ts-ignore
-      store: new TypeormStore().connect(sessionRepository),
+      store: new TypeormStore({
+        onError: (_store, error) => {
+          logger.error('SESSION STORE ERROR', error.stack || error.message);
+        },
+      }).connect(sessionRepository),
     }),
   );
   app.use(passport.initialize());
-  app.use(passport.session());
 
   await app.listen(configService.get('PORT'));
 }

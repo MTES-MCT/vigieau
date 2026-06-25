@@ -44,32 +44,35 @@ export class AuthController {
 
   @Get('/logout')
   @ApiOperation({ summary: 'OAuth - Logout' })
-  async logout(@Req() req, @Res() res: Response, next) {
-    const id_token = req.session.user ? req.session.user.id_token : undefined;
+  async logout(@Req() req, @Res() res: Response) {
+    const id_token = req.session?.user?.id_token;
     res.clearCookie('regleau_session');
-    req.logout((err) => {
-      if (err) {
-        return next(err);
-      }
-      req.session.destroy(async () => {
-        const TrustIssuer = await Issuer.discover(
-          `${this.configService.get(
-            'OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER',
-          )}/.well-known/openid-configuration`,
+
+    const redirectAfterLogout = async () => {
+      const TrustIssuer = await Issuer.discover(
+        `${this.configService.get(
+          'OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER',
+        )}/.well-known/openid-configuration`,
+      );
+      const end_session_endpoint = TrustIssuer.metadata.end_session_endpoint;
+      if (end_session_endpoint && id_token) {
+        res.redirect(
+          end_session_endpoint +
+            '?post_logout_redirect_uri=' +
+            this.configService.get('WEBSITE_URL') +
+            '&id_token_hint=' +
+            id_token,
         );
-        const end_session_endpoint = TrustIssuer.metadata.end_session_endpoint;
-        if (end_session_endpoint && id_token) {
-          res.redirect(
-            end_session_endpoint +
-              '?post_logout_redirect_uri=' +
-              this.configService.get('WEBSITE_URL') +
-              '&id_token_hint=' +
-              id_token,
-          );
-        } else {
-          res.redirect(this.configService.get('WEBSITE_URL'));
-        }
-      });
-    });
+      } else {
+        res.redirect(this.configService.get('WEBSITE_URL'));
+      }
+    };
+
+    if (!req.session) {
+      await redirectAfterLogout();
+      return;
+    }
+
+    req.session.destroy(redirectAfterLogout);
   }
 }

@@ -353,21 +353,11 @@ export class StatisticsService {
       statsToSave.push(stat);
     }
 
-    if (lastStat) {
-      await this.statisticRepository.update(
-        { id: lastStat.id },
-        statsToSave.find(
-          (stat) => stat.date.getTime() <= lastStatDate.getTime(),
-        ),
-      );
+    if (statsToSave.length > 0) {
+      await this.statisticRepository.upsert(statsToSave, ['date']);
     }
 
-    await this.statisticRepository.save(
-      statsToSave.filter(
-        (stat) => stat.date.getTime() > lastStatDate.getTime(),
-      ),
-    );
-    this.loadStatistics();
+    await this.loadStatistics();
   }
 
   /**
