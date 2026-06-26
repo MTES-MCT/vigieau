@@ -247,26 +247,15 @@ export class ZoneAlerteService {
     try {
       const { data } = await firstValueFrom(this.httpService.get(url));
       const idsSandre = data.features.map((f) => +f.properties.gid);
-      const promises = [];
+      const savePromises = [];
       for (const f of data.features) {
-        let existingZone = await this.zoneAlerteRepository.findOne({
-          where: [
-            {
-              idSandre: +f.properties.gid,
-            },
-            {
-              idSandre: IsNull(),
-              code: f.properties.CdAltZAS,
-              departement: {
-                code: depCode,
-              },
-              type: f.properties.TypeZAS,
-              numeroVersion: f.properties.NumeroVersionZAS
-                ? +f.properties.NumeroVersionZAS
-                : IsNull(),
-            },
-          ],
-        });
+        const zoneCode = this.getSandreZoneCode(f.properties);
+        let existingZone = await this.findExistingSandreZone(
+          +f.properties.gid,
+          depCode,
+          f.properties.TypeZAS,
+          zoneCode,
+        );
         if (!existingZone) {
           zonesAdded++;
           existingZone = new ZoneAlerte();
@@ -282,7 +271,7 @@ export class ZoneAlerteService {
         }
         existingZone.idSandre = +f.properties.gid;
         existingZone.nom = f.properties.LbZAS;
-        existingZone.code = f.properties.CodesAlternatifs?.code ?? '';
+        existingZone.code = zoneCode;
         existingZone.type = f.properties.TypeZAS;
         existingZone.numeroVersionSandre = f.properties.NumeroVersionZAS
           ? +f.properties.NumeroVersionZAS
@@ -290,8 +279,9 @@ export class ZoneAlerteService {
         existingZone.geom = f.geometry;
         existingZone.ressourceInfluencee = f.properties.RessInfluenceeZAS === 1;
         existingZone.disabled = false;
-        promises.push(this.zoneAlerteRepository.save(existingZone));
+        savePromises.push(this.zoneAlerteRepository.save(existingZone));
       }
+      await Promise.all(savePromises);
       const idsToDisable = await this.zoneAlerteRepository.find(<
         FindManyOptions
       >{
@@ -319,13 +309,12 @@ export class ZoneAlerteService {
           },
         ],
       });
-      promises.push(
-        this.zoneAlerteRepository.update(
+      if (idsToDisable.length > 0) {
+        await this.zoneAlerteRepository.update(
           idsToDisable.map((z) => z.id),
           { disabled: true },
-        ),
-      );
-      await Promise.all(promises);
+        );
+      }
       await this.departementService.getAll();
       this.logger.log(`${zonesUpdates} ZONES D'ALERTES MIS A JOUR`);
       this.logger.log(`${zonesAdded} ZONES D'ALERTES AJOUTEES`);
@@ -410,5 +399,90 @@ export class ZoneAlerteService {
     );
 
     return result[0]?.combined_geom;
+  }
+
+  private async findExistingSandreZone(
+    idSandre: number,
+    depCode: string,
+    type: 'SOU' | 'SUP',
+    code: string,
+  ): Promise<ZoneAlerte | null> {
+    const existingZone = await this.zoneAlerteRepository.findOne({
+      where: {
+        idSandre,
+      },
+    });
+    if (existingZone || !code) {
+      return existingZone;
+    }
+
+    return this.zoneAlerteRepository.findOne({
+      where: {
+        code,
+        departement: {
+          code: depCode,
+        },
+        type,
+      },
+    });
+  }
+
+  private getSandreZoneCode(properties: Record<string, any>): string {
+    const cdAltZas = this.toNonEmptyString(properties.CdAltZAS);
+    if (cdAltZas) {
+      return cdAltZas;
+    }
+
+    return this.extractCodeFromCodesAlternatifs(
+      properties.CodesAlternatifs,
+    ) ?? '';
+  }
+
+  private extractCodeFromCodesAlternatifs(value: any): string | null {
+    if (!value) {
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const code = this.extractCodeFromCodesAlternatifs(item);
+        if (code) {
+          return code;
+        }
+      }
+      return null;
+    }
+
+    if (typeof value === 'object') {
+      return (
+        this.toNonEmptyString(value.code) ??
+        this.extractCodeFromCodesAlternatifs(Object.values(value))
+      );
+    }
+
+    if (typeof value !== 'string') {
+      return null;
+    }
+
+    const directCode = this.extractCodeFromString(value);
+    if (directCode) {
+      return directCode;
+    }
+
+    try {
+      return this.extractCodeFromCodesAlternatifs(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+
+  private extractCodeFromString(value: string): string | null {
+    const normalizedValue = value.replace(/\\"/g, '"');
+    const codeMatch = normalizedValue.match(/"code"\s*:\s*"([^"]+)"/);
+    return this.toNonEmptyString(codeMatch?.[1]);
+  }
+
+  private toNonEmptyString(value: any): string | null {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
   }
 }
