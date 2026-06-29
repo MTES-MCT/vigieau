@@ -12,7 +12,6 @@ const props = defineProps<{
 
 const refDataStore = useRefDataStore();
 const utils = useUtils();
-const api = useApi();
 
 const departementsFiletered: Ref<any[]> = ref([]);
 const zonesInfluenceesSelected: Ref<ZoneAlerte[]> = ref(props.arreteCadre.zonesAlerte.filter(z => z.ressourceInfluencee));
@@ -83,6 +82,23 @@ const sortCommunes = () => {
     });
 };
 
+const loadCommunes = async () => {
+  const depCodes = props.arreteCadre.departements?.map(d => d.code).filter(Boolean) || [];
+  if (depCodes.length < 1) {
+    communes.value = [];
+    return;
+  }
+
+  loading.value = true;
+  try {
+    await refDataStore.ensureCommunesLoaded(depCodes);
+    const regex = new RegExp(`^(${depCodes.join('|')})`);
+    communes.value = refDataStore.communes.filter(c => regex.test(c.code));
+  } finally {
+    loading.value = false;
+  }
+};
+
 watch(
   () => props.arreteCadre.departements,
   async () => {
@@ -94,9 +110,7 @@ watch(
         .includes(z.id),
     );
     computeDepSelected();
-
-    const regex = new RegExp(`^(${props.arreteCadre.departements?.map(d => d.code).join('|')})`);
-    communes.value = refDataStore.communes.filter(c => regex.test(c.code));
+    await loadCommunes();
   },
   {immediate: true},
 );
@@ -117,6 +131,10 @@ watch(
         <p>
           Sélectionner les communes où ces ressources seront proposées.
         </p>
+        <p v-if="loading" class="fr-mt-2w">
+          <VIcon name="ri-loader-4-line" animation="spin" />
+          Chargement des communes...
+        </p>
         <template v-for="(d, index) in departementsFiletered">
           <div class="divider fr-mb-2w"></div>
           <h6>Ressources influencées - {{ d.nom }} ({{ d.nbZonesInfluenceesSelected }})</h6>
@@ -128,6 +146,7 @@ watch(
                   :label="option.communes?.length > 0 ? 'Modifier un groupement de communes' : 'Ajouter un groupement de communes'"
                   secondary
                   @click="createEditGroupementCommunes(option)"
+                  :disabled="loading"
                   :key="option.id + '-' + accordionKey"
                 />
               </div>
