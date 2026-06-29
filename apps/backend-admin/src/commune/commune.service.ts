@@ -13,6 +13,13 @@ import { User } from '@shared/entities/user.entity';
 @Injectable()
 export class CommuneService {
   private readonly logger = new RegleauLogger('CommuneService');
+  private readonly findCache = new Map<
+    string,
+    { expiresAt: number; value: Commune[] }
+  >();
+  private readonly findCacheFetches = new Map<string, Promise<Commune[]>>();
+  private readonly findCacheTtlMs = 6 * 60 * 60 * 1000;
+  private readonly findCacheMaxSize = 150;
 
   constructor(
     private readonly httpService: HttpService,
@@ -32,6 +39,34 @@ export class CommuneService {
   }
 
   async find(
+    depCodes?: string[],
+    withGeom?: boolean,
+    user?: User,
+  ): Promise<Commune[]> {
+    const cacheKey = this.getFindCacheKey(depCodes, withGeom, user);
+    const cached = this.findCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
+    if (this.findCacheFetches.has(cacheKey)) {
+      return this.findCacheFetches.get(cacheKey);
+    }
+
+    const fetchPromise = this.findFromDatabase(depCodes, withGeom, user)
+      .then((communes) => {
+        this.setFindCache(cacheKey, communes);
+        return communes;
+      })
+      .finally(() => {
+        this.findCacheFetches.delete(cacheKey);
+      });
+
+    this.findCacheFetches.set(cacheKey, fetchPromise);
+    return fetchPromise;
+  }
+
+  private async findFromDatabase(
     depCodes?: string[],
     withGeom?: boolean,
     user?: User,
@@ -69,6 +104,46 @@ export class CommuneService {
     }
 
     return qb.getRawMany();
+  }
+
+  private getFindCacheKey(
+    depCodes?: string[],
+    withGeom?: boolean,
+    user?: User,
+  ): string {
+    const normalizedDepCodes = [
+      ...new Set(depCodes?.filter(Boolean) || []),
+    ].sort();
+    let scope = 'all';
+
+    if (normalizedDepCodes.length > 0) {
+      scope = `dep:${normalizedDepCodes.join(',')}`;
+    } else if (user?.role === 'departement') {
+      scope = `user-dep:${[...new Set(user.role_departements || [])].sort().join(',')}`;
+    } else if (user?.role === 'commune') {
+      scope = `user-commune:${[...new Set(user.role_communes || [])].sort().join(',')}`;
+    }
+
+    return `${withGeom ? 'geom' : 'light'}:${scope}`;
+  }
+
+  private setFindCache(key: string, value: Commune[]): void {
+    if (this.findCache.size >= this.findCacheMaxSize) {
+      const oldestKey = this.findCache.keys().next().value;
+      if (oldestKey) {
+        this.findCache.delete(oldestKey);
+      }
+    }
+
+    this.findCache.set(key, {
+      expiresAt: Date.now() + this.findCacheTtlMs,
+      value,
+    });
+  }
+
+  private clearFindCache(): void {
+    this.findCache.clear();
+    this.findCacheFetches.clear();
   }
 
   findAllLight(): Promise<Commune[]> {
@@ -328,6 +403,7 @@ export class CommuneService {
         }),
       );
     }
+    this.clearFindCache();
     this.logger.log(`${communesUpdated} COMMUNES MIS A JOUR`);
     this.logger.log(`${communesAdded} COMMUNES AJOUTEES`);
   }
