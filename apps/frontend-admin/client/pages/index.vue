@@ -20,51 +20,35 @@ const api = useApi();
 const authStore = useAuthStore();
 const utils = useUtils();
 const router = useRouter();
-const statisticDepartementLoading = ref(true);
-const statisticDepartementError = ref(false);
 
-const loadStatisticDepartement = async () => {
-  statisticDepartementLoading.value = true;
-  statisticDepartementError.value = false;
-  const { data, error } = await api.statisticDepartement.list();
-  if (data.value) {
-    statisticDepartement.value = data.value;
-  }
-  statisticDepartementError.value = !!error.value;
-  statisticDepartementLoading.value = false;
-};
+const { data, error } = await api.statisticDepartement.list();
+if (data.value) {
+  statisticDepartement.value = data.value;
+}
 
 const modalCheckRulesOpened = ref(false);
 const modalTitle = ref('Vérification de vos règles de gestion');
-const modalActions: Ref<any[]> = ref([
-  {
+const modalActions: Ref<any[]> = ref([{
     label: 'Modifier',
     onclick: async () => {
       utils.closeModal(modalCheckRulesOpened);
       await api.user.checkRules();
       router.push('mon-departement');
     },
-  },
-  {
+  }, {
     label: 'Fermer',
     secondary: true,
     onclick: async () => {
       utils.closeModal(modalCheckRulesOpened);
       await api.user.checkRules();
     },
-  },
-]);
-if (
-  authStore.user &&
+  }],
+);
+if (authStore.user &&
   authStore.user.role === 'departement' &&
-  (!authStore.user?.checkRules || moment(authStore.user.checkRules).isBefore(moment().subtract(1, 'years'), 'day'))
-) {
+  (!authStore.user?.checkRules || moment(authStore.user.checkRules).isBefore(moment().subtract(1, 'years'), 'day'))) {
   modalCheckRulesOpened.value = true;
 }
-
-onMounted(() => {
-  loadStatisticDepartement();
-});
 </script>
 
 <template>
@@ -78,16 +62,6 @@ onMounted(() => {
       <div class="fr-grid-row fr-grid-row--gutters">
         <div class="fr-col-12 fr-col-lg-8">
           <AccueilStatsConsultation v-if="statisticDepartement" :statisticDepartement="statisticDepartement" />
-          <div v-else class="fr-card fr-p-2w accueil-loading-card">
-            <h2 class="text-align-center">Nombre de consultations VigiEau sur votre territoire</h2>
-            <p v-if="statisticDepartementLoading" class="fr-mb-0">Chargement des statistiques</p>
-            <DsfrAlert
-              v-if="statisticDepartementError"
-              type="error"
-              description="Les statistiques ne sont pas disponibles pour le moment."
-              :small="true"
-            />
-          </div>
         </div>
         <div class="fr-col-12 fr-col-lg-4">
           <AccueilStatsFeedback />
@@ -97,10 +71,6 @@ onMounted(() => {
         <!--        </div>-->
         <div class="fr-col-12 fr-col-lg-4">
           <AccueilStatsSubscriptions v-if="statisticDepartement" :statisticDepartement="statisticDepartement" />
-          <div v-else class="fr-card fr-p-2w accueil-loading-card">
-            <h2 class="text-align-center">Abonnements mail actifs sur mon territoire</h2>
-            <p v-if="statisticDepartementLoading" class="fr-mb-0">Chargement des statistiques</p>
-          </div>
         </div>
       </div>
     </div>
@@ -109,12 +79,10 @@ onMounted(() => {
     </div>
   </div>
 
-  <DsfrModal
-    :opened="modalCheckRulesOpened"
-    :title="modalTitle"
-    :actions="modalActions"
-    @close="modalCheckRulesOpened = utils.closeModal(modalCheckRulesOpened)"
-  >
+  <DsfrModal :opened="modalCheckRulesOpened"
+             :title="modalTitle"
+             :actions="modalActions"
+             @close="modalCheckRulesOpened = utils.closeModal(modalCheckRulesOpened);">
     <MonDepartementReglesModal />
   </DsfrModal>
 </template>
@@ -137,10 +105,6 @@ onMounted(() => {
   h2 {
     font-size: 1rem;
     line-height: 1.2rem;
-  }
-
-  .accueil-loading-card {
-    min-height: 8rem;
   }
 }
 
