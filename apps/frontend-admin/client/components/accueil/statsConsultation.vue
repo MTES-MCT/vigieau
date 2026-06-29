@@ -50,27 +50,31 @@ const chartLineOptions: ChartOptions = {
   },
 };
 
-
 const dateMin = computed(() => {
-  const dates = props.statisticDepartement?.map((s: any) => s.visits?.map((v: any) => new Date(v.date))).flat();
-  return dates && dates.length > 0 ? new Date(Math.min(...dates?.map(date => date.getTime()))).toISOString().split('T')[0] :
-    new Date().toISOString().split('T')[0];
+  const dates = props.statisticDepartement
+    .flatMap((s: any) => s.visits || [])
+    .map((v: any) => new Date(v.date))
+    .filter((date) => !Number.isNaN(date.getTime()));
+  return dates.length > 0
+    ? new Date(Math.min(...dates.map((date) => date.getTime()))).toISOString().split('T')[0]
+    : new Date().toISOString().split('T')[0];
 });
 const dateDebut = ref(dateMin.value);
 const dateFin = ref(new Date().toISOString().split('T')[0]);
 const currentDate = ref(new Date().toISOString().split('T')[0]);
 
 const computeData = () => {
-  const dates = props.statisticDepartement?.map((s: any) => s.visits?.map((v: any) => v.date))
-    .flat();
+  const dates = props.statisticDepartement.flatMap((s: any) => s.visits?.map((v: any) => v.date) || []);
   const uniqueDates = Array.from(new Set(dates));
   uniqueDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
 
   const data: any[] = [];
-  uniqueDates.map(d => {
-    const visits = props.statisticDepartement?.map(s => {
-      return s.visits.find((v: any) => v.date === d)?.visits;
-    }).reduce((acc, current) => acc + current, 0);
+  uniqueDates.map((d) => {
+    const visits = props.statisticDepartement
+      .map((s) => {
+        return s.visits?.find((v: any) => v.date === d)?.visits || 0;
+      })
+      .reduce((acc, current) => acc + current, 0);
 
     data.push({
       date: d,
@@ -82,7 +86,7 @@ const computeData = () => {
 };
 
 const filterData = () => {
-  const filteredData = fullData.value.filter(d => {
+  const filteredData = fullData.value.filter((d) => {
     const date = new Date(d.date);
     const dateDebutValue = new Date(dateDebut.value);
     const dateFinValue = new Date(dateFin.value);
@@ -90,11 +94,11 @@ const filterData = () => {
   });
 
   chartLineData.value = {
-    labels: filteredData.map(d => new Date(d.date)),
+    labels: filteredData.map((d) => new Date(d.date)),
     datasets: [
       {
         label: 'Visiteurs',
-        data: filteredData.map(d => d.visits),
+        data: filteredData.map((d) => d.visits),
       },
     ],
   };
@@ -139,9 +143,7 @@ watch([dateDebut, dateFin], () => {
       </DsfrInputGroup>
     </div>
     <div v-if="chartLineData">
-      <Line :options="chartLineOptions"
-            id="stats-consultation-line"
-            :data="chartLineData" />
+      <Line :options="chartLineOptions" id="stats-consultation-line" :data="chartLineData" />
     </div>
   </div>
 </template>

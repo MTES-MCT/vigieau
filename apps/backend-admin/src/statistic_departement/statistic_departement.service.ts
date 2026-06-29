@@ -18,6 +18,7 @@ import { isMainThread } from 'worker_threads';
 export class StatisticDepartementService {
   private readonly logger = new RegleauLogger('StatisticDepartementService');
   private statisticDepartements: StatisticDepartement[] = [];
+  private statisticDepartementsLoading: Promise<void> | null = null;
   releaseDate = '2023-07-12';
 
   constructor(
@@ -33,47 +34,70 @@ export class StatisticDepartementService {
     private readonly zoneAlerteComputedHistoricService: ZoneAlerteComputedHistoricService,
     private readonly zoneAlerteService: ZoneAlerteService,
   ) {
-    this.loadStatDep();
+    void this.loadStatDep();
     if (
       isMainThread &&
       process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS !== 'true'
     ) {
       setTimeout(() => {
-        this.computeDepartementStatistics();
+        void this.computeDepartementStatistics();
       }, 5000);
     }
   }
 
-  findAll(currentUser: User): StatisticDepartement[] {
+  async findAll(currentUser: User): Promise<StatisticDepartement[]> {
+    await this.ensureStatDepLoaded();
     if (!currentUser || currentUser.role === 'mte') {
       return this.statisticDepartements;
     } else {
+      const userDepartementCodes = currentUser.role_departements || [];
       return this.statisticDepartements.filter((s) =>
-        currentUser.role_departements.includes(s.departement.code),
+        userDepartementCodes.includes(s.departement.code),
       );
     }
   }
 
-  async loadStatDep() {
-    this.statisticDepartements = await this.statisticDepartementRepository.find(
-      {
-        select: {
-          id: true,
-          visits: true,
-          totalVisits: true,
-          weekVisits: true,
-          monthVisits: true,
-          yearVisits: true,
-          subscriptions: true,
-          departement: {
+  private async ensureStatDepLoaded() {
+    if (this.statisticDepartements.length > 0) {
+      return;
+    }
+    await this.loadStatDep();
+  }
+
+  async loadStatDep(force = false) {
+    if (this.statisticDepartementsLoading && !force) {
+      return this.statisticDepartementsLoading;
+    }
+
+    const loading = (async () => {
+      this.statisticDepartements =
+        await this.statisticDepartementRepository.find({
+          select: {
             id: true,
-            code: true,
-            nom: true,
+            visits: true,
+            totalVisits: true,
+            weekVisits: true,
+            monthVisits: true,
+            yearVisits: true,
+            subscriptions: true,
+            departement: {
+              id: true,
+              code: true,
+              nom: true,
+            },
           },
-        },
-        relations: ['departement'],
-      },
-    );
+          relations: ['departement'],
+        });
+    })();
+
+    this.statisticDepartementsLoading = loading;
+    try {
+      await loading;
+    } finally {
+      if (this.statisticDepartementsLoading === loading) {
+        this.statisticDepartementsLoading = null;
+      }
+    }
   }
 
   @Cron(CronExpression.EVERY_2_HOURS)
@@ -154,7 +178,7 @@ export class StatisticDepartementService {
         await this.statisticDepartementRepository.save(statisticDepartement);
       }
     }
-    this.loadStatDep();
+    await this.loadStatDep(true);
   }
 
   async computeDepartementStatisticsRestrictions(
