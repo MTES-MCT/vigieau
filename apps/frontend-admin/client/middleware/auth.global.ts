@@ -2,8 +2,9 @@ import { useAuthStore } from '~/stores/auth';
 
 export default defineNuxtRouteMiddleware(async (to) => {
   const authStore = useAuthStore();
+  const isConnexionRoute = to.path.replace(/\/$/, '') === '/connexion';
 
-  if (to.path === '/connexion') {
+  if (isConnexionRoute) {
     if (authStore.isAuthenticated) {
       return navigateTo({ path: '/', query: to.query });
     }
