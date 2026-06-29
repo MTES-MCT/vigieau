@@ -1,23 +1,29 @@
 <script setup lang="ts">
+import { useAuthStore } from '~/stores/auth';
+
 definePageMeta({
   layout: 'basic',
 });
 
 const runTimeConfig = useRuntimeConfig().public;
+const authStore = useAuthStore();
 const api = useApi();
 const userSelected = ref(null);
 const userList = ref([]);
 const route = useRoute();
 const isError = !!route.query.error;
-const { data, error } = await api.user.listDev();
-if (data.value) {
-  userList.value = data.value.map((user: any) => {
-    return {
-      text: `${user.email} - ${user.role} - ${user.roleDepartements?.join(', ')}`,
-      value: user.email,
-    };
-  });
-}
+
+const loadDevUsers = async () => {
+  const { data } = await api.user.listDev();
+  if (data.value) {
+    userList.value = data.value.map((user: any) => {
+      return {
+        text: `${user.email} - ${user.role} - ${user.roleDepartements?.join(', ')}`,
+        value: user.email,
+      };
+    });
+  }
+};
 
 useHead({
   title: `Connexion - ${runTimeConfig.appName}`,
@@ -30,6 +36,15 @@ const loginAgentConnect = () => {
 const loginDev = () => {
   navigateTo(`${runTimeConfig.apiUrl}/auth/login/dev/${userSelected.value}`, { external: true });
 };
+
+onMounted(async () => {
+  if (!+runTimeConfig.isProd) {
+    await loadDevUsers();
+  }
+  if (!isError && (await authStore.checkAuthentication())) {
+    await navigateTo('/');
+  }
+});
 </script>
 
 <template>
@@ -58,8 +73,7 @@ const loginDev = () => {
               >
             </p>
           </div>
-          <div class="fr-mb-6v" 
-               v-if="!+runTimeConfig.isProd">
+          <div class="fr-mb-6v" v-if="!+runTimeConfig.isProd">
             <h2>Se connecter (DEV Only)</h2>
             <DsfrSelect v-model="userSelected" :options="userList" />
             <DsfrButton label="Se connecter" data-cy="LoginDevBtn" @click="loginDev()" :disabled="!userSelected" />

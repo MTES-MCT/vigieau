@@ -1,7 +1,7 @@
 import { useAlertStore } from '~/stores/alert';
 import { getApiErrorMessage } from '~/composables/useApiErrorHandler';
 
-export const useCustomFetch = (url: string, options: any, timeout: number = 10000) => {
+export const useCustomFetch = (url: string, options: any, timeout: number = 10000, showAlert = true) => {
   const alertStore = useAlertStore();
 
   const customOptions = {
@@ -11,7 +11,7 @@ export const useCustomFetch = (url: string, options: any, timeout: number = 1000
 
   return useFetch(url, customOptions).then((res) => {
     const error = res.error.value;
-    if (error) {
+    if (error && showAlert) {
       alertStore.addAlert({
         description: getApiErrorMessage(error),
         type: 'error',

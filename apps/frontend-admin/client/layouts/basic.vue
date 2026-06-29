@@ -57,8 +57,8 @@ const accountOptions = (icon: boolean) => {
   });
   return links;
 };
-const loadQuickLinks = async () => {
-  const isAuthenticated = await authStore.isAuthenticated;
+const loadQuickLinks = () => {
+  const isAuthenticated = authStore.isAuthenticated;
   const links = [];
   if (isAuthenticated && ['mte', 'departement'].includes(authStore.user?.role)) {
     links.push({
@@ -92,8 +92,8 @@ const loadQuickLinks = async () => {
   }
   quickLinks.value = links;
 };
-const loadNavItems = async () => {
-  const isAuthenticated = await authStore.isAuthenticated;
+const loadNavItems = () => {
+  const isAuthenticated = authStore.isAuthenticated;
   const links = [];
 
   if (isAuthenticated && ['mte', 'departement'].includes(authStore.user?.role)) {
@@ -211,10 +211,10 @@ onUnmounted(() => {
 });
 
 watch(
-  authStore.user,
-  async () => {
-    await loadQuickLinks();
-    await loadNavItems();
+  () => authStore.user,
+  () => {
+    loadQuickLinks();
+    loadNavItems();
   },
   { immediate: true },
 );
