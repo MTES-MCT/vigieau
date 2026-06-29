@@ -1,12 +1,9 @@
 <script setup lang="ts">
-import { useAuthStore } from '~/stores/auth';
-
 definePageMeta({
   layout: 'basic',
 });
 
 const runTimeConfig = useRuntimeConfig().public;
-const authStore = useAuthStore();
 const api = useApi();
 const userSelected = ref(null);
 const userList = ref([]);
@@ -40,9 +37,6 @@ const loginDev = () => {
 onMounted(async () => {
   if (!+runTimeConfig.isProd) {
     await loadDevUsers();
-  }
-  if (!isError && (await authStore.checkAuthentication())) {
-    await navigateTo('/');
   }
 });
 </script>
