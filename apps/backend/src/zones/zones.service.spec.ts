@@ -38,6 +38,9 @@ describe('ZonesService', () => {
   };
 
   const mockConfigRepository = {
+    findOne: jest.fn().mockResolvedValue({
+      computeZoneAlerteComputedDate: null,
+    }),
     createQueryBuilder: jest.fn(() => ({
       where: jest.fn().mockReturnThis(),
       getCount: jest.fn().mockResolvedValue(0),
@@ -133,14 +136,10 @@ describe('ZonesService', () => {
     });
 
     it('should reload zones before lookup when a newer computation is available', async () => {
-      const queryBuilder = {
-        where: jest.fn().mockReturnThis(),
-        getCount: jest.fn().mockResolvedValue(1),
-      };
-      jest
-        .spyOn(configRepository, 'createQueryBuilder')
-        // @ts-ignore
-        .mockReturnValue(queryBuilder);
+      service['lastZoneComputationDate'] = new Date('2026-06-30T09:00:00Z');
+      jest.spyOn(configRepository, 'findOne').mockResolvedValue(<Config>{
+        computeZoneAlerteComputedDate: new Date('2026-06-30T10:00:00Z'),
+      });
       // @ts-ignore
       jest.spyOn(service, 'loadAllZones').mockResolvedValue(undefined);
       // @ts-ignore
@@ -151,6 +150,25 @@ describe('ZonesService', () => {
       await service.find(undefined, undefined, '12345');
 
       expect(service.loadAllZones).toHaveBeenCalled();
+      expect(service.searchZonesByCommune).toHaveBeenCalledWith('12345');
+    });
+
+    it('should not reload zones when the current computation is already loaded', async () => {
+      const computationDate = new Date('2026-06-30T10:00:00Z');
+      service['lastZoneComputationDate'] = computationDate;
+      jest.spyOn(configRepository, 'findOne').mockResolvedValue(<Config>{
+        computeZoneAlerteComputedDate: computationDate,
+      });
+      // @ts-ignore
+      jest.spyOn(service, 'loadAllZones').mockResolvedValue(undefined);
+      // @ts-ignore
+      jest.spyOn(service, 'searchZonesByCommune').mockReturnValue([]);
+      // @ts-ignore
+      jest.spyOn(service, 'formatZones').mockReturnValue([]);
+
+      await service.find(undefined, undefined, '12345');
+
+      expect(service.loadAllZones).not.toHaveBeenCalled();
       expect(service.searchZonesByCommune).toHaveBeenCalledWith('12345');
     });
   });

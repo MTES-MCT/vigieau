@@ -30,6 +30,9 @@ export class ZonesService {
   lastUpdateAm = null;
   loading = false;
   private zonesLoadPromise: Promise<void> | null = null;
+  private lastZoneComputationDate: Date | null = null;
+  private lastZoneComputationCheckAt = 0;
+  private readonly zoneComputationCheckIntervalMs = 10_000;
 
   constructor(
     @InjectRepository(ZoneAlerteComputed)
@@ -237,6 +240,7 @@ export class ZonesService {
     try {
       this.logger.log('LOADING ALL ZONES & COMMUNES - BEGIN');
 
+      const zoneComputationDate = await this.getZoneComputationDate();
       const zonesWithGeom = await this.loadZones(); // Étape 1 : Charger les zones avec leurs restrictions.
       await this.loadZonesRestrictions(zonesWithGeom); // Étape 2 : Associer les zones à leurs restrictions.
       await this.loadZonesCommunes(zonesWithGeom); // Étape 3 : Associer les zones à leurs communes.
@@ -304,6 +308,7 @@ export class ZonesService {
 
       this.loading = false;
       this.lastUpdate = new Date();
+      this.lastZoneComputationDate = zoneComputationDate;
       this.logger.log('LOADING ALL ZONES & COMMUNES - END');
       this.departementsService.loadSituation(this.allZonesWithRestrictions);
     } catch (e) {
@@ -317,10 +322,20 @@ export class ZonesService {
     }
   }
 
-  private async refreshZonesIfStale(): Promise<void> {
-    if (!this.lastUpdate) {
+  private async refreshZonesIfStale(force = false): Promise<void> {
+    if (!this.lastUpdate || this.loading) {
       return;
     }
+
+    const now = Date.now();
+    if (
+      !force &&
+      now - this.lastZoneComputationCheckAt <
+        this.zoneComputationCheckIntervalMs
+    ) {
+      return;
+    }
+    this.lastZoneComputationCheckAt = now;
 
     if (await this.hasNewZoneComputation()) {
       await this.loadAllZones();
@@ -328,16 +343,29 @@ export class ZonesService {
   }
 
   private async hasNewZoneComputation(): Promise<boolean> {
-    const count = await this.configRepository
-      .createQueryBuilder('config')
-      .where({
-        computeZoneAlerteComputedDate: MoreThan(
-          this.lastUpdate.toLocaleString('sv'),
-        ),
-      })
-      .getCount();
+    const zoneComputationDate = await this.getZoneComputationDate();
 
-    return count > 0;
+    if (!zoneComputationDate) {
+      return false;
+    }
+
+    return (
+      !this.lastZoneComputationDate ||
+      zoneComputationDate.getTime() > this.lastZoneComputationDate.getTime()
+    );
+  }
+
+  private async getZoneComputationDate(): Promise<Date | null> {
+    const config = await this.configRepository.findOne({
+      select: {
+        computeZoneAlerteComputedDate: true,
+      },
+      where: {
+        id: 1,
+      },
+    });
+
+    return config?.computeZoneAlerteComputedDate || null;
   }
 
   /**
@@ -598,13 +626,7 @@ export class ZonesService {
    */
   @Cron(CronExpression.EVERY_10_SECONDS)
   async updateZones(): Promise<void> {
-    if (this.loading || !this.lastUpdate) {
-      return;
-    }
-    if (await this.hasNewZoneComputation()) {
-      await this.loadAllZones();
-    }
-    return;
+    await this.refreshZonesIfStale(true);
   }
 
   /**
