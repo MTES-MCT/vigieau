@@ -1,7 +1,6 @@
 import 'reflect-metadata';
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from '../app.module';
 import { DatagouvService } from '../datagouv/datagouv.service';
 
 function parseYear(value: string | undefined): number {
@@ -14,6 +13,10 @@ function parseYear(value: string | undefined): number {
 
 async function main(): Promise<void> {
   const year = parseYear(process.argv[2]);
+  process.env.DISABLE_SCHEDULED_JOBS = 'true';
+  process.env.SKIP_SCHEMA_BOOTSTRAP = 'true';
+  process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
+  const { AppModule } = await import('../app.module.js');
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
   });

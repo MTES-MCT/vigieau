@@ -3,7 +3,9 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
-import * as archiver from 'archiver';
+// CommonJS import keeps the callable export intact in both Jest and the Nest build.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import archiver = require('archiver');
 import { AxiosError } from 'axios';
 import * as fs from 'node:fs';
 import { json2csv } from 'json-2-csv';
