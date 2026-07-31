@@ -17,6 +17,7 @@
     "start:debug": "nest start --debug --watch --max-old-space-size=4096",
     "start:prod": "node dist/apps/backend-admin/src/main --max-old-space-size=4096",
     "recompute:commune-statistics": "node dist/apps/backend-admin/src/scripts/recompute-commune-statistics.js",
+    "zones:sandre:reconcile": "node dist/apps/backend-admin/src/scripts/reconcile-sandre-zones.js",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -57,6 +58,7 @@
     "express": "^4.18.2",
     "express-formidable": "^1.2.0",
     "express-session": "^1.17.3",
+    "fast-xml-parser": "5.7.3",
     "handlebars": "^4.7.8",
     "helmet": "^8.0.0",
     "json-2-csv": "^5.5.5",
@@ -117,7 +119,11 @@
       "^.+\\.(t|j)s$": "ts-jest"
     },
     "moduleNameMapper": {
-      "^@shared/(.*)$": "<rootDir>/../../../global_shared/$1"
+      "^@shared/(.*)$": "<rootDir>/../../../global_shared/$1",
+      "^connect-typeorm$": "<rootDir>/../node_modules/connect-typeorm",
+      "^nestjs-paginate$": "<rootDir>/../node_modules/nestjs-paginate",
+      "^typeorm$": "<rootDir>/../node_modules/typeorm",
+      "^typeorm/(.*)$": "<rootDir>/../node_modules/typeorm/$1"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"

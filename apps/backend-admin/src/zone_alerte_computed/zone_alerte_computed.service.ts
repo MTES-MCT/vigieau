@@ -29,6 +29,8 @@ import {
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { ZoneAlerteComputedHistoricService } from './zone_alerte_computed_historic.service';
 
+export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
+
 @Injectable()
 export class ZoneAlerteComputedService {
   private readonly logger = new RegleauLogger('ZoneAlerteComputedService');
@@ -109,18 +111,50 @@ export class ZoneAlerteComputedService {
       });
 
       return new Promise((resolve, reject) => {
+        let currentResultReceived = false;
+        let timedOut = false;
+        const timeout = setTimeout(async () => {
+          timedOut = true;
+          const timeoutError = new Error('COMPUTE ALL worker timed out');
+          this.logger.error(timeoutError.message, '');
+          try {
+            await worker.terminate();
+          } catch (error) {
+            this.logger.error(
+              'COMPUTE ALL WORKER TERMINATION ERROR',
+              error instanceof Error ? error.toString() : String(error),
+            );
+          }
+          if (!currentResultReceived) {
+            this.isComputing = false;
+            reject(timeoutError);
+          }
+        }, ZONE_COMPUTE_WORKER_TIMEOUT_MS);
+
         worker.on('message', (result) => {
+          if (timedOut) {
+            return;
+          }
+          currentResultReceived = true;
           this.isComputing = false;
           resolve(result);
         });
 
         worker.on('error', (error) => {
+          if (timedOut) {
+            return;
+          }
+          clearTimeout(timeout);
           this.logger.error('COMPUTE ALL WORKER ERROR', error.toString());
           this.isComputing = false;
           reject(error);
         });
 
         worker.on('exit', (code) => {
+          clearTimeout(timeout);
+          if (timedOut) {
+            return;
+          }
           if (code !== 0) {
             const errorMessage = `COMPUTE ALL Worker stopped with exit code ${code}`;
             this.logger.error(errorMessage, '');

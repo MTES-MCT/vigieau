@@ -1,6 +1,16 @@
+import { EventEmitter } from 'node:events';
+import { Worker } from 'worker_threads';
 import moment from 'moment';
-import { ZoneAlerteComputedService } from './zone_alerte_computed.service';
+import {
+  ZONE_COMPUTE_WORKER_TIMEOUT_MS,
+  ZoneAlerteComputedService,
+} from './zone_alerte_computed.service';
 import { ZoneAlerteComputedHistoricService } from './zone_alerte_computed_historic.service';
+
+jest.mock('worker_threads', () => ({
+  ...jest.requireActual('worker_threads'),
+  Worker: jest.fn(),
+}));
 
 jest.mock('moment', () => {
   const momentModule = jest.requireActual('moment');
@@ -16,6 +26,7 @@ describe('ZoneAlerteComputedService', () => {
   let statisticCommuneService: { computeByMonth: jest.Mock };
 
   beforeEach(() => {
+    jest.clearAllMocks();
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
     configService = {
@@ -112,6 +123,42 @@ describe('ZoneAlerteComputedService', () => {
       '2026-03-25',
       '2026-03-25',
     );
+  });
+
+  it('terminates a compute worker that times out before its first result', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+    jest.spyOn((service as any).logger, 'error').mockImplementation();
+
+    const compute = service.askCompute([65]);
+    const rejection = expect(compute).rejects.toThrow(
+      'COMPUTE ALL worker timed out',
+    );
+    await jest.advanceTimersByTimeAsync(ZONE_COMPUTE_WORKER_TIMEOUT_MS);
+
+    await rejection;
+    expect(worker.terminate).toHaveBeenCalledTimes(1);
+    expect((service as any).isComputing).toBe(false);
+  });
+
+  it('keeps watching the worker after resolving its current result', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+    jest.spyOn((service as any).logger, 'error').mockImplementation();
+
+    const compute = service.askCompute([65], false, true);
+    worker.emit('message', { success: true });
+
+    await expect(compute).resolves.toEqual({ success: true });
+    expect(worker.terminate).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(ZONE_COMPUTE_WORKER_TIMEOUT_MS);
+
+    expect(worker.terminate).toHaveBeenCalledTimes(1);
   });
 });
 

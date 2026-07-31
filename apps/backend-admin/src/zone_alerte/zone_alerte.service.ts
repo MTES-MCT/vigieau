@@ -3,16 +3,20 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { BassinVersant } from '@shared/entities/bassin_versant.entity';
+import { Departement } from '@shared/entities/departement.entity';
+import { SandreZoneAlias } from '@shared/entities/sandre_zone_alias.entity';
+import { SandreZoneSyncState } from '@shared/entities/sandre_zone_sync_state.entity';
 import { User } from '@shared/entities/user.entity';
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { firstValueFrom } from 'rxjs';
 import {
   DataSource,
+  EntityManager,
   FindManyOptions,
   FindOptionsWhere,
   In,
   IsNull,
-  Not,
   Repository,
 } from 'typeorm';
 import { isMainThread } from 'worker_threads';
@@ -21,10 +25,84 @@ import { BassinVersantService } from '../bassin_versant/bassin_versant.service';
 import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { MailService } from '../shared/services/mail.service';
+import { runCurrentZoneComputeWorker } from '../worker_threads/run-current-zone-compute';
+import {
+  fetchSandreZoneSnapshot,
+  hashSandreZoneFeatures,
+  SandreZoneFeature,
+  SandreZoneSnapshot,
+} from './sandre-zone-sync';
+
+const SANDRE_FULL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const SANDRE_HTTP_TIMEOUT_MS = 30 * 1000;
+const SANDRE_VALID_STATUS = 'Validé';
+const SANDRE_ZONE_SELECT = {
+  id: true,
+  idSandre: true,
+  codeSandre: true,
+  statutSandre: true,
+  dateMajSandre: true,
+  codesAlternatifs: true,
+  sandrePayloadHash: true,
+  nom: true,
+  code: true,
+  type: true,
+  ressourceInfluencee: true,
+  numeroVersionSandre: true,
+  disabled: true,
+  departement: {
+    id: true,
+    code: true,
+  },
+  bassinVersant: {
+    id: true,
+    code: true,
+  },
+  geom: true,
+} as const;
+
+function sameStringArrays(left: string[], right: string[]): boolean {
+  return JSON.stringify([...(left ?? [])].sort()) === JSON.stringify(right);
+}
+
+function samePolygonGeometry(left: any, right: any): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+  return (
+    JSON.stringify({
+      type: left.type,
+      coordinates: left.coordinates,
+    }) ===
+    JSON.stringify({
+      type: right.type,
+      coordinates: right.coordinates,
+    })
+  );
+}
+
+interface SandreSyncResult {
+  added: number;
+  updated: number;
+  disabled: number;
+  unchanged: number;
+}
+
+interface SandreZoneMatch {
+  matchType: 'canonical' | 'alias' | 'legacy_gid';
+  zone: ZoneAlerte;
+}
+
+interface SandreSnapshotApplication {
+  result: SandreSyncResult;
+  recomputeRequired: boolean;
+}
 
 @Injectable()
 export class ZoneAlerteService {
   private readonly logger = new RegleauLogger('ZoneAlerteService');
+  private sandreSyncRunning = false;
+  private sandreSyncConfigurationWarned = false;
 
   constructor(
     @InjectRepository(ZoneAlerte)
@@ -193,35 +271,69 @@ export class ZoneAlerteService {
    */
   @Cron(CronExpression.EVERY_10_MINUTES)
   async updateZones() {
-    if (!isMainThread) {
+    const syncMode = this.configService
+      .get<string>('SANDRE_ZONE_SYNC_MODE')
+      ?.trim();
+    if (syncMode !== 'safe') {
+      if (!this.sandreSyncConfigurationWarned) {
+        if (!syncMode || syncMode === 'paused') {
+          this.logger.warn(
+            'SYNCHRONISATION SANDRE EN PAUSE: SANDRE_ZONE_SYNC_MODE=safe REQUIS',
+          );
+        } else {
+          this.logger.error(`SANDRE_ZONE_SYNC_MODE INVALIDE: ${syncMode}`, '');
+        }
+        this.sandreSyncConfigurationWarned = true;
+      }
       return;
     }
-    this.logger.log("MISE A JOUR DES ZONES D'ALERTE - DEBUT");
-    const departements = await this.departementService.findAllLight();
-    try {
-      for (const d of departements) {
-        let lastUpdate = (
-          await this.zoneAlerteRepository
-            .createQueryBuilder('zone_alerte')
-            .select('MAX(zone_alerte.updatedAt)', 'updatedAt')
-            .leftJoin('zone_alerte.departement', 'departement')
-            .where('departement.id = :depId', { depId: d.id })
-            .getRawOne()
-        ).updatedAt;
-        lastUpdate = lastUpdate ? lastUpdate.toISOString().split('T')[0] : null;
-        const filterString = lastUpdate
-          ? `Filter=<Filter>
-<And>
-<PropertyIsEqualTo><PropertyName>CdDepartement</PropertyName><Literal>${d.code}</Literal></PropertyIsEqualTo>
-<PropertyIsGreaterThanOrEqualTo><PropertyName>DateMajZAS</PropertyName><Literal>${lastUpdate}</Literal></PropertyIsGreaterThanOrEqualTo>
-</And>
-</Filter>`
-          : 'Filter=<Filter><PropertyIsEqualTo><PropertyName>CdDepartement</PropertyName><Literal>${d.code}</Literal></PropertyIsEqualTo></Filter>';
-        const url = `${this.configService.get('API_SANDRE')}/geo/zas?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&typename=ZAS&SRSNAME=EPSG:4326&OUTPUTFORMAT=GeoJSON&${filterString}`;
+    if (!isMainThread || this.sandreSyncRunning) {
+      return;
+    }
 
-        const { data } = await firstValueFrom(this.httpService.get(url));
-        if (data.features?.length > 0) {
-          await this.updateDepartementZones(d.code);
+    this.sandreSyncRunning = true;
+    this.logger.log("MISE A JOUR DES ZONES D'ALERTE - DEBUT");
+    try {
+      const departements = await this.departementService.findAllLight();
+
+      for (const d of departements) {
+        let recomputeWasPending = false;
+        try {
+          const state = await this.dataSource
+            .getRepository(SandreZoneSyncState)
+            .findOne({
+              where: {
+                departement: {
+                  id: d.id,
+                },
+              },
+            });
+          recomputeWasPending = Boolean(state?.needsRecompute);
+          const lastFullSyncAt = state?.lastFullSyncAt?.getTime();
+          const fullSyncExpired =
+            !lastFullSyncAt ||
+            Date.now() - lastFullSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
+          const sourceChanged =
+            !fullSyncExpired && (await this.hasSandreChanges(d.code, state));
+
+          if (fullSyncExpired || sourceChanged) {
+            await this.updateDepartementZones(d.code);
+          }
+        } catch (error) {
+          this.logger.error(
+            `ERREUR LORS DE LA MISE A JOUR DES ZONES D'ALERTES DU DEPARTEMENT ${d.code}`,
+            error,
+          );
+        }
+        if (recomputeWasPending) {
+          try {
+            await this.recomputeSandreDepartment(d.code);
+          } catch (error) {
+            this.logger.error(
+              `ERREUR LORS DU RECALCUL DES ZONES D'ALERTES DU DEPARTEMENT ${d.code}`,
+              error,
+            );
+          }
         }
       }
     } catch (error) {
@@ -229,96 +341,51 @@ export class ZoneAlerteService {
         "ERREUR LORS DE LA MISE A JOUR DES ZONES D'ALERTES",
         error,
       );
+    } finally {
+      this.sandreSyncRunning = false;
+      this.logger.log("MISE A JOUR DES ZONES D'ALERTE - FIN");
     }
-    this.logger.log("MISE A JOUR DES ZONES D'ALERTE - FIN");
   }
 
-  async updateDepartementZones(depCode: string) {
+  async updateDepartementZones(depCode: string): Promise<SandreSyncResult> {
     this.logger.log(`MISE A JOUR DES ZONES D'ALERTE DU DEPARTEMENT ${depCode}`);
-    const filterString = `Filter=<Filter>
-<AND>
-<PropertyIsEqualTo><PropertyName>CdDepartement</PropertyName><Literal>${depCode}</Literal></PropertyIsEqualTo>
-<PropertyIsEqualTo><PropertyName>StZAS</PropertyName><Literal>Validé</Literal></PropertyIsEqualTo>
-</AND>
-</Filter>`;
-    const url = `${this.configService.get('API_SANDRE')}/geo/zas?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&typename=ZAS&SRSNAME=EPSG:4326&OUTPUTFORMAT=GeoJSON&${filterString}`;
-    let zonesUpdates = 0;
-    let zonesAdded = 0;
+
+    const [{ syncStartedAt }] = await this.dataSource.query(
+      'SELECT clock_timestamp() AS "syncStartedAt"',
+    );
+    const snapshot = await this.fetchSandreDepartmentSnapshot(depCode);
+    const { result, recomputeRequired } = await this.applySandreSnapshot(
+      depCode,
+      snapshot,
+      new Date(syncStartedAt),
+    );
+
+    this.logger.log(`${result.updated} ZONES D'ALERTES MISES A JOUR`);
+    this.logger.log(`${result.added} ZONES D'ALERTES AJOUTEES`);
+    this.logger.log(`${result.disabled} ZONES D'ALERTES DESACTIVEES`);
+
     try {
-      const { data } = await firstValueFrom(this.httpService.get(url));
-      const idsSandre = data.features.map((f) => +f.properties.gid);
-      const savePromises = [];
-      for (const f of data.features) {
-        const zoneCode = this.getSandreZoneCode(f.properties);
-        let existingZone = await this.findExistingSandreZone(
-          +f.properties.gid,
-          depCode,
-          f.properties.TypeZAS,
-          zoneCode,
-        );
-        if (!existingZone) {
-          zonesAdded++;
-          existingZone = new ZoneAlerte();
-          existingZone.departement = await this.departementService.findByCode(
-            f.properties.CdDepartement,
-          );
-          existingZone.bassinVersant =
-            await this.bassinVersantService.findByCode(
-              +f.properties.NumCircAdminBassin,
-            );
-        } else {
-          zonesUpdates++;
-        }
-        existingZone.idSandre = +f.properties.gid;
-        existingZone.nom = f.properties.LbZAS;
-        existingZone.code = zoneCode;
-        existingZone.type = f.properties.TypeZAS;
-        existingZone.numeroVersionSandre = f.properties.NumeroVersionZAS
-          ? +f.properties.NumeroVersionZAS
-          : null;
-        existingZone.geom = f.geometry;
-        existingZone.ressourceInfluencee = f.properties.RessInfluenceeZAS === 1;
-        existingZone.disabled = false;
-        savePromises.push(this.zoneAlerteRepository.save(existingZone));
-      }
-      await Promise.all(savePromises);
-      const idsToDisable = await this.zoneAlerteRepository.find(<
-        FindManyOptions
-      >{
-        select: {
-          id: true,
-          idSandre: true,
-          departement: {
-            id: true,
-            code: true,
-          },
-        },
-        relations: ['departement'],
-        where: [
-          {
-            departement: {
-              code: depCode,
-            },
-            idSandre: Not(In(idsSandre)),
-          },
-          {
-            departement: {
-              code: depCode,
-            },
-            idSandre: IsNull(),
-          },
-        ],
-      });
-      if (idsToDisable.length > 0) {
-        await this.zoneAlerteRepository.update(
-          idsToDisable.map((z) => z.id),
-          { disabled: true },
-        );
-      }
       await this.departementService.getAll();
-      this.logger.log(`${zonesUpdates} ZONES D'ALERTES MIS A JOUR`);
-      this.logger.log(`${zonesAdded} ZONES D'ALERTES AJOUTEES`);
-      if (zonesAdded > 0) {
+    } catch (error) {
+      this.logger.error(
+        `SYNCHRONISATION SANDRE REUSSIE MAIS CACHE NON RAFRAICHI POUR LE DEPARTEMENT ${depCode}`,
+        error,
+      );
+    }
+
+    if (recomputeRequired) {
+      try {
+        await this.recomputeSandreDepartment(depCode);
+      } catch (error) {
+        this.logger.error(
+          `SYNCHRONISATION SANDRE REUSSIE MAIS RECALCUL NON TERMINE POUR LE DEPARTEMENT ${depCode}`,
+          error,
+        );
+      }
+    }
+
+    if (result.added > 0) {
+      try {
         const arretesCadre =
           await this.arreteCadreService.findByDepartement(depCode);
         await this.mailService.sendEmailsByDepartement(
@@ -326,17 +393,573 @@ export class ZoneAlerteService {
           `Vos nouvelles zones d’alerte ont été intégrées`,
           'maj_za',
           {
-            arretesCadre: arretesCadre,
+            arretesCadre,
           },
           true,
         );
+      } catch (error) {
+        this.logger.error(
+          `SYNCHRONISATION SANDRE REUSSIE MAIS NOTIFICATION NON ENVOYEE POUR LE DEPARTEMENT ${depCode}`,
+          error,
+        );
       }
+    }
+
+    return result;
+  }
+
+  private async hasSandreChanges(
+    depCode: string,
+    state: SandreZoneSyncState,
+  ): Promise<boolean> {
+    if (state.featureCount === 0) {
+      return (await this.fetchSandreFeatureCount(depCode)) > 0;
+    }
+    if (!state.sourceUpdatedAt || !state.latestFeaturesHash) {
+      return false;
+    }
+
+    const latestFeatures = await this.fetchSandreDepartmentSnapshot(
+      depCode,
+      state.sourceUpdatedAt,
+      true,
+    );
+    return latestFeatures.snapshotHash !== state.latestFeaturesHash;
+  }
+
+  private async fetchSandreFeatureCount(
+    depCode: string,
+    updatedAfter?: string,
+    includeUpdateDate = false,
+  ): Promise<number> {
+    return (
+      await this.fetchSandreDepartmentSnapshot(
+        depCode,
+        updatedAfter,
+        includeUpdateDate,
+      )
+    ).featureCount;
+  }
+
+  async fetchSandreDepartmentSnapshot(
+    depCode: string,
+    updatedAfter?: string,
+    includeUpdateDate = false,
+  ): Promise<SandreZoneSnapshot> {
+    return fetchSandreZoneSnapshot(
+      this.configService.getOrThrow<string>('API_SANDRE'),
+      depCode,
+      {
+        getJson: async (url) => {
+          const { data } = await firstValueFrom(
+            this.httpService.get(url, {
+              timeout: SANDRE_HTTP_TIMEOUT_MS,
+            }),
+          );
+          return data;
+        },
+        getText: async (url) => {
+          const { data } = await firstValueFrom(
+            this.httpService.get(url, {
+              responseType: 'text',
+              timeout: SANDRE_HTTP_TIMEOUT_MS,
+            }),
+          );
+          return data;
+        },
+      },
+      updatedAfter,
+      includeUpdateDate,
+    );
+  }
+
+  private async applySandreSnapshot(
+    depCode: string,
+    snapshot: SandreZoneSnapshot,
+    snapshotStartedAt: Date,
+  ): Promise<SandreSnapshotApplication> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const departementRepository =
+        queryRunner.manager.getRepository(Departement);
+      const stateRepository =
+        queryRunner.manager.getRepository(SandreZoneSyncState);
+      const departement = await departementRepository.findOne({
+        where: { code: depCode },
+      });
+      if (!departement) {
+        throw new Error(`Unknown department ${depCode}`);
+      }
+      await queryRunner.manager.query(
+        "SELECT pg_advisory_xact_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
+        [departement.id],
+      );
+
+      let state = await stateRepository.findOne({
+        where: {
+          departement: {
+            id: departement.id,
+          },
+        },
+      });
+      const now = new Date();
+      const staleByStart =
+        state?.snapshotStartedAt &&
+        state.snapshotStartedAt.getTime() >= snapshotStartedAt.getTime();
+      const staleBySourceDate =
+        state?.sourceUpdatedAt &&
+        snapshot.sourceUpdatedAt &&
+        state.sourceUpdatedAt > snapshot.sourceUpdatedAt;
+      if (staleByStart || staleBySourceDate) {
+        this.logger.warn(
+          `INSTANTANE SANDRE IGNORE CAR PLUS ANCIEN POUR LE DEPARTEMENT ${depCode}`,
+        );
+        await queryRunner.commitTransaction();
+        return {
+          result: {
+            added: 0,
+            updated: 0,
+            disabled: 0,
+            unchanged: snapshot.featureCount,
+          },
+          recomputeRequired: false,
+        };
+      }
+
+      const result: SandreSyncResult = {
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 0,
+      };
+      const activeZoneIds = new Set<number>();
+      let recomputeRequired = false;
+      const activeFeatures = snapshot.features.filter(
+        (feature) => feature.status === SANDRE_VALID_STATUS,
+      );
+      const inactiveFeatures = snapshot.features.filter(
+        (feature) => feature.status === 'Gelé',
+      );
+      await this.assertValidSandreGeometries(
+        queryRunner.manager,
+        activeFeatures,
+      );
+
+      for (const feature of activeFeatures) {
+        const match = await this.findSandreZoneMatch(
+          queryRunner.manager,
+          departement,
+          feature,
+        );
+        if (match && activeZoneIds.has(match.zone.id)) {
+          throw new Error(
+            `Multiple active Sandre codes resolve to local zone ${match.zone.id}`,
+          );
+        }
+        const upsert = await this.upsertActiveSandreZone(
+          queryRunner.manager,
+          departement,
+          feature,
+          match,
+          result,
+        );
+        activeZoneIds.add(upsert.zone.id);
+        recomputeRequired ||= upsert.recomputeRequired;
+      }
+
+      for (const feature of inactiveFeatures) {
+        const match = await this.findSandreZoneMatch(
+          queryRunner.manager,
+          departement,
+          feature,
+        );
+        if (!match || activeZoneIds.has(match.zone.id)) {
+          result.unchanged++;
+          continue;
+        }
+
+        const zone = match.zone;
+        const zoneWasActive = zone.disabled !== true;
+        const changed =
+          zoneWasActive ||
+          zone.statutSandre !== feature.status ||
+          zone.dateMajSandre !== feature.sourceUpdatedAt ||
+          zone.sandrePayloadHash !== feature.payloadHash;
+        if (!changed) {
+          result.unchanged++;
+          continue;
+        }
+
+        zone.disabled = true;
+        zone.statutSandre = feature.status;
+        zone.dateMajSandre = feature.sourceUpdatedAt;
+        zone.codesAlternatifs = feature.alternateCodes;
+        zone.sandrePayloadHash = feature.payloadHash;
+        if (match.matchType === 'legacy_gid' && !zone.codeSandre) {
+          zone.codeSandre = feature.codeSandre;
+        }
+        await queryRunner.manager.getRepository(ZoneAlerte).save(zone);
+        result.disabled++;
+        recomputeRequired ||= zoneWasActive;
+      }
+
+      state ??= stateRepository.create({ departement });
+      state.sourceUpdatedAt = snapshot.sourceUpdatedAt;
+      state.snapshotHash = snapshot.snapshotHash;
+      state.latestFeaturesHash = this.getLatestSandreFeaturesHash(snapshot);
+      state.snapshotStartedAt = snapshotStartedAt;
+      state.lastFullSyncAt = now;
+      state.lastSuccessAt = now;
+      state.featureCount = snapshot.featureCount;
+      state.needsRecompute = Boolean(state.needsRecompute) || recomputeRequired;
+      if (recomputeRequired) {
+        state.recomputeRevision = (state.recomputeRevision ?? 0) + 1;
+      }
+      await stateRepository.save(state);
+      await queryRunner.commitTransaction();
+
+      return { result, recomputeRequired };
     } catch (error) {
-      this.logger.error(
-        `ERREUR LORS DE LA MISE A JOUR DES ZONES D\'ALERTES DU DEPARTEMENT ${depCode}`,
-        error,
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  private getLatestSandreFeaturesHash(
+    snapshot: SandreZoneSnapshot,
+  ): string | null {
+    if (!snapshot.sourceUpdatedAt) {
+      return null;
+    }
+    return hashSandreZoneFeatures(
+      snapshot.features.filter(
+        (feature) => feature.sourceUpdatedAt === snapshot.sourceUpdatedAt,
+      ),
+    );
+  }
+
+  private async assertValidSandreGeometries(
+    manager: EntityManager,
+    features: SandreZoneFeature[],
+  ): Promise<void> {
+    if (features.length === 0) {
+      return;
+    }
+    const invalidFeatures =
+      (await manager.query(
+        `
+          WITH input AS (
+            SELECT
+              item->>'code' AS code,
+              ST_SetSRID(
+                ST_GeomFromGeoJSON((item->'geometry')::text),
+                4326
+              ) AS geom
+            FROM jsonb_array_elements($1::jsonb) AS item
+          )
+          SELECT code
+          FROM input
+          WHERE ST_IsEmpty(geom)
+            OR NOT ST_IsValid(geom)
+            OR GeometryType(geom) NOT IN ('POLYGON', 'MULTIPOLYGON')
+            OR ST_XMin(Box3D(geom)) < -180
+            OR ST_XMax(Box3D(geom)) > 180
+            OR ST_YMin(Box3D(geom)) < -90
+            OR ST_YMax(Box3D(geom)) > 90
+        `,
+        [
+          JSON.stringify(
+            features.map((feature) => ({
+              code: feature.codeSandre,
+              geometry: feature.geometry,
+            })),
+          ),
+        ],
+      )) ?? [];
+    if (invalidFeatures.length > 0) {
+      throw new Error(
+        `Invalid Sandre geometry for zone ${invalidFeatures[0].code}`,
       );
     }
+  }
+
+  private async findSandreZoneMatch(
+    manager: EntityManager,
+    departement: Departement,
+    feature: SandreZoneFeature,
+  ): Promise<SandreZoneMatch | null> {
+    const zoneRepository = manager.getRepository(ZoneAlerte);
+    const canonicalMatches = await zoneRepository.find({
+      select: SANDRE_ZONE_SELECT,
+      where: {
+        codeSandre: feature.codeSandre,
+      },
+      relations: {
+        bassinVersant: true,
+        departement: true,
+      },
+      take: 2,
+    });
+    if (canonicalMatches.length > 1) {
+      throw new Error(`Duplicate Sandre code ${feature.codeSandre}`);
+    }
+    if (canonicalMatches.length === 1) {
+      this.assertSandreZoneScope(canonicalMatches[0], departement, feature);
+      return {
+        matchType: 'canonical',
+        zone: canonicalMatches[0],
+      };
+    }
+
+    const alias = await manager.getRepository(SandreZoneAlias).findOne({
+      select: {
+        id: true,
+        zoneAlerte: SANDRE_ZONE_SELECT,
+      },
+      where: {
+        departement: {
+          id: departement.id,
+        },
+        zoneType: feature.type,
+        aliasType: 'cd_zas',
+        aliasValue: feature.codeSandre,
+      },
+      relations: {
+        zoneAlerte: {
+          bassinVersant: true,
+          departement: true,
+        },
+      },
+    });
+    if (alias) {
+      this.assertSandreZoneScope(alias.zoneAlerte, departement, feature);
+      return {
+        matchType: 'alias',
+        zone: alias.zoneAlerte,
+      };
+    }
+
+    const legacyMatches = await zoneRepository.find({
+      select: SANDRE_ZONE_SELECT,
+      where: {
+        idSandre: feature.gid,
+        codeSandre: IsNull(),
+        departement: {
+          id: departement.id,
+        },
+        type: feature.type,
+      },
+      relations: {
+        bassinVersant: true,
+        departement: true,
+      },
+      take: 2,
+    });
+    if (legacyMatches.length > 1) {
+      throw new Error(
+        `Duplicate legacy Sandre gid ${feature.gid} for department ${departement.code}`,
+      );
+    }
+
+    return legacyMatches.length === 1
+      ? {
+          matchType: 'legacy_gid',
+          zone: legacyMatches[0],
+        }
+      : null;
+  }
+
+  private assertSandreZoneScope(
+    zone: ZoneAlerte,
+    departement: Departement,
+    feature: SandreZoneFeature,
+  ): void {
+    if (zone.departement?.id !== departement.id || zone.type !== feature.type) {
+      throw new Error(
+        `Sandre zone ${feature.codeSandre} conflicts with local zone ${zone.id}`,
+      );
+    }
+  }
+
+  private async upsertActiveSandreZone(
+    manager: EntityManager,
+    departement: Departement,
+    feature: SandreZoneFeature,
+    match: SandreZoneMatch | null,
+    result: SandreSyncResult,
+  ): Promise<{ zone: ZoneAlerte; recomputeRequired: boolean }> {
+    const zoneRepository = manager.getRepository(ZoneAlerte);
+    const bassinVersant = await manager.getRepository(BassinVersant).findOne({
+      where: {
+        code: feature.basinCode,
+      },
+    });
+    if (!bassinVersant) {
+      throw new Error(
+        `Unknown basin ${feature.basinCode} for Sandre zone ${feature.codeSandre}`,
+      );
+    }
+
+    const zone = match?.zone ?? zoneRepository.create();
+    const isNew = !match;
+    const displayCode =
+      zone.code || feature.preferredAlternateCode || feature.codeSandre;
+    const recomputeRequired =
+      isNew ||
+      zone.idSandre !== feature.gid ||
+      zone.nom !== feature.name ||
+      zone.type !== feature.type ||
+      zone.ressourceInfluencee !== feature.influencedResource ||
+      zone.disabled !== false ||
+      zone.bassinVersant?.id !== bassinVersant.id ||
+      !samePolygonGeometry(zone.geom, feature.geometry);
+    const changed =
+      isNew ||
+      zone.idSandre !== feature.gid ||
+      zone.codeSandre !== feature.codeSandre ||
+      zone.nom !== feature.name ||
+      zone.type !== feature.type ||
+      zone.numeroVersionSandre !== feature.version ||
+      zone.ressourceInfluencee !== feature.influencedResource ||
+      zone.disabled !== false ||
+      zone.statutSandre !== feature.status ||
+      zone.dateMajSandre !== feature.sourceUpdatedAt ||
+      zone.sandrePayloadHash !== feature.payloadHash ||
+      zone.bassinVersant?.id !== bassinVersant.id ||
+      !sameStringArrays(zone.codesAlternatifs, feature.alternateCodes) ||
+      !samePolygonGeometry(zone.geom, feature.geometry);
+
+    if (!changed) {
+      result.unchanged++;
+      return { zone, recomputeRequired: false };
+    }
+
+    if (
+      match?.matchType === 'alias' &&
+      zone.codeSandre &&
+      zone.codeSandre !== feature.codeSandre
+    ) {
+      await this.ensureSandreAlias(
+        manager,
+        departement,
+        zone,
+        zone.codeSandre,
+        'sandre_genealogy',
+      );
+    }
+
+    zone.departement = departement;
+    zone.bassinVersant = bassinVersant;
+    zone.idSandre = feature.gid;
+    zone.codeSandre = feature.codeSandre;
+    zone.nom = feature.name;
+    zone.code = displayCode;
+    zone.type = feature.type;
+    zone.numeroVersionSandre = feature.version;
+    zone.geom = feature.geometry;
+    zone.ressourceInfluencee = feature.influencedResource;
+    zone.disabled = false;
+    zone.statutSandre = feature.status;
+    zone.dateMajSandre = feature.sourceUpdatedAt;
+    zone.codesAlternatifs = feature.alternateCodes;
+    zone.sandrePayloadHash = feature.payloadHash;
+
+    const savedZone = await zoneRepository.save(zone);
+    if (isNew) {
+      result.added++;
+    } else {
+      result.updated++;
+    }
+    return { zone: savedZone, recomputeRequired };
+  }
+
+  private async ensureSandreAlias(
+    manager: EntityManager,
+    departement: Departement,
+    zone: ZoneAlerte,
+    aliasValue: string,
+    source: 'sandre_genealogy' | 'manual_reconciliation',
+  ): Promise<void> {
+    const aliasRepository = manager.getRepository(SandreZoneAlias);
+    const existingAlias = await aliasRepository.findOne({
+      where: {
+        departement: {
+          id: departement.id,
+        },
+        zoneType: zone.type,
+        aliasType: 'cd_zas',
+        aliasValue,
+      },
+      relations: {
+        zoneAlerte: true,
+      },
+    });
+    if (existingAlias?.zoneAlerte.id === zone.id) {
+      return;
+    }
+    if (existingAlias) {
+      throw new Error(
+        `Sandre alias ${aliasValue} is already assigned to zone ${existingAlias.zoneAlerte.id}`,
+      );
+    }
+
+    await aliasRepository.save(
+      aliasRepository.create({
+        departement,
+        zoneAlerte: zone,
+        zoneType: zone.type,
+        aliasType: 'cd_zas',
+        aliasValue,
+        source,
+      }),
+    );
+  }
+
+  private async recomputeSandreDepartment(depCode: string): Promise<void> {
+    const departement = await this.dataSource
+      .getRepository(Departement)
+      .findOne({ where: { code: depCode } });
+    if (!departement) {
+      throw new Error(`Unknown department ${depCode}`);
+    }
+
+    const state = await this.dataSource
+      .getRepository(SandreZoneSyncState)
+      .findOne({
+        where: {
+          departement: {
+            id: departement.id,
+          },
+        },
+      });
+    if (!state?.needsRecompute) {
+      return;
+    }
+    const recomputeRevision = state.recomputeRevision ?? 0;
+    const result = await this.runCurrentZoneComputeWorker([departement.id]);
+    if (result?.success !== true) {
+      throw new Error(result?.error || 'Zone recomputation did not complete');
+    }
+
+    await this.dataSource.query(
+      `
+        UPDATE sandre_zone_sync_state
+        SET "needsRecompute" = false, "updatedAt" = now()
+        WHERE "departementId" = $1
+          AND "recomputeRevision" = $2
+          AND "needsRecompute" = true
+      `,
+      [departement.id, recomputeRevision],
+    );
+  }
+
+  private runCurrentZoneComputeWorker(departmentIds: number[]) {
+    return runCurrentZoneComputeWorker(departmentIds);
   }
 
   async getZonesArea(zones: any[]) {
@@ -399,90 +1022,5 @@ export class ZoneAlerteService {
     );
 
     return result[0]?.combined_geom;
-  }
-
-  private async findExistingSandreZone(
-    idSandre: number,
-    depCode: string,
-    type: 'SOU' | 'SUP',
-    code: string,
-  ): Promise<ZoneAlerte | null> {
-    const existingZone = await this.zoneAlerteRepository.findOne({
-      where: {
-        idSandre,
-      },
-    });
-    if (existingZone || !code) {
-      return existingZone;
-    }
-
-    return this.zoneAlerteRepository.findOne({
-      where: {
-        code,
-        departement: {
-          code: depCode,
-        },
-        type,
-      },
-    });
-  }
-
-  private getSandreZoneCode(properties: Record<string, any>): string {
-    const cdAltZas = this.toNonEmptyString(properties.CdAltZAS);
-    if (cdAltZas) {
-      return cdAltZas;
-    }
-
-    return this.extractCodeFromCodesAlternatifs(
-      properties.CodesAlternatifs,
-    ) ?? '';
-  }
-
-  private extractCodeFromCodesAlternatifs(value: any): string | null {
-    if (!value) {
-      return null;
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const code = this.extractCodeFromCodesAlternatifs(item);
-        if (code) {
-          return code;
-        }
-      }
-      return null;
-    }
-
-    if (typeof value === 'object') {
-      return (
-        this.toNonEmptyString(value.code) ??
-        this.extractCodeFromCodesAlternatifs(Object.values(value))
-      );
-    }
-
-    if (typeof value !== 'string') {
-      return null;
-    }
-
-    const directCode = this.extractCodeFromString(value);
-    if (directCode) {
-      return directCode;
-    }
-
-    try {
-      return this.extractCodeFromCodesAlternatifs(JSON.parse(value));
-    } catch {
-      return null;
-    }
-  }
-
-  private extractCodeFromString(value: string): string | null {
-    const normalizedValue = value.replace(/\\"/g, '"');
-    const codeMatch = normalizedValue.match(/"code"\s*:\s*"([^"]+)"/);
-    return this.toNonEmptyString(codeMatch?.[1]);
-  }
-
-  private toNonEmptyString(value: any): string | null {
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
   }
 }

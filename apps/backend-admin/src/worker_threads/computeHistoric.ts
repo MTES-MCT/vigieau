@@ -1,7 +1,5 @@
 import { NestFactory } from '@nestjs/core';
 import { workerData, parentPort } from 'worker_threads';
-import { AppModule } from '../app.module';
-import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import moment from 'moment';
 
@@ -14,8 +12,19 @@ interface WorkerData {
 }
 
 async function run() {
+  let app;
+  let response: { success: boolean; result?: any; error?: string };
   try {
-    const app = await NestFactory.createApplicationContext(AppModule);
+    process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
+    process.env.SANDRE_ZONE_SYNC_MODE = 'paused';
+    process.env.DISABLE_SCHEDULED_JOBS = 'true';
+    process.env.SKIP_SCHEMA_BOOTSTRAP = 'true';
+    const [{ AppModule }, { ZoneAlerteComputedHistoricService }] =
+      await Promise.all([
+        import('../app.module.js'),
+        import('../zone_alerte_computed/zone_alerte_computed_historic.service.js'),
+      ]);
+    app = await NestFactory.createApplicationContext(AppModule);
     const zoneAlerteComputedHistoricService = app.get(
       ZoneAlerteComputedHistoricService,
     );
@@ -42,13 +51,30 @@ async function run() {
         );
     }
 
-    if (parentPort) {
-      parentPort.postMessage({ success: true, result });
-    }
+    response = { success: true, result };
   } catch (error) {
     logger.error('Error in compute historic worker', error.toString());
-    if (parentPort) {
-      parentPort.postMessage({ success: false, error: error.toString() });
+    response = {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    try {
+      await app?.close();
+    } catch (error) {
+      logger.error(
+        'Error while closing compute historic worker',
+        String(error),
+      );
+      response = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    try {
+      parentPort?.postMessage(response);
+    } finally {
+      parentPort?.close();
     }
   }
 }
