@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -11,12 +11,22 @@ interface ServiceHarness {
   service: DatagouvService;
   arreteRestrictionService: { findDatagouv: jest.Mock };
   statisticCommuneService: {
+    getStatisticCommuneStream: jest.Mock;
     getStatisticCommuneStreamForYear: jest.Mock;
   };
   httpService: {
     get: jest.Mock;
     post: jest.Mock;
     put: jest.Mock;
+  };
+  dataSource: { createQueryRunner: jest.Mock };
+  queryRunner: {
+    connect: jest.Mock;
+    startTransaction: jest.Mock;
+    rollbackTransaction: jest.Mock;
+    query: jest.Mock;
+    release: jest.Mock;
+    isTransactionActive: boolean;
   };
   logger: {
     log: jest.Mock;
@@ -34,6 +44,8 @@ function createHarness(
     API_DATAGOUV: 'https://www.data.gouv.fr/api/1/',
     API_DATAGOUV_DATASET: 'dataset-id',
     API_DATAGOUV_KEY: 'secret-api-key',
+    API_DATAGOUV_HISTORIQUE_COMMUNES_RESOURCE_ID:
+      '4322064e-cfb4-4c8a-8200-7620f491ccdb',
     ...overrides,
   };
   const httpService = {
@@ -45,7 +57,19 @@ function createHarness(
     findDatagouv: jest.fn().mockResolvedValue([]),
   };
   const statisticCommuneService = {
+    getStatisticCommuneStream: jest.fn(),
     getStatisticCommuneStreamForYear: jest.fn(),
+  };
+  const queryRunner = {
+    connect: jest.fn().mockResolvedValue(undefined),
+    startTransaction: jest.fn().mockResolvedValue(undefined),
+    rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+    query: jest.fn().mockResolvedValue([{ locked: true }]),
+    release: jest.fn().mockResolvedValue(undefined),
+    isTransactionActive: true,
+  };
+  const dataSource = {
+    createQueryRunner: jest.fn().mockReturnValue(queryRunner),
   };
   const service = new DatagouvService(
     httpService as any,
@@ -56,6 +80,7 @@ function createHarness(
     {} as any,
     {} as any,
     statisticCommuneService as any,
+    dataSource as any,
   );
   const logger = {
     log: jest.fn(),
@@ -68,6 +93,8 @@ function createHarness(
     arreteRestrictionService,
     statisticCommuneService,
     httpService,
+    dataSource,
+    queryRunner,
     logger,
   };
 }
@@ -84,7 +111,7 @@ describe('DatagouvService', () => {
     );
   });
 
-  it('continues all independent exports and runs communes before maps', async () => {
+  it('continues all exports without delaying the existing maps publication', async () => {
     const harness = createHarness('/tmp');
     const updateArretes = jest
       .spyOn(harness.service, 'updateArretes')
@@ -101,6 +128,9 @@ describe('DatagouvService', () => {
     const updateCommunes = jest
       .spyOn(harness.service, 'updateCommunes')
       .mockResolvedValue();
+    const updateHistoriqueCommunes = jest
+      .spyOn(harness.service, 'updateHistoriqueCommunes')
+      .mockResolvedValue();
     const updateMaps = jest
       .spyOn(harness.service, 'updateMaps')
       .mockRejectedValue(new Error('resource not found'));
@@ -112,9 +142,13 @@ describe('DatagouvService', () => {
     expect(updateArretesCadre).toHaveBeenCalledTimes(1);
     expect(updateRestrictions).toHaveBeenCalledTimes(1);
     expect(updateCommunes).toHaveBeenCalledTimes(1);
+    expect(updateHistoriqueCommunes).toHaveBeenCalledTimes(1);
     expect(updateMaps).toHaveBeenCalledTimes(1);
     expect(updateCommunes.mock.invocationCallOrder[0]).toBeLessThan(
       updateMaps.mock.invocationCallOrder[0],
+    );
+    expect(updateMaps.mock.invocationCallOrder[0]).toBeLessThan(
+      updateHistoriqueCommunes.mock.invocationCallOrder[0],
     );
     expect(harness.logger.error).toHaveBeenCalledTimes(2);
   });
@@ -189,12 +223,200 @@ describe('DatagouvService', () => {
         },
       }),
     );
+    const previousArchivePath = join(
+      directory,
+      'restrictions_communes_2026.zip',
+    );
+    await writeFile(previousArchivePath, 'previous-complete-archive');
     const upload = jest.spyOn(harness.service, 'uploadToDatagouv');
 
     await expect(harness.service.updateCommunes(2026)).rejects.toThrow(
       'database stream failed',
     );
     expect(upload).not.toHaveBeenCalled();
+    await expect(readFile(previousArchivePath, 'utf8')).resolves.toBe(
+      'previous-complete-archive',
+    );
+    await expect(
+      stat(join(directory, 'restrictions_communes_2026.zip.tmp')),
+    ).rejects.toThrow();
+  });
+
+  it('streams the complete commune history directly into the historical ZIP', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '01001',
+          commune_nom: "L'Abergement-Clémenciat",
+          sc_restrictions: [
+            { date: '2013-01-01', SOU: null, SUP: null, AEP: null },
+            { date: '2026-07-31', SOU: null, SUP: 'alerte', AEP: null },
+          ],
+        },
+        {
+          commune_code: '01002',
+          commune_nom: "L'Abergement-de-Varey",
+          sc_restrictions: null,
+        },
+      ]),
+    );
+    const upload = jest
+      .spyOn(harness.service, 'uploadToDatagouv')
+      .mockResolvedValue();
+
+    await harness.service.updateHistoriqueCommunes();
+
+    const archive = await JSZip.loadAsync(
+      await readFile(join(directory, 'historique_communes.zip')),
+    );
+    const files = Object.keys(archive.files);
+    expect(files).toEqual(['historique_communes.json']);
+    const json = await archive.file('historique_communes.json').async('string');
+    expect(JSON.parse(json)).toEqual([
+      {
+        commune: { code: '01001', nom: "L'Abergement-Clémenciat" },
+        restrictions: [
+          { date: '2013-01-01', SOU: null, SUP: null, AEP: null },
+          { date: '2026-07-31', SOU: null, SUP: 'alerte', AEP: null },
+        ],
+      },
+      {
+        commune: { code: '01002', nom: "L'Abergement-de-Varey" },
+        restrictions: null,
+      },
+    ]);
+    expect(
+      harness.statisticCommuneService.getStatisticCommuneStream,
+    ).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledWith(
+      'historique_communes',
+      'historique_communes.zip',
+      'Historique Communes',
+    );
+    expect(harness.queryRunner.query).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+    await expect(
+      stat(join(directory, 'historique_communes.json')),
+    ).rejects.toThrow();
+  });
+
+  it('keeps the previous historical ZIP and releases the lock after a partial stream failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    let readCount = 0;
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      new Readable({
+        objectMode: true,
+        read() {
+          if (readCount++ === 0) {
+            this.push({
+              commune_code: '01001',
+              commune_nom: "L'Abergement-Clémenciat",
+              sc_restrictions: [],
+            });
+          } else {
+            this.destroy(new Error('database stream failed after one row'));
+          }
+        },
+      }),
+    );
+    const archivePath = join(directory, 'historique_communes.zip');
+    await writeFile(archivePath, 'previous-complete-archive');
+    const upload = jest.spyOn(harness.service, 'uploadToDatagouv');
+
+    await expect(harness.service.updateHistoriqueCommunes()).rejects.toThrow(
+      'database stream failed after one row',
+    );
+
+    expect(upload).not.toHaveBeenCalled();
+    await expect(readFile(archivePath, 'utf8')).resolves.toBe(
+      'previous-complete-archive',
+    );
+    await expect(
+      stat(join(directory, 'historique_communes.zip.tmp')),
+    ).rejects.toThrow();
+    expect(harness.queryRunner.query).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a valid empty historical JSON array', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([]),
+    );
+    jest.spyOn(harness.service, 'uploadToDatagouv').mockResolvedValue();
+
+    await harness.service.updateHistoriqueCommunes();
+
+    const archive = await JSZip.loadAsync(
+      await readFile(join(directory, 'historique_communes.zip')),
+    );
+    await expect(
+      archive.file('historique_communes.json').async('string'),
+    ).resolves.toBe('[]');
+  });
+
+  it('rejects a concurrent historical publication before opening the data stream', async () => {
+    const harness = createHarness('/tmp');
+    harness.queryRunner.query
+      .mockReset()
+      .mockResolvedValue([{ locked: false }]);
+
+    await expect(harness.service.updateHistoriqueCommunes()).rejects.toThrow(
+      "Une publication de l'historique des communes est déjà en cours",
+    );
+
+    expect(
+      harness.statisticCommuneService.getStatisticCommuneStream,
+    ).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(harness.httpService.post).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing historical resource before taking the export lock', async () => {
+    const harness = createHarness('/tmp', {
+      API_DATAGOUV_HISTORIQUE_COMMUNES_RESOURCE_ID: undefined,
+    });
+
+    await expect(harness.service.updateHistoriqueCommunes()).rejects.toThrow(
+      'Ressource non configurée : historique_communes',
+    );
+
+    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(
+      harness.statisticCommuneService.getStatisticCommuneStream,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('uploads the historical archive to the existing resource UUID', async () => {
+    const harness = createHarness('/tmp');
+    jest.spyOn(fs, 'openAsBlob').mockResolvedValue(new Blob(['zip-content']));
+
+    await harness.service.uploadToDatagouv(
+      'historique_communes',
+      'historique_communes.zip',
+      'Historique Communes',
+    );
+
+    expect(harness.httpService.post).toHaveBeenCalledWith(
+      'https://www.data.gouv.fr/api/1/datasets/dataset-id/resources/4322064e-cfb4-4c8a-8200-7620f491ccdb/upload/',
+      expect.any(FormData),
+      expect.any(Object),
+    );
+    expect(harness.httpService.put).toHaveBeenCalledWith(
+      'https://www.data.gouv.fr/api/1/datasets/dataset-id/resources/4322064e-cfb4-4c8a-8200-7620f491ccdb/',
+      { title: 'Historique Communes' },
+      expect.any(Object),
+    );
   });
 
   it('skips the annual query when its resource is not configured', async () => {

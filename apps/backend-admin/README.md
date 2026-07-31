@@ -31,9 +31,15 @@ cp env.example .env
 - DOMAIN_NAME : Domaine du frontend (localhost:3000 en local)
 - PATH_TO_WRITE_FILE : Dossier pour stocker les fichiers temporaires ou le serveur peut lire / écrire
 
-### Publication annuelle des restrictions par commune
+### Publication des restrictions par commune
 
-La publication quotidienne utilise une ressource Datagouv distincte par année. Pour initialiser une nouvelle année, exécuter la commande suivante puis renseigner l'identifiant retourné dans `API_DATAGOUV_COMMUNES_<ANNEE>_RESOURCE_ID` :
+La publication quotidienne met à jour la ressource cumulative `Historique Communes` ainsi que la ressource de l'année en cours. L'UUID historique doit être renseigné dans `API_DATAGOUV_HISTORIQUE_COMMUNES_RESOURCE_ID`. Pour republier immédiatement l'historique complet :
+
+```bash
+npm run datagouv:publish-historique-communes
+```
+
+Pour initialiser la ressource d'une nouvelle année, exécuter la commande suivante puis renseigner l'identifiant retourné dans `API_DATAGOUV_COMMUNES_<ANNEE>_RESOURCE_ID`. Elle sera ensuite mise à jour par la publication quotidienne :
 
 ```bash
 npm run datagouv:publish-communes -- 2026

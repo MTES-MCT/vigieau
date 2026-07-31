@@ -34,6 +34,17 @@ export class StatisticCommuneService {
     // }, 5000);
   }
 
+  async getStatisticCommuneStream() {
+    return this.statisticCommuneRepository
+      .createQueryBuilder('sc')
+      .innerJoin('sc.commune', 'commune')
+      .select('commune.code', 'commune_code')
+      .addSelect('commune.nom', 'commune_nom')
+      .addSelect('sc.restrictions', 'sc_restrictions')
+      .orderBy('commune.code', 'ASC')
+      .stream();
+  }
+
   async getStatisticCommuneStreamForYear(year: number) {
     if (!Number.isInteger(year) || year < 2013 || year > 9999) {
       throw new Error(`Invalid statistic year: ${year}`);

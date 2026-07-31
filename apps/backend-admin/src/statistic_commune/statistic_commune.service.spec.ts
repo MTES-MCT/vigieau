@@ -1,6 +1,36 @@
 import { StatisticCommuneService } from './statistic_commune.service';
 
 describe('StatisticCommuneService', () => {
+  it('streams the complete commune history in a stable order', async () => {
+    const stream = {};
+    const queryBuilder = {
+      innerJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      stream: jest.fn().mockResolvedValue(stream),
+    };
+    const repository = {
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+    };
+    const service = new StatisticCommuneService(
+      repository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(service.getStatisticCommuneStream()).resolves.toBe(stream);
+
+    expect(queryBuilder.addSelect).toHaveBeenCalledWith(
+      'sc.restrictions',
+      'sc_restrictions',
+    );
+    expect(queryBuilder.orderBy).toHaveBeenCalledWith('commune.code', 'ASC');
+  });
+
   it('streams commune restrictions within the requested year bounds', async () => {
     const stream = {};
     const queryBuilder = {

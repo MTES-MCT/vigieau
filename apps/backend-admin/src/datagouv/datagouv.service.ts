@@ -2,6 +2,7 @@ import { HttpService } from '@nestjs/axios';
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { InjectDataSource } from '@nestjs/typeorm';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 // CommonJS import keeps the callable export intact in both Jest and the Nest build.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -11,10 +12,11 @@ import * as fs from 'node:fs';
 import { json2csv } from 'json-2-csv';
 import JSZip from 'jszip';
 import moment from 'moment';
-import { writeFile } from 'node:fs/promises';
+import { rename, rm, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { catchError, firstValueFrom, lastValueFrom } from 'rxjs';
-import { Readable, Transform } from 'stream';
+import { PassThrough, Readable, Transform } from 'stream';
+import { DataSource } from 'typeorm';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { DepartementService } from '../departement/departement.service';
@@ -50,7 +52,6 @@ export class DatagouvService {
     pmtiles_archive: '9b5a883c-1b44-493e-9b4a-472b47f63e8f',
     geojson_archive: 'f386e124-3dcc-435a-a368-427ac51fbe97',
     arretes_cadre: '0732e970-c12c-4e6a-adca-5ac9dbc3fdfa',
-    historique_communes: '4322064e-cfb4-4c8a-8200-7620f491ccdb',
   };
 
   constructor(
@@ -65,6 +66,8 @@ export class DatagouvService {
     private readonly s3Service: S3Service,
     private readonly departementService: DepartementService,
     private readonly statisticCommuneService: StatisticCommuneService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {
     this.path = this.configService.get('PATH_TO_WRITE_FILE');
     this.datagouvApiKey = this.configService.get('API_DATAGOUV_KEY');
@@ -120,6 +123,9 @@ export class DatagouvService {
     );
     await this.runDataGouvUpdate('COMMUNES', () => this.updateCommunes());
     await this.runDataGouvUpdate('CARTES', () => this.updateMaps());
+    await this.runDataGouvUpdate('HISTORIQUE COMMUNES', () =>
+      this.updateHistoriqueCommunes(),
+    );
 
     this.logger.log('MISE A JOUR DATAGOUV - FIN');
   }
@@ -510,6 +516,11 @@ export class DatagouvService {
   }
 
   private getDataGouvResourceId(resource: string): string | undefined {
+    if (resource === 'historique_communes') {
+      return this.configService.get(
+        'API_DATAGOUV_HISTORIQUE_COMMUNES_RESOURCE_ID',
+      );
+    }
     const communesMatch = /^communes_(\d{4})$/.exec(resource);
     if (communesMatch) {
       return this.configService.get(
@@ -586,6 +597,60 @@ export class DatagouvService {
       definition.zipFileName,
       definition.title,
     );
+  }
+
+  async updateHistoriqueCommunes(): Promise<void> {
+    if (!this.canUploadToDataGouv()) {
+      throw new Error("Configuration manquante pour l'upload vers Datagouv");
+    }
+    if (!this.getDataGouvResourceId('historique_communes')) {
+      throw new Error('Ressource non configurée : historique_communes');
+    }
+
+    this.logger.log('MISE A JOUR DATAGOUV - HISTORIQUE COMMUNES - DEBUT');
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let transactionStarted = false;
+    try {
+      await queryRunner.connect();
+      connected = true;
+      await queryRunner.startTransaction();
+      transactionStarted = true;
+      const [lock] = await queryRunner.query(
+        "SELECT pg_try_advisory_xact_lock(hashtext('vigieau:datagouv-historique-communes')) AS locked",
+      );
+      if (lock?.locked !== true) {
+        throw new Error(
+          "Une publication de l'historique des communes est déjà en cours",
+        );
+      }
+
+      const stream =
+        await this.statisticCommuneService.getStatisticCommuneStream();
+      await this.writeCommunesArchive(
+        stream,
+        'historique_communes.json',
+        'historique_communes.zip',
+      );
+      await this.uploadToDatagouv(
+        'historique_communes',
+        'historique_communes.zip',
+        'Historique Communes',
+      );
+    } finally {
+      try {
+        if (transactionStarted && queryRunner.isTransactionActive) {
+          await queryRunner.rollbackTransaction();
+        }
+      } finally {
+        if (connected) {
+          await queryRunner.release();
+        }
+      }
+    }
+
+    this.logger.log('MISE A JOUR DATAGOUV - HISTORIQUE COMMUNES - FIN');
   }
 
   async createOrUpdateCommunesResource(year: number): Promise<string> {
@@ -681,11 +746,67 @@ export class DatagouvService {
     jsonFileName: string,
   ): Promise<void> {
     this.logger.log(`MISE A JOUR DATAGOUV - COMMUNES ${year} - DEBUT`);
+    const stream =
+      await this.statisticCommuneService.getStatisticCommuneStreamForYear(year);
+    await this.writeCommunesArchive(
+      stream,
+      jsonFileName,
+      `restrictions_communes_${year}.zip`,
+    );
+    this.logger.log(`MISE A JOUR DATAGOUV - COMMUNES ${year} - FIN`);
+  }
 
-    const filePath = `${this.path}/${jsonFileName}`;
+  private async writeCommunesArchive(
+    source: Readable,
+    jsonFileName: string,
+    zipFileName: string,
+  ): Promise<void> {
+    const zipFilePath = `${this.path}/${zipFileName}`;
+    const temporaryZipFilePath = `${zipFilePath}.tmp`;
+    await rm(temporaryZipFilePath, { force: true });
+
+    const jsonStream = new PassThrough();
+    const zipStream = fs.createWriteStream(temporaryZipFilePath, {
+      flags: 'wx',
+    });
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archiveCompleted = new Promise<void>((resolve, reject) => {
+      zipStream.once('close', resolve);
+      zipStream.once('error', reject);
+      archive.once('error', reject);
+    });
+
+    archive.pipe(zipStream);
+    archive.append(jsonStream, { name: jsonFileName });
+
+    const contentCompleted = pipeline(
+      source,
+      this.createCommunesJsonTransform(),
+      jsonStream,
+    );
+    const finalizationCompleted = archive.finalize();
+
+    try {
+      await Promise.all([
+        contentCompleted,
+        finalizationCompleted,
+        archiveCompleted,
+      ]);
+      await rename(temporaryZipFilePath, zipFilePath);
+    } catch (error) {
+      archive.abort();
+      jsonStream.destroy();
+      zipStream.destroy();
+      await rm(temporaryZipFilePath, { force: true });
+      throw error;
+    }
+
+    this.logger.log(`Fichier ZIP disponible : ${zipFilePath}`);
+  }
+
+  private createCommunesJsonTransform(): Transform {
     let first = true;
-
-    const transformStream = new Transform({
+    return new Transform({
       writableObjectMode: true,
       transform(chunk: any, _encoding, callback) {
         const formattedData = JSON.stringify({
@@ -695,43 +816,13 @@ export class DatagouvService {
           },
           restrictions: chunk.sc_restrictions,
         });
-
-        if (!first) {
-          callback(null, ',' + formattedData);
-        } else {
-          first = false;
-          callback(null, '[' + formattedData);
-        }
+        const prefix = first ? '[' : ',';
+        first = false;
+        callback(null, prefix + formattedData);
       },
       flush(callback) {
         callback(null, first ? '[]' : ']');
       },
     });
-
-    const stream =
-      await this.statisticCommuneService.getStatisticCommuneStreamForYear(year);
-    await pipeline(stream, transformStream, fs.createWriteStream(filePath));
-
-    this.logger.log('END FILESTREAM');
-
-    const zipFilePath = `${this.path}/restrictions_communes_${year}.zip`;
-    const zipStream = fs.createWriteStream(zipFilePath);
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    const archiveCompleted = new Promise<void>((resolve, reject) => {
-      zipStream.on('close', resolve);
-      zipStream.on('error', reject);
-      archive.on('error', reject);
-    });
-
-    archive.pipe(zipStream);
-    archive.append(fs.createReadStream(filePath), {
-      name: jsonFileName,
-    });
-
-    await archive.finalize();
-    await archiveCompleted;
-
-    this.logger.log(`Fichier ZIP disponible : ${zipFilePath}`);
-    this.logger.log(`MISE A JOUR DATAGOUV - COMMUNES ${year} - FIN`);
   }
 }
