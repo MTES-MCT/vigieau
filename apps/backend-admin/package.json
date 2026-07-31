@@ -16,6 +16,7 @@
     "start:coverage": "nyc --silent nest start --watch --max-old-space-size=4096",
     "start:debug": "nest start --debug --watch --max-old-space-size=4096",
     "start:prod": "node dist/apps/backend-admin/src/main --max-old-space-size=4096",
+    "datagouv:publish-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-communes.js",
     "recompute:commune-statistics": "node dist/apps/backend-admin/src/scripts/recompute-commune-statistics.js",
     "zones:sandre:reconcile": "node dist/apps/backend-admin/src/scripts/reconcile-sandre-zones.js",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",

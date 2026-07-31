@@ -3,13 +3,14 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
-import archiver from 'archiver';
+import * as archiver from 'archiver';
 import { AxiosError } from 'axios';
-import fs from 'fs';
+import * as fs from 'node:fs';
 import { json2csv } from 'json-2-csv';
 import JSZip from 'jszip';
 import moment from 'moment';
 import { writeFile } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { catchError, firstValueFrom, lastValueFrom } from 'rxjs';
 import { Readable, Transform } from 'stream';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
@@ -65,7 +66,8 @@ export class DatagouvService {
   ) {
     this.path = this.configService.get('PATH_TO_WRITE_FILE');
     this.datagouvApiKey = this.configService.get('API_DATAGOUV_KEY');
-    this.datagouvApiUrl = `${this.configService.get('API_DATAGOUV')}/datasets/${this.configService.get('API_DATAGOUV_DATASET')}`;
+    const apiUrl = this.configService.get<string>('API_DATAGOUV') || '';
+    this.datagouvApiUrl = `${apiUrl.replace(/\/+$/, '')}/datasets/${this.configService.get('API_DATAGOUV_DATASET')}`;
   }
 
   /**
@@ -92,22 +94,60 @@ export class DatagouvService {
 
     this.logger.log('MISE A JOUR DATAGOUV - DEBUT');
 
+    let arretes: ArreteRestriction[] | undefined;
     try {
-      const arretes = await this.arreteRestrictionService.findDatagouv();
-      await this.updateArretes(arretes);
-      await this.updateArretesCadre();
-      await this.updateHistoriqueArretes(arretes);
-      await this.updateRestrictions();
-      await this.updateMaps();
-      await this.updateCommunes();
+      arretes = await this.arreteRestrictionService.findDatagouv();
     } catch (error) {
-      this.logger.error(
-        'Erreur lors de la mise à jour des données Datagouv',
-        error,
+      this.logDataGouvError('RECUPERATION DES ARRETES', error);
+    }
+
+    if (arretes) {
+      await this.runDataGouvUpdate('ARRETES', () =>
+        this.updateArretes(arretes),
+      );
+      await this.runDataGouvUpdate('HISTORIQUE ARRETES', () =>
+        this.updateHistoriqueArretes(arretes),
       );
     }
 
+    await this.runDataGouvUpdate('ARRETES CADRE', () =>
+      this.updateArretesCadre(),
+    );
+    await this.runDataGouvUpdate('RESTRICTIONS', () =>
+      this.updateRestrictions(),
+    );
+    await this.runDataGouvUpdate('COMMUNES', () => this.updateCommunes());
+    await this.runDataGouvUpdate('CARTES', () => this.updateMaps());
+
     this.logger.log('MISE A JOUR DATAGOUV - FIN');
+  }
+
+  private async runDataGouvUpdate(
+    name: string,
+    update: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await update();
+    } catch (error) {
+      this.logDataGouvError(name, error);
+    }
+  }
+
+  private logDataGouvError(name: string, error: unknown): void {
+    this.logger.error(
+      `Erreur lors de la mise à jour Datagouv - ${name}`,
+      this.formatDataGouvError(error),
+    );
+  }
+
+  private formatDataGouvError(error: unknown): string {
+    const axiosError = error as AxiosError;
+    return JSON.stringify({
+      message: error instanceof Error ? error.message : String(error),
+      code: axiosError?.code,
+      status: axiosError?.response?.status,
+      statusText: axiosError?.response?.statusText,
+    });
   }
 
   /**
@@ -450,40 +490,67 @@ export class DatagouvService {
   ): Promise<void> {
     this.logger.log(`ENVOI VERS DATAGOUV - ${resource}`);
 
-    if (!this.datagouvResources[resource]) {
+    const resourceId = this.getDataGouvResourceId(resource);
+    if (!resourceId) {
       this.logger.warn(`Ressource non configurée : ${resource}`);
       return;
     }
 
-    const url = `${this.datagouvApiUrl}/resources/${this.datagouvResources[resource]}/`;
+    const url = `${this.datagouvApiUrl}/resources/${resourceId}/`;
     if (!isUrl) {
-      const data = fs.readFileSync(`${this.path}/${fileName}`);
-      const formData = new FormData();
-      formData.append('file', new Blob([data]), fileName);
-
-      await lastValueFrom(
-        this.httpService
-          .post(`${url}/upload`, formData, {
-            headers: {
-              Accept: 'application/json',
-              'X-Api-Key': this.datagouvApiKey,
-            },
-          })
-          .pipe(
-            catchError((error: AxiosError) => {
-              this.logger.error(
-                "ERREUR DANS L'ENVOI VERS DATAGOUV",
-                JSON.stringify(error),
-              );
-              throw error;
-            }),
-          ),
-      );
+      await this.uploadDataGouvFile(`${url}upload/`, fileName);
     }
 
     const body: any = { title };
     if (isUrl) body.url = fileName;
 
+    await this.updateDataGouvResource(resourceId, body);
+  }
+
+  private getDataGouvResourceId(resource: string): string | undefined {
+    const communesMatch = /^communes_(\d{4})$/.exec(resource);
+    if (communesMatch) {
+      return this.configService.get(
+        `API_DATAGOUV_COMMUNES_${communesMatch[1]}_RESOURCE_ID`,
+      );
+    }
+    return this.datagouvResources[resource];
+  }
+
+  private async uploadDataGouvFile(
+    url: string,
+    fileName: string,
+  ): Promise<any> {
+    const data = await fs.openAsBlob(`${this.path}/${fileName}`);
+    const formData = new FormData();
+    formData.append('file', data, fileName);
+
+    const response = await lastValueFrom(
+      this.httpService
+        .post(url, formData, {
+          headers: {
+            Accept: 'application/json',
+            'X-Api-Key': this.datagouvApiKey,
+          },
+        })
+        .pipe(
+          catchError((error: AxiosError) => {
+            this.logger.error(
+              "ERREUR DANS L'ENVOI VERS DATAGOUV",
+              this.formatDataGouvError(error),
+            );
+            throw error;
+          }),
+        ),
+    );
+    return response.data;
+  }
+
+  private async updateDataGouvResource(
+    resourceId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    const url = `${this.datagouvApiUrl}/resources/${resourceId}/`;
     await lastValueFrom(
       this.httpService
         .put(url, body, {
@@ -496,7 +563,7 @@ export class DatagouvService {
           catchError((error: AxiosError) => {
             this.logger.error(
               'ERREUR DANS LA MISE A JOUR DES METADONNEES DATAGOUV',
-              JSON.stringify(error),
+              this.formatDataGouvError(error),
             );
             throw error;
           }),
@@ -504,17 +571,121 @@ export class DatagouvService {
     );
   }
 
-  async updateCommunes() {
-    this.logger.log('MISE A JOUR DATAGOUV - COMMUNES - DEBUT');
+  async updateCommunes(year = new Date().getFullYear()): Promise<void> {
+    const definition = this.getCommunesResourceDefinition(year);
+    if (!this.getDataGouvResourceId(definition.resource)) {
+      this.logger.warn(`Ressource non configurée : ${definition.resource}`);
+      return;
+    }
 
-    const filePath = `${this.path}/historique_communes.json`;
-    const fileStream = fs.createWriteStream(filePath);
-    fileStream.write('['); // Début du fichier JSON
+    await this.generateCommunesArchive(year, definition.jsonFileName);
+    await this.uploadToDatagouv(
+      definition.resource,
+      definition.zipFileName,
+      definition.title,
+    );
+  }
+
+  async createOrUpdateCommunesResource(year: number): Promise<string> {
+    if (!this.canUploadToDataGouv()) {
+      throw new Error("Configuration manquante pour l'upload vers Datagouv");
+    }
+
+    const definition = this.getCommunesResourceDefinition(year);
+    const configuredResourceId = this.getDataGouvResourceId(
+      definition.resource,
+    );
+    const matchingResources = configuredResourceId
+      ? [{ id: configuredResourceId }]
+      : await this.findDataGouvCommuneResources(
+          definition.title,
+          definition.zipFileName,
+        );
+
+    if (matchingResources.length > 1) {
+      throw new Error(
+        `Plusieurs ressources Datagouv correspondent à « ${definition.title} »`,
+      );
+    }
+
+    await this.generateCommunesArchive(year, definition.jsonFileName);
+
+    let resourceId = matchingResources[0]?.id;
+    if (resourceId) {
+      await this.uploadDataGouvFile(
+        `${this.datagouvApiUrl}/resources/${resourceId}/upload/`,
+        definition.zipFileName,
+      );
+    } else {
+      const resource = await this.uploadDataGouvFile(
+        `${this.datagouvApiUrl}/upload/`,
+        definition.zipFileName,
+      );
+      resourceId = resource?.id;
+      if (!resourceId) {
+        throw new Error(
+          "Datagouv n'a pas retourné l'identifiant de la ressource",
+        );
+      }
+    }
+
+    await this.updateDataGouvResource(resourceId, {
+      title: definition.title,
+      description: definition.description,
+      type: 'update',
+    });
+    return resourceId;
+  }
+
+  private async findDataGouvCommuneResources(
+    title: string,
+    fileName: string,
+  ): Promise<Array<{ id: string }>> {
+    const response = await firstValueFrom(
+      this.httpService.get(`${this.datagouvApiUrl}/`, {
+        headers: { Accept: 'application/json' },
+      }),
+    );
+    const possibleFileNames = [fileName, fileName.replaceAll('_', '-')];
+    return (response.data?.resources || []).filter((resource) => {
+      const resourceUrl = resource.url || '';
+      return (
+        resource.title === title ||
+        possibleFileNames.some((candidate) =>
+          resourceUrl.endsWith(`/${candidate}`),
+        )
+      );
+    });
+  }
+
+  private getCommunesResourceDefinition(year: number) {
+    if (!Number.isInteger(year) || year < 2013 || year > 9999) {
+      throw new Error(`Année de statistiques communales invalide : ${year}`);
+    }
+
+    return {
+      resource: `communes_${year}`,
+      jsonFileName: `restrictions_communes_${year}.json`,
+      zipFileName: `restrictions_communes_${year}.zip`,
+      title: `Communes en restrictions - ${year}`,
+      description:
+        `Historique quotidien des niveaux de gravité applicables à chaque commune pour l'année ${year}. ` +
+        `Le ZIP contient le fichier restrictions_communes_${year}.json.`,
+    };
+  }
+
+  private async generateCommunesArchive(
+    year: number,
+    jsonFileName: string,
+  ): Promise<void> {
+    this.logger.log(`MISE A JOUR DATAGOUV - COMMUNES ${year} - DEBUT`);
+
+    const filePath = `${this.path}/${jsonFileName}`;
     let first = true;
 
     const transformStream = new Transform({
-      objectMode: true,
-      transform(chunk: any, encoding, callback) {
+      writableObjectMode: true,
+      transform(chunk: any, _encoding, callback) {
         const formattedData = JSON.stringify({
           commune: {
             code: chunk.commune_code,
@@ -527,53 +698,38 @@ export class DatagouvService {
           callback(null, ',' + formattedData);
         } else {
           first = false;
-          callback(null, formattedData);
+          callback(null, '[' + formattedData);
         }
+      },
+      flush(callback) {
+        callback(null, first ? '[]' : ']');
       },
     });
 
     const stream =
-      await this.statisticCommuneService.getStatisticCommuneStream();
-
-    stream.pipe(transformStream).pipe(fileStream);
-
-    stream.on('end', () => {
-      fileStream.write(']'); // Fin JSON
-      fileStream.end();
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      fileStream.on('finish', resolve);
-      fileStream.on('error', reject);
-    });
+      await this.statisticCommuneService.getStatisticCommuneStreamForYear(year);
+    await pipeline(stream, transformStream, fs.createWriteStream(filePath));
 
     this.logger.log('END FILESTREAM');
 
-    // 🔥 Création du ZIP en streaming
-    const zipFilePath = `${this.path}/historique_communes.zip`;
+    const zipFilePath = `${this.path}/restrictions_communes_${year}.zip`;
     const zipStream = fs.createWriteStream(zipFilePath);
     const archive = archiver('zip', { zlib: { level: 9 } });
+    const archiveCompleted = new Promise<void>((resolve, reject) => {
+      zipStream.on('close', resolve);
+      zipStream.on('error', reject);
+      archive.on('error', reject);
+    });
 
     archive.pipe(zipStream);
     archive.append(fs.createReadStream(filePath), {
-      name: 'historique_communes.json',
+      name: jsonFileName,
     });
 
-    await archive.finalize(); // Finalisation de l'archive
-
-    await new Promise<void>((resolve, reject) => {
-      zipStream.on('close', resolve);
-      zipStream.on('error', reject);
-    });
+    await archive.finalize();
+    await archiveCompleted;
 
     this.logger.log(`Fichier ZIP disponible : ${zipFilePath}`);
-
-    await this.uploadToDatagouv(
-      'historique_communes',
-      'historique_communes.zip',
-      'Historique Communes',
-    );
-
-    this.logger.log('MISE A JOUR DATAGOUV - COMMUNES - FIN');
+    this.logger.log(`MISE A JOUR DATAGOUV - COMMUNES ${year} - FIN`);
   }
 }

@@ -31,6 +31,14 @@ cp env.example .env
 - DOMAIN_NAME : Domaine du frontend (localhost:3000 en local)
 - PATH_TO_WRITE_FILE : Dossier pour stocker les fichiers temporaires ou le serveur peut lire / écrire
 
+### Publication annuelle des restrictions par commune
+
+La publication quotidienne utilise une ressource Datagouv distincte par année. Pour initialiser une nouvelle année, exécuter la commande suivante puis renseigner l'identifiant retourné dans `API_DATAGOUV_COMMUNES_<ANNEE>_RESOURCE_ID` :
+
+```bash
+npm run datagouv:publish-communes -- 2026
+```
+
 ### Installation des dépendances
 
 ```bash

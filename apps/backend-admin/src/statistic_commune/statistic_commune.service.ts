@@ -1,6 +1,6 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, LessThan, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
 import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { RegleauLogger } from '../logger/regleau.logger';
@@ -34,10 +34,33 @@ export class StatisticCommuneService {
     // }, 5000);
   }
 
-  async getStatisticCommuneStream() {
+  async getStatisticCommuneStreamForYear(year: number) {
+    if (!Number.isInteger(year) || year < 2013 || year > 9999) {
+      throw new Error(`Invalid statistic year: ${year}`);
+    }
+
+    const startDate = `${year}-01-01`;
+    const endDate = `${year + 1}-01-01`;
+
     return this.statisticCommuneRepository
       .createQueryBuilder('sc')
-      .leftJoinAndSelect('sc.commune', 'commune')
+      .innerJoin('sc.commune', 'commune')
+      .select('commune.code', 'commune_code')
+      .addSelect('commune.nom', 'commune_nom')
+      .addSelect(
+        `COALESCE(
+          (
+            SELECT jsonb_agg(restriction.value ORDER BY restriction.value ->> 'date')
+            FROM jsonb_array_elements(COALESCE(sc.restrictions, '[]'::jsonb)) AS restriction(value)
+            WHERE restriction.value ->> 'date' >= :startDate
+              AND restriction.value ->> 'date' < :endDate
+          ),
+          '[]'::jsonb
+        )`,
+        'sc_restrictions',
+      )
+      .setParameters({ startDate, endDate })
+      .orderBy('commune.code', 'ASC')
       .stream();
   }
 
@@ -67,13 +90,10 @@ export class StatisticCommuneService {
         communes.map(async (c: Commune) => {
           let statCommune = c.statisticCommune;
           if (!statCommune) {
-            // @ts-ignore
-            statCommune = {
+            statCommune = await this.statisticCommuneRepository.save({
               commune: c,
               restrictions: [],
-            };
-            statCommune =
-              await this.statisticCommuneRepository.save(statCommune);
+            } as StatisticCommune);
           }
 
           const restriction = {
