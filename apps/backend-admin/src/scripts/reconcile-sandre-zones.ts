@@ -446,13 +446,14 @@ async function fetchGenealogySource(): Promise<{
   };
 }
 
-async function fetchText(
+export async function fetchText(
   url: string,
   enforceSizeLimit = true,
 ): Promise<string> {
   const response = await fetch(url, {
     headers: {
       accept: 'application/xml,text/xml,text/csv,text/html;q=0.9',
+      'accept-language': 'fr',
     },
     signal: AbortSignal.timeout(60_000),
   });

@@ -1,6 +1,7 @@
 import {
   acquireHistoricalRecomputeLock,
   currentTargetFingerprint,
+  fetchText,
   parseCliOptions,
 } from './reconcile-sandre-zones';
 
@@ -80,5 +81,28 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
       acquireHistoricalRecomputeLock(executor, '2024-01-15', 0),
     ).rejects.toThrow('Timed out waiting for the historic zone compute lock');
     expect(executor.query).toHaveBeenCalledTimes(1);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('uses a supported language header for Sandre metadata', async () => {
+    const fetch = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      text: jest.fn().mockResolvedValue('<metadata />'),
+    } as unknown as Response);
+
+    await expect(
+      fetchText('https://www.sandre.eaufrance.fr/metadata.xml'),
+    ).resolves.toBe('<metadata />');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://www.sandre.eaufrance.fr/metadata.xml',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'accept-language': 'fr',
+        }),
+      }),
+    );
   });
 });
