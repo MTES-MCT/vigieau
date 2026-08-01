@@ -495,6 +495,12 @@ export class ZonesService implements OnModuleInit {
       const loadedPublicationId = this.activeSnapshot.publication?.id || null;
       const publicationChanged =
         publicationState.activePublicationId !== loadedPublicationId;
+      const candidatePreloaded =
+        this.isCandidatePreloadCurrent(publicationState);
+
+      if (publicationState.candidatePublicationId && !candidatePreloaded) {
+        this.startCandidatePreload(publicationState.candidatePublicationId);
+      }
 
       if (publicationChanged) {
         const stablePublication =
@@ -517,17 +523,15 @@ export class ZonesService implements OnModuleInit {
             );
         }
       } else if (publicationState.activePublicationId) {
-        const candidatePreloaded =
-          this.isCandidatePreloadCurrent(publicationState);
-        if (publicationState.candidatePublicationId && !candidatePreloaded) {
-          this.startCandidatePreload(publicationState.candidatePublicationId);
-        }
         if (!publicationState.candidatePublicationId || candidatePreloaded) {
           this.lastCacheError = null;
         }
       } else if (await this.hasNewZoneComputation()) {
         await this.loadAllZones();
-      } else {
+      } else if (
+        !publicationState.candidatePublicationId ||
+        candidatePreloaded
+      ) {
         this.lastCacheError = null;
       }
       await this.writePublicationHeartbeat(heartbeatRequired);

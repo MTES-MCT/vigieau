@@ -571,6 +571,63 @@ describe('ZonesService', () => {
     expect(result).toMatchObject([{ id: 2 }]);
   });
 
+  it('preloads the first candidate before the legacy computation changes', async () => {
+    const candidateId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    installSnapshot();
+    service['lastZoneComputationCheckAt'] = 0;
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: null,
+      candidatePublicationId: candidateId,
+    });
+    mockZonePublicationRepository.query.mockResolvedValue([
+      makePublicationRow(candidateId, 'candidate', 2),
+    ]);
+
+    await service['refreshZonesIfStale'](true);
+    await flushPromises();
+
+    expect(service['publicationSnapshots'].has(candidateId)).toBe(true);
+    expect(mockZonePublicationInstanceRepository.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        activePublicationId: null,
+        candidatePublicationId: candidateId,
+        zoneCount: 1,
+        communeLinkCount: 1,
+      }),
+      ['instanceId'],
+    );
+    expect(service['activeSnapshot']?.publication).toBeNull();
+  });
+
+  it('keeps a first-candidate preload failure visible', async () => {
+    const candidateId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    installSnapshot();
+    service['lastZoneComputationCheckAt'] = 0;
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: null,
+      candidatePublicationId: candidateId,
+    });
+    mockZonePublicationRepository.query.mockRejectedValue(
+      new Error('candidate read failed'),
+    );
+
+    await service['refreshZonesIfStale'](true);
+    await flushPromises();
+    await flushPromises();
+
+    expect(service['lastCacheError']).toMatchObject({
+      phase: 'candidate-preload',
+    });
+    expect(mockZonePublicationInstanceRepository.upsert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        candidatePublicationId: null,
+        lastError: 'candidate-preload',
+      }),
+      ['instanceId'],
+    );
+    expect(service['activeSnapshot']?.publication).toBeNull();
+  });
+
   it('builds all lookup indexes locally before publishing them', async () => {
     queryBuilder.getRawMany.mockResolvedValueOnce([
       {
