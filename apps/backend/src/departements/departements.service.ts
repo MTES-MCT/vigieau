@@ -1,4 +1,9 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, Repository } from 'typeorm';
 import { Departement } from '@shared/entities/departement.entity';
@@ -9,6 +14,10 @@ import { Utils } from '../core/utils';
 import { max } from 'lodash';
 import { Region } from '@shared/entities/region.entity';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
+import { ZonePublication } from '@shared/entities/zone_publication.entity';
+import { ZonePublicationAggregate } from '@shared/entities/zone_publication_aggregate.entity';
+import { type ZonePublicationAggregatePayload } from '@shared/zone_publication_materialization';
+import { isUUID } from 'class-validator';
 
 @Injectable()
 export class DepartementsService {
@@ -30,6 +39,12 @@ export class DepartementsService {
     private readonly regionRepository: Repository<Region>,
     @InjectRepository(BassinVersant)
     private readonly bassinVersantRepository: Repository<BassinVersant>,
+    @Optional()
+    @InjectRepository(ZonePublication)
+    private readonly zonePublicationRepository?: Repository<ZonePublication>,
+    @Optional()
+    @InjectRepository(ZonePublicationAggregate)
+    private readonly zonePublicationAggregateRepository?: Repository<ZonePublicationAggregate>,
   ) {
     this.loadRefData();
   }
@@ -64,7 +79,16 @@ export class DepartementsService {
     bassinVersant?: string,
     region?: string,
     departement?: string,
-  ): DepartementDto[] {
+    publicationId?: string,
+  ): DepartementDto[] | Promise<DepartementDto[]> {
+    if (publicationId) {
+      return this.situationByPublication(
+        publicationId,
+        bassinVersant,
+        region,
+        departement,
+      );
+    }
     const searchDate = date || new Date().toISOString().split('T')[0];
 
     const situationDepartement = this.situationDepartements.find(
@@ -74,6 +98,20 @@ export class DepartementsService {
       throw new HttpException(`Date non disponible.`, HttpStatus.NOT_FOUND);
     }
 
+    return this.filterSituation(
+      situationDepartement.departementSituation,
+      bassinVersant,
+      region,
+      departement,
+    );
+  }
+
+  private filterSituation(
+    situation: DepartementDto[],
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ): DepartementDto[] {
     if (bassinVersant) {
       const b = this.bassinsVersants.find((b) => b.id === +bassinVersant);
       if (!b) {
@@ -82,7 +120,7 @@ export class DepartementsService {
           HttpStatus.NOT_FOUND,
         );
       }
-      return situationDepartement.departementSituation.filter((d) =>
+      return situation.filter((d) =>
         b.departements.some((dep) => dep.code === d.code),
       );
     }
@@ -92,7 +130,7 @@ export class DepartementsService {
       if (!r) {
         throw new HttpException(`Région non trouvée.`, HttpStatus.NOT_FOUND);
       }
-      return situationDepartement.departementSituation.filter((d) =>
+      return situation.filter((d) =>
         r.departements.some((dep) => dep.code === d.code),
       );
     }
@@ -105,11 +143,9 @@ export class DepartementsService {
           HttpStatus.NOT_FOUND,
         );
       }
-      return situationDepartement.departementSituation.filter(
-        (ds) => d.code === ds.code,
-      );
+      return situation.filter((ds) => d.code === ds.code);
     }
-    return situationDepartement.departementSituation;
+    return situation;
   }
 
   /**
@@ -117,6 +153,7 @@ export class DepartementsService {
    */
   async loadRefData(): Promise<void> {
     this.departements = await this.departementRepository.find({
+      relations: ['region'],
       order: {
         nom: 'ASC',
       },
@@ -153,7 +190,7 @@ export class DepartementsService {
         return;
       }
       try {
-        const nextSituation = await this.buildSituation(currentZones);
+        const nextSituation = await this.buildSituationSnapshot(currentZones);
         if (generation !== this.situationLoadGeneration) {
           return;
         }
@@ -176,7 +213,22 @@ export class DepartementsService {
     throw lastError;
   }
 
-  private async buildSituation(currentZones): Promise<any[]> {
+  async buildSituationSnapshot(
+    currentZones: readonly Record<string, unknown>[],
+    aggregate?: ZonePublicationAggregatePayload | null,
+  ): Promise<any[]> {
+    return this.buildSituation(currentZones, aggregate);
+  }
+
+  publishSituation(nextSituation: any[]): void {
+    this.situationLoadGeneration += 1;
+    this.situationDepartements = nextSituation;
+  }
+
+  private async buildSituation(
+    currentZones: readonly Record<string, unknown>[],
+    aggregate?: ZonePublicationAggregatePayload | null,
+  ): Promise<any[]> {
     const [departements, statistics] = await Promise.all([
       this.departementRepository.find(<FindManyOptions>{
         select: {
@@ -203,7 +255,8 @@ export class DepartementsService {
       }),
     ]);
 
-    return statistics.map((s) => {
+    const today = new Date().toISOString().split('T')[0];
+    const situations = statistics.map((s) => {
       return {
         date: s.date,
         departementSituation: departements.map((d) => {
@@ -224,15 +277,24 @@ export class DepartementsService {
               ? s.departementSituation[d.code].aep
               : null;
 
-          if (s.date === new Date().toISOString().split('T')[0]) {
+          if (s.date === today) {
+            const materialized = aggregate?.departments[d.code];
             const depZones = currentZones.filter(
               (z) => z.departement === d.code,
             );
 
-            niveauGraviteMax = this.computeMaxGravite(depZones);
-            niveauGraviteSupMax = this.computeMaxGravite(depZones, 'SUP');
-            niveauGraviteSouMax = this.computeMaxGravite(depZones, 'SOU');
-            niveauGraviteAepMax = this.computeMaxGravite(depZones, 'AEP');
+            niveauGraviteMax = materialized
+              ? materialized.max
+              : this.computeMaxGravite(depZones);
+            niveauGraviteSupMax = materialized
+              ? materialized.sup
+              : this.computeMaxGravite(depZones, 'SUP');
+            niveauGraviteSouMax = materialized
+              ? materialized.sou
+              : this.computeMaxGravite(depZones, 'SOU');
+            niveauGraviteAepMax = materialized
+              ? materialized.aep
+              : this.computeMaxGravite(depZones, 'AEP');
           }
 
           return {
@@ -245,6 +307,85 @@ export class DepartementsService {
             niveauGraviteAepMax: niveauGraviteAepMax,
           };
         }),
+      };
+    });
+
+    if (
+      aggregate &&
+      !situations.some((situation) => situation.date === today)
+    ) {
+      situations.push({
+        date: today,
+        departementSituation: this.mapMaterializedSituation(aggregate),
+      });
+    }
+    return situations;
+  }
+
+  private async situationByPublication(
+    publicationId: string,
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ): Promise<DepartementDto[]> {
+    if (!isUUID(publicationId)) {
+      throw new HttpException(
+        `L'identifiant de publication n'est pas valide.`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (
+      !this.zonePublicationRepository ||
+      !this.zonePublicationAggregateRepository
+    ) {
+      throw new HttpException(
+        `Cette publication est temporairement indisponible.`,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    if (!this.departements) {
+      await this.loadRefData();
+    }
+    const [publication, aggregate] = await Promise.all([
+      this.zonePublicationRepository.findOne({
+        select: { id: true, status: true },
+        where: { id: publicationId },
+      }),
+      this.zonePublicationAggregateRepository.findOne({
+        where: { publicationId },
+      }),
+    ]);
+    if (
+      !publication ||
+      !aggregate ||
+      !['active', 'retired'].includes(publication.status)
+    ) {
+      throw new HttpException(
+        `Cette publication n'est plus disponible.`,
+        HttpStatus.GONE,
+      );
+    }
+    return this.filterSituation(
+      this.mapMaterializedSituation(aggregate.payload),
+      bassinVersant,
+      region,
+      departement,
+    );
+  }
+
+  private mapMaterializedSituation(
+    aggregate: ZonePublicationAggregatePayload,
+  ): DepartementDto[] {
+    return this.departements.map((department) => {
+      const situation = aggregate.departments[department.code];
+      return {
+        code: department.code,
+        nom: department.nom,
+        region: department.region?.nom,
+        niveauGraviteMax: situation?.max ?? null,
+        niveauGraviteSupMax: situation?.sup ?? null,
+        niveauGraviteSouMax: situation?.sou ?? null,
+        niveauGraviteAepMax: situation?.aep ?? null,
       };
     });
   }

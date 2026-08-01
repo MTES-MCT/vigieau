@@ -6,7 +6,8 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { ConfigService as NestConfigService } from '@nestjs/config';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { Departement } from '@shared/entities/departement.entity';
@@ -523,6 +524,7 @@ export class ArreteRestrictionService {
     createArreteRestrictionDto: CreateUpdateArreteRestrictionDto,
     currentUser?: User,
   ): Promise<ArreteRestriction> {
+    void currentUser;
     const arreteRestriction: ArreteRestriction =
       await this.arreteRestrictionRepository.save(createArreteRestrictionDto);
     arreteRestriction.restrictions = await this.restrictionService.updateAll(
@@ -938,7 +940,11 @@ export class ArreteRestrictionService {
     );
     await this.arreteRestrictionRepository.delete(id);
     if (arrete.statut === 'publie') {
-      this.zoneAlerteComputedService.askCompute([arrete.departement.id], false);
+      void this.zoneAlerteComputedService
+        .askCompute([arrete.departement.id], false)
+        .catch((error) =>
+          this.logger.error('ERREUR RECALCUL ZONES APRES ARRETE', error),
+        );
       this.statisticDepartementService.computeDepartementStatistics();
     }
     return;
@@ -1095,7 +1101,6 @@ export class ArreteRestrictionService {
         promises.push(
           this.arreteRestrictionRepository.update(
             { id: ar.id },
-            // @ts-ignore
             { dateFin: acDateFin.format('YYYY-MM-DD') },
           ),
         );
@@ -1103,7 +1108,6 @@ export class ArreteRestrictionService {
           promises.push(
             this.arreteRestrictionRepository.update(
               { id: ar.id },
-              // @ts-ignore
               { dateDebut: acDateFin.format('YYYY-MM-DD') },
             ),
           );
@@ -1140,17 +1144,23 @@ export class ArreteRestrictionService {
     } catch (e) {
       this.logger.error('ERREUR COMPUTE DEPARTEMENTS STATISTICS', e);
     }
-    this.zoneAlerteComputedService.askCompute(
+    return this.zoneAlerteComputedService.askCompute(
       departements ? departements.map((d) => d.id) : [],
       false,
       computeHistoric,
     );
   }
 
+  async catchUpHistoricComputations(requiredThrough: string): Promise<void> {
+    await this.zoneAlerteComputedService.computeHistoricPersistently(
+      requiredThrough,
+    );
+  }
+
   /**
    * Vérification s'il faut envoyer des mails de relance tous les jours à 8h du matin
    */
-  @Cron(CronExpression.EVERY_DAY_AT_8AM)
+  @BusinessCron(CronExpression.EVERY_DAY_AT_8AM)
   async sendArreteRestrictionEmails() {
     const [ar15ARelancer, ar2ARelancer] = await Promise.all([
       this.getArAtXDays(15),
@@ -1379,8 +1389,7 @@ export class ArreteRestrictionService {
         v === undefined
       ) {
         if (Array.isArray(object)) {
-          // @ts-ignore
-          object.splice(k, 1);
+          object.splice(Number(k), 1);
           this.removeEmpty(object);
         } else {
           delete object[k];

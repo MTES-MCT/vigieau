@@ -26,8 +26,18 @@ import { S3Service } from './services/s3.service';
             pass: configService.get<string>('MAIL_PASSWORD'),
           },
           tls: {
-            // do not fail on invalid certs
-            rejectUnauthorized: false,
+            rejectUnauthorized:
+              configService
+                .get<string>('MAIL_TLS_REJECT_UNAUTHORIZED')
+                ?.trim()
+                .toLowerCase() !== 'false',
+            ...(configService.get<string>('MAIL_TLS_CA')?.trim()
+              ? {
+                  ca: configService
+                    .getOrThrow<string>('MAIL_TLS_CA')
+                    .replace(/\\n/g, '\n'),
+                }
+              : {}),
           },
         },
         preview: configService.get<string>('NODE_ENV') === 'local',

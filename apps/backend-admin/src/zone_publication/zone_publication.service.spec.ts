@@ -7,17 +7,44 @@ import {
 } from './zone_publication.service';
 import { createHash } from 'node:crypto';
 
-const GEOJSON_ARTIFACT = Buffer.from('{"type":"FeatureCollection"}');
+function geojsonArtifact(featureCount: number): Buffer<ArrayBuffer> {
+  return Buffer.from(
+    JSON.stringify({
+      type: 'FeatureCollection',
+      features: Array.from({ length: featureCount }, (_, index) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [index, index] },
+        properties: { id: index + 1 },
+      })),
+    }),
+  );
+}
+
+const GEOJSON_ARTIFACT = geojsonArtifact(1);
+const EMPTY_GEOJSON_ARTIFACT = geojsonArtifact(0);
 const PMTILES_ARTIFACT = (() => {
-  const header = Buffer.alloc(127);
+  const header = Buffer.alloc(129);
   header.write('PMTiles', 0, 'ascii');
   header.writeUInt8(3, 7);
-  [8, 24, 40, 56].forEach((offset) => header.writeBigUInt64LE(127n, offset));
+  header.writeBigUInt64LE(127n, 8);
+  header.writeBigUInt64LE(1n, 16);
+  header.writeBigUInt64LE(128n, 24);
+  header.writeBigUInt64LE(0n, 32);
+  header.writeBigUInt64LE(128n, 40);
+  header.writeBigUInt64LE(0n, 48);
+  header.writeBigUInt64LE(128n, 56);
+  header.writeBigUInt64LE(1n, 64);
+  header.writeBigUInt64LE(1n, 72);
+  header.writeBigUInt64LE(1n, 80);
+  header.writeBigUInt64LE(1n, 88);
   header.writeUInt8(1, 99);
   return header;
 })();
 const GEOJSON_CHECKSUM = createHash('sha256')
   .update(GEOJSON_ARTIFACT)
+  .digest('hex');
+const EMPTY_GEOJSON_CHECKSUM = createHash('sha256')
+  .update(EMPTY_GEOJSON_ARTIFACT)
   .digest('hex');
 const PMTILES_CHECKSUM = createHash('sha256')
   .update(PMTILES_ARTIFACT)
@@ -185,6 +212,50 @@ describe('ZonePublicationService', () => {
     await expect(service.bumpSourceRevision()).resolves.toBe('12');
   });
 
+  it('opens the daily gate only for the fully promoted active publication', async () => {
+    const sourceComputedAt = new Date('2026-08-01T08:00:00Z');
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([
+        {
+          publicationId: 'publication-1',
+          sourceRevision: '42',
+          sourceComputedAt,
+          geojsonUrl: 'https://example.test/zones.geojson',
+          geojsonChecksum: 'a'.repeat(64),
+          pmtilesUrl: 'https://example.test/zones.pmtiles',
+          pmtilesChecksum: 'b'.repeat(64),
+        },
+      ]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(
+      service.getActivePublicationGate('2026-08-01'),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        publicationId: 'publication-1',
+        sourceRevision: '42',
+        sourceComputedAt: sourceComputedAt.toISOString(),
+      }),
+    );
+    const sql = dataSource.query.mock.calls[0][0];
+    expect(sql).toContain('publication."status" = \'active\'');
+    expect(sql).toContain('publication."sourceRevision" = source."revision"');
+    expect(sql).toContain('publication."legacyPromotedAt" IS NOT NULL');
+    expect(sql).toContain('publication."dataGouvPromotedAt" IS NOT NULL');
+    expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
+  });
+
+  it('keeps the daily gate closed without a matching publication', async () => {
+    const service = new ZonePublicationService({
+      query: jest.fn().mockResolvedValue([]),
+    } as any);
+
+    await expect(
+      service.getActivePublicationGate('2026-08-01'),
+    ).resolves.toBeNull();
+  });
+
   it('requests recomputation only when neither active nor candidate matches', async () => {
     const dataSource = {
       query: jest
@@ -193,7 +264,7 @@ describe('ZonePublicationService', () => {
           {
             sourceRevision: '10',
             activeRevision: '9',
-            activeMaterializationVersion: 1,
+            activeMaterializationVersion: 2,
             candidateRevision: null,
             candidateMaterializationVersion: null,
             failureCount: 0,
@@ -203,9 +274,9 @@ describe('ZonePublicationService', () => {
           {
             sourceRevision: '10',
             activeRevision: '9',
-            activeMaterializationVersion: 1,
+            activeMaterializationVersion: 2,
             candidateRevision: '10',
-            candidateMaterializationVersion: 1,
+            candidateMaterializationVersion: 2,
             failureCount: 0,
           },
         ]),
@@ -233,6 +304,29 @@ describe('ZonePublicationService', () => {
     const service = new ZonePublicationService(dataSource as any);
 
     await expect(service.isRecomputeRequired()).resolves.toBe(true);
+  });
+
+  it('keeps automatic recomputation paused after a persisted rollback', async () => {
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([
+        {
+          sourceRevision: '10',
+          activeRevision: '9',
+          activeMaterializationVersion: 2,
+          candidateRevision: null,
+          candidateMaterializationVersion: null,
+          automaticPublishingPaused: true,
+          failureCount: 0,
+          recentInProgress: false,
+        },
+      ]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(service.isRecomputeRequired()).resolves.toBe(false);
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'state."automaticPublishingPaused"',
+    );
   });
 
   it('keeps publication build and activation inactive unless explicitly enabled', async () => {
@@ -265,7 +359,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 1,
+          activeMaterializationVersion: 2,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '3',
@@ -280,7 +374,7 @@ describe('ZonePublicationService', () => {
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.any(String),
-      [4500, 1],
+      [4500, 2],
     );
     const query = dataSource.query.mock.calls[0][0] as string;
     expect(query).toContain('failed."sourceRevision" = source."revision"');
@@ -293,7 +387,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 1,
+          activeMaterializationVersion: 2,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '3',
@@ -317,7 +411,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 1,
+          activeMaterializationVersion: 2,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '4',
@@ -347,7 +441,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 1,
+          activeMaterializationVersion: 2,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: 0,
@@ -360,7 +454,7 @@ describe('ZonePublicationService', () => {
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.any(String),
-      [4500, 1],
+      [4500, 2],
     );
   });
 
@@ -378,7 +472,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'validated',
               sourceRevision: '5',
-              materializationVersion: 1,
+              materializationVersion: 2,
             },
           ];
         }
@@ -418,6 +512,62 @@ describe('ZonePublicationService', () => {
     expect(lockStatements[2]).toContain('FROM "zone_publication"');
   });
 
+  it('does not replace a prepared rollback candidate with a concurrent build', async () => {
+    const executed: Array<{ sql: string; params?: unknown[] }> = [];
+    const manager = {
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        executed.push({ sql, params });
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '10' }];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: 'rollback-target',
+              candidateStatus: 'retired',
+              automaticPublishingPaused: true,
+            },
+          ];
+        }
+        if (
+          sql.includes('FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'new-build',
+              status: 'validated',
+              sourceRevision: '10',
+              materializationVersion: 2,
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(service.markCandidate('new-build')).resolves.toBe(false);
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes(`SET "status" = 'superseded'`) &&
+          params?.[0] === 'new-build',
+      ),
+    ).toBe(true);
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes('UPDATE "zone_publication_state"') ||
+          params?.[0] === 'rollback-target',
+      ),
+    ).toBe(false);
+  });
+
   it('keeps the active publication when not every live instance is ready', async () => {
     const executed: string[] = [];
     const manager = {
@@ -437,7 +587,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 1,
+              materializationVersion: 2,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -496,7 +646,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 1,
+              materializationVersion: 2,
               zoneCount: 10,
               communeLinkCount: 20,
               candidateAt: new Date('2020-01-01T00:00:00Z'),
@@ -569,7 +719,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 1,
+              materializationVersion: 2,
               zoneCount: 10,
               communeLinkCount: 20,
               candidateAt: new Date('2020-01-01T00:00:00Z'),
@@ -632,7 +782,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 1,
+              materializationVersion: 2,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -700,6 +850,93 @@ describe('ZonePublicationService', () => {
     expect(promotionLockIndex).toBeLessThan(stateSwitchIndex);
   });
 
+  it('reactivates a retired publication only after every live instance preloads it', async () => {
+    const executed: Array<{ sql: string; params?: unknown[] }> = [];
+    const manager = {
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        executed.push({ sql, params });
+        if (sql.includes('pg_try_advisory_xact_lock')) {
+          return [{ locked: true }];
+        }
+        if (sql.includes(`SET "status" = 'active'`)) {
+          return [[{ id: 'retired-publication' }], 1];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'current-publication',
+              candidatePublicationId: 'retired-publication',
+              candidateRequestedAt: new Date(),
+            },
+          ];
+        }
+        if (
+          sql.includes('FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'retired-publication',
+              status: 'retired',
+              sourceRevision: 'older-source',
+              materializationVersion: 1,
+              zoneCount: 10,
+              communeLinkCount: 20,
+              contentFingerprint: 'a'.repeat(64),
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: 'newer-source' }];
+        }
+        if (sql.includes('FROM "zone_publication_instance"')) {
+          return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(
+      service.activateWhenReady({ minimumReadyInstances: 2 }),
+    ).resolves.toEqual({
+      status: 'activated',
+      publicationId: 'retired-publication',
+      liveInstances: 2,
+      readyInstances: 2,
+      rollback: true,
+    });
+
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes(`SET "status" = 'retired'`) &&
+          params?.[0] === 'current-publication',
+      ),
+    ).toBe(true);
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes(`SET "status" = 'active'`) &&
+          sql.includes('"legacyPromotedAt" = CASE') &&
+          params?.[0] === 'retired-publication' &&
+          params?.[1] === true,
+      ),
+    ).toBe(true);
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes('UPDATE "zone_publication_state"') &&
+          sql.includes('"automaticPublishingPaused"') &&
+          params?.[0] === 'retired-publication' &&
+          params?.[1] === true,
+      ),
+    ).toBe(true);
+  });
+
   it('retries activation later when stable promotion owns the shared lock', async () => {
     const executed: string[] = [];
     const manager = {
@@ -722,7 +959,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 1,
+              materializationVersion: 2,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -1079,8 +1316,14 @@ describe('ZonePublicationService', () => {
         if (sql.includes('WITH expected AS MATERIALIZED')) {
           return [{ missingCount: 0, extraCount: 0 }];
         }
+        if (sql.includes('ambiguous_zone_types')) {
+          return [{ count: 0 }];
+        }
         if (sql.includes('AS "zoneCount"')) {
           return [{ zoneCount: 1, communeLinkCount: 1 }];
+        }
+        if (sql.includes('INSERT INTO "zone_publication_aggregate"')) {
+          return [{ publicationId: 'publication' }];
         }
         if (sql.includes(`SET "status" = 'validated'`)) {
           return [[{ id: 'publication' }], 1];
@@ -1117,12 +1360,22 @@ describe('ZonePublicationService', () => {
   });
 
   it('rejects a snapshot whose zone count differs from the immutable artifacts', async () => {
+    const twoFeatureArtifact = geojsonArtifact(2);
+    const twoFeatureChecksum = createHash('sha256')
+      .update(twoFeatureArtifact)
+      .digest('hex');
     const manager = { query: jest.fn() };
     const dataSource = {
       transaction: jest.fn((_isolation, callback) => callback(manager)),
       query: jest.fn().mockResolvedValue([]),
     };
     const service = new ZonePublicationService(dataSource as any);
+    fetchSpy.mockImplementation(async (url) => {
+      const content = String(url).endsWith('.pmtiles')
+        ? PMTILES_ARTIFACT
+        : twoFeatureArtifact;
+      return new Response(content, { status: 200 });
+    });
     jest
       .spyOn(service as any, 'assertCurrentSourceRevision')
       .mockResolvedValue(undefined);
@@ -1151,7 +1404,7 @@ describe('ZonePublicationService', () => {
         sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
         artifactZoneCount: 2,
         geojsonUrl: 'https://example.test/zones-hash.geojson',
-        geojsonChecksum: GEOJSON_CHECKSUM,
+        geojsonChecksum: twoFeatureChecksum,
         pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
         pmtilesChecksum: PMTILES_CHECKSUM,
       }),
@@ -1192,7 +1445,7 @@ describe('ZonePublicationService', () => {
       service.buildCandidateFromCurrentComputed({
         sourceRevision: '9',
         sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
-        artifactZoneCount: 0,
+        artifactZoneCount: 1,
         geojsonUrl: 'https://example.test/zones-hash.geojson',
         geojsonChecksum: GEOJSON_CHECKSUM,
         pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
@@ -1227,7 +1480,7 @@ describe('ZonePublicationService', () => {
       service.buildCandidateFromCurrentComputed({
         sourceRevision: '9',
         sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
-        artifactZoneCount: 0,
+        artifactZoneCount: 1,
         geojsonUrl: 'https://example.test/zones-hash.geojson',
         geojsonChecksum: GEOJSON_CHECKSUM,
         pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
@@ -1258,13 +1511,80 @@ describe('ZonePublicationService', () => {
       service.buildCandidateFromCurrentComputed({
         sourceRevision: '9',
         sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
-        artifactZoneCount: 0,
+        artifactZoneCount: 1,
         geojsonUrl: 'https://example.test/zones-hash.geojson',
         geojsonChecksum: GEOJSON_CHECKSUM,
         pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
         pmtilesChecksum: malformedChecksum,
       }),
     ).rejects.toThrow('PMTiles publication artifact header is invalid');
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a checksum-valid GeoJSON whose feature count is inconsistent', async () => {
+    const twoFeatureArtifact = geojsonArtifact(2);
+    const twoFeatureChecksum = createHash('sha256')
+      .update(twoFeatureArtifact)
+      .digest('hex');
+    const dataSource = {
+      transaction: jest.fn(),
+      query: jest.fn().mockResolvedValue([]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+    fetchSpy.mockImplementation(async (url) => {
+      const content = String(url).endsWith('.pmtiles')
+        ? PMTILES_ARTIFACT
+        : twoFeatureArtifact;
+      return new Response(content, { status: 200 });
+    });
+
+    await expect(
+      service.buildCandidateFromCurrentComputed({
+        sourceRevision: '9',
+        sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
+        artifactZoneCount: 1,
+        geojsonUrl: 'https://example.test/zones-hash.geojson',
+        geojsonChecksum: twoFeatureChecksum,
+        pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
+        pmtilesChecksum: PMTILES_CHECKSUM,
+      }),
+    ).rejects.toThrow(
+      'GeoJSON publication artifact contains 2 features; expected 1',
+    );
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a checksum-valid PMTiles without tile data for a non-empty publication', async () => {
+    const emptyPmtiles = Buffer.from(PMTILES_ARTIFACT);
+    [64, 72, 80, 88].forEach((offset) =>
+      emptyPmtiles.writeBigUInt64LE(0n, offset),
+    );
+    const emptyPmtilesChecksum = createHash('sha256')
+      .update(emptyPmtiles)
+      .digest('hex');
+    const dataSource = {
+      transaction: jest.fn(),
+      query: jest.fn().mockResolvedValue([]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+    fetchSpy.mockImplementation(async (url) => {
+      const content = String(url).endsWith('.pmtiles')
+        ? emptyPmtiles
+        : GEOJSON_ARTIFACT;
+      return new Response(content, { status: 200 });
+    });
+
+    await expect(
+      service.buildCandidateFromCurrentComputed({
+        sourceRevision: '9',
+        sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
+        artifactZoneCount: 1,
+        geojsonUrl: 'https://example.test/zones-hash.geojson',
+        geojsonChecksum: GEOJSON_CHECKSUM,
+        pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
+        pmtilesChecksum: emptyPmtilesChecksum,
+      }),
+    ).rejects.toThrow('PMTiles publication artifact contains no tile data');
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
@@ -1286,6 +1606,9 @@ describe('ZonePublicationService', () => {
         if (sql.includes('WITH expected AS MATERIALIZED')) {
           return [{ missingCount: 0, extraCount: 0 }];
         }
+        if (sql.includes('ambiguous_zone_types')) {
+          return [{ count: 0 }];
+        }
         if (sql.includes('AS "zoneCount"')) {
           return [{ zoneCount: 0, communeLinkCount: 0 }];
         }
@@ -1300,6 +1623,12 @@ describe('ZonePublicationService', () => {
       query: jest.fn().mockResolvedValue([]),
     };
     const service = new ZonePublicationService(dataSource as any);
+    fetchSpy.mockImplementation(async (url) => {
+      const content = String(url).endsWith('.pmtiles')
+        ? PMTILES_ARTIFACT
+        : EMPTY_GEOJSON_ARTIFACT;
+      return new Response(content, { status: 200 });
+    });
     const markCandidate = jest.spyOn(service, 'markCandidate');
 
     await expect(
@@ -1308,7 +1637,7 @@ describe('ZonePublicationService', () => {
         sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
         artifactZoneCount: 0,
         geojsonUrl: 'https://example.test/zones-hash.geojson',
-        geojsonChecksum: GEOJSON_CHECKSUM,
+        geojsonChecksum: EMPTY_GEOJSON_CHECKSUM,
         pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
         pmtilesChecksum: PMTILES_CHECKSUM,
       }),
@@ -1347,6 +1676,9 @@ describe('ZonePublicationService', () => {
         if (sql.includes(`SET "status" = 'validated'`)) {
           return [{ id: 'publication' }];
         }
+        if (sql.includes('INSERT INTO "zone_publication_aggregate"')) {
+          return [{ publicationId: 'publication' }];
+        }
         return [];
       }),
     };
@@ -1355,6 +1687,12 @@ describe('ZonePublicationService', () => {
       query: jest.fn().mockResolvedValue([]),
     };
     const service = new ZonePublicationService(dataSource as any);
+    fetchSpy.mockImplementation(async (url) => {
+      const content = String(url).endsWith('.pmtiles')
+        ? PMTILES_ARTIFACT
+        : EMPTY_GEOJSON_ARTIFACT;
+      return new Response(content, { status: 200 });
+    });
     const markCandidate = jest
       .spyOn(service, 'markCandidate')
       .mockResolvedValue(true);
@@ -1364,7 +1702,7 @@ describe('ZonePublicationService', () => {
       sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
       artifactZoneCount: 0,
       geojsonUrl: 'https://example.test/zones-hash.geojson',
-      geojsonChecksum: GEOJSON_CHECKSUM,
+      geojsonChecksum: EMPTY_GEOJSON_CHECKSUM,
       pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
       pmtilesChecksum: PMTILES_CHECKSUM,
     });

@@ -1,7 +1,9 @@
 import 'reflect-metadata';
 import 'dotenv/config';
-import { readFile, writeFile } from 'fs/promises';
+import { open, readFile } from 'fs/promises';
 import { resolve } from 'path';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { DataSource, QueryRunner } from 'typeorm';
 import {
   fetchSandreZoneSnapshot,
@@ -33,16 +35,32 @@ import {
   transformDatabaseState,
   ZoneReferenceCounts,
 } from '../zone_alerte/sandre-zone-reconciliation';
+import {
+  isStrictOneToOneGeometry,
+  STRICT_GEOMETRY_THRESHOLDS,
+  StrictGeometryEvidence,
+} from '../zone_alerte/sandre-zone-governance';
 
-const REPORT_VERSION = 3;
+export const RECONCILIATION_REPORT_VERSION = 5;
 const MAX_SOURCE_SIZE = 10 * 1024 * 1024;
-const MANUAL_REVIEW_ARRETE_CADRE_IDS = [29959];
 const HISTORICAL_RECOMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 
 export interface CliOptions {
   apply: boolean;
   departments: string[];
+  mappingPairs: ManualMappingPair[];
+  recordDecisions: boolean;
   reportPath: string | null;
+}
+
+export interface ManualMappingPair {
+  oldZoneId: number;
+  newZoneId: number;
+}
+
+interface ManualMappingEvidence extends StrictGeometryEvidence {
+  oldZoneId: number;
+  newZoneId: number;
 }
 
 interface DepartmentRow {
@@ -73,6 +91,8 @@ interface ReconciliationReport {
     departments: string[];
   };
   source: SourceEvidence;
+  applicationPolicy: 'official_strict_1to1' | 'manual_dry_run_only';
+  geometryEvidence: ManualMappingEvidence[];
   candidateFingerprint: string;
   mappingFingerprint: string;
   database: {
@@ -85,6 +105,7 @@ interface ReconciliationReport {
     ambiguous: number;
     noOfficialSuccessor: number;
     blockingCollisions: number;
+    selectedMappings: number;
   };
   results: ReconciliationResult[];
   mappings: ReconciliationMapping[];
@@ -95,6 +116,8 @@ interface ReconciliationReport {
 interface Analysis {
   departments: DepartmentRow[];
   source: SourceEvidence;
+  applicationPolicy: ReconciliationReport['applicationPolicy'];
+  geometryEvidence: ManualMappingEvidence[];
   relations: SandreGenealogyRelation[];
   officialZones: OfficialZoneRecord[];
   localZones: LocalZoneRecord[];
@@ -109,7 +132,7 @@ interface Analysis {
   mappingFingerprint: string;
 }
 
-interface QueryExecutor {
+export interface QueryExecutor {
   query(query: string, parameters?: any[]): Promise<any[]>;
 }
 
@@ -169,6 +192,12 @@ async function main(): Promise<void> {
       'The approved report was generated for another database target',
     );
   }
+  if (
+    approvedReport &&
+    approvedReport.applicationPolicy !== 'official_strict_1to1'
+  ) {
+    throw new Error('Manual geometry reports can never be applied');
+  }
   const requestedDepartments =
     approvedReport?.scope.departments ?? options.departments;
 
@@ -189,7 +218,10 @@ async function main(): Promise<void> {
   let analysis: Analysis;
   let outcome: 'APPLIED' | 'ALREADY_APPLIED' | null = null;
   let recomputeDebts: RecomputeDebt[] = [];
+  let globalLock: QueryRunner | null = null;
+  let operationError: unknown;
   try {
+    globalLock = await acquireSandreGlobalLock(dataSource);
     const alreadyApplied =
       approvedReport &&
       (await reportDatabaseStateIsAlreadyApplied(dataSource, approvedReport));
@@ -205,18 +237,19 @@ async function main(): Promise<void> {
         dataSource,
         requestedDepartments,
         approvedReport?.mappings,
+        options.mappingPairs,
       );
     }
 
     if (!options.apply && analysis) {
       const report = createReport(analysis);
       const json = `${JSON.stringify(report, null, 2)}\n`;
+      if (options.recordDecisions) {
+        await recordReconciliationDecisions(dataSource, report);
+      }
       if (options.reportPath) {
         const reportPath = resolve(options.reportPath);
-        await writeFile(reportPath, json, {
-          encoding: 'utf8',
-          flag: 'wx',
-        });
+        await writeReportFile(reportPath, json);
         console.error(`[sandre-reconcile] report written to ${reportPath}`);
       } else {
         process.stdout.write(json);
@@ -245,8 +278,29 @@ async function main(): Promise<void> {
       outcome = applyResult.status;
       recomputeDebts = applyResult.recomputeDebts;
     }
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    await dataSource.destroy();
+    let cleanupError: unknown;
+    if (globalLock) {
+      try {
+        await releaseSandreGlobalLock(globalLock);
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    try {
+      await dataSource.destroy();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (cleanupError) {
+      if (!operationError) {
+        throw cleanupError;
+      }
+      console.error('[sandre-reconcile] cleanup failed', cleanupError);
+    }
   }
 
   const departmentIds = [
@@ -267,6 +321,69 @@ async function main(): Promise<void> {
     throw error;
   }
   writeApplyOutcome(outcome, outcome, approvedReport.mappings);
+}
+
+export async function acquireSandreGlobalLock(
+  dataSource: DataSource,
+): Promise<QueryRunner> {
+  const queryRunner = dataSource.createQueryRunner();
+  let connected = false;
+  let lockAcquired = false;
+  let operationError: unknown;
+  try {
+    await queryRunner.connect();
+    connected = true;
+    const [lock] = await queryRunner.query(
+      "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS locked",
+    );
+    if (lock?.locked !== true) {
+      throw new Error('Another Sandre synchronization is already running');
+    }
+    lockAcquired = true;
+    return queryRunner;
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    if (connected && !lockAcquired) {
+      try {
+        await queryRunner.release();
+      } catch (cleanupError) {
+        if (!operationError) {
+          throw cleanupError;
+        }
+      }
+    }
+  }
+}
+
+export async function releaseSandreGlobalLock(
+  queryRunner: QueryRunner,
+): Promise<void> {
+  let cleanupError: unknown;
+  try {
+    const [unlock] = await queryRunner.query(
+      "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS unlocked",
+    );
+    if (unlock?.unlocked !== true) {
+      throw new Error('Unable to release the global Sandre lock');
+    }
+  } catch (error) {
+    cleanupError = error;
+    try {
+      await queryRunner.query('SELECT pg_advisory_unlock_all()');
+    } catch {
+      // Releasing a broken connection is the final lock cleanup fallback.
+    }
+  }
+  try {
+    await queryRunner.release();
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (cleanupError) {
+    throw cleanupError;
+  }
 }
 
 async function reportDatabaseStateIsAlreadyApplied(
@@ -296,13 +413,19 @@ async function analyzeReadOnly(
   dataSource: DataSource,
   requestedDepartments: string[],
   databaseMappings?: ReconciliationMapping[],
+  manualMappingPairs: ManualMappingPair[] = [],
 ): Promise<Analysis> {
   const queryRunner = dataSource.createQueryRunner();
   await queryRunner.connect();
   await queryRunner.startTransaction('REPEATABLE READ');
   try {
     await queryRunner.query('SET TRANSACTION READ ONLY');
-    return await analyze(queryRunner, requestedDepartments, databaseMappings);
+    return await analyze(
+      queryRunner,
+      requestedDepartments,
+      databaseMappings,
+      manualMappingPairs,
+    );
   } finally {
     if (queryRunner.isTransactionActive) {
       await queryRunner.rollbackTransaction();
@@ -315,6 +438,7 @@ async function analyze(
   executor: QueryExecutor,
   requestedDepartments: string[],
   databaseMappings?: ReconciliationMapping[],
+  manualMappingPairs: ManualMappingPair[] = [],
 ): Promise<Analysis> {
   const genealogySource = await fetchGenealogySource();
   const departments = await loadDepartments(executor, requestedDepartments);
@@ -374,7 +498,17 @@ async function analyze(
     localZones,
     referenceCounts,
   );
-  const mappings = mappingsFromResults(results, localZones);
+  const officialMappings = mappingsFromResults(results, localZones);
+  const manualMappings =
+    manualMappingPairs.length > 0
+      ? await loadStrictManualMappings(
+          executor,
+          manualMappingPairs,
+          departments,
+          referenceCounts,
+        )
+      : null;
+  const mappings = manualMappings?.mappings ?? officialMappings;
   const mappingsForDatabaseState = databaseMappings ?? mappings;
   const databaseState = await loadDatabaseState(
     executor,
@@ -392,6 +526,10 @@ async function analyze(
   return {
     departments,
     source,
+    applicationPolicy: manualMappings
+      ? 'manual_dry_run_only'
+      : 'official_strict_1to1',
+    geometryEvidence: manualMappings?.evidence ?? [],
     relations: genealogySource.relations,
     officialZones,
     localZones,
@@ -460,14 +598,47 @@ export async function fetchText(
   if (!response.ok) {
     throw new Error(`Unable to fetch ${url}: HTTP ${response.status}`);
   }
-  const text = await response.text();
-  if (
-    !text ||
-    (enforceSizeLimit && Buffer.byteLength(text, 'utf8') > MAX_SOURCE_SIZE)
-  ) {
+  const text = await readResponseText(response, enforceSizeLimit);
+  if (!text) {
     throw new Error(`Invalid source size for ${url}`);
   }
   return text;
+}
+
+async function readResponseText(
+  response: Response,
+  enforceSizeLimit: boolean,
+): Promise<string> {
+  if (!response.body) {
+    const text = await response.text();
+    if (enforceSizeLimit && Buffer.byteLength(text, 'utf8') > MAX_SOURCE_SIZE) {
+      throw new Error('Source exceeds the configured size limit');
+    }
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let byteCount = 0;
+  let text = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      byteCount += value.byteLength;
+      if (enforceSizeLimit && byteCount > MAX_SOURCE_SIZE) {
+        await reader.cancel();
+        throw new Error('Source exceeds the configured size limit');
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 async function fetchJson(url: string): Promise<unknown> {
@@ -558,7 +729,156 @@ async function loadLocalZones(
   }));
 }
 
-async function loadReferenceCounts(
+async function loadStrictManualMappings(
+  executor: QueryExecutor,
+  pairs: ManualMappingPair[],
+  departments: DepartmentRow[],
+  referenceCounts: Map<number, ZoneReferenceCounts>,
+): Promise<{
+  mappings: ReconciliationMapping[];
+  evidence: ManualMappingEvidence[];
+}> {
+  const rows = await executor.query(
+    `
+      WITH requested AS (
+        SELECT *
+        FROM unnest($1::integer[], $2::integer[])
+          AS pair(old_zone_id, new_zone_id)
+      ), base AS (
+        SELECT
+          pair.old_zone_id,
+          pair.new_zone_id,
+          old_zone.disabled AS old_disabled,
+          new_zone.disabled AS new_disabled,
+          old_zone.type AS old_type,
+          new_zone.type AS new_type,
+          old_zone."departementId" AS department_id,
+          old_department.code AS department_code,
+          new_department.code AS new_department_code,
+          COALESCE(old_zone."codeSandre", old_zone."idSandre"::text) AS old_code,
+          COALESCE(new_zone."codeSandre", new_zone."idSandre"::text) AS new_code,
+          ST_IsValid(old_zone.geom) AND ST_IsValid(new_zone.geom) AS valid,
+          ST_Transform(old_zone.geom, 2154) AS old_geom,
+          ST_Transform(new_zone.geom, 2154) AS new_geom
+        FROM requested pair
+        JOIN zone_alerte old_zone ON old_zone.id = pair.old_zone_id
+        JOIN zone_alerte new_zone ON new_zone.id = pair.new_zone_id
+        JOIN departement old_department
+          ON old_department.id = old_zone."departementId"
+        JOIN departement new_department
+          ON new_department.id = new_zone."departementId"
+      ), scored AS (
+        SELECT
+          base.*,
+          intersection.area / NULLIF(ST_Area(base.old_geom), 0) AS source_coverage,
+          intersection.area / NULLIF(ST_Area(base.new_geom), 0) AS target_coverage,
+          intersection.area / NULLIF(
+            ST_Area(base.old_geom) + ST_Area(base.new_geom) - intersection.area,
+            0
+          ) AS iou
+        FROM base
+        CROSS JOIN LATERAL (
+          SELECT CASE
+            WHEN base.valid AND ST_Intersects(base.old_geom, base.new_geom)
+              THEN ST_Area(ST_Intersection(base.old_geom, base.new_geom))
+            ELSE 0
+          END AS area
+        ) intersection
+      )
+      SELECT
+        scored.*,
+        COALESCE(second_best.iou, 0) AS second_iou,
+        COALESCE(second_best.source_coverage, 0) AS second_source_coverage
+      FROM scored
+      LEFT JOIN LATERAL (
+        SELECT
+          candidate_intersection.area / NULLIF(
+            ST_Area(scored.old_geom) + ST_Area(candidate.geom) -
+              candidate_intersection.area,
+            0
+          ) AS iou,
+          candidate_intersection.area / NULLIF(ST_Area(scored.old_geom), 0)
+            AS source_coverage
+        FROM (
+          SELECT
+            candidate.id,
+            ST_Transform(candidate.geom, 2154) AS geom
+          FROM zone_alerte candidate
+          WHERE candidate."departementId" = scored.department_id
+            AND candidate.type = scored.old_type
+            AND candidate.disabled = false
+            AND candidate.id <> scored.new_zone_id
+            AND ST_IsValid(candidate.geom)
+        ) candidate
+        CROSS JOIN LATERAL (
+          SELECT CASE
+            WHEN ST_Intersects(scored.old_geom, candidate.geom)
+              THEN ST_Area(ST_Intersection(scored.old_geom, candidate.geom))
+            ELSE 0
+          END AS area
+        ) candidate_intersection
+        ORDER BY iou DESC NULLS LAST, candidate.id
+        LIMIT 1
+      ) second_best ON true
+      ORDER BY scored.old_zone_id
+    `,
+    [pairs.map((pair) => pair.oldZoneId), pairs.map((pair) => pair.newZoneId)],
+  );
+  if (rows.length !== pairs.length) {
+    throw new Error(
+      'At least one requested manual mapping zone does not exist',
+    );
+  }
+
+  const departmentIds = new Set(departments.map((department) => department.id));
+  const mappings: ReconciliationMapping[] = [];
+  const evidence: ManualMappingEvidence[] = [];
+  for (const row of rows) {
+    const oldZoneId = Number(row.old_zone_id);
+    const newZoneId = Number(row.new_zone_id);
+    const geometry: ManualMappingEvidence = {
+      oldZoneId,
+      newZoneId,
+      sourceCoverage: Number(row.source_coverage),
+      targetCoverage: Number(row.target_coverage),
+      iou: Number(row.iou),
+      secondIou: Number(row.second_iou),
+      secondSourceCoverage: Number(row.second_source_coverage),
+    };
+    const references = referenceCounts.get(oldZoneId);
+    if (
+      oldZoneId === newZoneId ||
+      row.old_disabled !== true ||
+      row.new_disabled !== false ||
+      row.valid !== true ||
+      row.old_type !== row.new_type ||
+      row.department_code !== row.new_department_code ||
+      !departmentIds.has(Number(row.department_id)) ||
+      !row.old_code ||
+      !row.new_code ||
+      !references ||
+      references.nonAbrogeArreteCadre < 1 ||
+      !isStrictOneToOneGeometry(geometry)
+    ) {
+      throw new Error(
+        `Manual mapping ${oldZoneId}:${newZoneId} does not pass strict 1:1 safeguards`,
+      );
+    }
+    mappings.push({
+      departmentId: Number(row.department_id),
+      departmentCode: row.department_code,
+      zoneType: row.old_type,
+      oldZoneId,
+      oldCodeSandre: row.old_code,
+      newZoneId,
+      newCodeSandre: row.new_code,
+    });
+    evidence.push(geometry);
+  }
+  return { mappings, evidence };
+}
+
+export async function loadReferenceCounts(
   executor: QueryExecutor,
   departmentIds: number[],
 ): Promise<Map<number, ZoneReferenceCounts>> {
@@ -568,27 +888,24 @@ async function loadReferenceCounts(
         `
           SELECT
             az."zoneAlerteId" AS id,
-            count(*)::integer AS count,
-            count(*) FILTER (
-              WHERE ac.statut <> 'abroge'
-            )::integer AS "nonAbrogeCount",
-            count(*) FILTER (
-              WHERE ac.id = ANY($2::integer[])
-            )::integer AS "manualReviewCount"
+            count(*)::integer AS count
           FROM arrete_cadre_zone_alerte az
           JOIN arrete_cadre ac ON ac.id = az."arreteCadreId"
           JOIN zone_alerte za ON za.id = az."zoneAlerteId"
           WHERE za."departementId" = ANY($1::integer[])
+            AND ac.statut <> 'abroge'
           GROUP BY az."zoneAlerteId"
         `,
-        [departmentIds, MANUAL_REVIEW_ARRETE_CADRE_IDS],
+        [departmentIds],
       ),
       executor.query(
         `
           SELECT r."zoneAlerteId" AS id, count(*)::integer AS count
           FROM restriction r
+          JOIN arrete_restriction ar ON ar.id = r."arreteRestrictionId"
           JOIN zone_alerte za ON za.id = r."zoneAlerteId"
           WHERE za."departementId" = ANY($1::integer[])
+            AND ar.statut <> 'abroge'
           GROUP BY r."zoneAlerteId"
         `,
         [departmentIds],
@@ -597,8 +914,10 @@ async function loadReferenceCounts(
         `
           SELECT c."zoneAlerteId" AS id, count(*)::integer AS count
           FROM arrete_cadre_zone_alerte_communes c
+          JOIN arrete_cadre ac ON ac.id = c."arreteCadreId"
           JOIN zone_alerte za ON za.id = c."zoneAlerteId"
           WHERE za."departementId" = ANY($1::integer[])
+            AND ac.statut <> 'abroge'
           GROUP BY c."zoneAlerteId"
         `,
         [departmentIds],
@@ -611,7 +930,6 @@ async function loadReferenceCounts(
       const current = counts.get(id) ?? {
         arreteCadre: 0,
         nonAbrogeArreteCadre: 0,
-        manualReviewArreteCadre: 0,
         restrictions: 0,
         customizations: 0,
       };
@@ -623,8 +941,7 @@ async function loadReferenceCounts(
   arreteCadreRows.forEach((row) => {
     const current = counts.get(Number(row.id));
     if (current) {
-      current.nonAbrogeArreteCadre = Number(row.nonAbrogeCount);
-      current.manualReviewArreteCadre = Number(row.manualReviewCount);
+      current.nonAbrogeArreteCadre = Number(row.count);
     }
   });
   increment(restrictionRows, 'restrictions');
@@ -632,7 +949,7 @@ async function loadReferenceCounts(
   return counts;
 }
 
-async function loadDatabaseState(
+export async function loadDatabaseState(
   executor: QueryExecutor,
   mappings: ReconciliationMapping[],
 ): Promise<ReconciliationDatabaseState> {
@@ -682,6 +999,7 @@ async function loadDatabaseState(
           FROM arrete_cadre_zone_alerte link
           JOIN arrete_cadre ac ON ac.id = link."arreteCadreId"
           WHERE link."zoneAlerteId" = ANY($1::integer[])
+            AND ac.statut <> 'abroge'
           ORDER BY link."arreteCadreId", link."zoneAlerteId"
         `,
         [zoneIds],
@@ -691,6 +1009,7 @@ async function loadDatabaseState(
           SELECT
             restriction_row.id,
             restriction_row."arreteRestrictionId",
+            ar.statut AS "arreteRestrictionStatut",
             ar."dateDebut" AS "arreteRestrictionDateDebut",
             restriction_row."zoneAlerteId",
             restriction_row."arreteCadreId",
@@ -700,16 +1019,23 @@ async function loadDatabaseState(
           JOIN arrete_restriction ar
             ON ar.id = restriction_row."arreteRestrictionId"
           WHERE restriction_row."zoneAlerteId" = ANY($1::integer[])
+            AND ar.statut <> 'abroge'
           ORDER BY restriction_row.id
         `,
         [zoneIds],
       ),
       executor.query(
         `
-          SELECT id, "arreteCadreId", "zoneAlerteId"
-          FROM arrete_cadre_zone_alerte_communes
-          WHERE "zoneAlerteId" = ANY($1::integer[])
-          ORDER BY id
+          SELECT
+            customization.id,
+            customization."arreteCadreId",
+            ac.statut AS "arreteCadreStatut",
+            customization."zoneAlerteId"
+          FROM arrete_cadre_zone_alerte_communes customization
+          JOIN arrete_cadre ac ON ac.id = customization."arreteCadreId"
+          WHERE customization."zoneAlerteId" = ANY($1::integer[])
+            AND ac.statut <> 'abroge'
+          ORDER BY customization.id
         `,
         [zoneIds],
       ),
@@ -734,7 +1060,20 @@ async function loadDatabaseState(
       ),
     ]);
 
-  const customizationIds = customizationRows.map((row) => Number(row.id));
+  // Preserve operational-only fingerprint semantics if these queries are
+  // widened later for diagnostics.
+  const operationalLinkRows = linkRows.filter((row) =>
+    isOperationalParentStatus(row.arreteCadreStatut),
+  );
+  const operationalRestrictionRows = restrictionRows.filter((row) =>
+    isOperationalParentStatus(row.arreteRestrictionStatut),
+  );
+  const operationalCustomizationRows = customizationRows.filter((row) =>
+    isOperationalParentStatus(row.arreteCadreStatut),
+  );
+  const customizationIds = operationalCustomizationRows.map((row) =>
+    Number(row.id),
+  );
   const communeRows =
     customizationIds.length === 0
       ? []
@@ -769,14 +1108,14 @@ async function loadDatabaseState(
         sandrePayloadHash: row.sandrePayloadHash ?? null,
       }),
     ),
-    arreteCadreLinks: linkRows.map(
+    arreteCadreLinks: operationalLinkRows.map(
       (row): DatabaseArreteCadreLink => ({
         arreteCadreId: Number(row.arreteCadreId),
         arreteCadreStatut: row.arreteCadreStatut,
         zoneAlerteId: Number(row.zoneAlerteId),
       }),
     ),
-    restrictions: restrictionRows.map(
+    restrictions: operationalRestrictionRows.map(
       (row): DatabaseRestrictionState => ({
         id: Number(row.id),
         arreteRestrictionId: Number(row.arreteRestrictionId),
@@ -787,7 +1126,7 @@ async function loadDatabaseState(
         niveauGravite: row.niveauGravite ?? null,
       }),
     ),
-    customizations: customizationRows.map(
+    customizations: operationalCustomizationRows.map(
       (row): DatabaseCustomizationState => ({
         id: Number(row.id),
         arreteCadreId: Number(row.arreteCadreId),
@@ -810,7 +1149,7 @@ async function loadDatabaseState(
 
 function createReport(analysis: Analysis): ReconciliationReport {
   const reportWithoutFingerprint = {
-    version: REPORT_VERSION,
+    version: RECONCILIATION_REPORT_VERSION,
     generatedAt: new Date().toISOString(),
     scope: {
       departments: analysis.departments
@@ -818,6 +1157,8 @@ function createReport(analysis: Analysis): ReconciliationReport {
         .sort(),
     },
     source: analysis.source,
+    applicationPolicy: analysis.applicationPolicy,
+    geometryEvidence: analysis.geometryEvidence,
     candidateFingerprint: analysis.candidateFingerprint,
     mappingFingerprint: analysis.mappingFingerprint,
     database: {
@@ -836,6 +1177,7 @@ function createReport(analysis: Analysis): ReconciliationReport {
         (item) => item.status === 'NO_OFFICIAL_SUCCESSOR',
       ).length,
       blockingCollisions: analysis.collisions.length,
+      selectedMappings: analysis.mappings.length,
     },
     results: analysis.results,
     mappings: analysis.mappings,
@@ -847,6 +1189,95 @@ function createReport(analysis: Analysis): ReconciliationReport {
   };
 }
 
+async function recordReconciliationDecisions(
+  dataSource: DataSource,
+  report: ReconciliationReport,
+): Promise<void> {
+  const queryRunner = dataSource.createQueryRunner();
+  await queryRunner.connect();
+  await queryRunner.startTransaction('SERIALIZABLE');
+  try {
+    const [batch] = await queryRunner.query(
+      `
+        INSERT INTO sandre_zone_sync_batch (
+          kind, mode, status, "reportFingerprint", metadata,
+          "startedAt", "finishedAt"
+        ) VALUES (
+          'reconciliation', 'audit', 'observed', $1, $2::jsonb,
+          clock_timestamp(), clock_timestamp()
+        )
+        RETURNING id
+      `,
+      [
+        report.reportFingerprint,
+        JSON.stringify({
+          applicationPolicy: report.applicationPolicy,
+          mappingFingerprint: report.mappingFingerprint,
+          sourceFingerprint: report.source.fingerprint,
+          strictGeometryThresholds: STRICT_GEOMETRY_THRESHOLDS,
+        }),
+      ],
+    );
+    const evidenceByMapping = new Map(
+      report.geometryEvidence.map((item) => [
+        `${item.oldZoneId}:${item.newZoneId}`,
+        item,
+      ]),
+    );
+    for (const mapping of report.mappings) {
+      await queryRunner.query(
+        `
+          INSERT INTO sandre_zone_sync_decision (
+            "batchId", "departementId", "zoneAlerteId",
+            "candidateZoneAlerteId", "decisionKey", "zoneType",
+            "sourceCode", "targetCode", action, outcome, reason, evidence
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            'RECONCILE_1_TO_1', 'deferred', $9, $10::jsonb
+          )
+        `,
+        [
+          batch.id,
+          mapping.departmentId,
+          mapping.oldZoneId,
+          mapping.newZoneId,
+          `${mapping.oldZoneId}:${mapping.newZoneId}`,
+          mapping.zoneType,
+          mapping.oldCodeSandre,
+          mapping.newCodeSandre,
+          report.applicationPolicy === 'manual_dry_run_only'
+            ? 'MANUAL_GEOMETRY_DRY_RUN'
+            : 'OFFICIAL_LINEAR_SUCCESSOR_DRY_RUN',
+          JSON.stringify(
+            evidenceByMapping.get(
+              `${mapping.oldZoneId}:${mapping.newZoneId}`,
+            ) ?? null,
+          ),
+        ],
+      );
+    }
+    await queryRunner.commitTransaction();
+  } catch (error) {
+    await queryRunner.rollbackTransaction();
+    throw error;
+  } finally {
+    await queryRunner.release();
+  }
+}
+
+async function writeReportFile(path: string, content: string): Promise<void> {
+  const handle = await open(path, 'wx');
+  try {
+    await pipeline(
+      Readable.from([content]),
+      handle.createWriteStream({ autoClose: false }),
+    );
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readApprovedReport(
   reportPath: string | null,
 ): Promise<ReconciliationReport> {
@@ -856,7 +1287,7 @@ async function readApprovedReport(
   const report = JSON.parse(
     await readFile(resolve(reportPath), 'utf8'),
   ) as ReconciliationReport;
-  if (report.version !== REPORT_VERSION) {
+  if (report.version !== RECONCILIATION_REPORT_VERSION) {
     throw new Error(`Unsupported report version ${report.version}`);
   }
   const { reportFingerprint, ...unsignedReport } = report;
@@ -880,6 +1311,13 @@ function assertAnalysisMatchesReport(
     fingerprint(currentDepartments) !== fingerprint(report.scope.departments)
   ) {
     throw new Error('Department scope changed since the approved report');
+  }
+  if (
+    analysis.applicationPolicy !== report.applicationPolicy ||
+    fingerprint(analysis.geometryEvidence) !==
+      fingerprint(report.geometryEvidence)
+  ) {
+    throw new Error('Reconciliation application policy changed');
   }
   if (analysis.source.fingerprint !== report.source.fingerprint) {
     throw new Error('Sandre source changed since the approved report');
@@ -985,36 +1423,36 @@ async function applyMappings(
     }
 
     await createMappingTable(queryRunner, mappings);
-    await queryRunner.query(`
-      INSERT INTO arrete_cadre_zone_alerte ("arreteCadreId", "zoneAlerteId")
-      SELECT link."arreteCadreId", mapping.new_zone_id
-      FROM arrete_cadre_zone_alerte link
-      JOIN sandre_reconciliation_mapping mapping
-        ON mapping.old_zone_id = link."zoneAlerteId"
-      ON CONFLICT DO NOTHING
-    `);
-    await queryRunner.query(`
-      DELETE FROM arrete_cadre_zone_alerte link
-      USING sandre_reconciliation_mapping mapping
-      WHERE link."zoneAlerteId" = mapping.old_zone_id
-    `);
-    await queryRunner.query(`
-      UPDATE restriction restriction_row
-      SET "zoneAlerteId" = mapping.new_zone_id
-      FROM sandre_reconciliation_mapping mapping
-      WHERE restriction_row."zoneAlerteId" = mapping.old_zone_id
-    `);
-    await queryRunner.query(`
-      UPDATE arrete_cadre_zone_alerte_communes customization
-      SET "zoneAlerteId" = mapping.new_zone_id
-      FROM sandre_reconciliation_mapping mapping
-      WHERE customization."zoneAlerteId" = mapping.old_zone_id
-    `);
+    await moveOperationalReferences(queryRunner);
     await queryRunner.query(`
       UPDATE sandre_zone_alias alias
       SET "zoneAlerteId" = mapping.new_zone_id
       FROM sandre_reconciliation_mapping mapping
       WHERE alias."zoneAlerteId" = mapping.old_zone_id
+    `);
+    await queryRunner.query(`
+      INSERT INTO sandre_zone_alias (
+        "departementId",
+        "zoneAlerteId",
+        "zoneType",
+        "aliasType",
+        "aliasValue",
+        source
+      )
+      SELECT
+        mapping.department_id,
+        mapping.new_zone_id,
+        mapping.zone_type,
+        'cd_zas',
+        mapping.old_code_sandre,
+        'manual_reconciliation'
+      FROM sandre_reconciliation_mapping mapping
+      ON CONFLICT (
+        "departementId",
+        "zoneType",
+        "aliasType",
+        "aliasValue"
+      ) DO NOTHING
     `);
 
     await assertNoOldReferences(queryRunner, mappings);
@@ -1036,21 +1474,12 @@ async function applyMappings(
     }
     throw error;
   } finally {
-    let cleanupError: unknown;
-    if (historicalLockAcquired) {
-      try {
-        await releaseHistoricalRecomputeLock(queryRunner);
-      } catch (error) {
-        cleanupError = error;
-      }
-    }
     try {
-      await queryRunner.release();
-    } catch (error) {
-      cleanupError ??= error;
-    }
-    if (!operationError && cleanupError) {
-      throw cleanupError;
+      await releaseReconciliationResources(queryRunner, historicalLockAcquired);
+    } catch (cleanupError) {
+      if (!operationError) {
+        throw cleanupError;
+      }
     }
   }
 }
@@ -1100,21 +1529,12 @@ async function recordRecomputeDebt(
     }
     throw error;
   } finally {
-    let cleanupError: unknown;
-    if (historicalLockAcquired) {
-      try {
-        await releaseHistoricalRecomputeLock(queryRunner);
-      } catch (error) {
-        cleanupError = error;
-      }
-    }
     try {
-      await queryRunner.release();
-    } catch (error) {
-      cleanupError ??= error;
-    }
-    if (!operationError && cleanupError) {
-      throw cleanupError;
+      await releaseReconciliationResources(queryRunner, historicalLockAcquired);
+    } catch (cleanupError) {
+      if (!operationError) {
+        throw cleanupError;
+      }
     }
   }
 }
@@ -1245,15 +1665,85 @@ export async function acquireHistoricalRecomputeLock(
 async function releaseHistoricalRecomputeLock(
   executor: QueryExecutor,
 ): Promise<void> {
-  const [unlockResult] = await executor.query(
-    "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
-  );
+  let unlockResult: { unlocked?: boolean } | undefined;
+  try {
+    [unlockResult] = await executor.query(
+      "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
+    );
+  } catch (error) {
+    try {
+      await executor.query('SELECT pg_advisory_unlock_all()');
+    } catch {
+      // Releasing the query runner is the final cleanup fallback.
+    }
+    throw error;
+  }
   if (unlockResult?.unlocked !== true) {
     throw new Error('Unable to release the historic zone compute lock');
   }
 }
 
-async function lockAffectedRows(
+export async function releaseReconciliationResources(
+  queryRunner: QueryRunner,
+  historicalLockAcquired: boolean,
+): Promise<void> {
+  let cleanupError: unknown;
+  if (historicalLockAcquired) {
+    try {
+      await releaseHistoricalRecomputeLock(queryRunner);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  try {
+    await queryRunner.release();
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (cleanupError) {
+    throw cleanupError;
+  }
+}
+
+export async function moveOperationalReferences(
+  executor: QueryExecutor,
+): Promise<void> {
+  await executor.query(`
+    INSERT INTO arrete_cadre_zone_alerte ("arreteCadreId", "zoneAlerteId")
+    SELECT link."arreteCadreId", mapping.new_zone_id
+    FROM arrete_cadre_zone_alerte link
+    JOIN arrete_cadre parent ON parent.id = link."arreteCadreId"
+    JOIN sandre_reconciliation_mapping mapping
+      ON mapping.old_zone_id = link."zoneAlerteId"
+    WHERE parent.statut <> 'abroge'
+    ON CONFLICT DO NOTHING
+  `);
+  await executor.query(`
+    DELETE FROM arrete_cadre_zone_alerte link
+    USING sandre_reconciliation_mapping mapping, arrete_cadre parent
+    WHERE link."arreteCadreId" = parent.id
+      AND link."zoneAlerteId" = mapping.old_zone_id
+      AND parent.statut <> 'abroge'
+  `);
+  await executor.query(`
+    UPDATE restriction reference
+    SET "zoneAlerteId" = mapping.new_zone_id
+    FROM sandre_reconciliation_mapping mapping, arrete_restriction parent
+    WHERE reference."arreteRestrictionId" = parent.id
+      AND reference."zoneAlerteId" = mapping.old_zone_id
+      AND parent.statut <> 'abroge'
+  `);
+  await executor.query(`
+    UPDATE arrete_cadre_zone_alerte_communes reference
+    SET "zoneAlerteId" = mapping.new_zone_id
+    FROM sandre_reconciliation_mapping mapping, arrete_cadre parent
+    WHERE reference."arreteCadreId" = parent.id
+      AND reference."zoneAlerteId" = mapping.old_zone_id
+      AND parent.statut <> 'abroge'
+  `);
+}
+
+export async function lockAffectedRows(
   queryRunner: QueryRunner,
   zoneIds: number[],
 ): Promise<void> {
@@ -1269,45 +1759,70 @@ async function lockAffectedRows(
   );
   await queryRunner.query(
     `
-      SELECT id
-      FROM restriction
-      WHERE "zoneAlerteId" = ANY($1::integer[])
-      ORDER BY id
-      FOR UPDATE
-    `,
-    [zoneIds],
-  );
-  await queryRunner.query(
-    `
-      SELECT id
-      FROM arrete_cadre_zone_alerte_communes
-      WHERE "zoneAlerteId" = ANY($1::integer[])
-      ORDER BY id
-      FOR UPDATE
-    `,
-    [zoneIds],
-  );
-  await queryRunner.query(
-    `
-      SELECT "arreteCadreId", "zoneAlerteId"
-      FROM arrete_cadre_zone_alerte
-      WHERE "zoneAlerteId" = ANY($1::integer[])
-      ORDER BY "arreteCadreId", "zoneAlerteId"
-      FOR UPDATE
-    `,
-    [zoneIds],
-  );
-  await queryRunner.query(
-    `
-      SELECT ac.id
-      FROM arrete_cadre ac
-      WHERE ac.id IN (
+      SELECT parent.id
+      FROM arrete_cadre parent
+      WHERE parent.id IN (
         SELECT link."arreteCadreId"
         FROM arrete_cadre_zone_alerte link
         WHERE link."zoneAlerteId" = ANY($1::integer[])
+        UNION
+        SELECT reference."arreteCadreId"
+        FROM arrete_cadre_zone_alerte_communes reference
+        WHERE reference."zoneAlerteId" = ANY($1::integer[])
       )
-      ORDER BY ac.id
+      ORDER BY parent.id
       FOR UPDATE
+    `,
+    [zoneIds],
+  );
+  await queryRunner.query(
+    `
+      SELECT parent.id
+      FROM arrete_restriction parent
+      WHERE parent.id IN (
+        SELECT reference."arreteRestrictionId"
+        FROM restriction reference
+        WHERE reference."zoneAlerteId" = ANY($1::integer[])
+      )
+      ORDER BY parent.id
+      FOR UPDATE
+    `,
+    [zoneIds],
+  );
+  await queryRunner.query(
+    `
+      SELECT reference.id
+      FROM restriction reference
+      JOIN arrete_restriction parent
+        ON parent.id = reference."arreteRestrictionId"
+      WHERE reference."zoneAlerteId" = ANY($1::integer[])
+        AND parent.statut <> 'abroge'
+      ORDER BY reference.id
+      FOR UPDATE OF reference
+    `,
+    [zoneIds],
+  );
+  await queryRunner.query(
+    `
+      SELECT reference.id
+      FROM arrete_cadre_zone_alerte_communes reference
+      JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
+      WHERE reference."zoneAlerteId" = ANY($1::integer[])
+        AND parent.statut <> 'abroge'
+      ORDER BY reference.id
+      FOR UPDATE OF reference
+    `,
+    [zoneIds],
+  );
+  await queryRunner.query(
+    `
+      SELECT link."arreteCadreId", link."zoneAlerteId"
+      FROM arrete_cadre_zone_alerte link
+      JOIN arrete_cadre parent ON parent.id = link."arreteCadreId"
+      WHERE link."zoneAlerteId" = ANY($1::integer[])
+        AND parent.statut <> 'abroge'
+      ORDER BY link."arreteCadreId", link."zoneAlerteId"
+      FOR UPDATE OF link
     `,
     [zoneIds],
   );
@@ -1373,7 +1888,7 @@ async function createMappingTable(
   );
 }
 
-async function assertNoOldReferences(
+export async function assertNoOldReferences(
   executor: QueryExecutor,
   mappings: ReconciliationMapping[],
 ): Promise<void> {
@@ -1384,18 +1899,25 @@ async function assertNoOldReferences(
       FROM unnest($1::integer[]) AS mapping(old_zone_id)
       WHERE EXISTS (
         SELECT 1
-        FROM arrete_cadre_zone_alerte
-        WHERE "zoneAlerteId" = mapping.old_zone_id
+        FROM arrete_cadre_zone_alerte reference
+        JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
+        WHERE reference."zoneAlerteId" = mapping.old_zone_id
+          AND parent.statut <> 'abroge'
       )
       OR EXISTS (
         SELECT 1
-        FROM restriction
-        WHERE "zoneAlerteId" = mapping.old_zone_id
+        FROM restriction reference
+        JOIN arrete_restriction parent
+          ON parent.id = reference."arreteRestrictionId"
+        WHERE reference."zoneAlerteId" = mapping.old_zone_id
+          AND parent.statut <> 'abroge'
       )
       OR EXISTS (
         SELECT 1
-        FROM arrete_cadre_zone_alerte_communes
-        WHERE "zoneAlerteId" = mapping.old_zone_id
+        FROM arrete_cadre_zone_alerte_communes reference
+        JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
+        WHERE reference."zoneAlerteId" = mapping.old_zone_id
+          AND parent.statut <> 'abroge'
       )
       OR EXISTS (
         SELECT 1
@@ -1416,8 +1938,10 @@ async function assertNoOldReferences(
 
 export function parseCliOptions(args: string[]): CliOptions {
   const departments = new Set<string>();
+  const mappingPairs = new Map<number, number>();
   let apply = false;
   let dryRun = false;
+  let recordDecisions = false;
   let reportPath: string | null = null;
 
   for (let index = 0; index < args.length; index++) {
@@ -1430,7 +1954,15 @@ export function parseCliOptions(args: string[]): CliOptions {
       dryRun = true;
       continue;
     }
-    if (argument === '--department' || argument === '--report') {
+    if (argument === '--record-decisions') {
+      recordDecisions = true;
+      continue;
+    }
+    if (
+      argument === '--department' ||
+      argument === '--report' ||
+      argument === '--mapping'
+    ) {
       const value = args[++index];
       if (!value) {
         throw new Error(`${argument} requires a value`);
@@ -1441,8 +1973,10 @@ export function parseCliOptions(args: string[]): CliOptions {
           .map((item) => item.trim())
           .filter(Boolean)
           .forEach((item) => departments.add(item));
-      } else {
+      } else if (argument === '--report') {
         reportPath = value;
+      } else {
+        addManualMappingPairs(mappingPairs, value);
       }
       continue;
     }
@@ -1459,6 +1993,10 @@ export function parseCliOptions(args: string[]): CliOptions {
       reportPath = argument.slice('--report='.length);
       continue;
     }
+    if (argument.startsWith('--mapping=')) {
+      addManualMappingPairs(mappingPairs, argument.slice('--mapping='.length));
+      continue;
+    }
     if (argument === '--help') {
       process.stdout.write(
         [
@@ -1467,6 +2005,8 @@ export function parseCliOptions(args: string[]): CliOptions {
           'Dry-run is the default and writes JSON to stdout.',
           '  --department CODE[,CODE]  Limit the audit to departments',
           '  --report PATH             Write a new dry-run report or read it for apply',
+          '  --mapping OLD:NEW[,..]    Audit explicit strict 1:1 mappings; never applicable',
+          '  --record-decisions        Persist the dry-run batch and decisions',
           '  --apply                   Apply an unchanged approved report',
           '',
         ].join('\n'),
@@ -1483,11 +2023,49 @@ export function parseCliOptions(args: string[]): CliOptions {
   if (apply && !reportPath) {
     throw new Error('--apply requires --report <path>');
   }
+  if (apply && (mappingPairs.size > 0 || recordDecisions)) {
+    throw new Error(
+      '--mapping and --record-decisions are dry-run options only',
+    );
+  }
+  if (mappingPairs.size > 0 && sortedDepartments.length === 0) {
+    throw new Error('--mapping requires an explicit --department scope');
+  }
   return {
     apply,
     departments: sortedDepartments,
+    mappingPairs: [...mappingPairs.entries()]
+      .map(([oldZoneId, newZoneId]) => ({ oldZoneId, newZoneId }))
+      .sort((left, right) => left.oldZoneId - right.oldZoneId),
+    recordDecisions,
     reportPath,
   };
+}
+
+function addManualMappingPairs(
+  mappings: Map<number, number>,
+  value: string,
+): void {
+  const usedTargets = new Set(mappings.values());
+  for (const item of value.split(',').map((part) => part.trim())) {
+    const match = item.match(/^(\d+):(\d+)$/);
+    if (!match) {
+      throw new Error(`Invalid --mapping value: ${item}`);
+    }
+    const oldZoneId = Number(match[1]);
+    const newZoneId = Number(match[2]);
+    if (
+      oldZoneId <= 0 ||
+      newZoneId <= 0 ||
+      oldZoneId === newZoneId ||
+      mappings.has(oldZoneId) ||
+      usedTargets.has(newZoneId)
+    ) {
+      throw new Error(`Mapping ${item} is not one-to-one`);
+    }
+    mappings.set(oldZoneId, newZoneId);
+    usedTargets.add(newZoneId);
+  }
 }
 
 async function mapWithConcurrency<T, U>(
@@ -1515,6 +2093,10 @@ async function mapWithConcurrency<T, U>(
 
 function nullableNumber(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value);
+}
+
+function isOperationalParentStatus(value: unknown): boolean {
+  return typeof value === 'string' && value !== 'abroge';
 }
 
 function writeApplyOutcome(

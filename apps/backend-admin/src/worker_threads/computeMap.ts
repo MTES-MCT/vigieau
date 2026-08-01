@@ -102,17 +102,14 @@ async function run() {
     const response = { success: true, result: lockResult.value };
 
     if (computeHistoric) {
-      parentPort?.postMessage(response);
-      responseSent = true;
       await withHistoricComputeLock(dataSource, () =>
-        zoneAlerteComputedService.computeHistoric(),
+        zoneAlerteComputedService.computeHistoric(true),
       );
-    } else {
-      await closeApp(app);
-      app = undefined;
-      parentPort?.postMessage(response);
-      responseSent = true;
     }
+    await closeApp(app);
+    app = undefined;
+    parentPort?.postMessage(response);
+    responseSent = true;
   } catch (error) {
     logger.error('Error in compute map worker', error);
     if (!responseSent) {

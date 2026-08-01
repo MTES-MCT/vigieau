@@ -19,11 +19,14 @@ export interface ZonePublicationPin {
 const index = {
   searchAddresses(addressQuery: string, exactAddress = false): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/search/?q=${addressQuery}${_adresseOptions}${exactAddress ? '&type=housenumber' : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiAdresseUrl,
-      parseResponse: _formatAddresses,
-    });
+    return useFetch(
+      `/search/?q=${addressQuery}${_adresseOptions}${exactAddress ? '&type=housenumber' : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiAdresseUrl,
+        parseResponse: _formatAddresses,
+      },
+    );
   },
 
   searchAddressByLatlon(lon: string, lat: string): Promise<any> {
@@ -96,10 +99,19 @@ const index = {
     });
   },
 
-  getDepartmentsData(date: string, area?: string): Promise<any> {
+  getDepartmentsData(
+    date: string,
+    area?: string,
+    publicationPin?: ZonePublicationPin | null,
+  ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
     const apiDate = getDepartmentsApiDate(date);
-    return useFetch(`/departements?date=${apiDate}&${area ? area : ''}`, {
+    const params = new URLSearchParams(area || '');
+    params.set('date', apiDate);
+    if (publicationPin?.publicationId) {
+      params.set('publicationId', publicationPin.publicationId);
+    }
+    return useFetch(`/departements?${params.toString()}`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
     });
@@ -107,18 +119,28 @@ const index = {
 
   getDataArea(dateDebut: string, dateFin: string, area?: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/area?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch(
+      `/data/area?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
-  getDataDepartement(dateDebut: string, dateFin: string, area?: string): Promise<any> {
+  getDataDepartement(
+    dateDebut: string,
+    dateFin: string,
+    area?: string,
+  ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/departement?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch(
+      `/data/departement?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
   getDataDuree(): Promise<any> {
@@ -129,12 +151,19 @@ const index = {
     });
   },
 
-  getDataCommune(codeInsee: string, dateDebut?: string, dateFin?: string): Promise<any> {
+  getDataCommune(
+    codeInsee: string,
+    dateDebut?: string,
+    dateFin?: string,
+  ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/commune/${codeInsee}?${dateDebut ? 'dateDebut=' + dateDebut : ''}&${dateFin ? 'dateFin=' + dateFin : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch(
+      `/data/commune/${codeInsee}?${dateDebut ? 'dateDebut=' + dateDebut : ''}&${dateFin ? 'dateFin=' + dateFin : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
   getArretesRestrictions(date: string, area?: string): Promise<any> {
@@ -208,9 +237,7 @@ const _searchZones = async (
   publicationPin?: ZonePublicationPin,
 ): Promise<any> => {
   const apiSecheresseUrl = useRuntimeConfig().public.apiSecheresseUrl;
-  const publicationStore = publicationPin
-    ? null
-    : useZonePublicationStore();
+  const publicationStore = publicationPin ? null : useZonePublicationStore();
   let publicationId = publicationPin?.publicationId;
   if (publicationStore) {
     try {

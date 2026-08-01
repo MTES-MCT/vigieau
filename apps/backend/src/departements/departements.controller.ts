@@ -24,6 +24,7 @@ export class DepartementsController {
       query.bassinVersant,
       query.region,
       query.departement,
+      query.publicationId,
     );
   }
 }

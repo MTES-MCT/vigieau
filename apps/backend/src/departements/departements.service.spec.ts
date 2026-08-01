@@ -9,6 +9,25 @@ import { VigieauLogger } from '../logger/vigieau.logger';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { HttpException, HttpStatus } from '@nestjs/common';
 
+jest.mock('@shared/entities/departement.entity', () => ({
+  Departement: class Departement {},
+}));
+jest.mock('@shared/entities/statistic.entity', () => ({
+  Statistic: class Statistic {},
+}));
+jest.mock('@shared/entities/region.entity', () => ({
+  Region: class Region {},
+}));
+jest.mock('@shared/entities/bassin_versant.entity', () => ({
+  BassinVersant: class BassinVersant {},
+}));
+jest.mock('@shared/entities/zone_publication.entity', () => ({
+  ZonePublication: class ZonePublication {},
+}));
+jest.mock('@shared/entities/zone_publication_aggregate.entity', () => ({
+  ZonePublicationAggregate: class ZonePublicationAggregate {},
+}));
+
 describe('DepartementsService', () => {
   let service: DepartementsService;
   let mockDepartementRepository: Partial<Repository<Departement>>;
@@ -83,6 +102,63 @@ describe('DepartementsService', () => {
   });
 
   describe('situationByDepartement', () => {
+    it('returns the aggregate pinned to the requested publication', async () => {
+      const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+      service['departements'] = [
+        {
+          id: 65,
+          code: '65',
+          nom: 'Hautes-Pyrenees',
+          region: { nom: 'Occitanie' },
+        },
+      ] as any;
+      service['situationDepartements'] = [
+        {
+          date: '2026-08-01',
+          departementSituation: [
+            { code: '65', niveauGraviteMax: 'pas_de_restrictions' },
+          ],
+        },
+      ];
+      (service as any).zonePublicationRepository = {
+        findOne: jest.fn().mockResolvedValue({
+          id: publicationId,
+          status: 'retired',
+        }),
+      } as any;
+      (service as any).zonePublicationAggregateRepository = {
+        findOne: jest.fn().mockResolvedValue({
+          publicationId,
+          payload: {
+            departments: {
+              '65': {
+                max: 'crise',
+                sup: 'crise',
+                sou: null,
+                aep: 'alerte',
+              },
+            },
+          },
+        }),
+      } as any;
+
+      await expect(
+        service.situationByDepartement(
+          '2026-08-01',
+          undefined,
+          undefined,
+          undefined,
+          publicationId,
+        ),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          code: '65',
+          niveauGraviteMax: 'crise',
+          niveauGraviteAepMax: 'alerte',
+        }),
+      ]);
+    });
+
     it('should throw an exception if the date is not found', () => {
       service['situationDepartements'] = [];
 
@@ -236,6 +312,7 @@ describe('DepartementsService', () => {
       expect(service['bassinsVersants']).toEqual(mockBassinsVersants);
 
       expect(mockDepartementRepository.find).toHaveBeenCalledWith({
+        relations: ['region'],
         order: { nom: 'ASC' },
       });
       expect(mockRegionRepository.find).toHaveBeenCalledWith({
@@ -348,7 +425,9 @@ describe('DepartementsService', () => {
       resolveFirstStatistics(statistics);
       await oldLoad;
 
-      expect(service['situationDepartements'][0].departementSituation[0]).toEqual(
+      expect(
+        service['situationDepartements'][0].departementSituation[0],
+      ).toEqual(
         expect.objectContaining({
           code: '65',
           niveauGraviteMax: 'crise',

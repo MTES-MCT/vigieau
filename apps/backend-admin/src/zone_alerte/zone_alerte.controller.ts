@@ -6,6 +6,8 @@ import { plainToInstance } from 'class-transformer';
 import camelcaseKeys from 'camelcase-keys';
 import { ZoneAlerteDto, ZoneAlertGeomDto } from './dto/zone_alerte.dto';
 import { AuthenticatedGuard } from '../core/guards/authenticated.guard';
+import { Roles } from '../core/decorators/roles.decorator';
+import { RolesGuard } from '../core/guards/roles.guard';
 
 @UseGuards(AuthenticatedGuard)
 @Controller('zone-alerte')
@@ -44,6 +46,14 @@ export class ZoneAlerteController {
   })
   async getMaxUpdatedDate(@Req() req): Promise<string> {
     return await this.zoneAlerteService.getMaxUpdatedDate(req.session.user);
+  }
+
+  @Get('/operator/sandre')
+  @UseGuards(RolesGuard)
+  @Roles(['mte'])
+  @ApiOperation({ summary: 'Retourne l’état opérationnel SANDRE' })
+  async getSandreOperatorStatus() {
+    return this.zoneAlerteService.getSandreOperatorStatus();
   }
 
   @Get(':departementCode')

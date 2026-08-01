@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsDateString, IsOptional, IsString } from 'class-validator';
+import { IsDateString, IsOptional, IsString, IsUUID } from 'class-validator';
 
 export class DepartementDto {
   @ApiProperty({ example: '01', description: 'Code du département' })
@@ -82,4 +82,12 @@ export class QueryDepartementDto {
   @IsOptional()
   @IsString({ message: 'Le département doit être une chaîne de caractères.' })
   departement?: string;
+
+  @ApiProperty({
+    description: 'Identifiant de publication versionnée (optionnel).',
+    required: false,
+  })
+  @IsOptional()
+  @IsUUID()
+  publicationId?: string;
 }

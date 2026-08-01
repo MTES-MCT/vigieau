@@ -1,4 +1,5 @@
 import { ZonePublication1785518400000 } from '../migrations/1785518400000-ZonePublication';
+import { ZonePublicationDurability1785608400000 } from '../migrations/1785608400000-ZonePublicationDurability';
 
 describe('ZonePublication1785518400000', () => {
   it('creates immutable publication tables and source revision triggers', async () => {
@@ -188,5 +189,38 @@ describe('ZonePublication1785518400000', () => {
       'DROP TABLE IF EXISTS "zone_publication_commune"',
     );
     expect(migrationSql).toContain('DROP TABLE IF EXISTS "zone_publication"');
+  });
+});
+
+describe('ZonePublicationDurability1785608400000', () => {
+  it('persists and cleanly removes the automatic publication pause', async () => {
+    const upStatements: string[] = [];
+    const downStatements: string[] = [];
+
+    await new ZonePublicationDurability1785608400000().up({
+      query: jest.fn(async (sql: string) => {
+        upStatements.push(sql);
+      }),
+    } as any);
+    await new ZonePublicationDurability1785608400000().down({
+      query: jest.fn(async (sql: string) => {
+        downStatements.push(sql);
+      }),
+    } as any);
+
+    const upSql = upStatements.join('\n');
+    expect(upSql).toContain(
+      '"automaticPublishingPaused" boolean NOT NULL DEFAULT false',
+    );
+    expect(upSql).toContain(
+      '"automaticPublishingPausedAt" TIMESTAMP WITH TIME ZONE',
+    );
+    const downSql = downStatements.join('\n');
+    expect(downSql).toContain(
+      'DROP COLUMN IF EXISTS "automaticPublishingPausedAt"',
+    );
+    expect(downSql).toContain(
+      'DROP COLUMN IF EXISTS "automaticPublishingPaused"',
+    );
   });
 });

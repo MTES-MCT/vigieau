@@ -3,11 +3,21 @@ import { RegleauLogger } from '../../logger/regleau.logger';
 import {
   DeleteObjectCommand,
   CopyObjectCommand,
+  HeadObjectCommand,
   S3,
   type CopyObjectCommandInput,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { ConfigService } from '@nestjs/config';
+
+export interface S3WriteOptions {
+  cacheControl?: string;
+  contentType?: string;
+}
+
+export interface S3OperationOptions extends S3WriteOptions {
+  abortSignal?: AbortSignal;
+}
 
 @Injectable()
 export class S3Service {
@@ -71,7 +81,11 @@ export class S3Service {
   //   return recursiveDelete();
   // }
 
-  async uploadFile(file: Express.Multer.File, prefix: string = '') {
+  async uploadFile(
+    file: Express.Multer.File,
+    prefix: string = '',
+    options: S3OperationOptions = {},
+  ) {
     const { originalname } = file;
 
     this.logger.log(`UPLOADING ${prefix} ${originalname}`);
@@ -79,7 +93,8 @@ export class S3Service {
       file.buffer,
       this.configService.get('S3_BUCKET'),
       (this.configService.get('S3_PREFIX') || '') + prefix + originalname,
-      file.mimetype,
+      options.contentType || file.mimetype,
+      options,
     );
   }
 
@@ -100,7 +115,7 @@ export class S3Service {
     fileName: string,
     newFileName: string,
     prefix: string = '',
-    options?: { abortSignal?: AbortSignal },
+    options?: S3OperationOptions,
   ) {
     const oldFileUrl =
       '/' +
@@ -119,6 +134,17 @@ export class S3Service {
       CopySource: encodeURI(oldFileUrl),
       Key: String(newFileUrl),
       ACL: 'public-read',
+      ...(options?.cacheControl || options?.contentType
+        ? {
+            ...(options.cacheControl
+              ? { CacheControl: options.cacheControl }
+              : {}),
+            ...(options.contentType
+              ? { ContentType: options.contentType }
+              : {}),
+            MetadataDirective: 'REPLACE' as const,
+          }
+        : {}),
     };
     return await client.send(new CopyObjectCommand(params), {
       abortSignal: options?.abortSignal,
@@ -140,7 +166,28 @@ export class S3Service {
     return `${baseUrl}/${key}`;
   }
 
-  async s3_upload(file, bucket, name, mimetype) {
+  async headFile(
+    fileName: string,
+    prefix: string = '',
+    options?: Pick<S3OperationOptions, 'abortSignal'>,
+  ) {
+    const key = `${this.configService.get('S3_PREFIX') || ''}${prefix}${fileName}`;
+    return this.client.send(
+      new HeadObjectCommand({
+        Bucket: this.configService.get('S3_BUCKET'),
+        Key: key,
+      }),
+      { abortSignal: options?.abortSignal },
+    );
+  }
+
+  async s3_upload(
+    file,
+    bucket,
+    name,
+    mimetype,
+    options: S3OperationOptions = {},
+  ) {
     const client = this.client;
     const upload = new Upload({
       client,
@@ -150,13 +197,28 @@ export class S3Service {
         Body: file,
         ACL: 'public-read',
         ContentType: mimetype,
+        ...(options.cacheControl ? { CacheControl: options.cacheControl } : {}),
       },
     });
+
+    const abortUpload = () => {
+      void upload.abort().catch(() => undefined);
+    };
+    if (options.abortSignal?.aborted) {
+      abortUpload();
+    } else {
+      options.abortSignal?.addEventListener('abort', abortUpload, {
+        once: true,
+      });
+    }
 
     try {
       return await upload.done();
     } catch (e) {
       this.logger.error("Erreur lors de l'upload d'un fichier", e);
+      throw e;
+    } finally {
+      options.abortSignal?.removeEventListener('abort', abortUpload);
     }
   }
 }

@@ -3,7 +3,8 @@ import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, FindOptionsWhere, In, Repository } from 'typeorm';
 import { Commune } from '@shared/entities/commune.entity';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { DepartementService } from '../departement/departement.service';
 import { firstValueFrom } from 'rxjs';
 import { RegleauLogger } from '../logger/regleau.logger';
@@ -367,7 +368,7 @@ export class CommuneService {
     });
   }
 
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  @BusinessCron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async updateCommuneRef() {
     this.logger.log('MISE A JOUR DES COMMUNES');
     let communesUpdated = 0;

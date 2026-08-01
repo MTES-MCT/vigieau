@@ -23,7 +23,12 @@
     "lint:admin-backend": "npm --prefix apps/backend-admin run lint",
     "lint:public-frontend": "npm --prefix apps/frontend run lint",
     "lint:admin-frontend": "npm --prefix apps/frontend-admin run lint",
-    "lint": "npm run lint:backend && npm run lint:admin-backend && npm run lint:public-frontend && npm run lint:admin-frontend"
+    "lint": "npm run lint:backend && npm run lint:admin-backend && npm run lint:public-frontend && npm run lint:admin-frontend",
+    "lint:changed": "node scripts/lint-changed.mjs",
+    "audit:production": "npm audit --omit=dev --audit-level=low && npm --prefix apps/backend audit --omit=dev --audit-level=low && npm --prefix apps/backend-admin audit --omit=dev --audit-level=low && npm --prefix apps/frontend audit --omit=dev --audit-level=low && npm --prefix apps/frontend-admin audit --omit=dev --audit-level=low",
+    "smoke:public": "node scripts/smoke-public.mjs",
+    "smoke:admin": "node scripts/smoke-admin.mjs",
+    "smoke:datagouv": "node scripts/smoke-datagouv.mjs"
   },
   "devDependencies": {
     "concurrently": "^7.0.0"

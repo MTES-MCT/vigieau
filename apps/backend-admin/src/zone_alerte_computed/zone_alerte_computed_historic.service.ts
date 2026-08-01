@@ -15,7 +15,6 @@ import { ArreteRestrictionService } from '../arrete_restriction/arrete_restricti
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '../config/config.service';
 import { Utils } from '../core/utils';
-import { DatagouvService } from '../datagouv/datagouv.service';
 import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { RestrictionService } from '../restriction/restriction.service';
@@ -24,6 +23,13 @@ import { StatisticService } from '../statistic/statistic.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
+
+export interface HistoricCursorState {
+  mapCursor: string | null;
+  statsCursor: string | null;
+  mapGeneration: string;
+  statsGeneration: string;
+}
 
 @Injectable()
 export class ZoneAlerteComputedHistoricService {
@@ -49,8 +55,6 @@ export class ZoneAlerteComputedHistoricService {
     private readonly statisticDepartementService: StatisticDepartementService,
     @Inject(forwardRef(() => StatisticCommuneService))
     private readonly statisticCommuneService: StatisticCommuneService,
-    @Inject(forwardRef(() => DatagouvService))
-    private readonly dataGouvService: DatagouvService,
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
@@ -76,9 +80,26 @@ export class ZoneAlerteComputedHistoricService {
       .getRawOne();
   }
 
-  async computeHistoricMaps(date?: Moment, dateStats?: Moment) {
+  async computeHistoricMaps(
+    date?: Moment,
+    dateStats?: Moment,
+    expectedMapCursor?: string | null,
+    expectedStatsCursor?: string | null,
+    expectedMapGeneration?: string | number,
+    expectedStatsGeneration?: string | number,
+  ) {
     const dateDebut = date ? date : moment();
     const dateFin = moment('2024-04-28');
+    let mapCursor =
+      expectedMapCursor === undefined
+        ? date?.format('YYYY-MM-DD') || null
+        : expectedMapCursor;
+    let statsCursor =
+      expectedStatsCursor === undefined
+        ? dateStats?.format('YYYY-MM-DD') || null
+        : expectedStatsCursor;
+    let mapGeneration = String(expectedMapGeneration ?? 0);
+    let statsGeneration = String(expectedStatsGeneration ?? 0);
 
     for (
       let m = moment(dateDebut);
@@ -163,9 +184,8 @@ export class ZoneAlerteComputedHistoricService {
         `${path}/${fileNameToSave}.geojson`,
         JSON.stringify(geojson),
       );
-      try {
-        await this.execPromise(
-          `${path}/tippecanoe_program/bin/tippecanoe \
+      await this.execPromise(
+        `${path}/tippecanoe_program/bin/tippecanoe \
           -Z4 \
           -zg \
           --maximum-tile-byte=1000000 \
@@ -178,49 +198,39 @@ export class ZoneAlerteComputedHistoricService {
           --output="${path}/${fileNameToSave}.pmtiles" \
           "${path}/${fileNameToSave}.geojson"
             `,
-        );
-        const dataPmtiles = fs.readFileSync(
-          `${path}/${fileNameToSave}.pmtiles`,
-        );
-        const fileToTransferPmtiles = {
-          originalname: `${fileNameToSave}.pmtiles`,
-          buffer: dataPmtiles,
-        };
-        const dataGeojson = fs.readFileSync(
-          `${path}/${fileNameToSave}.geojson`,
-        );
-        const fileToTransferGeojson = {
-          originalname: `${fileNameToSave}.geojson`,
-          buffer: dataGeojson,
-        };
-        // @ts-ignore
-        await this.s3Service.uploadFile(fileToTransferPmtiles, 'pmtiles/');
-        // @ts-ignore
-        await this.s3Service.uploadFile(fileToTransferGeojson, 'geojson/');
-      } catch (e) {
-        this.logger.error('ERROR GENERATING PMTILES', e);
-      }
+      );
+      const dataPmtiles = fs.readFileSync(`${path}/${fileNameToSave}.pmtiles`);
+      const fileToTransferPmtiles = {
+        originalname: `${fileNameToSave}.pmtiles`,
+        buffer: dataPmtiles,
+      };
+      const dataGeojson = fs.readFileSync(`${path}/${fileNameToSave}.geojson`);
+      const fileToTransferGeojson = {
+        originalname: `${fileNameToSave}.geojson`,
+        buffer: dataGeojson,
+      };
+      await this.s3Service.uploadFile(
+        fileToTransferPmtiles as Express.Multer.File,
+        'pmtiles/',
+      );
+      await this.s3Service.uploadFile(
+        fileToTransferGeojson as Express.Multer.File,
+        'geojson/',
+      );
       if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
-        // @ts-ignore
+        const zonesForStatistics = zas.map((zone) => {
+          const computedZone = zone as unknown as ZoneAlerteComputed;
+          computedZone.restriction = zone.restrictions[0];
+          return computedZone;
+        });
         await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
-          zas.map((z) => {
-            // @ts-ignore
-            z.restriction = z.restrictions[0];
-            // @ts-ignore
-            return z as ZoneAlerteComputed;
-          }),
+          zonesForStatistics,
           new Date(m.format('YYYY-MM-DD')),
           true,
           true,
         );
-        // @ts-ignore
         await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
-          zas.map((z) => {
-            // @ts-ignore
-            z.restriction = z.restrictions[0];
-            // @ts-ignore
-            return z as ZoneAlerteComputed;
-          }),
+          zonesForStatistics,
           new Date(m.format('YYYY-MM-DD')),
           true,
           true,
@@ -229,25 +239,63 @@ export class ZoneAlerteComputedHistoricService {
           zas,
           m.format('YYYY-MM-DD'),
         );
-        await this.configService.setConfig(
-          null,
-          m.format('YYYY-MM-DD'),
-          null,
-          true,
+        const completedThrough = m.format('YYYY-MM-DD');
+        const advanced = await this.configService.advanceComputeStatsDate(
+          statsCursor,
+          statsGeneration,
+          completedThrough,
         );
+        this.assertHistoricCursorAdvanced(
+          'statistics',
+          advanced,
+          statsCursor,
+          statsGeneration,
+          completedThrough,
+        );
+        statsCursor = completedThrough;
+        statsGeneration = this.nextGeneration(statsGeneration);
       }
-      await this.configService.setConfig(
-        m.format('YYYY-MM-DD'),
-        null,
-        null,
-        true,
-      );
+      const completedThrough = m.format('YYYY-MM-DD');
+      if (!mapCursor || completedThrough >= mapCursor) {
+        const advanced = await this.configService.advanceComputeMapDate(
+          mapCursor,
+          mapGeneration,
+          completedThrough,
+        );
+        this.assertHistoricCursorAdvanced(
+          'map',
+          advanced,
+          mapCursor,
+          mapGeneration,
+          completedThrough,
+        );
+        mapCursor = completedThrough;
+        mapGeneration = this.nextGeneration(mapGeneration);
+      }
     }
+    return { mapCursor, statsCursor, mapGeneration, statsGeneration };
   }
 
-  async computeHistoricMapsComputed(date?: Moment, dateStats?: Moment) {
+  async computeHistoricMapsComputed(
+    date?: Moment,
+    dateStats?: Moment,
+    expectedMapCursor?: string | null,
+    expectedStatsCursor?: string | null,
+    expectedMapGeneration?: string | number,
+    expectedStatsGeneration?: string | number,
+  ) {
     const dateDebut = date ? date : moment();
     const dateFin = moment().subtract(1, 'days');
+    let mapCursor =
+      expectedMapCursor === undefined
+        ? date?.format('YYYY-MM-DD') || null
+        : expectedMapCursor;
+    let statsCursor =
+      expectedStatsCursor === undefined
+        ? dateStats?.format('YYYY-MM-DD') || null
+        : expectedStatsCursor;
+    let mapGeneration = String(expectedMapGeneration ?? 0);
+    let statsGeneration = String(expectedStatsGeneration ?? 0);
     // const dateFin = moment('23/06/2024', 'DD/MM/YYYY');
 
     for (
@@ -280,12 +328,21 @@ export class ZoneAlerteComputedHistoricService {
           allZonesComputed,
           m.format('YYYY-MM-DD'),
         );
-        await this.configService.setConfig(
-          null,
-          m.format('YYYY-MM-DD'),
-          null,
-          true,
+        const completedThrough = m.format('YYYY-MM-DD');
+        const advanced = await this.configService.advanceComputeStatsDate(
+          statsCursor,
+          statsGeneration,
+          completedThrough,
         );
+        this.assertHistoricCursorAdvanced(
+          'statistics',
+          advanced,
+          statsCursor,
+          statsGeneration,
+          completedThrough,
+        );
+        statsCursor = completedThrough;
+        statsGeneration = this.nextGeneration(statsGeneration);
       }
       await this.zoneAlerteComputedHistoricRepository
         .createQueryBuilder()
@@ -293,16 +350,45 @@ export class ZoneAlerteComputedHistoricService {
         .set({ enabled: true })
         .where('1 = 1')
         .execute();
-      await this.configService.setConfig(
-        m.format('YYYY-MM-DD'),
-        null,
-        null,
-        true,
-      );
+      const completedThrough = m.format('YYYY-MM-DD');
+      if (!mapCursor || completedThrough >= mapCursor) {
+        const advanced = await this.configService.advanceComputeMapDate(
+          mapCursor,
+          mapGeneration,
+          completedThrough,
+        );
+        this.assertHistoricCursorAdvanced(
+          'map',
+          advanced,
+          mapCursor,
+          mapGeneration,
+          completedThrough,
+        );
+        mapCursor = completedThrough;
+        mapGeneration = this.nextGeneration(mapGeneration);
+      }
     }
     await this.statisticCommuneService.sortStatCommune();
     await this.statisticDepartementService.sortStatDepartement();
-    await this.dataGouvService.updateMaps(dateDebut);
+    return { mapCursor, statsCursor, mapGeneration, statsGeneration };
+  }
+
+  private assertHistoricCursorAdvanced(
+    cursor: 'map' | 'statistics',
+    advanced: boolean,
+    expectedCurrent: string | null,
+    expectedGeneration: string,
+    completedThrough: string,
+  ): void {
+    if (!advanced) {
+      throw new Error(
+        `Historic ${cursor} cursor changed concurrently while advancing ${expectedCurrent || 'null'}@${expectedGeneration} -> ${completedThrough}`,
+      );
+    }
+  }
+
+  private nextGeneration(current: string): string {
+    return (BigInt(current) + 1n).toString();
   }
 
   async computeZonesForDate(date: Moment, departements?: Departement[]) {
@@ -941,8 +1027,7 @@ WITH cleaned_geometries AS (
       .addSelect('"niveauGravite"')
       .leftJoin('zone_alerte_computed_historic.departement', 'departement')
       .where('departement.id = :id', { id: departement.id })
-      .getRawMany();
-    // @ts-ignore
+      .getRawMany<ZoneAlerteComputedHistoric & { departement_id: number }>();
     await Promise.all(
       zonesDepartement.map(async (z) => {
         z.restriction =
@@ -951,7 +1036,7 @@ WITH cleaned_geometries AS (
           );
         z.departement = {
           id: z.departement_id,
-        };
+        } as Departement;
         return z;
       }),
     );
@@ -1057,7 +1142,7 @@ WITH cleaned_geometries AS (
 
     await Promise.all(
       groupedResults.map(async (row) => {
-        const { id, nom, type, niveauGravite, merged_geom } = row;
+        const { id, merged_geom } = row;
         return this.dataSource.query(
           `
 UPDATE zone_alerte_computed_historic
@@ -1211,34 +1296,24 @@ DELETE FROM zone_alerte_computed_historic
       originalname: `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
       buffer: dataGeojson,
     };
-    try {
-      // @ts-ignore
-      const s3ResponseGeojson = await this.s3Service.uploadFile(
-        fileToTransferGeojson as Express.Multer.File,
-        'geojson/',
-      );
-    } catch (e) {
-      this.logger.error('ERROR UPLOADING GEOJSON', e);
-    }
-    try {
-      await this.execPromise(
-        `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles ${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
-      );
-      const data = fs.readFileSync(
-        `${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
-      );
-      const fileToTransfer = {
-        originalname: `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
-        buffer: data,
-      };
-      // @ts-ignore
-      const s3Response = await this.s3Service.uploadFile(
-        fileToTransfer as Express.Multer.File,
-        'pmtiles/',
-      );
-    } catch (e) {
-      this.logger.error('ERROR UPLOADING / GENERATING PMTILES', e);
-    }
+    await this.s3Service.uploadFile(
+      fileToTransferGeojson as Express.Multer.File,
+      'geojson/',
+    );
+    await this.execPromise(
+      `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles ${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
+    );
+    const data = fs.readFileSync(
+      `${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
+    );
+    const fileToTransfer = {
+      originalname: `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
+      buffer: data,
+    };
+    await this.s3Service.uploadFile(
+      fileToTransfer as Express.Multer.File,
+      'pmtiles/',
+    );
     return allZonesComputed;
   }
 

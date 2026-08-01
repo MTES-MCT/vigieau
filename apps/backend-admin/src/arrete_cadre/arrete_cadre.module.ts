@@ -12,6 +12,9 @@ import { FichierModule } from '../fichier/fichier.module';
 import { RestrictionModule } from '../restriction/restriction.module';
 import { UsageModule } from '../usage/usage.module';
 import { ArreteCadreZoneAlerteCommunesModule } from '../arrete_cadre_zone_alerte_communes/arrete_cadre_zone_alerte_communes.module';
+import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
+import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
+import { ArreteCadreScheduler } from './arrete_cadre.scheduler';
 
 @Module({
   imports: [
@@ -25,9 +28,14 @@ import { ArreteCadreZoneAlerteCommunesModule } from '../arrete_cadre_zone_alerte
     RestrictionModule,
     UsageModule,
     ArreteCadreZoneAlerteCommunesModule,
+    ZonePublicationModule,
   ],
   controllers: [ArreteCadreController],
-  providers: [ArreteCadreService],
+  providers: [
+    ArreteCadreService,
+    ArreteCadreScheduler,
+    ExternalPublicationRegistryService,
+  ],
   exports: [ArreteCadreService],
 })
 export class ArreteCadreModule {}

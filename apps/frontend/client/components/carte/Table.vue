@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import api from '../../api';
+import type { ZonePublicationPin } from '../../api';
 import utils from '../../utils';
+import { createLatestTaskRunner } from '../../utils/retryable-task';
 import { Ref } from 'vue';
 import { json2csv } from 'json-2-csv';
 
 const props = defineProps<{
-  date: string,
-  area: string,
-  light: boolean,
-  filterText: string,
+  date: string;
+  area: string;
+  light: boolean;
+  filterText: string;
+  publicationPin?: ZonePublicationPin | null;
 }>();
 
 const headers = ['N° Département', 'Département', 'Niveau de gravité'];
@@ -45,20 +48,53 @@ const rowsFiltered: Ref<any[]> = ref([]);
 const componentKey = ref(0);
 const loading = ref(false);
 const departementsData = ref([]);
+const dataTaskRunner = createLatestTaskRunner();
 
 async function loadData() {
   rows.value = [];
   loading.value = true;
-  const { data, error } = await api.getDepartmentsData(props.date, props.area);
-  dataResume.map(r => r.number = 0);
-  departementsData.value = data.value;
-  data.value?.forEach((d: any) => {
-    const dr = dataResume.find(r => r.niveauGravite === (d.niveauGraviteMax ? d.niveauGraviteMax : 'pas_de_restrictions'));
-    rows.value.push([d.code, d.nom, dr ? dr.label : 'Pas de restrictions']);
-    if (dr) dr.number++;
-  });
-  rowsFiltered.value = [...rows.value];
-  loading.value = false;
+  const date = props.date;
+  const area = props.area;
+  const publicationPin = props.publicationPin;
+  await dataTaskRunner.run(
+    async () => {
+      try {
+        const response = await api.getDepartmentsData(
+          date,
+          area,
+          publicationPin,
+        );
+        return { response };
+      } catch (error) {
+        return { error };
+      }
+    },
+    (result) => {
+      dataResume.forEach((r) => (r.number = 0));
+      if ('error' in result || result.response.error.value) {
+        departementsData.value = [];
+        rows.value = [];
+        rowsFiltered.value = [];
+        loading.value = false;
+        return;
+      }
+
+      const nextRows: any[] = [];
+      departementsData.value = result.response.data.value || [];
+      result.response.data.value?.forEach((d: any) => {
+        const dr = dataResume.find(
+          (r) =>
+            r.niveauGravite ===
+            (d.niveauGraviteMax ? d.niveauGraviteMax : 'pas_de_restrictions'),
+        );
+        nextRows.push([d.code, d.nom, dr ? dr.label : 'Pas de restrictions']);
+        if (dr) dr.number++;
+      });
+      rows.value = nextRows;
+      rowsFiltered.value = [...nextRows];
+      loading.value = false;
+    },
+  );
 }
 
 const classObject = (rank: number | undefined): any => {
@@ -72,30 +108,32 @@ function checkKeyboardNav($event) {
 }
 
 function filterDepartments() {
-  rowsFiltered.value = rows.value.filter(r => {
-    return r.findIndex(x => x.toLowerCase().includes(query.value.toLowerCase())) >= 0;
+  rowsFiltered.value = rows.value.filter((r) => {
+    return (
+      r.findIndex((x) => x.toLowerCase().includes(query.value.toLowerCase())) >=
+      0
+    );
   });
   componentKey.value += 1;
 }
 
 async function downloadCsv() {
-  const formatDepartements = departementsData.value
-    .map((departement: any) => {
-      return {
-        code: departement.code,
-        nom: departement.nom,
-        region: departement.region,
-        niveau_gravite_max: departement.niveauGraviteMax,
-      };
-    });
+  const formatDepartements = departementsData.value.map((departement: any) => {
+    return {
+      code: departement.code,
+      nom: departement.nom,
+      region: departement.region,
+      niveau_gravite_max: departement.niveauGraviteMax,
+    };
+  });
   const csv = await json2csv(formatDepartements, {
     expandArrayObjects: true,
   });
 
   // Create a CSV file and allow the user to download it
-  let blob = new Blob([csv], { type: 'text/csv' });
-  let url = window.URL.createObjectURL(blob);
-  let a = document.createElement('a');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
   a.href = url;
   a.download = `situation_departement_${props.date}.csv`;
   document.body.appendChild(a);
@@ -111,13 +149,21 @@ const pageTitle = computed(() => {
           département) ${props.filterText ? ' - ' + props.filterText : ''}`;
 });
 
-watch(() => props, () => {
-  const date = new Date(props.date);
-  if (!date) {
-    return;
-  }
-  loadData();
-}, { immediate: true, deep: true });
+watch(
+  () => props,
+  () => {
+    const date = new Date(props.date);
+    if (!date) {
+      return;
+    }
+    loadData();
+  },
+  { immediate: true, deep: true },
+);
+
+onBeforeUnmount(() => {
+  dataTaskRunner.cancel();
+});
 </script>
 
 <template>
@@ -125,14 +171,24 @@ watch(() => props, () => {
     <template v-if="rows?.length > 0">
       <div class="carte-table-header">
         <h3 class="fr-mt-2w fr-mb-1w fr-h4">{{ pageTitle }}</h3>
-        <div class="fr-grid-row fr-grid-row--center departement-card-wrapper fr-mb-2w">
-          <div class="fr-col-lg fr-p-2w fr-m-1w departement-card" v-for="resume of dataResume">
+        <div
+          class="fr-grid-row fr-grid-row--center departement-card-wrapper fr-mb-2w"
+        >
+          <div
+            v-for="resume of dataResume"
+            :key="resume.niveauGravite"
+            class="fr-col-lg fr-p-2w fr-m-1w departement-card"
+          >
             <ul>
               <li>
-                <DsfrBadge small
-                           no-icon
-                           :class="classObject(utils.getRestrictionRank(resume.niveauGravite))"
-                           :label="resume.label" />
+                <DsfrBadge
+                  small
+                  no-icon
+                  :class="
+                    classObject(utils.getRestrictionRank(resume.niveauGravite))
+                  "
+                  :label="resume.label"
+                />
               </li>
               <li class="departement-card__number fr-mt-1w">
                 {{ resume.number }} départements
@@ -145,20 +201,23 @@ watch(() => props, () => {
         <h3 v-if="!light" class="fr-pt-2w fr-mb-1w">
           {{ tableTitle }}
         </h3>
-        <DsfrSearchBar v-model="query"
-                       v-if="!light"
-                       placeholder="Rechercher"
-                       large
-                       buttonText="Rechercher"
-                       title="Rechercher un département"
-                       ref="input"
-                       @search="checkKeyboardNav({key: 'search'})" />
-        <DsfrTable :title="tableTitle"
-                   :headers="headers"
-                   :rows="rowsFiltered"
-                   :pagination="true"
-                   :key="componentKey"
-                   class="fr-table--sm fr-table--no-title" />
+        <DsfrSearchBar
+          v-model="query"
+          v-if="!light"
+          placeholder="Rechercher"
+          large
+          buttonText="Rechercher"
+          title="Rechercher un département"
+          @search="checkKeyboardNav({ key: 'search' })"
+        />
+        <DsfrTable
+          :title="tableTitle"
+          :headers="headers"
+          :rows="rowsFiltered"
+          :pagination="true"
+          :key="componentKey"
+          class="fr-table--sm fr-table--no-title"
+        />
       </div>
 
       <div class="text-align-right fr-mt-1w">
@@ -173,21 +232,25 @@ watch(() => props, () => {
       </div>
     </template>
     <template v-else>
-      <p class="fr-mt-4w">Une erreur est survenue dans la récupération des données. Veuillez ré-essayer dans quelques
-        instants.</p>
+      <p class="fr-mt-4w">
+        Une erreur est survenue dans la récupération des données. Veuillez
+        ré-essayer dans quelques instants.
+      </p>
     </template>
   </div>
 </template>
 
 <style scoped lang="scss">
 .carte-table {
-  &-header, &-body {
+  &-header,
+  &-body {
     padding: 0 2rem;
   }
 
   &.carte-table__light {
     .carte-table {
-      &-header, &-body {
+      &-header,
+      &-body {
         padding: 0rem;
       }
     }

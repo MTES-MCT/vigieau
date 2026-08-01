@@ -4,15 +4,23 @@ function activePublication() {
   return {
     id: 'publication-1',
     sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
+    geojsonUrl:
+      'https://objects.example.test/geojson/zones_arretes_en_vigueur_immutable.geojson',
     geojsonChecksum: 'a'.repeat(64),
+    pmtilesUrl:
+      'https://objects.example.test/pmtiles/zones_arretes_en_vigueur_immutable.pmtiles',
     pmtilesChecksum: 'b'.repeat(64),
   };
 }
 
 function createHarness(options?: {
   lock?: boolean;
+  stableLock?: boolean;
+  dataGouvLock?: boolean;
   publication?: object | null;
   stableCompletion?: boolean;
+  dataGouvCompletion?: boolean;
+  activePublication?: boolean;
 }) {
   const publication =
     options && 'publication' in options
@@ -20,24 +28,47 @@ function createHarness(options?: {
       : activePublication();
   const manager = {
     query: jest.fn(async (sql: string, parameters?: unknown[]) => {
-      void parameters;
       if (sql.includes('pg_try_advisory_xact_lock')) {
-        return [{ locked: options?.lock ?? true }];
+        const lockName = parameters?.[0];
+        return [
+          {
+            locked:
+              lockName === 'vigieau:zone-publication-datagouv-promotion'
+                ? (options?.dataGouvLock ?? options?.lock ?? true)
+                : (options?.stableLock ?? options?.lock ?? true),
+          },
+        ];
+      }
+      if (sql.includes('SELECT state."activePublicationId"')) {
+        return options?.activePublication === false
+          ? []
+          : [{ activePublicationId: activePublication().id }];
       }
       if (sql.includes('SELECT publication."id"')) {
         return publication ? [publication] : [];
       }
       if (sql.includes('UPDATE "config"')) {
+        const sourceComputedAt =
+          publication && 'sourceComputedAt' in publication
+            ? publication.sourceComputedAt
+            : activePublication().sourceComputedAt;
         return [
           [
             {
-              computeZoneAlerteComputedDate: new Date('2026-07-31T12:00:00Z'),
+              computeZoneAlerteComputedDate: new Date(
+                sourceComputedAt as Date | string,
+              ),
             },
           ],
           1,
         ];
       }
       if (sql.includes('RETURNING publication."id"')) {
+        if (sql.includes('"dataGouvPromotedAt" = now()')) {
+          return options?.dataGouvCompletion === false
+            ? [[], 0]
+            : [[{ id: activePublication().id }], 1];
+        }
         return options?.stableCompletion === false
           ? [[], 0]
           : [[{ id: activePublication().id }], 1];
@@ -59,6 +90,23 @@ function createHarness(options?: {
   };
   const s3Service = {
     copyFile: jest.fn().mockResolvedValue(undefined),
+    headFile: jest.fn(
+      (fileName: string, prefix?: string, options?: unknown) => {
+        void prefix;
+        void options;
+        return Promise.resolve({
+          ContentLength: 100,
+          ContentType: fileName.endsWith('.geojson')
+            ? 'application/geo+json'
+            : 'application/vnd.pmtiles',
+          CacheControl: fileName.match(
+            /zones_arretes_en_vigueur_(?:[a-f0-9]{64})\./,
+          )
+            ? 'public, max-age=31536000, immutable'
+            : 'public, max-age=0, must-revalidate',
+        });
+      },
+    ),
     getPublicFileUrl: jest.fn((fileName: string, prefix: string) => {
       return `https://objects.example.test/${prefix}${fileName}`;
     }),
@@ -158,31 +206,56 @@ describe('ZonePublicationPromotionService', () => {
         `zones_arretes_en_vigueur_${'a'.repeat(64)}.geojson`,
         'zones_arretes_en_vigueur_2026-07-31.geojson',
         'geojson/',
-        { abortSignal: expect.any(AbortSignal) },
+        {
+          abortSignal: expect.any(AbortSignal),
+          cacheControl: 'public, max-age=0, must-revalidate',
+          contentType: 'application/geo+json',
+        },
       ],
       [
         `zones_arretes_en_vigueur_${'b'.repeat(64)}.pmtiles`,
         'zones_arretes_en_vigueur_2026-07-31.pmtiles',
         'pmtiles/',
-        { abortSignal: expect.any(AbortSignal) },
+        {
+          abortSignal: expect.any(AbortSignal),
+          cacheControl: 'public, max-age=0, must-revalidate',
+          contentType: 'application/vnd.pmtiles',
+        },
       ],
       [
         `zones_arretes_en_vigueur_${'a'.repeat(64)}.geojson`,
         'zones_arretes_en_vigueur.geojson',
         'geojson/',
-        { abortSignal: expect.any(AbortSignal) },
+        {
+          abortSignal: expect.any(AbortSignal),
+          cacheControl: 'public, max-age=0, must-revalidate',
+          contentType: 'application/geo+json',
+        },
       ],
       [
         `zones_arretes_en_vigueur_${'b'.repeat(64)}.pmtiles`,
         'zones_arretes_en_vigueur.pmtiles',
         'pmtiles/',
-        { abortSignal: expect.any(AbortSignal) },
+        {
+          abortSignal: expect.any(AbortSignal),
+          cacheControl: 'public, max-age=0, must-revalidate',
+          contentType: 'application/vnd.pmtiles',
+        },
       ],
     ]);
     const copySignals = harness.s3Service.copyFile.mock.calls.map(
       ([, , , options]) => options.abortSignal,
     );
     expect(new Set(copySignals).size).toBe(4);
+    expect(harness.s3Service.headFile).toHaveBeenCalledTimes(8);
+    copySignals.forEach((copySignal, index) => {
+      expect(harness.s3Service.headFile.mock.calls[index * 2][2]).toEqual({
+        abortSignal: copySignal,
+      });
+      expect(harness.s3Service.headFile.mock.calls[index * 2 + 1][2]).toEqual({
+        abortSignal: copySignal,
+      });
+    });
     const configUpdateIndex = harness.manager.query.mock.calls.findIndex(
       ([sql]) => sql.includes('UPDATE "config"'),
     );
@@ -190,9 +263,9 @@ describe('ZonePublicationPromotionService', () => {
     expect(harness.manager.query.mock.calls[configUpdateIndex][1]).toEqual([
       new Date('2026-07-31T12:00:00Z'),
     ]);
-    expect(harness.manager.query.mock.calls[configUpdateIndex][0]).toContain(
-      '"computeZoneAlerteComputedDate" < $1',
-    );
+    expect(
+      harness.manager.query.mock.calls[configUpdateIndex][0],
+    ).not.toContain('"computeZoneAlerteComputedDate" < $1');
     expect(harness.s3Service.copyFile.mock.invocationCallOrder[3]).toBeLessThan(
       harness.manager.query.mock.invocationCallOrder[configUpdateIndex],
     );
@@ -249,6 +322,27 @@ describe('ZonePublicationPromotionService', () => {
     ).toHaveLength(1);
   });
 
+  it('synchronizes the legacy computation date exactly during a rollback', async () => {
+    const rollbackPublication = {
+      ...activePublication(),
+      id: 'rollback-publication',
+      sourceComputedAt: new Date('2026-07-29T08:00:00Z'),
+    };
+    const harness = createHarness({ publication: rollbackPublication });
+
+    await expect(harness.service.promoteStableArtifacts()).resolves.toBe(
+      'promoted',
+    );
+
+    const configUpdate = harness.manager.query.mock.calls.find(([sql]) =>
+      sql.includes('UPDATE "config"'),
+    );
+    expect(configUpdate?.[1]).toEqual([new Date('2026-07-29T08:00:00Z')]);
+    expect(configUpdate?.[0]).not.toContain(
+      '"computeZoneAlerteComputedDate" < $1',
+    );
+  });
+
   it('fails the transaction when config and the stable marker cannot commit together', async () => {
     const harness = createHarness({ stableCompletion: false });
 
@@ -299,25 +393,72 @@ describe('ZonePublicationPromotionService', () => {
     expect(harness.datagouvService.uploadToDatagouv.mock.calls).toEqual([
       [
         'geojson',
-        'https://objects.example.test/geojson/zones_arretes_en_vigueur.geojson',
+        'https://objects.example.test/geojson/zones_arretes_en_vigueur_immutable.geojson',
         'Carte des zones et arrêtés en vigueur - GeoJSON',
         true,
         { timeoutMs: 12_500 },
       ],
       [
         'pmtiles',
-        'https://objects.example.test/pmtiles/zones_arretes_en_vigueur.pmtiles',
+        'https://objects.example.test/pmtiles/zones_arretes_en_vigueur_immutable.pmtiles',
         'Carte des zones et arrêtés en vigueur - PMTILES',
         true,
         { timeoutMs: 12_500 },
       ],
     ]);
-    const completionSql = harness.dataSource.query.mock.calls[0][0];
+    const completionSql = harness.manager.query.mock.calls.find(([sql]) =>
+      sql.includes('"dataGouvPromotedAt" = now()'),
+    )?.[0];
     expect(completionSql).toContain('"dataGouvPromotedAt" = now()');
     expect(completionSql).toContain(
       'state."activePublicationId" = publication."id"',
     );
     expect(harness.s3Service.copyFile).not.toHaveBeenCalled();
+    expect(selectionSql).toContain('publication."geojsonUrl"');
+    expect(selectionSql).toContain('publication."pmtilesUrl"');
+    expect(harness.manager.query.mock.calls.slice(0, 2)).toEqual([
+      [
+        'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
+        ['vigieau:zone-publication-stable-promotion'],
+      ],
+      [
+        'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
+        ['vigieau:zone-publication-datagouv-promotion'],
+      ],
+    ]);
+    expect(harness.getTransactionRollbackCount()).toBe(0);
+  });
+
+  it('does not write data.gouv while activation or another promotion owns a lock', async () => {
+    const activationHarness = createHarness({ stableLock: false });
+    const promotionHarness = createHarness({ dataGouvLock: false });
+
+    await expect(activationHarness.service.promoteDataGouv()).resolves.toBe(
+      'busy',
+    );
+    await expect(promotionHarness.service.promoteDataGouv()).resolves.toBe(
+      'busy',
+    );
+
+    expect(
+      activationHarness.datagouvService.uploadToDatagouv,
+    ).not.toHaveBeenCalled();
+    expect(
+      promotionHarness.datagouvService.uploadToDatagouv,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('checks that the pinned publication is still active before external writes', async () => {
+    const harness = createHarness({ activePublication: false });
+
+    await expect(harness.service.promoteDataGouv()).resolves.toBe('failed');
+
+    expect(harness.datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
+    expect(harness.getTransactionRollbackCount()).toBe(1);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('SET "promotionLastAttemptAt" = now()'),
+      ['publication-1', 'Zone publication publication-1 is no longer active'],
+    );
   });
 
   it('keeps data.gouv failure retryable without repeating stable copies', async () => {
@@ -329,7 +470,7 @@ describe('ZonePublicationPromotionService', () => {
     await expect(harness.service.promoteDataGouv()).resolves.toBe('failed');
     expect(harness.datagouvService.uploadToDatagouv).toHaveBeenCalledTimes(1);
     expect(harness.dataSource.query.mock.calls[0][0]).toContain(
-      'SET "promotionError" = $2',
+      '"promotionError" = $2',
     );
     expect(harness.dataSource.query.mock.calls[0][1]).toEqual([
       'publication-1',

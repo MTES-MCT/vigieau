@@ -5,9 +5,10 @@ import {
   formatLocalCivilDate,
 } from '../../utils/zone-publication';
 import type { LocalDateRollover } from '../../utils/zone-publication';
+import type { ZonePublicationPin } from '../../api';
 
-const props = defineProps<{
-  embedded: any
+defineProps<{
+  embedded: any;
 }>();
 
 const tabTitles = [
@@ -16,7 +17,14 @@ const tabTitles = [
 ];
 const selectedTabIndex: Ref<number> = ref(0);
 const dateCarte = ref(formatLocalCivilDate());
+const displayedPublicationPin = ref<ZonePublicationPin | null>(null);
 let localDateRollover: LocalDateRollover | null = null;
+
+const updateDisplayedPublicationPin = (
+  publicationPin: ZonePublicationPin | null,
+) => {
+  displayedPublicationPin.value = publicationPin;
+};
 
 onMounted(() => {
   dateCarte.value = formatLocalCivilDate();
@@ -37,18 +45,21 @@ onBeforeUnmount(() => {
         <h2 class="fr-mb-0">Carte des restrictions</h2>
         <p>Arrêtés publiés avant le {{ dateCarte }}</p>
       </div>
-      <DsfrTabs :tab-titles="tabTitles"
-                v-model="selectedTabIndex">
-        <DsfrTabContent panel-id="tab-content-0"
-                        tab-id="tab-0">
+      <DsfrTabs :tab-titles="tabTitles" v-model="selectedTabIndex">
+        <DsfrTabContent panel-id="tab-content-0" tab-id="tab-0">
           <div class="wrap-map">
-            <CarteMap :embedded="embedded"
-                      :date="dateCarte" />
+            <CarteMap
+              :embedded="embedded"
+              :date="dateCarte"
+              @displayedPublicationPin="updateDisplayedPublicationPin"
+            />
           </div>
         </DsfrTabContent>
-        <DsfrTabContent panel-id="tab-content-1"
-                        tab-id="tab-1">
-          <CarteTable :date="dateCarte" />
+        <DsfrTabContent panel-id="tab-content-1" tab-id="tab-1">
+          <CarteTable
+            :date="dateCarte"
+            :publicationPin="displayedPublicationPin"
+          />
         </DsfrTabContent>
       </DsfrTabs>
     </div>

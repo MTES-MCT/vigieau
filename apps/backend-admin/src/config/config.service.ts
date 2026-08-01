@@ -24,6 +24,52 @@ export class ConfigService {
     return this.configRepository.findOne({ where: { id: 1 } });
   }
 
+  async advanceComputeMapDate(
+    expectedCurrent: string | null,
+    expectedGeneration: string,
+    completedThrough: string,
+  ): Promise<boolean> {
+    const result = await this.configRepository
+      .createQueryBuilder()
+      .update()
+      .set({
+        computeMapDate: completedThrough,
+        computeMapGeneration: () => '"computeMapGeneration" + 1',
+      })
+      .where('id = 1')
+      .andWhere('"computeMapDate" IS NOT DISTINCT FROM :expectedCurrent', {
+        expectedCurrent,
+      })
+      .andWhere('"computeMapGeneration" = :expectedGeneration', {
+        expectedGeneration,
+      })
+      .execute();
+    return result.affected === 1;
+  }
+
+  async advanceComputeStatsDate(
+    expectedCurrent: string | null,
+    expectedGeneration: string,
+    completedThrough: string,
+  ): Promise<boolean> {
+    const result = await this.configRepository
+      .createQueryBuilder()
+      .update()
+      .set({
+        computeStatsDate: completedThrough,
+        computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+      })
+      .where('id = 1')
+      .andWhere('"computeStatsDate" IS NOT DISTINCT FROM :expectedCurrent', {
+        expectedCurrent,
+      })
+      .andWhere('"computeStatsGeneration" = :expectedGeneration', {
+        expectedGeneration,
+      })
+      .execute();
+    return result.affected === 1;
+  }
+
   async setConfig(
     computeMapDate?: string,
     computeStatsDate?: string,
@@ -31,19 +77,20 @@ export class ConfigService {
     force?: boolean,
   ) {
     if (computeMapDate) {
+      // The generation records invalidations even when the dirty date is equal.
       const qb = this.configRepository
         .createQueryBuilder()
         .update()
-        .set({ computeMapDate })
+        .set({
+          computeMapDate: force
+            ? computeMapDate
+            : () =>
+                'LEAST(COALESCE("computeMapDate", CAST(:computeMapDate AS date)), CAST(:computeMapDate AS date))',
+          computeMapGeneration: () => '"computeMapGeneration" + 1',
+        })
         .where('id = 1');
       if (!force) {
-        qb.andWhere(
-          new Brackets((qb) => {
-            qb.where('computeMapDate > :computeMapDate', {
-              computeMapDate,
-            }).orWhere('computeMapDate IS NULL');
-          }),
-        );
+        qb.setParameter('computeMapDate', computeMapDate);
       }
       await qb.execute();
     }
@@ -52,16 +99,16 @@ export class ConfigService {
       const qb = this.configRepository
         .createQueryBuilder()
         .update()
-        .set({ computeStatsDate })
+        .set({
+          computeStatsDate: force
+            ? computeStatsDate
+            : () =>
+                'LEAST(COALESCE("computeStatsDate", CAST(:computeStatsDate AS date)), CAST(:computeStatsDate AS date))',
+          computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+        })
         .where('id = 1');
       if (!force) {
-        qb.andWhere(
-          new Brackets((qb) => {
-            qb.where('computeStatsDate > :computeStatsDate', {
-              computeStatsDate,
-            }).orWhere('computeStatsDate IS NULL');
-          }),
-        );
+        qb.setParameter('computeStatsDate', computeStatsDate);
       }
       await qb.execute();
     }
@@ -87,12 +134,16 @@ export class ConfigService {
   }
 
   async resetConfig() {
-    return this.configRepository.update(
-      { id: 1 },
-      {
+    return this.configRepository
+      .createQueryBuilder()
+      .update()
+      .set({
         computeMapDate: null,
         computeStatsDate: null,
-      },
-    );
+        computeMapGeneration: () => '"computeMapGeneration" + 1',
+        computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+      })
+      .where('id = 1')
+      .execute();
   }
 }

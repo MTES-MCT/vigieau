@@ -1,9 +1,10 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Like, MoreThanOrEqual, Repository } from 'typeorm';
+import { MoreThanOrEqual, Repository } from 'typeorm';
 import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { Statistic } from '@shared/entities/statistic.entity';
 import { DepartementService } from '../departement/departement.service';
 import { User } from '@shared/entities/user.entity';
@@ -12,7 +13,6 @@ import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_c
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
-import { isMainThread } from 'worker_threads';
 
 @Injectable()
 export class StatisticDepartementService {
@@ -35,14 +35,6 @@ export class StatisticDepartementService {
     private readonly zoneAlerteService: ZoneAlerteService,
   ) {
     void this.loadStatDep();
-    if (
-      isMainThread &&
-      process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS !== 'true'
-    ) {
-      setTimeout(() => {
-        void this.computeDepartementStatistics();
-      }, 5000);
-    }
   }
 
   async findAll(currentUser: User): Promise<StatisticDepartement[]> {
@@ -100,7 +92,7 @@ export class StatisticDepartementService {
     }
   }
 
-  @Cron(CronExpression.EVERY_2_HOURS)
+  @BusinessCron(CronExpression.EVERY_2_HOURS)
   async computeDepartementStatistics() {
     this.logger.log('Computing departement statistics...');
     const statsDepartement: StatisticDepartement[] =
@@ -210,8 +202,7 @@ export class StatisticDepartementService {
           (s) => s.departement.code === d.code,
         );
         if (!statDepartement) {
-          // @ts-ignore
-          statDepartement = {
+          statDepartement = <StatisticDepartement>{
             departement: d,
             visits: [],
             totalVisits: 0,

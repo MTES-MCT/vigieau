@@ -47,6 +47,15 @@ export class ZonePublication extends BaseEntity {
   @Column({ type: "integer", default: 0 })
   communeLinkCount: number;
 
+  @Column({ type: "integer", default: 0 })
+  departmentCount: number;
+
+  @Column({ type: "varchar", length: 64, nullable: true })
+  contentFingerprint: string | null;
+
+  @Column({ type: "jsonb", nullable: true })
+  validationReport: Record<string, unknown> | null;
+
   @Column({ type: "text", nullable: true })
   geojsonUrl: string | null;
 

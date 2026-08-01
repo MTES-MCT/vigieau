@@ -13,11 +13,13 @@ import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { RegleauLogger } from './logger/regleau.logger';
 import { json, urlencoded } from 'express';
+import { adminWriteFreezeMiddleware } from './core/middleware/admin-write-freeze.middleware';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = app.get(RegleauLogger);
   app.useLogger(logger);
+  app.use(adminWriteFreezeMiddleware);
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -65,7 +67,6 @@ async function bootstrap() {
         httpOnly: true, // so that cookie can't be accessed via client-side script
         domain: configService.get('DOMAIN'),
       },
-      // @ts-ignore
       store: new TypeormStore({
         onError: (_store, error) => {
           logger.error('SESSION STORE ERROR', error.stack || error.message);

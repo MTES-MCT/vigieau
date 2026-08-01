@@ -4,6 +4,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import { DatagouvService } from '../datagouv/datagouv.service';
 import { RegleauLogger } from '../logger/regleau.logger';
+import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
 import { S3Service } from '../shared/services/s3.service';
 import {
   isZonePublicationEnabled,
@@ -17,7 +18,9 @@ const ZONE_PUBLICATION_PROMOTION_INTERVAL_MS = 60_000;
 interface ActivePublicationPromotion {
   id: string;
   sourceComputedAt: Date | string;
+  geojsonUrl: string;
   geojsonChecksum: string;
+  pmtilesUrl: string;
   pmtilesChecksum: string;
 }
 
@@ -45,7 +48,11 @@ export class ZonePublicationPromotionService {
 
   @Interval(ZONE_PUBLICATION_PROMOTION_INTERVAL_MS)
   async promoteStableArtifactsOnSchedule(): Promise<void> {
-    if (!isZonePublicationEnabled() || this.stablePromotionInProgress) {
+    if (
+      !shouldRunWebScheduledJobs() ||
+      !isZonePublicationEnabled() ||
+      this.stablePromotionInProgress
+    ) {
       return;
     }
     this.stablePromotionInProgress = true;
@@ -65,7 +72,11 @@ export class ZonePublicationPromotionService {
 
   @Interval(ZONE_PUBLICATION_PROMOTION_INTERVAL_MS)
   async promoteDataGouvOnSchedule(): Promise<void> {
-    if (!isZonePublicationEnabled() || this.dataGouvPromotionInProgress) {
+    if (
+      !shouldRunWebScheduledJobs() ||
+      !isZonePublicationEnabled() ||
+      this.dataGouvPromotionInProgress
+    ) {
       return;
     }
     this.dataGouvPromotionInProgress = true;
@@ -168,96 +179,127 @@ export class ZonePublicationPromotionService {
       'ZONE_PUBLICATION_PROMOTION_RETRY_SECONDS',
       300,
     );
-    const publication = await this.claimDataGouvPromotion(retrySeconds);
-    if (!publication) {
-      return 'nothing_to_do';
-    }
-
+    let publicationId: string | undefined;
     try {
-      if (!this.datagouvService.canUploadToDataGouv()) {
-        throw new Error('data.gouv.fr upload configuration is incomplete');
-      }
-      const timeoutMs = this.readPositiveInteger(
-        'ZONE_PUBLICATION_DATAGOUV_TIMEOUT_MS',
-        15_000,
-      );
-      await this.datagouvService.uploadToDatagouv(
-        'geojson',
-        this.s3Service.getPublicFileUrl(
-          'zones_arretes_en_vigueur.geojson',
-          'geojson/',
-        ),
-        'Carte des zones et arrêtés en vigueur - GeoJSON',
-        true,
-        { timeoutMs },
-      );
-      await this.datagouvService.uploadToDatagouv(
-        'pmtiles',
-        this.s3Service.getPublicFileUrl(
-          'zones_arretes_en_vigueur.pmtiles',
-          'pmtiles/',
-        ),
-        'Carte des zones et arrêtés en vigueur - PMTILES',
-        true,
-        { timeoutMs },
-      );
-      const promoted = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      return await this.dataSource.transaction(async (manager) => {
+        // Activation takes the same lock. Keeping it for the complete external
+        // write prevents an older publication from finishing after a newer one.
+        const [stableLock] = await manager.query(
+          'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
+          [ZONE_PUBLICATION_STABLE_PROMOTION_LOCK],
+        );
+        if (stableLock?.locked !== true) {
+          return 'busy';
+        }
+        const [dataGouvLock] = await manager.query(
+          'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
+          [ZONE_PUBLICATION_DATAGOUV_PROMOTION_LOCK],
+        );
+        if (dataGouvLock?.locked !== true) {
+          return 'busy';
+        }
+
+        const publication = await this.findActivePublicationForPromotion(
+          manager,
+          'datagouv',
+          retrySeconds,
+        );
+        if (!publication) {
+          return 'nothing_to_do';
+        }
+        publicationId = publication.id;
+        await this.recordPromotionAttempt(manager, publication.id);
+        if (!this.datagouvService.canUploadToDataGouv()) {
+          throw new Error('data.gouv.fr upload configuration is incomplete');
+        }
+        if (!publication.geojsonUrl || !publication.pmtilesUrl) {
+          throw new Error(
+            `Zone publication ${publication.id} has incomplete immutable artifact URLs`,
+          );
+        }
+        const timeoutMs = this.readPositiveInteger(
+          'ZONE_PUBLICATION_DATAGOUV_TIMEOUT_MS',
+          15_000,
+        );
+        await this.assertActivePublication(manager, publication.id);
+        await this.datagouvService.uploadToDatagouv(
+          'geojson',
+          publication.geojsonUrl,
+          'Carte des zones et arrêtés en vigueur - GeoJSON',
+          true,
+          { timeoutMs },
+        );
+        await this.assertActivePublication(manager, publication.id);
+        await this.datagouvService.uploadToDatagouv(
+          'pmtiles',
+          publication.pmtilesUrl,
+          'Carte des zones et arrêtés en vigueur - PMTILES',
+          true,
+          { timeoutMs },
+        );
+        const promoted = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+          await manager.query(
+            `
+            UPDATE "zone_publication" publication
+            SET "dataGouvPromotedAt" = now(),
+                "promotionLastAttemptAt" = NULL,
+                "promotionError" = NULL
+            FROM "zone_publication_state" state
+            WHERE publication."id" = $1
+              AND publication."status" = 'active'
+              AND state."id" = 1
+              AND state."activePublicationId" = publication."id"
+            RETURNING publication."id"
+            `,
+            [publication.id],
+          ),
+        );
+        if (promoted.length !== 1) {
+          throw new Error(
+            `Zone publication ${publication.id} is no longer active`,
+          );
+        }
+        return 'promoted';
+      });
+    } catch (error) {
+      if (publicationId) {
         await this.dataSource.query(
           `
-          UPDATE "zone_publication" publication
-          SET "dataGouvPromotedAt" = now(),
-              "promotionLastAttemptAt" = NULL,
-              "promotionError" = NULL
-          FROM "zone_publication_state" state
-          WHERE publication."id" = $1
-            AND publication."status" = 'active'
-            AND state."id" = 1
-            AND state."activePublicationId" = publication."id"
-          RETURNING publication."id"
+            UPDATE "zone_publication" publication
+            SET "promotionLastAttemptAt" = now(), "promotionError" = $2
+            FROM "zone_publication_state" state
+            WHERE publication."id" = $1
+              AND publication."status" = 'active'
+              AND state."id" = 1
+              AND state."activePublicationId" = publication."id"
           `,
-          [publication.id],
-        ),
-      );
-      return promoted.length === 1 ? 'promoted' : 'nothing_to_do';
-    } catch (error) {
-      await this.dataSource.query(
-        `
-          UPDATE "zone_publication" publication
-          SET "promotionError" = $2
-          FROM "zone_publication_state" state
-          WHERE publication."id" = $1
-            AND publication."status" = 'active'
-            AND state."id" = 1
-            AND state."activePublicationId" = publication."id"
-        `,
-        [publication.id, this.errorMessage(error)],
-      );
-      return 'failed';
+          [publicationId, this.errorMessage(error)],
+        );
+        return 'failed';
+      }
+      throw error;
     }
   }
 
-  private async claimDataGouvPromotion(
-    retrySeconds: number,
-  ): Promise<ActivePublicationPromotion | null> {
-    return this.dataSource.transaction(async (manager) => {
-      const [lock] = await manager.query(
-        'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
-        [ZONE_PUBLICATION_DATAGOUV_PROMOTION_LOCK],
-      );
-      if (lock?.locked !== true) {
-        return null;
-      }
-      const publication = await this.findActivePublicationForPromotion(
-        manager,
-        'datagouv',
-        retrySeconds,
-      );
-      if (!publication) {
-        return null;
-      }
-      await this.recordPromotionAttempt(manager, publication.id);
-      return publication;
-    });
+  private async assertActivePublication(
+    manager: EntityManager,
+    publicationId: string,
+  ): Promise<void> {
+    const [state] = await manager.query(
+      `
+        SELECT state."activePublicationId"
+        FROM "zone_publication_state" state
+        INNER JOIN "zone_publication" publication
+          ON publication."id" = state."activePublicationId"
+         AND publication."status" = 'active'
+        WHERE state."id" = 1
+          AND state."activePublicationId" = $1
+      `,
+      [publicationId],
+    );
+    if (!state) {
+      throw new Error(`Zone publication ${publicationId} is no longer active`);
+    }
   }
 
   private async findActivePublicationForPromotion(
@@ -274,7 +316,9 @@ export class ZonePublicationPromotionService {
       `
         SELECT publication."id",
                publication."sourceComputedAt",
+               publication."geojsonUrl",
                publication."geojsonChecksum",
+               publication."pmtilesUrl",
                publication."pmtilesChecksum"
         FROM "zone_publication_state" state
         INNER JOIN "zone_publication" publication
@@ -319,27 +363,18 @@ export class ZonePublicationPromotionService {
         UPDATE "config"
         SET "computeZoneAlerteComputedDate" = $1
         WHERE "id" = 1
-          AND (
-            "computeZoneAlerteComputedDate" < $1
-            OR "computeZoneAlerteComputedDate" IS NULL
-          )
         RETURNING "computeZoneAlerteComputedDate"
         `,
         [computationDate],
       ),
     );
-    const [config] =
-      updated.length > 0
-        ? updated
-        : await manager.query(
-            `SELECT "computeZoneAlerteComputedDate" FROM "config" WHERE "id" = 1`,
-          );
+    const [config] = updated;
     const effectiveDate = new Date(config?.computeZoneAlerteComputedDate);
     if (!config || Number.isNaN(effectiveDate.getTime())) {
       throw new Error('Zone computation config state is missing');
     }
-    if (effectiveDate.getTime() < computationDate.getTime()) {
-      throw new Error('Zone computation config date could not be advanced');
+    if (effectiveDate.getTime() !== computationDate.getTime()) {
+      throw new Error('Zone computation config date could not be synchronized');
     }
   }
 
@@ -368,33 +403,84 @@ export class ZonePublicationPromotionService {
       source: string,
       destination: string,
       prefix: string,
+      cacheControl: string,
+      contentType: string,
     ) =>
-      this.s3Service.copyFile(source, destination, prefix, {
+      this.copyAndValidateArtifact(source, destination, prefix, {
         // A copy must get its own deadline: the four sequential copies can
         // legitimately take longer than the timeout of one S3 operation.
         abortSignal: AbortSignal.timeout(timeoutMs),
+        cacheControl,
+        contentType,
       });
+
+    const stableCache = 'public, max-age=0, must-revalidate';
 
     await copyFile(
       immutableGeojson,
       `zones_arretes_en_vigueur_${day}.geojson`,
       'geojson/',
+      stableCache,
+      'application/geo+json',
     );
     await copyFile(
       immutablePmtiles,
       `zones_arretes_en_vigueur_${day}.pmtiles`,
       'pmtiles/',
+      stableCache,
+      'application/vnd.pmtiles',
     );
     await copyFile(
       immutableGeojson,
       'zones_arretes_en_vigueur.geojson',
       'geojson/',
+      stableCache,
+      'application/geo+json',
     );
     await copyFile(
       immutablePmtiles,
       'zones_arretes_en_vigueur.pmtiles',
       'pmtiles/',
+      stableCache,
+      'application/vnd.pmtiles',
     );
+  }
+
+  private async copyAndValidateArtifact(
+    source: string,
+    destination: string,
+    prefix: string,
+    options: {
+      abortSignal: AbortSignal;
+      cacheControl: string;
+      contentType: string;
+    },
+  ): Promise<void> {
+    const sourceHead = await this.s3Service.headFile(source, prefix, {
+      abortSignal: options.abortSignal,
+    });
+    if (!sourceHead.ContentLength || sourceHead.ContentLength <= 0) {
+      throw new Error(`Source S3 vide ou absente: ${prefix}${source}`);
+    }
+    await this.s3Service.copyFile(source, destination, prefix, options);
+    const destinationHead = await this.s3Service.headFile(destination, prefix, {
+      abortSignal: options.abortSignal,
+    });
+    if (destinationHead.ContentLength !== sourceHead.ContentLength) {
+      throw new Error(
+        `Copie S3 invalide: ${prefix}${destination} a une taille inattendue`,
+      );
+    }
+    if (destinationHead.CacheControl !== options.cacheControl) {
+      throw new Error(
+        `Copie S3 invalide: cache-control inattendu pour ${prefix}${destination}`,
+      );
+    }
+    if (destinationHead.ContentType !== options.contentType) {
+      throw new Error(
+        `Copie S3 invalide: content-type inattendu pour ${prefix}${destination}`,
+      );
+    }
   }
 
   private errorMessage(error: unknown): string {

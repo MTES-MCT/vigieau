@@ -14,6 +14,10 @@ import { CommunesService } from '../communes/communes.service';
 import { DataService } from '../data/data.service';
 import { DepartementsService } from '../departements/departements.service';
 import { StatisticsService } from '../statistics/statistics.service';
+import {
+  buildZonePublicationAggregate,
+  computeZonePublicationFingerprint,
+} from '@shared/zone_publication_materialization';
 import { ZonesService } from './zones.service';
 
 const mockFlatbushConstructor = jest.fn();
@@ -109,7 +113,11 @@ describe('ZonesService', () => {
     upsert: jest.fn(),
     query: jest.fn(),
   };
-  const mockDepartementsService = { loadSituation: jest.fn() };
+  const mockDepartementsService = {
+    loadSituation: jest.fn(),
+    buildSituationSnapshot: jest.fn(),
+    publishSituation: jest.fn(),
+  };
   const mockStatisticsService = { loadStatistics: jest.fn() };
   const mockDataService = { loadData: jest.fn() };
   const mockCommunesService = {
@@ -161,6 +169,8 @@ describe('ZonesService', () => {
     sourceComputedAt: version,
     zoneCount: 1,
     communeLinkCount: 1,
+    geojsonUrl: `https://example.test/${publicationId}.geojson`,
+    geojsonChecksum: 'b'.repeat(64),
     pmtilesUrl: `https://example.test/${publicationId}.pmtiles`,
     pmtilesChecksum: 'a'.repeat(64),
     activatedAt: status === 'candidate' ? null : version,
@@ -207,6 +217,15 @@ describe('ZonesService', () => {
       version: snapshotVersion,
       loadedAt: new Date(),
       communeAssociationCount: 1,
+      departmentSituation: Object.freeze([]),
+      aggregate: Object.freeze({
+        version: 1,
+        zoneCount: 1,
+        communeLinkCount: 1,
+        restrictedZoneCount: 1,
+        zoneCountByType: Object.freeze({ SUP: 1 }),
+        departments: Object.freeze({}),
+      }),
       publication: null,
     });
   };
@@ -221,8 +240,12 @@ describe('ZonesService', () => {
       publication: Object.freeze({
         id: publicationId,
         revision: '42',
+        geojsonUrl: `https://example.test/${publicationId}.geojson`,
+        geojsonChecksum: 'b'.repeat(64),
         pmtilesUrl: `https://example.test/${publicationId}.pmtiles`,
         pmtilesChecksum: 'a'.repeat(64),
+        zoneCount: 1,
+        contentFingerprint: null,
         sourceComputedAt: version,
         activatedAt: status === 'candidate' ? null : version,
         status,
@@ -275,6 +298,10 @@ describe('ZonesService', () => {
       { live: 1, activeReady: 0, candidateReady: 0 },
     ]);
     mockDepartementsService.loadSituation.mockResolvedValue(undefined);
+    mockDepartementsService.buildSituationSnapshot.mockImplementation(
+      async (zones) => zones,
+    );
+    mockDepartementsService.publishSituation.mockReturnValue(undefined);
     mockStatisticsService.loadStatistics.mockResolvedValue(undefined);
     mockDataService.loadData.mockResolvedValue(undefined);
     mockCommunesService.findArretesMunicipaux.mockResolvedValue([]);
@@ -489,7 +516,7 @@ describe('ZonesService', () => {
 
     expect(mockZonePublicationRepository.query).toHaveBeenCalledTimes(2);
     expect(service['activeSnapshot']?.publication?.id).toBe(initialId);
-    expect(mockDepartementsService.loadSituation).not.toHaveBeenCalled();
+    expect(mockDepartementsService.publishSituation).not.toHaveBeenCalled();
 
     resolveLatestSnapshot([makePublicationRow(latestId, 'active', 3)]);
     await refresh;
@@ -497,8 +524,8 @@ describe('ZonesService', () => {
     expect(service['activeSnapshot']?.publication?.id).toBe(latestId);
     expect(mockZonePublicationStateRepository.findOne).toHaveBeenCalledTimes(3);
     expect(mockZonePublicationRepository.query).toHaveBeenCalledTimes(2);
-    expect(mockDepartementsService.loadSituation).toHaveBeenCalledTimes(1);
-    expect(mockDepartementsService.loadSituation).toHaveBeenCalledWith(
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledTimes(1);
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: 3 })]),
     );
   });
@@ -541,7 +568,7 @@ describe('ZonesService', () => {
 
     expect(mockZonePublicationRepository.query).toHaveBeenCalledTimes(2);
     expect(service['activeSnapshot']).toBeNull();
-    expect(mockDepartementsService.loadSituation).not.toHaveBeenCalled();
+    expect(mockDepartementsService.publishSituation).not.toHaveBeenCalled();
 
     resolveLatestSnapshot([makePublicationRow(latestId, 'active', 2)]);
     await loading;
@@ -549,8 +576,8 @@ describe('ZonesService', () => {
     expect(service['activeSnapshot']?.publication?.id).toBe(latestId);
     expect(mockZonePublicationStateRepository.findOne).toHaveBeenCalledTimes(3);
     expect(mockZonePublicationRepository.query).toHaveBeenCalledTimes(2);
-    expect(mockDepartementsService.loadSituation).toHaveBeenCalledTimes(1);
-    expect(mockDepartementsService.loadSituation).toHaveBeenCalledWith(
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledTimes(1);
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: 2 })]),
     );
   });
@@ -618,7 +645,9 @@ describe('ZonesService', () => {
     expect(service['lastCacheError']).toMatchObject({
       phase: 'candidate-preload',
     });
-    expect(mockZonePublicationInstanceRepository.upsert).toHaveBeenLastCalledWith(
+    expect(
+      mockZonePublicationInstanceRepository.upsert,
+    ).toHaveBeenLastCalledWith(
       expect.objectContaining({
         candidatePublicationId: null,
         lastError: 'candidate-preload',
@@ -851,8 +880,11 @@ describe('ZonesService', () => {
     await expect(service.getPublication()).resolves.toEqual({
       id: publicationId,
       revision: '42',
+      geojsonUrl: `https://example.test/${publicationId}.geojson`,
+      geojsonChecksum: 'b'.repeat(64),
       pmtilesUrl: `https://example.test/${publicationId}.pmtiles`,
       pmtilesChecksum: 'a'.repeat(64),
+      zoneCount: 1,
     });
     await expect(
       service.find(
@@ -886,6 +918,64 @@ describe('ZonesService', () => {
         mockZonePublicationInstanceRepository.upsert.mock.calls.length - 1
       ][0];
     expect(heartbeat.heartbeatAt()).toBe('now()');
+  });
+
+  it('verifies and publishes zone and department snapshots as one version', async () => {
+    const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const row: any = makePublicationRow(publicationId);
+    const aggregate = buildZonePublicationAggregate([row.publicPayload], 1);
+    row.departmentCount = 1;
+    row.aggregatePayload = aggregate;
+    row.contentFingerprint = computeZonePublicationFingerprint({
+      zones: [
+        {
+          sourceZoneId: row.sourceZoneId,
+          departmentCode: row.departmentCode,
+          type: row.publicPayload.type,
+          geometry: row.geom,
+          publicPayload: row.publicPayload,
+          communeCodes: row.communeCodes,
+        },
+      ],
+      aggregate,
+    });
+    const situation = [
+      {
+        date: '2026-07-31',
+        departementSituation: [{ code: '65', niveauGraviteMax: 'alerte' }],
+      },
+    ];
+    let snapshotDuringDepartmentPublish: unknown;
+    mockDepartementsService.buildSituationSnapshot.mockResolvedValueOnce(
+      situation,
+    );
+    mockDepartementsService.publishSituation.mockImplementationOnce(() => {
+      snapshotDuringDepartmentPublish = service['activeSnapshot'];
+    });
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: publicationId,
+      candidatePublicationId: null,
+    });
+    mockZonePublicationRepository.query.mockResolvedValue([row]);
+
+    await service.loadAllZones();
+
+    expect(snapshotDuringDepartmentPublish).toBeNull();
+    expect(mockDepartementsService.buildSituationSnapshot).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ id: 1 })]),
+      aggregate,
+    );
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledWith(
+      situation,
+    );
+    expect(service['activeSnapshot']).toMatchObject({
+      aggregate,
+      departmentSituation: situation,
+      publication: {
+        id: publicationId,
+        contentFingerprint: row.contentFingerprint,
+      },
+    });
   });
 
   it('loads a legitimate empty versioned publication and serves empty lookups', async () => {

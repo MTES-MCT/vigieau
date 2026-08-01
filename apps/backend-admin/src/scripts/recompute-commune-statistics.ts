@@ -43,9 +43,7 @@ function parseDates(): string[] {
   const sortedDates = [...dates].sort();
   sortedDates.forEach(parseMoment);
   if (sortedDates.length === 0) {
-    throw new Error(
-      'Set DATES=YYYY-MM-DD[,YYYY-MM-DD] or DATE_FROM/DATE_TO',
-    );
+    throw new Error('Set DATES=YYYY-MM-DD[,YYYY-MM-DD] or DATE_FROM/DATE_TO');
   }
 
   return sortedDates;
@@ -89,6 +87,8 @@ async function main() {
     }
 
     const foundCodes = departements.map((departement) => departement.code);
+    const statisticScopeCodes =
+      departementCodes.length > 0 ? foundCodes : undefined;
     const missingCodes = departementCodes.filter(
       (code) => !foundCodes.includes(code),
     );
@@ -114,13 +114,13 @@ async function main() {
         dateMoment.toDate(),
         true,
         false,
-        foundCodes,
+        statisticScopeCodes,
       );
 
       if (recomputeMonths) {
         await statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
           dateMoment.toDate(),
-          foundCodes,
+          statisticScopeCodes,
         );
       }
 
@@ -128,7 +128,7 @@ async function main() {
     }
 
     if (sortAtEnd) {
-      await statisticCommuneService.sortStatCommune(foundCodes);
+      await statisticCommuneService.sortStatCommune(statisticScopeCodes);
       console.log('[recompute-commune-statistics] sorted');
     }
   } finally {

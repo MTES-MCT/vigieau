@@ -18,12 +18,10 @@ import { CreateUpdateArreteMunicipalDto } from './dto/create_update_arrete_munic
 import moment from 'moment';
 import { FichierService } from '../fichier/fichier.service';
 import { StatutArreteMunicipal } from '@shared/types/arrete_municipal.type';
-import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
-import { RepealArreteMunicipalDto } from './dto/repeal_arrete_municipal.dto';
 import { CommuneService } from '../commune/commune.service';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { MailService } from '../shared/services/mail.service';
-import { Commune } from '@shared/entities/commune.entity';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
@@ -416,7 +414,7 @@ export class ArreteMunicipalService {
   /**
    * Mis à jour des statuts des AM tous les jours à 2h du matin
    */
-  @Cron(CronExpression.EVERY_DAY_AT_2AM)
+  @BusinessCron(CronExpression.EVERY_DAY_AT_2AM)
   async updateArreteMunicipalStatut() {
     const amAVenir = await this.arreteMunicipalRepository.find({
       where: {

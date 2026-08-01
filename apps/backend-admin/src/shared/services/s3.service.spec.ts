@@ -1,6 +1,31 @@
+import { CopyObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import { S3Service } from './s3.service';
 
+jest.mock('@aws-sdk/lib-storage', () => ({
+  Upload: jest.fn(),
+}));
+
 describe('S3Service', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const createHarness = () => {
+    const values = {
+      NODE_ENV: 'local',
+      S3_BUCKET: 'vigieau-bucket',
+      S3_PREFIX: 'prod/',
+      S3_VHOST: 'https://objects.example.test/',
+    };
+    const service = new S3Service({
+      get: jest.fn((key: string) => values[key]),
+    } as any);
+    const send = jest.fn().mockResolvedValue({ ContentLength: 42 });
+    (service as any).client = { send };
+    return { send, service };
+  };
+
   it('builds a normalized public URL from the configured prefix', () => {
     const values = {
       S3_VHOST: 'https://objects.example.test/',
@@ -27,24 +52,96 @@ describe('S3Service', () => {
   });
 
   it('forwards the abort signal to S3 copies', async () => {
-    const service = new S3Service({
-      get: jest.fn((key: string) => {
-        const values: Record<string, string> = {
-          S3_BUCKET: 'vigieau',
-          S3_PREFIX: 'preprod/',
-          NODE_ENV: 'test',
-        };
-        return values[key];
-      }),
-    } as any);
-    const send = jest.fn().mockResolvedValue({});
-    (service as any).client = { send };
+    const harness = createHarness();
     const abortSignal = AbortSignal.timeout(1_000);
 
-    await service.copyFile('source.pmtiles', 'stable.pmtiles', 'pmtiles/', {
+    await harness.service.copyFile(
+      'source.pmtiles',
+      'stable.pmtiles',
+      'pmtiles/',
+      { abortSignal },
+    );
+
+    expect(harness.send).toHaveBeenCalledWith(expect.any(Object), {
       abortSignal,
     });
+  });
 
-    expect(send).toHaveBeenCalledWith(expect.any(Object), { abortSignal });
+  it('copies stable aliases with explicit cache and content metadata', async () => {
+    const harness = createHarness();
+
+    await harness.service.copyFile(
+      'immutable.pmtiles',
+      'current.pmtiles',
+      'pmtiles/',
+      {
+        cacheControl: 'public, max-age=0, must-revalidate',
+        contentType: 'application/vnd.pmtiles',
+      },
+    );
+
+    const [command] = harness.send.mock.calls[0];
+    expect(command).toBeInstanceOf(CopyObjectCommand);
+    expect(command.input).toEqual(
+      expect.objectContaining({
+        Bucket: 'vigieau-bucket',
+        Key: 'prod/pmtiles/current.pmtiles',
+        CopySource: '/vigieau-bucket/prod/pmtiles/immutable.pmtiles',
+        CacheControl: 'public, max-age=0, must-revalidate',
+        ContentType: 'application/vnd.pmtiles',
+        MetadataDirective: 'REPLACE',
+      }),
+    );
+  });
+
+  it('heads the exact prefixed key used by validation', async () => {
+    const harness = createHarness();
+    const abortSignal = AbortSignal.timeout(1_000);
+
+    await expect(
+      harness.service.headFile('current.geojson', 'geojson/', { abortSignal }),
+    ).resolves.toEqual({ ContentLength: 42 });
+
+    const [command] = harness.send.mock.calls[0];
+    expect(command).toBeInstanceOf(HeadObjectCommand);
+    expect(command.input).toEqual({
+      Bucket: 'vigieau-bucket',
+      Key: 'prod/geojson/current.geojson',
+    });
+    expect(harness.send).toHaveBeenCalledWith(command, { abortSignal });
+  });
+
+  it('aborts an in-flight multipart upload when its deadline expires', async () => {
+    const harness = createHarness();
+    const abort = jest.fn().mockResolvedValue(undefined);
+    let rejectUpload: (error: Error) => void;
+    const done = jest.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectUpload = reject;
+        }),
+    );
+    (Upload as unknown as jest.Mock).mockImplementationOnce(() => ({
+      abort,
+      done,
+    }));
+    const controller = new AbortController();
+
+    const upload = harness.service.uploadFile(
+      {
+        originalname: 'immutable.pmtiles',
+        mimetype: 'application/vnd.pmtiles',
+        buffer: Buffer.from('PMTiles'),
+      } as Express.Multer.File,
+      'pmtiles/',
+      { abortSignal: controller.signal },
+    );
+    const rejection = expect(upload).rejects.toThrow('upload aborted');
+
+    controller.abort(new Error('deadline exceeded'));
+    expect(abort).toHaveBeenCalledTimes(1);
+    rejectUpload!(new Error('upload aborted'));
+
+    await rejection;
   });
 });

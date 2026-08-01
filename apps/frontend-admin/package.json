@@ -8,7 +8,7 @@
     "format": "eslint . --fix",
     "generate": "nuxt generate",
     "lint:js": "eslint .",
-    "lint:prettier": "prettier --check",
+    "lint:prettier": "prettier --check .",
     "lint": "npm run lint:js && npm run lint:prettier",
     "lintfix": "prettier --write --list-different . && npm run lint:js -- --fix",
     "preview": "nuxt preview",

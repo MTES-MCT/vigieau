@@ -30,6 +30,12 @@ import { ZonePublicationCommune } from '@shared/entities/zone_publication_commun
 import { ZonePublicationState } from '@shared/entities/zone_publication_state.entity';
 import { ZonePublicationInstance } from '@shared/entities/zone_publication_instance.entity';
 import { isUUID } from 'class-validator';
+import {
+  buildZonePublicationAggregate,
+  computeZonePublicationFingerprint,
+  stableJson,
+  type ZonePublicationAggregatePayload,
+} from '@shared/zone_publication_materialization';
 
 type ZoneCacheError = {
   at: Date;
@@ -52,14 +58,20 @@ type ZoneCacheSnapshot = Readonly<{
   version: Date | null;
   loadedAt: Date;
   communeAssociationCount: number;
+  departmentSituation: readonly any[];
+  aggregate: ZonePublicationAggregatePayload;
   publication: ZonePublicationManifest | null;
 }>;
 
 export type ZonePublicationManifest = Readonly<{
   id: string;
   revision: string;
+  geojsonUrl: string | null;
+  geojsonChecksum: string | null;
   pmtilesUrl: string | null;
   pmtilesChecksum: string | null;
+  zoneCount: number;
+  contentFingerprint: string | null;
   sourceComputedAt: Date;
   activatedAt: Date | null;
   status: ZonePublicationStatus;
@@ -101,6 +113,9 @@ export type ZoneCacheStatus = {
     mode: 'legacy' | 'versioned';
     activeId: string | null;
     activeRevision: string | null;
+    availableActiveId?: string | null;
+    candidateId?: string | null;
+    loadedFingerprint?: string | null;
     candidatePreloaded: boolean;
     cachedPublications: number;
     instances: PublicationInstanceSummary;
@@ -367,7 +382,7 @@ export class ZonesService implements OnModuleInit {
 
       // Publication atomique : aucune structure du cache actif n'est modifiée
       // avant que le nouveau snapshot soit entièrement construit et validé.
-      this.activeSnapshot = snapshot;
+      this.publishActiveSnapshot(snapshot);
       this.lastCacheError = null;
       this.logger.log(
         `LOADING ALL ZONES & COMMUNES - END ${JSON.stringify({
@@ -382,10 +397,6 @@ export class ZonesService implements OnModuleInit {
           durationMs: Date.now() - startedAt,
         })}`,
       );
-      void this.departementsService
-        .loadSituation(snapshot.zones)
-        .catch((error) => this.reportOperationalError(error, 'departements'));
-
       if (publicationState.candidatePublicationId) {
         this.startCandidatePreload(publicationState.candidatePublicationId);
       }
@@ -516,7 +527,7 @@ export class ZonesService implements OnModuleInit {
         publicationState = stablePublication.publicationState;
         const snapshot = stablePublication.snapshot;
         const snapshotChanged = snapshot !== this.activeSnapshot;
-        this.activeSnapshot = snapshot;
+        this.publishActiveSnapshot(snapshot);
         this.lastCacheError = null;
         this.prunePublicationSnapshots();
         if (publicationState.candidatePublicationId) {
@@ -524,11 +535,6 @@ export class ZonesService implements OnModuleInit {
         }
         if (snapshotChanged) {
           heartbeatRequired = true;
-          void this.departementsService
-            .loadSituation(snapshot.zones)
-            .catch((error) =>
-              this.reportOperationalError(error, 'departements'),
-            );
         }
       } else if (publicationState.activePublicationId) {
         if (!publicationState.candidatePublicationId || candidatePreloaded) {
@@ -590,6 +596,13 @@ export class ZonesService implements OnModuleInit {
 
     const zones = this.mapZonesWithRestrictions(zonesWithGeom);
     const indexes = await this.buildZoneIndexes(zonesWithGeom, zones);
+    const aggregate = buildZonePublicationAggregate(
+      zones,
+      indexes.communeAssociationCount,
+    );
+    const departmentSituation = Object.freeze(
+      await this.departementsService.buildSituationSnapshot(zones, aggregate),
+    );
     const communeArretesMunicipaux = Object.freeze([
       ...((await this.loadArretesMunicipaux()) || []),
     ]);
@@ -604,6 +617,8 @@ export class ZonesService implements OnModuleInit {
       version: zoneComputationDate,
       loadedAt: new Date(),
       communeAssociationCount: indexes.communeAssociationCount,
+      departmentSituation,
+      aggregate,
       publication: null,
     });
   }
@@ -689,7 +704,12 @@ export class ZonesService implements OnModuleInit {
     publicationId: string,
   ): Promise<ZoneCacheSnapshot> {
     const cached = this.publicationSnapshots.get(publicationId);
-    if (cached?.publication?.status === 'candidate') return cached;
+    if (
+      cached?.publication?.status === 'candidate' ||
+      cached?.publication?.status === 'retired'
+    ) {
+      return cached;
+    }
 
     const pending = this.candidatePreloadPromises.get(publicationId);
     if (pending) return pending;
@@ -717,7 +737,10 @@ export class ZonesService implements OnModuleInit {
     try {
       return await this.withSecondarySnapshotLoad(async () => {
         this.prunePublicationSnapshotsForCandidate(publicationId);
-        return this.getOrLoadPublicationSnapshot(publicationId, ['candidate']);
+        return this.getOrLoadPublicationSnapshot(publicationId, [
+          'candidate',
+          'retired',
+        ]);
       });
     } finally {
       clearInterval(heartbeatTimer);
@@ -726,8 +749,9 @@ export class ZonesService implements OnModuleInit {
 
   private startCandidatePreload(publicationId: string): void {
     if (
-      this.publicationSnapshots.get(publicationId)?.publication?.status ===
-        'candidate' ||
+      ['candidate', 'retired'].includes(
+        this.publicationSnapshots.get(publicationId)?.publication?.status || '',
+      ) ||
       this.candidatePreloadPromises.has(publicationId)
     ) {
       return;
@@ -773,9 +797,14 @@ export class ZonesService implements OnModuleInit {
           publication."sourceComputedAt" AS "sourceComputedAt",
           publication."zoneCount" AS "zoneCount",
           publication."communeLinkCount" AS "communeLinkCount",
+          publication."departmentCount" AS "departmentCount",
+          publication."contentFingerprint" AS "contentFingerprint",
+          publication."geojsonUrl" AS "geojsonUrl",
+          publication."geojsonChecksum" AS "geojsonChecksum",
           publication."pmtilesUrl" AS "pmtilesUrl",
           publication."pmtilesChecksum" AS "pmtilesChecksum",
           publication."activatedAt" AS "activatedAt",
+          aggregate."payload" AS "aggregatePayload",
           zone."id" AS "publicationZoneId",
           zone."sourceZoneId" AS "sourceZoneId",
           zone."departmentCode" AS "departmentCode",
@@ -792,6 +821,8 @@ export class ZonesService implements OnModuleInit {
         LEFT JOIN "zone_publication_commune" commune
           ON commune."publicationId" = publication."id"
           AND commune."publicationZoneId" = zone."id"
+        LEFT JOIN "zone_publication_aggregate" aggregate
+          ON aggregate."publicationId" = publication."id"
         WHERE publication."id" = $1
           AND publication."status" = ANY($2::varchar[])
         GROUP BY
@@ -801,9 +832,14 @@ export class ZonesService implements OnModuleInit {
           publication."sourceComputedAt",
           publication."zoneCount",
           publication."communeLinkCount",
+          publication."departmentCount",
+          publication."contentFingerprint",
+          publication."geojsonUrl",
+          publication."geojsonChecksum",
           publication."pmtilesUrl",
           publication."pmtilesChecksum",
           publication."activatedAt",
+          aggregate."payload",
           zone."id",
           zone."sourceZoneId",
           zone."departmentCode",
@@ -858,6 +894,49 @@ export class ZonesService implements OnModuleInit {
       communes: row.communeCodes.map((code) => ({ code })),
     }));
     const indexes = await this.buildZoneIndexes(zonesWithGeom, zones);
+    const expectedAggregate = buildZonePublicationAggregate(
+      zones,
+      indexes.communeAssociationCount,
+    );
+    const aggregate = metadata.aggregatePayload || expectedAggregate;
+    if (
+      metadata.contentFingerprint &&
+      stableJson(aggregate) !== stableJson(expectedAggregate)
+    ) {
+      throw new Error(
+        `Publication ${publicationId}: agrégat départemental incohérent.`,
+      );
+    }
+    if (
+      metadata.contentFingerprint &&
+      Number(metadata.departmentCount) !==
+        Object.keys(aggregate.departments).length
+    ) {
+      throw new Error(
+        `Publication ${publicationId}: nombre de départements incohérent.`,
+      );
+    }
+    if (metadata.contentFingerprint) {
+      const actualFingerprint = computeZonePublicationFingerprint({
+        zones: zoneRows.map((row) => ({
+          sourceZoneId: row.sourceZoneId,
+          departmentCode: row.departmentCode,
+          type: row.publicPayload.type,
+          geometry: row.geom,
+          publicPayload: row.publicPayload,
+          communeCodes: row.communeCodes,
+        })),
+        aggregate,
+      });
+      if (actualFingerprint !== metadata.contentFingerprint) {
+        throw new Error(
+          `Publication ${publicationId}: empreinte de matérialisation incohérente.`,
+        );
+      }
+    }
+    const departmentSituation = Object.freeze(
+      await this.departementsService.buildSituationSnapshot(zones, aggregate),
+    );
     const communeArretesMunicipaux = Object.freeze([
       ...((await this.loadArretesMunicipaux()) || []),
     ]);
@@ -878,11 +957,17 @@ export class ZonesService implements OnModuleInit {
       version: sourceComputedAt,
       loadedAt: new Date(),
       communeAssociationCount: indexes.communeAssociationCount,
+      departmentSituation,
+      aggregate,
       publication: Object.freeze({
         id: metadata.publicationId,
         revision: String(metadata.revision),
+        geojsonUrl: metadata.geojsonUrl || null,
+        geojsonChecksum: metadata.geojsonChecksum || null,
         pmtilesUrl: metadata.pmtilesUrl || null,
         pmtilesChecksum: metadata.pmtilesChecksum || null,
+        zoneCount: expectedZoneCount,
+        contentFingerprint: metadata.contentFingerprint || null,
         sourceComputedAt,
         activatedAt: metadata.activatedAt
           ? new Date(metadata.activatedAt)
@@ -898,6 +983,13 @@ export class ZonesService implements OnModuleInit {
     }
     Object.values(value).forEach((child) => this.deepFreeze(child));
     return Object.freeze(value);
+  }
+
+  private publishActiveSnapshot(snapshot: ZoneCacheSnapshot): void {
+    this.departementsService.publishSituation([
+      ...snapshot.departmentSituation,
+    ]);
+    this.activeSnapshot = snapshot;
   }
 
   private prunePublicationSnapshots(): void {
@@ -1471,6 +1563,9 @@ export class ZonesService implements OnModuleInit {
         mode: snapshot?.publication ? 'versioned' : 'legacy',
         activeId: snapshot?.publication?.id || null,
         activeRevision: snapshot?.publication?.revision || null,
+        availableActiveId: this.availablePublicationState.activePublicationId,
+        candidateId: this.availablePublicationState.candidatePublicationId,
+        loadedFingerprint: snapshot?.publication?.contentFingerprint || null,
         candidatePreloaded: Boolean(
           this.availablePublicationState.candidatePublicationId &&
           candidatePreloadCurrent,
@@ -1484,8 +1579,12 @@ export class ZonesService implements OnModuleInit {
   async getPublication(): Promise<{
     id: string;
     revision: string;
+    geojsonUrl: string | null;
+    geojsonChecksum: string | null;
     pmtilesUrl: string | null;
     pmtilesChecksum: string | null;
+    zoneCount: number;
+    contentFingerprint?: string;
   }> {
     await this.refreshZonesIfStale(true);
     if (!this.activeSnapshot) {
@@ -1504,8 +1603,14 @@ export class ZonesService implements OnModuleInit {
     return {
       id: publication.id,
       revision: publication.revision,
+      geojsonUrl: publication.geojsonUrl,
+      geojsonChecksum: publication.geojsonChecksum,
       pmtilesUrl: publication.pmtilesUrl,
       pmtilesChecksum: publication.pmtilesChecksum,
+      zoneCount: publication.zoneCount,
+      ...(publication.contentFingerprint
+        ? { contentFingerprint: publication.contentFingerprint }
+        : {}),
     };
   }
 
@@ -1553,10 +1658,7 @@ export class ZonesService implements OnModuleInit {
       throw this.publicationUnavailable(error);
     }
     if (publicationId === this.availablePublicationState.activePublicationId) {
-      this.activeSnapshot = snapshot;
-      void this.departementsService
-        .loadSituation(snapshot.zones)
-        .catch((error) => this.reportOperationalError(error, 'departements'));
+      this.publishActiveSnapshot(snapshot);
     }
     this.prunePublicationSnapshots();
     return snapshot;
@@ -1605,8 +1707,10 @@ export class ZonesService implements OnModuleInit {
   private isCandidatePreloadCurrent(state: PublicationState): boolean {
     if (!state.candidatePublicationId) return true;
     return Boolean(
-      this.publicationSnapshots.get(state.candidatePublicationId)?.publication
-        ?.status === 'candidate',
+      ['candidate', 'retired'].includes(
+        this.publicationSnapshots.get(state.candidatePublicationId)?.publication
+          ?.status || '',
+      ),
     );
   }
 
@@ -1657,6 +1761,8 @@ export class ZonesService implements OnModuleInit {
           zoneCount: acknowledgedSnapshot?.zones.length ?? null,
           communeLinkCount:
             acknowledgedSnapshot?.communeAssociationCount ?? null,
+          contentFingerprint:
+            acknowledgedSnapshot?.publication?.contentFingerprint ?? null,
           lastError: this.lastCacheError?.phase || null,
           heartbeatAt: () => 'now()',
         },
@@ -1675,9 +1781,11 @@ export class ZonesService implements OnModuleInit {
             COUNT(*)::integer AS "live",
             COUNT(*) FILTER (
               WHERE "activePublicationId" = $1
+                AND ($3::varchar IS NULL OR "contentFingerprint" = $3)
             )::integer AS "activeReady",
             COUNT(*) FILTER (
               WHERE "candidatePublicationId" = $2
+                AND ($4::varchar IS NULL OR "contentFingerprint" = $4)
             )::integer AS "candidateReady"
           FROM "zone_publication_instance"
           WHERE "heartbeatAt" >= now() - interval '30 seconds'
@@ -1685,6 +1793,12 @@ export class ZonesService implements OnModuleInit {
         [
           this.activeSnapshot?.publication?.id || null,
           this.availablePublicationState.candidatePublicationId,
+          this.activeSnapshot?.publication?.contentFingerprint || null,
+          this.availablePublicationState.candidatePublicationId
+            ? this.publicationSnapshots.get(
+                this.availablePublicationState.candidatePublicationId,
+              )?.publication?.contentFingerprint || null
+            : null,
         ],
       );
       return {

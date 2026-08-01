@@ -8,6 +8,10 @@ const logger = new RegleauLogger('ComputeHistoricWorker');
 interface WorkerData {
   dateMin: string;
   dateStats?: string;
+  expectedMapCursor?: string | null;
+  expectedStatsCursor?: string | null;
+  expectedMapGeneration?: string;
+  expectedStatsGeneration?: string;
   type: 'maps' | 'mapsComputed';
 }
 
@@ -29,7 +33,15 @@ async function run() {
       ZoneAlerteComputedHistoricService,
     );
 
-    const { dateMin, dateStats, type } = workerData as WorkerData;
+    const {
+      dateMin,
+      dateStats,
+      expectedMapCursor,
+      expectedStatsCursor,
+      expectedMapGeneration,
+      expectedStatsGeneration,
+      type,
+    } = workerData as WorkerData;
     const dateMinMoment = moment(dateMin);
     const dateStatsMoment = dateStats ? moment(dateStats) : null;
 
@@ -42,12 +54,20 @@ async function run() {
       result = await zoneAlerteComputedHistoricService.computeHistoricMaps(
         dateMinMoment,
         dateStatsMoment,
+        expectedMapCursor,
+        expectedStatsCursor,
+        expectedMapGeneration,
+        expectedStatsGeneration,
       );
     } else {
       result =
         await zoneAlerteComputedHistoricService.computeHistoricMapsComputed(
           dateMinMoment,
           dateStatsMoment,
+          expectedMapCursor,
+          expectedStatsCursor,
+          expectedMapGeneration,
+          expectedStatsGeneration,
         );
     }
 

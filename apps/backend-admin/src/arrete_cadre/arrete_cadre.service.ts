@@ -6,7 +6,8 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { User } from '@shared/entities/user.entity';
@@ -813,10 +814,9 @@ export class ArreteCadreService {
   }
 
   /**
-   * Mis à jour des statuts des AC tous les jours à 2h du matin
+   * Met à jour les statuts des AC et lance le recalcul national associé.
    */
-  @Cron(CronExpression.EVERY_DAY_AT_2AM)
-  async updateArreteCadreStatut() {
+  async updateArreteCadreStatut(computeHistoric = true) {
     const acAVenir = await this.arreteCadreRepository.find(<FindManyOptions>{
       where: {
         statut: 'a_venir',
@@ -841,13 +841,22 @@ export class ArreteCadreService {
     );
     this.logger.log(`${acPerime.length} Arrêtés Cadre abrogés`);
 
-    this.arreteRestrictionService.updateArreteRestrictionStatut(null, true);
+    return this.arreteRestrictionService.updateArreteRestrictionStatut(
+      null,
+      computeHistoric,
+    );
+  }
+
+  async catchUpHistoricComputations(requiredThrough: string): Promise<void> {
+    await this.arreteRestrictionService.catchUpHistoricComputations(
+      requiredThrough,
+    );
   }
 
   /**
    * Vérification s'il faut envoyer des mails de relance tous les jours à 8h du matin
    */
-  @Cron(CronExpression.EVERY_DAY_AT_8AM)
+  @BusinessCron(CronExpression.EVERY_DAY_AT_8AM)
   async sendArreteCadreEmails() {
     const [ac15ARelancer, ac2ARelancer] = await Promise.all([
       this.getAcAtXDays(15),

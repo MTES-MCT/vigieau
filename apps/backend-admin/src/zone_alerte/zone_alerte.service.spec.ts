@@ -74,6 +74,16 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     recomputeResult?: any;
     syncMode?: string;
     invalidGeometryCodes?: string[];
+    referencedZoneIds?: number[];
+    genealogyRelations?: Array<{
+      id: string;
+      parentCode: string;
+      childCode: string;
+      modificationDate: string;
+      modificationType: string;
+      reason: string;
+    }>;
+    globalLockAvailable?: boolean;
   }) => {
     const zoneRepository = {
       create: jest.fn(() => ({})),
@@ -118,17 +128,43 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     ]);
     const manager = {
       getRepository: jest.fn((entity) => repositories.get(entity)),
-      query: jest.fn(async (query: string) =>
-        query.includes('ST_IsValid')
-          ? (options?.invalidGeometryCodes ?? []).map((code) => ({ code }))
-          : undefined,
-      ),
+      query: jest.fn(async (query: string, parameters?: any[]) => {
+        if (query.includes('ST_IsValid')) {
+          return (options?.invalidGeometryCodes ?? []).map((code) => ({
+            code,
+          }));
+        }
+        if (query.includes('AS "nonAbrogeArreteCadre"')) {
+          const referenced = (options?.referencedZoneIds ?? []).includes(
+            parameters?.[0],
+          );
+          return [
+            {
+              arreteCadre: referenced ? 1 : 0,
+              nonAbrogeArreteCadre: referenced ? 1 : 0,
+              restrictions: 0,
+              customizations: 0,
+            },
+          ];
+        }
+        return [];
+      }),
     };
     const queryRunner = {
       manager,
       query: jest.fn(async (query: string, parameters?: any[]) => {
         if (query.includes('pg_try_advisory_lock')) {
-          return [{ locked: true }];
+          return [
+            {
+              locked:
+                options?.globalLockAvailable === undefined
+                  ? true
+                  : options.globalLockAvailable,
+            },
+          ];
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          return [{ unlocked: true }];
         }
         if (
           query.includes('UPDATE sandre_zone_sync_state') &&
@@ -154,6 +190,9 @@ describe('ZoneAlerteService Sandre synchronization', () => {
               syncStartedAt: new Date('2026-07-31T08:00:00.000Z'),
             },
           ];
+        }
+        if (query.includes('INSERT INTO sandre_zone_sync_batch')) {
+          return [{ id: '1' }];
         }
         if (
           query.includes('UPDATE sandre_zone_sync_state') &&
@@ -211,6 +250,9 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       dataSource as any,
     );
     (service as any).runCurrentZoneComputeWorker = runCurrentZoneComputeWorker;
+    (service as any).getSandreGenealogyRelations = jest
+      .fn()
+      .mockResolvedValue(options?.genealogyRelations ?? []);
 
     return {
       aliasRepository,
@@ -250,7 +292,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       'Incomplete Sandre snapshot',
     );
 
-    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(harness.dataSource.createQueryRunner).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
   });
 
@@ -283,6 +326,150 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         idSandre: 3201,
         disabled: false,
       }),
+    );
+  });
+
+  it('holds the global database lock before the first Sandre request', async () => {
+    const harness = createHarness();
+
+    await harness.service.updateDepartementZones('65');
+
+    const lockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('pg_try_advisory_lock'),
+    );
+    expect(lockCallIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[lockCallIndex],
+    ).toBeLessThan(harness.httpService.get.mock.invocationCallOrder[0]);
+  });
+
+  it('does not fetch when another process owns the global lock', async () => {
+    const harness = createHarness({ globalLockAvailable: false });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'already running',
+    );
+
+    expect(harness.httpService.get).not.toHaveBeenCalled();
+    expect(harness.dataSource.query).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the query runner and falls back when the global unlock fails', async () => {
+    const harness = createHarness();
+    const unlockError = new Error('unlock query failed');
+    harness.queryRunner.query
+      .mockRejectedValueOnce(unlockError)
+      .mockResolvedValueOnce([]);
+
+    await expect(
+      (harness.service as any).releaseSandreGlobalLock(harness.queryRunner),
+    ).rejects.toBe(unlockError);
+    expect(harness.queryRunner.query).toHaveBeenNthCalledWith(
+      2,
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('records an audit snapshot and decisions without mutating zones', async () => {
+    const harness = createHarness({ syncMode: 'audit' });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      {
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 1,
+      },
+    );
+
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('"observedSnapshotHash"'),
+      expect.any(Array),
+    );
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO sandre_zone_sync_decision'),
+      expect.any(Array),
+    );
+    expect(harness.runCurrentZoneComputeWorker).not.toHaveBeenCalled();
+  });
+
+  it('exposes a redacted operator status with observed, applied and blocked state', async () => {
+    const harness = createHarness();
+    harness.dataSource.query.mockImplementation((async (query: string) => {
+      if (query.includes('FROM sandre_zone_sync_batch')) {
+        return [
+          {
+            id: '12',
+            mode: 'safe',
+            status: 'blocked',
+            startedAt: new Date(Date.now() - 20_000),
+            finishedAt: new Date(Date.now() - 10_000),
+            failureReason: 'must not be exposed',
+          },
+        ];
+      }
+      return [
+        {
+          departmentCode: '65',
+          observedSourceUpdatedAt: '2026-08-01',
+          appliedSourceUpdatedAt: '2026-07-31',
+          lastObservedAt: new Date(Date.now() - 30_000),
+          lastAppliedAt: new Date(Date.now() - 86_400_000),
+          blockedAt: new Date(Date.now() - 10_000),
+          blockCode: 'NON_ABROGATED_AC_REFERENCE',
+          blockedReason: 'must not be exposed',
+        },
+      ];
+    }) as any);
+
+    const status = await harness.service.getSandreOperatorStatus();
+
+    expect(status).toEqual(
+      expect.objectContaining({
+        mode: 'safe',
+        latestBatch: expect.objectContaining({
+          id: '12',
+          status: 'blocked',
+          durationSeconds: 10,
+        }),
+        summary: {
+          trackedDepartments: 1,
+          blockedDepartments: 1,
+        },
+        departments: [
+          expect.objectContaining({
+            departmentCode: '65',
+            blocked: true,
+            blockCode: 'NON_ABROGATED_AC_REFERENCE',
+          }),
+        ],
+      }),
+    );
+    expect(JSON.stringify(status)).not.toContain('failureReason');
+    expect(JSON.stringify(status)).not.toContain('blockedReason');
+    expect(JSON.stringify(status)).not.toContain('must not be exposed');
+  });
+
+  it('purges old Sandre batches while retaining the latest audit trail', async () => {
+    const harness = createHarness();
+    harness.dataSource.query.mockResolvedValue([
+      [{ id: '10' }, { id: '11' }],
+      2,
+    ] as any);
+
+    await expect(harness.service.purgeSandreSyncHistory()).resolves.toBe(2);
+
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('WITH retained AS'),
+      [90],
+    );
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining(`batch."status" <> 'started'`),
+      [90],
     );
   });
 
@@ -349,6 +536,127 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(unrelatedZone.disabled).toBe(false);
     expect(harness.zoneRepository.save).toHaveBeenCalledWith(frozenZone);
     expect(zoneFind).toHaveBeenCalledTimes(2);
+  });
+
+  it('rolls back the whole department when a referenced frozen zone has no official successor', async () => {
+    const activeFeature = rawFeature();
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: '1380',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: '3201',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: '1380',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      referencedZoneIds: [102],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'NO_TYPE_2_SUCCESSOR',
+    );
+
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('"blockedSnapshotHash"'),
+      expect.any(Array),
+    );
+  });
+
+  it('reconciles a referenced frozen zone only through a strict official successor', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      code: '73_65_14',
+      nom: 'Zone actuelle',
+      type: 'SUP',
+      numeroVersionSandre: 1,
+      ressourceInfluencee: false,
+      disabled: false,
+      departement: department,
+      bassinVersant: basin,
+      geom: activeFeature.geometry,
+      codesAlternatifs: ['73_65_14'],
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: 'OLD',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      referencedZoneIds: [102],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.objectContaining({ disabled: 1 }),
+    );
+
+    expect(harness.aliasRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        zoneAlerte: expect.objectContaining({ id: 201 }),
+        aliasValue: 'OLD',
+        source: 'sandre_genealogy',
+      }),
+    );
+    expect(frozenZone.disabled).toBe(true);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('rolls back the entire department when an active zone is invalid', async () => {
@@ -485,7 +793,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
       'Invalid Sandre zone payload',
     );
-    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(harness.dataSource.createQueryRunner).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
   });
 
@@ -529,15 +838,17 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       new Date('2026-07-31T08:00:00.000Z'),
     );
 
-    expect(result).toEqual({
-      result: {
-        added: 0,
-        updated: 0,
-        disabled: 0,
-        unchanged: 1,
-      },
-      recomputeRequired: false,
-    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        result: {
+          added: 0,
+          updated: 0,
+          disabled: 0,
+          unchanged: 1,
+        },
+        recomputeRequired: false,
+      }),
+    );
     expect(harness.zoneRepository.find).toHaveBeenCalledTimes(1);
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
     expect(harness.stateRepository.save).toHaveBeenCalledWith(
@@ -695,6 +1006,167 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     await harness.service.updateZones();
 
     expect(updateSpy).toHaveBeenCalledWith('65');
+  });
+
+  it('retries a blocked department on the next cron instead of waiting a day', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        blockedAt: new Date(Date.now() - 6 * 60 * 1000),
+      },
+    });
+    const updateSpy = jest
+      .spyOn(harness.service, 'updateDepartementZones')
+      .mockResolvedValue({
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 0,
+      });
+
+    await harness.service.updateZones();
+
+    expect(updateSpy).toHaveBeenCalledWith('65');
+    expect(harness.httpService.get).not.toHaveBeenCalled();
+  });
+
+  it('applies a fresh audit observation immediately after switching to safe', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: null,
+        observedSnapshotHash: 'same',
+        appliedSnapshotHash: 'same',
+        observedSourceUpdatedAt: '2026-08-01',
+        appliedSourceUpdatedAt: '2026-08-01',
+      },
+    });
+    const changeSpy = jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest
+      .spyOn(harness.service, 'updateDepartementZones')
+      .mockResolvedValue({
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 1,
+      });
+
+    await harness.service.updateZones();
+
+    expect(updateSpy).toHaveBeenCalledWith('65');
+    expect(changeSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      difference: 'snapshot hash',
+      observedSnapshotHash: 'observed',
+      appliedSnapshotHash: 'applied',
+      observedSourceUpdatedAt: '2026-08-01',
+      appliedSourceUpdatedAt: '2026-08-01',
+    },
+    {
+      difference: 'source date',
+      observedSnapshotHash: 'same',
+      appliedSnapshotHash: 'same',
+      observedSourceUpdatedAt: '2026-08-01',
+      appliedSourceUpdatedAt: '2026-07-31',
+    },
+  ])(
+    'retries a fresh pending $difference immediately in safe mode',
+    async (state) => {
+      const harness = createHarness({
+        state: {
+          ...state,
+          needsRecompute: false,
+          lastObservedAt: new Date(),
+          lastAppliedAt: new Date(),
+        },
+      });
+      const changeSpy = jest
+        .spyOn(harness.service as any, 'hasSandreChanges')
+        .mockResolvedValue(false);
+      const updateSpy = jest
+        .spyOn(harness.service, 'updateDepartementZones')
+        .mockResolvedValue({
+          added: 0,
+          updated: 0,
+          disabled: 0,
+          unchanged: 1,
+        });
+
+      await harness.service.updateZones();
+
+      expect(updateSpy).toHaveBeenCalledWith('65');
+      expect(changeSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not apply a pending observation while still in audit mode', async () => {
+    const harness = createHarness({
+      syncMode: 'audit',
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: null,
+        observedSnapshotHash: 'observed',
+        appliedSnapshotHash: null,
+        observedSourceUpdatedAt: '2026-08-01',
+        appliedSourceUpdatedAt: null,
+      },
+    });
+    jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest.spyOn(harness.service, 'updateDepartementZones');
+
+    await harness.service.updateZones();
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not force an already applied fresh snapshot in safe mode', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: new Date(),
+        observedSnapshotHash: 'same',
+        appliedSnapshotHash: 'same',
+        observedSourceUpdatedAt: '2026-08-01',
+        appliedSourceUpdatedAt: '2026-08-01',
+      },
+    });
+    jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest.spyOn(harness.service, 'updateDepartementZones');
+
+    await harness.service.updateZones();
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('resets the in-process guard even when global lock cleanup fails', async () => {
+    const harness = createHarness();
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    jest
+      .spyOn(harness.service as any, 'releaseSandreGlobalLock')
+      .mockRejectedValue(new Error('unlock failed'));
+
+    await harness.service.updateZones();
+    await harness.service.updateZones();
+
+    expect(harness.departementService.findAllLight).toHaveBeenCalledTimes(2);
   });
 
   it('does not write and warns once when the synchronization mode is absent', async () => {

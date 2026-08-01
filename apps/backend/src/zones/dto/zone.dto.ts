@@ -131,8 +131,20 @@ export class ZonePublicationDto {
   revision: string;
 
   @ApiProperty({ nullable: true })
+  geojsonUrl: string | null;
+
+  @ApiProperty({ nullable: true })
+  geojsonChecksum: string | null;
+
+  @ApiProperty({ nullable: true })
   pmtilesUrl: string | null;
 
   @ApiProperty({ nullable: true })
   pmtilesChecksum: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  contentFingerprint?: string;
+
+  @ApiProperty({ example: 123 })
+  zoneCount: number;
 }

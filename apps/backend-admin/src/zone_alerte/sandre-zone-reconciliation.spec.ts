@@ -10,6 +10,7 @@ import {
   parseGenealogyCsv,
   ReconciliationDatabaseState,
   ReconciliationMapping,
+  ReconciliationResult,
   SandreGenealogyRelation,
   transformDatabaseState,
   ZoneReferenceCounts,
@@ -68,13 +69,9 @@ const localZone = (
   sandrePayloadHash: `hash-${codeSandre}`,
 });
 
-const references = (
-  nonAbrogeArreteCadre = 1,
-  manualReviewArreteCadre = 0,
-): ZoneReferenceCounts => ({
+const references = (nonAbrogeArreteCadre = 1): ZoneReferenceCounts => ({
   arreteCadre: 1,
   nonAbrogeArreteCadre,
-  manualReviewArreteCadre,
   restrictions: 1,
   customizations: 1,
 });
@@ -175,23 +172,40 @@ describe('Sandre zone reconciliation', () => {
       expect(mappingsFromResults(results, zones)).toEqual([mapping]);
     });
 
-    it('always excludes a zone linked to an AC requiring manual review', () => {
-      const zones = [localZone(1, 'OLD', true), localZone(2, 'NEW', false)];
-      const results = buildReconciliationResults(
-        [genealogyRelation('OLD', 'NEW')],
-        [officialZone('OLD', 1, 'Gelé'), officialZone('NEW', 2, 'Validé')],
-        zones,
-        new Map([[1, references(1, 1)]]),
-      );
+    it('refuses automatic split and merge mappings even when each row looks applicable', () => {
+      const zones = [
+        localZone(1, 'OLD-A', true),
+        localZone(2, 'NEW', false),
+        localZone(3, 'OLD-B', true),
+      ];
+      const results: ReconciliationResult[] = [
+        {
+          status: 'APPLICABLE',
+          reason: 'OFFICIAL_LINEAR_SUCCESSOR',
+          departmentCode: '31',
+          oldZoneId: 1,
+          oldCodeSandre: 'OLD-A',
+          newZoneId: 2,
+          newCodeSandre: 'NEW',
+          genealogyPath: ['OLD-A', 'NEW'],
+          references: references(),
+        },
+        {
+          status: 'APPLICABLE',
+          reason: 'OFFICIAL_LINEAR_SUCCESSOR',
+          departmentCode: '31',
+          oldZoneId: 3,
+          oldCodeSandre: 'OLD-B',
+          newZoneId: 2,
+          newCodeSandre: 'NEW',
+          genealogyPath: ['OLD-B', 'NEW'],
+          references: references(),
+        },
+      ];
 
-      expect(results[0]).toEqual(
-        expect.objectContaining({
-          status: 'AMBIGUOUS',
-          reason: 'MANUAL_REVIEW_ARRETE_CADRE_REFERENCE',
-          newZoneId: null,
-        }),
+      expect(() => mappingsFromResults(results, zones)).toThrow(
+        'split or merge',
       );
-      expect(mappingsFromResults(results, zones)).toEqual([]);
     });
 
     it.each([
@@ -395,18 +409,32 @@ describe('Sandre zone reconciliation', () => {
             zoneAlerteId: 2,
             aliasValue: 'LEGACY',
           }),
-        ]),
-      );
-      expect(transformed.aliases).not.toEqual(
-        expect.arrayContaining([
           expect.objectContaining({
+            zoneAlerteId: 2,
             aliasValue: 'OLD',
+            source: 'manual_reconciliation',
           }),
         ]),
       );
       expect(earliestMappedRestrictionDate(state, [mapping])).toBe(
         '2025-01-01',
       );
+    });
+
+    it('deduplicates an existing canonical alias and preserves its source', () => {
+      const state = databaseState({
+        aliases: [alias(1, 'OLD')],
+      });
+
+      const transformed = transformDatabaseState(state, [mapping]);
+
+      expect(transformed.aliases).toEqual([
+        expect.objectContaining({
+          zoneAlerteId: 2,
+          aliasValue: 'OLD',
+          source: 'official_sync',
+        }),
+      ]);
     });
   });
 });

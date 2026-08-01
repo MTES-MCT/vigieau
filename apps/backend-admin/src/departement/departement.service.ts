@@ -1,13 +1,18 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Departement } from '@shared/entities/departement.entity';
 import { firstValueFrom } from 'rxjs';
 import { Repository } from 'typeorm';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
 import { RegleauLogger } from '../logger/regleau.logger';
+import { parseDepartementGeometryFeed } from './departement-geometry';
+
+const DEFAULT_DEPARTEMENTS_GEOJSON_URL =
+  'https://etalab-datasets.geo.data.gouv.fr/contours-administratifs/2023/geojson/departements-5m.geojson';
 
 @Injectable()
 export class DepartementService {
@@ -126,37 +131,30 @@ export class DepartementService {
     });
   }
 
-  @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_MIDNIGHT)
+  @BusinessCron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_MIDNIGHT)
   async updateDepartementsGeom() {
     this.logger.log('MISE A JOUR DES DEPARTEMENTS');
-    const { data } = await firstValueFrom(
-      this.httpService.get(
-        'http://etalab-datasets.geo.data.gouv.fr/contours-administratifs/2023/geojson/departements-5m.geojson',
-      ),
-    );
-    const toUpdate = data.features.map((feature) => {
-      return {
-        code: feature.properties.code,
-        geom: feature.geometry,
-      };
-    });
-    const sqlQueries = toUpdate.map((tmp) => {
-      return this.departementRepository.update(
-        {
-          code: tmp.code,
-        },
-        {
-          geom: tmp.geom,
-        },
+    const sourceUrl =
+      this.configService.get<string>('DEPARTEMENTS_GEOJSON_URL') ||
+      DEFAULT_DEPARTEMENTS_GEOJSON_URL;
+    const { data } = await firstValueFrom(this.httpService.get(sourceUrl));
+    const toUpdate = parseDepartementGeometryFeed(data);
+    await this.departementRepository.manager.transaction(async (manager) => {
+      await Promise.all(
+        toUpdate.map((tmp) =>
+          manager.update(
+            Departement,
+            { code: tmp.code },
+            { geom: tmp.geom as any },
+          ),
+        ),
+      );
+      await manager.update(
+        Departement,
+        {},
+        { geom: () => `ST_TRANSFORM(geom, 4326)` },
       );
     });
-    await Promise.all(sqlQueries);
-    await this.departementRepository.update(
-      {},
-      {
-        geom: () => `ST_TRANSFORM(geom, 4326)`,
-      },
-    );
     this.logger.log('DEPARTEMENTS MIS A JOUR');
   }
 }

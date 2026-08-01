@@ -37,10 +37,10 @@ import * as path from 'path';
 import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { ZonePublicationModule } from './zone_publication/zone_publication.module';
 import { bootstrapSchema } from './schema-bootstrap';
+import { areScheduledJobsDisabled } from './core/scheduling/business-cron';
 
 const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
-const scheduledJobsEnabled =
-  process.env.DISABLE_SCHEDULED_JOBS?.trim() !== 'true';
+const scheduledJobsEnabled = !areScheduledJobsDisabled();
 @Module({
   imports: [
     ...(isSentryEnabled() ? [SentryModule.forRoot()] : []),

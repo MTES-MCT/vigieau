@@ -1,7 +1,7 @@
 import { HttpService } from '@nestjs/axios';
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { Departement } from '@shared/entities/departement.entity';
@@ -18,23 +18,46 @@ import {
   In,
   IsNull,
   Repository,
+  QueryRunner,
 } from 'typeorm';
 import { isMainThread } from 'worker_threads';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { BassinVersantService } from '../bassin_versant/bassin_versant.service';
+import { BusinessCron } from '../core/scheduling/business-cron';
 import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { MailService } from '../shared/services/mail.service';
 import { runCurrentZoneComputeWorker } from '../worker_threads/run-current-zone-compute';
+import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
+import {
+  buildReconciliationResults,
+  discoverGenealogyCsvUrl,
+  mappingsFromResults,
+  parseGenealogyCsv,
+  SANDRE_GENEALOGY_METADATA_URL,
+  SandreGenealogyRelation,
+  ZoneReferenceCounts,
+} from './sandre-zone-reconciliation';
 import {
   fetchSandreZoneSnapshot,
   hashSandreZoneFeatures,
   SandreZoneFeature,
   SandreZoneSnapshot,
 } from './sandre-zone-sync';
+import {
+  isSandreBlockedRetryDue,
+  parseSandreZoneSyncMode,
+  SandreDepartmentBlockedError,
+  SandreOperatorStatus,
+  SandreSyncDecisionDraft,
+  SandreZoneSyncMode,
+} from './sandre-zone-governance';
 
 const SANDRE_FULL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const SANDRE_HTTP_TIMEOUT_MS = 30 * 1000;
+const SANDRE_GENEALOGY_CACHE_MS = 10 * 60 * 1000;
+const SANDRE_GENEALOGY_METADATA_MAX_BYTES = 1024 * 1024;
+const SANDRE_GENEALOGY_CSV_MAX_BYTES = 20 * 1024 * 1024;
 const SANDRE_VALID_STATUS = 'Validé';
 const SANDRE_ZONE_SELECT = {
   id: true,
@@ -96,13 +119,21 @@ interface SandreZoneMatch {
 interface SandreSnapshotApplication {
   result: SandreSyncResult;
   recomputeRequired: boolean;
+  decisions: SandreSyncDecisionDraft[];
 }
 
 @Injectable()
 export class ZoneAlerteService {
   private readonly logger = new RegleauLogger('ZoneAlerteService');
   private sandreSyncRunning = false;
+  private sandreGlobalLockHeld = false;
   private sandreSyncConfigurationWarned = false;
+  private sandreGenealogyCache: {
+    expiresAt: number;
+    relations: SandreGenealogyRelation[];
+  } | null = null;
+  private sandreGenealogyFetch: Promise<SandreGenealogyRelation[]> | null =
+    null;
 
   constructor(
     @InjectRepository(ZoneAlerte)
@@ -266,22 +297,157 @@ export class ZoneAlerteService {
     return result?.maxDate || null;
   }
 
+  async getSandreOperatorStatus(): Promise<SandreOperatorStatus> {
+    const generatedAt = new Date();
+    const [latestBatch] = await this.dataSource.query(`
+      SELECT id, mode, status, "startedAt", "finishedAt"
+      FROM sandre_zone_sync_batch
+      WHERE kind = 'snapshot'
+      ORDER BY "startedAt" DESC, id DESC
+      LIMIT 1
+    `);
+    const departmentRows = await this.dataSource.query(`
+      SELECT
+        departement.code AS "departmentCode",
+        state."observedSourceUpdatedAt",
+        state."appliedSourceUpdatedAt",
+        state."lastObservedAt",
+        state."lastAppliedAt",
+        state."blockedAt",
+        CASE
+          WHEN state."blockedAt" IS NULL THEN NULL
+          WHEN state."blockedReason" LIKE '%non-abrogated framework order%'
+            THEN 'NON_ABROGATED_AC_REFERENCE'
+          WHEN state."blockedReason" LIKE '%operational reference%'
+            THEN 'OPERATIONAL_ZONE_REFERENCE'
+          ELSE 'DEPARTMENT_VALIDATION_FAILED'
+        END AS "blockCode"
+      FROM sandre_zone_sync_state state
+      JOIN departement ON departement.id = state."departementId"
+      ORDER BY departement.code
+    `);
+    const ageSeconds = (value: Date | string | null): number | null => {
+      if (!value) {
+        return null;
+      }
+      return Math.max(
+        0,
+        Math.floor((generatedAt.getTime() - new Date(value).getTime()) / 1000),
+      );
+    };
+    const departments = departmentRows.map((row) => ({
+      departmentCode: row.departmentCode,
+      observedSourceUpdatedAt: row.observedSourceUpdatedAt ?? null,
+      appliedSourceUpdatedAt: row.appliedSourceUpdatedAt ?? null,
+      lastObservedAt: row.lastObservedAt
+        ? new Date(row.lastObservedAt).toISOString()
+        : null,
+      lastAppliedAt: row.lastAppliedAt
+        ? new Date(row.lastAppliedAt).toISOString()
+        : null,
+      observedAgeSeconds: ageSeconds(row.lastObservedAt),
+      appliedAgeSeconds: ageSeconds(row.lastAppliedAt),
+      blocked: Boolean(row.blockedAt),
+      blockedAt: row.blockedAt ? new Date(row.blockedAt).toISOString() : null,
+      blockCode: row.blockCode ?? null,
+    }));
+    const mode = parseSandreZoneSyncMode(
+      this.configService.get<string>('SANDRE_ZONE_SYNC_MODE'),
+    );
+    const batchStartedAt = latestBatch?.startedAt
+      ? new Date(latestBatch.startedAt)
+      : null;
+    const batchFinishedAt = latestBatch?.finishedAt
+      ? new Date(latestBatch.finishedAt)
+      : null;
+
+    return {
+      mode: mode ?? 'invalid',
+      generatedAt: generatedAt.toISOString(),
+      latestBatch: latestBatch
+        ? {
+            id: String(latestBatch.id),
+            mode: latestBatch.mode,
+            status: latestBatch.status,
+            startedAt: batchStartedAt.toISOString(),
+            finishedAt: batchFinishedAt?.toISOString() ?? null,
+            ageSeconds: ageSeconds(batchFinishedAt ?? batchStartedAt) ?? 0,
+            durationSeconds: batchFinishedAt
+              ? Math.max(
+                  0,
+                  Math.floor(
+                    (batchFinishedAt.getTime() - batchStartedAt.getTime()) /
+                      1000,
+                  ),
+                )
+              : null,
+          }
+        : null,
+      summary: {
+        trackedDepartments: departments.length,
+        blockedDepartments: departments.filter((item) => item.blocked).length,
+      },
+      departments,
+    };
+  }
+
+  @BusinessCron(CronExpression.EVERY_DAY_AT_3AM)
+  async purgeSandreSyncHistory(): Promise<number> {
+    const configuredRetention = Number(
+      this.configService.get<string>('SANDRE_SYNC_RETENTION_DAYS'),
+    );
+    const retentionDays =
+      Number.isInteger(configuredRetention) && configuredRetention >= 7
+        ? configuredRetention
+        : 90;
+    const deleted = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await this.dataSource.query(
+        `
+        WITH retained AS (
+          SELECT DISTINCT ON (
+            COALESCE("departementId", 0), "kind", "mode"
+          ) "id"
+          FROM sandre_zone_sync_batch
+          ORDER BY COALESCE("departementId", 0), "kind", "mode",
+                   "startedAt" DESC, "id" DESC
+        )
+        DELETE FROM sandre_zone_sync_batch batch
+        WHERE batch."startedAt" < now() - ($1 * interval '1 day')
+          AND batch."status" <> 'started'
+          AND NOT EXISTS (
+            SELECT 1 FROM retained WHERE retained."id" = batch."id"
+          )
+        RETURNING batch."id"
+      `,
+        [retentionDays],
+      ),
+    );
+    if (deleted.length > 0) {
+      this.logger.log(`PURGED ${deleted.length} SANDRE SYNC BATCHES`);
+    }
+    return deleted.length;
+  }
+
   /**
    * Vérification régulière s'il n'y a pas de nouvelles zones
    */
-  @Cron(CronExpression.EVERY_10_MINUTES)
+  @BusinessCron(CronExpression.EVERY_10_MINUTES)
   async updateZones() {
-    const syncMode = this.configService
-      .get<string>('SANDRE_ZONE_SYNC_MODE')
-      ?.trim();
-    if (syncMode !== 'safe') {
+    const configuredMode = this.configService.get<string>(
+      'SANDRE_ZONE_SYNC_MODE',
+    );
+    const syncMode = parseSandreZoneSyncMode(configuredMode);
+    if (!syncMode || syncMode === 'paused') {
       if (!this.sandreSyncConfigurationWarned) {
-        if (!syncMode || syncMode === 'paused') {
+        if (syncMode === 'paused') {
           this.logger.warn(
-            'SYNCHRONISATION SANDRE EN PAUSE: SANDRE_ZONE_SYNC_MODE=safe REQUIS',
+            'SYNCHRONISATION SANDRE EN PAUSE: SANDRE_ZONE_SYNC_MODE=audit OU safe REQUIS',
           );
         } else {
-          this.logger.error(`SANDRE_ZONE_SYNC_MODE INVALIDE: ${syncMode}`, '');
+          this.logger.error(
+            `SANDRE_ZONE_SYNC_MODE INVALIDE: ${configuredMode}`,
+            '',
+          );
         }
         this.sandreSyncConfigurationWarned = true;
       }
@@ -293,7 +459,16 @@ export class ZoneAlerteService {
 
     this.sandreSyncRunning = true;
     this.logger.log("MISE A JOUR DES ZONES D'ALERTE - DEBUT");
+    let globalLock: QueryRunner | null = null;
     try {
+      globalLock = await this.acquireSandreGlobalLock();
+      if (!globalLock) {
+        this.logger.warn(
+          'SYNCHRONISATION SANDRE IGNOREE: UNE AUTRE EXECUTION DETIENT LE VERROU GLOBAL',
+        );
+        return;
+      }
+      this.sandreGlobalLockHeld = true;
       const departements = await this.departementService.findAllLight();
 
       for (const d of departements) {
@@ -309,14 +484,31 @@ export class ZoneAlerteService {
               },
             });
           recomputeWasPending = Boolean(state?.needsRecompute);
-          const lastFullSyncAt = state?.lastFullSyncAt?.getTime();
+          const lastFullSyncAt = (
+            state?.lastObservedAt ?? state?.lastFullSyncAt
+          )?.getTime();
           const fullSyncExpired =
             !lastFullSyncAt ||
             Date.now() - lastFullSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
+          const blockedRetryDue =
+            syncMode === 'safe' && isSandreBlockedRetryDue(state?.blockedAt);
+          const applicationPending =
+            syncMode === 'safe' &&
+            (!state?.lastAppliedAt ||
+              state.observedSnapshotHash !== state.appliedSnapshotHash ||
+              state.observedSourceUpdatedAt !== state.appliedSourceUpdatedAt);
           const sourceChanged =
-            !fullSyncExpired && (await this.hasSandreChanges(d.code, state));
+            !fullSyncExpired &&
+            !blockedRetryDue &&
+            !applicationPending &&
+            (await this.hasSandreChanges(d.code, state));
 
-          if (fullSyncExpired || sourceChanged) {
+          if (
+            fullSyncExpired ||
+            blockedRetryDue ||
+            applicationPending ||
+            sourceChanged
+          ) {
             await this.updateDepartementZones(d.code);
           }
         } catch (error) {
@@ -325,7 +517,7 @@ export class ZoneAlerteService {
             error,
           );
         }
-        if (recomputeWasPending) {
+        if (syncMode === 'safe' && recomputeWasPending) {
           try {
             await this.recomputeSandreDepartment(d.code);
           } catch (error) {
@@ -342,23 +534,133 @@ export class ZoneAlerteService {
         error,
       );
     } finally {
-      this.sandreSyncRunning = false;
-      this.logger.log("MISE A JOUR DES ZONES D'ALERTE - FIN");
+      this.sandreGlobalLockHeld = false;
+      try {
+        if (globalLock) {
+          await this.releaseSandreGlobalLock(globalLock);
+        }
+      } catch (error) {
+        this.logger.error(
+          'ERREUR LORS DE LA LIBERATION DU VERROU GLOBAL SANDRE',
+          error,
+        );
+      } finally {
+        this.sandreSyncRunning = false;
+        this.logger.log("MISE A JOUR DES ZONES D'ALERTE - FIN");
+      }
     }
   }
 
   async updateDepartementZones(depCode: string): Promise<SandreSyncResult> {
+    const configuredMode = this.configService.get<string>(
+      'SANDRE_ZONE_SYNC_MODE',
+    );
+    const syncMode = parseSandreZoneSyncMode(configuredMode);
+    if (!syncMode) {
+      throw new Error(`Invalid SANDRE_ZONE_SYNC_MODE: ${configuredMode}`);
+    }
+    if (syncMode === 'paused') {
+      return { added: 0, updated: 0, disabled: 0, unchanged: 0 };
+    }
+
+    if (this.sandreGlobalLockHeld) {
+      return this.updateDepartementZonesWithMode(depCode, syncMode);
+    }
+    const globalLock = await this.acquireSandreGlobalLock();
+    if (!globalLock) {
+      throw new Error('Another Sandre synchronization is already running');
+    }
+    let operationError: unknown;
+    try {
+      return await this.updateDepartementZonesWithMode(depCode, syncMode);
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      try {
+        await this.releaseSandreGlobalLock(globalLock);
+      } catch (cleanupError) {
+        if (!operationError) {
+          throw cleanupError;
+        }
+        this.logger.error(
+          'ERREUR LORS DE LA LIBERATION DU VERROU GLOBAL SANDRE',
+          cleanupError,
+        );
+      }
+    }
+  }
+
+  private async updateDepartementZonesWithMode(
+    depCode: string,
+    syncMode: Exclude<SandreZoneSyncMode, 'paused'>,
+  ): Promise<SandreSyncResult> {
     this.logger.log(`MISE A JOUR DES ZONES D'ALERTE DU DEPARTEMENT ${depCode}`);
 
     const [{ syncStartedAt }] = await this.dataSource.query(
       'SELECT clock_timestamp() AS "syncStartedAt"',
     );
-    const snapshot = await this.fetchSandreDepartmentSnapshot(depCode);
-    const { result, recomputeRequired } = await this.applySandreSnapshot(
-      depCode,
-      snapshot,
-      new Date(syncStartedAt),
-    );
+    const startedAt = new Date(syncStartedAt);
+    const batchId = await this.startSandreBatch(depCode, syncMode, startedAt);
+    let snapshot: SandreZoneSnapshot;
+    try {
+      snapshot = await this.fetchSandreDepartmentSnapshot(depCode);
+    } catch (error) {
+      await this.finishSandreBatch(batchId, 'failed', null, error);
+      throw error;
+    }
+    await this.recordSandreObservation(depCode, snapshot, startedAt);
+
+    if (syncMode === 'audit') {
+      const decisions = this.createAuditDecisions(snapshot);
+      await this.persistSandreDecisions(
+        this.dataSource,
+        depCode,
+        batchId,
+        decisions,
+      );
+      await this.finishSandreBatch(batchId, 'observed', snapshot);
+      return {
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: snapshot.featureCount,
+      };
+    }
+
+    let application: SandreSnapshotApplication;
+    try {
+      application = await this.applySandreSnapshot(
+        depCode,
+        snapshot,
+        startedAt,
+        batchId,
+      );
+    } catch (error) {
+      const decisions =
+        error instanceof SandreDepartmentBlockedError
+          ? error.decisions
+          : this.createBlockedDecisions(snapshot, error);
+      await this.persistSandreDecisions(
+        this.dataSource,
+        depCode,
+        batchId,
+        decisions,
+      );
+      await this.markSandreDepartmentBlocked(depCode, snapshot, error);
+      await this.finishSandreBatch(batchId, 'blocked', snapshot, error);
+      throw error;
+    }
+    try {
+      await this.finishSandreBatch(batchId, 'applied', snapshot);
+    } catch (error) {
+      this.logger.error(
+        `SYNCHRONISATION SANDRE APPLIQUEE MAIS LOT ${batchId} NON FINALISE`,
+        error,
+      );
+    }
+
+    const { result, recomputeRequired } = application;
 
     this.logger.log(`${result.updated} ZONES D'ALERTES MISES A JOUR`);
     this.logger.log(`${result.added} ZONES D'ALERTES AJOUTEES`);
@@ -408,23 +710,322 @@ export class ZoneAlerteService {
     return result;
   }
 
+  private async acquireSandreGlobalLock(): Promise<QueryRunner | null> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let lockAcquired = false;
+    let operationError: unknown;
+    try {
+      await queryRunner.connect();
+      connected = true;
+      const [lock] = await queryRunner.query(
+        "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS locked",
+      );
+      if (lock?.locked !== true) {
+        return null;
+      }
+      lockAcquired = true;
+      return queryRunner;
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      if (connected && !lockAcquired) {
+        try {
+          await queryRunner.release();
+        } catch (cleanupError) {
+          if (!operationError) {
+            throw cleanupError;
+          }
+          this.logger.error(
+            'ERREUR LORS DE LA LIBERATION DE LA CONNEXION SANDRE',
+            cleanupError,
+          );
+        }
+      }
+    }
+  }
+
+  private async releaseSandreGlobalLock(
+    queryRunner: QueryRunner,
+  ): Promise<void> {
+    let cleanupError: unknown;
+    try {
+      const [unlock] = await queryRunner.query(
+        "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS unlocked",
+      );
+      if (unlock?.unlocked !== true) {
+        throw new Error('Unable to release the global Sandre lock');
+      }
+    } catch (error) {
+      cleanupError = error;
+      try {
+        await queryRunner.query('SELECT pg_advisory_unlock_all()');
+      } catch {
+        // Releasing a broken connection is the final lock cleanup fallback.
+      }
+    }
+    try {
+      await queryRunner.release();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (cleanupError) {
+      throw cleanupError;
+    }
+  }
+
+  private async startSandreBatch(
+    depCode: string,
+    mode: Exclude<SandreZoneSyncMode, 'paused'>,
+    startedAt: Date,
+  ): Promise<string> {
+    const [batch] = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await this.dataSource.query(
+        `
+        INSERT INTO sandre_zone_sync_batch (
+          kind, mode, status, "startedAt", "departementId"
+        )
+        SELECT 'snapshot', $2, 'started', $3, departement.id
+        FROM departement
+        WHERE departement.code = $1
+        RETURNING id
+      `,
+        [depCode, mode, startedAt],
+      ),
+    );
+    if (!batch?.id) {
+      throw new Error(`Unknown department ${depCode}`);
+    }
+    return String(batch.id);
+  }
+
+  private async finishSandreBatch(
+    batchId: string,
+    status: 'observed' | 'applied' | 'blocked' | 'failed',
+    snapshot: SandreZoneSnapshot | null,
+    error?: unknown,
+  ): Promise<void> {
+    await this.dataSource.query(
+      `
+        UPDATE sandre_zone_sync_batch
+        SET
+          status = $2,
+          "snapshotHash" = $3,
+          "sourceUpdatedAt" = $4,
+          "featureCount" = $5,
+          "failureReason" = $6,
+          "finishedAt" = clock_timestamp()
+        WHERE id = $1
+      `,
+      [
+        batchId,
+        status,
+        snapshot?.snapshotHash ?? null,
+        snapshot?.sourceUpdatedAt ?? null,
+        snapshot?.featureCount ?? null,
+        error ? this.sandreFailureReason(error) : null,
+      ],
+    );
+  }
+
+  private async recordSandreObservation(
+    depCode: string,
+    snapshot: SandreZoneSnapshot,
+    observedAt: Date,
+  ): Promise<void> {
+    await this.dataSource.query(
+      `
+        INSERT INTO sandre_zone_sync_state (
+          "departementId",
+          "observedSourceUpdatedAt",
+          "observedSnapshotHash",
+          "observedLatestFeaturesHash",
+          "observedFeatureCount",
+          "lastObservedAt",
+          "createdAt",
+          "updatedAt"
+        )
+        SELECT
+          departement.id, $2, $3, $4, $5, $6, now(), now()
+        FROM departement
+        WHERE departement.code = $1
+        ON CONFLICT ("departementId") DO UPDATE
+        SET
+          "observedSourceUpdatedAt" = EXCLUDED."observedSourceUpdatedAt",
+          "observedSnapshotHash" = EXCLUDED."observedSnapshotHash",
+          "observedLatestFeaturesHash" = EXCLUDED."observedLatestFeaturesHash",
+          "observedFeatureCount" = EXCLUDED."observedFeatureCount",
+          "lastObservedAt" = EXCLUDED."lastObservedAt",
+          "updatedAt" = now()
+      `,
+      [
+        depCode,
+        snapshot.sourceUpdatedAt,
+        snapshot.snapshotHash,
+        this.getLatestSandreFeaturesHash(snapshot),
+        snapshot.featureCount,
+        observedAt,
+      ],
+    );
+  }
+
+  private async markSandreDepartmentBlocked(
+    depCode: string,
+    snapshot: SandreZoneSnapshot,
+    error: unknown,
+  ): Promise<void> {
+    await this.dataSource.query(
+      `
+        UPDATE sandre_zone_sync_state state
+        SET
+          "blockedAt" = clock_timestamp(),
+          "blockedReason" = $2,
+          "blockedSnapshotHash" = $3,
+          "updatedAt" = now()
+        FROM departement
+        WHERE state."departementId" = departement.id
+          AND departement.code = $1
+      `,
+      [depCode, this.sandreFailureReason(error), snapshot.snapshotHash],
+    );
+  }
+
+  private createAuditDecisions(
+    snapshot: SandreZoneSnapshot,
+  ): SandreSyncDecisionDraft[] {
+    return snapshot.features.map((feature) =>
+      feature.status === SANDRE_VALID_STATUS
+        ? {
+            decisionKey: `${feature.codeSandre}:active`,
+            zoneType: feature.type,
+            sourceCode: feature.codeSandre,
+            action: 'UPSERT_ACTIVE',
+            outcome: 'observed',
+            reason: 'AUDIT_MODE_NO_WRITE',
+            evidence: {
+              status: feature.status,
+              payloadHash: feature.payloadHash,
+            },
+          }
+        : {
+            decisionKey: `${feature.codeSandre}:inactive`,
+            zoneType: feature.type,
+            sourceCode: feature.codeSandre,
+            action: 'REVIEW_INACTIVE',
+            outcome: 'deferred',
+            reason: 'AUDIT_MODE_NO_WRITE',
+            evidence: {
+              status: feature.status,
+              payloadHash: feature.payloadHash,
+            },
+          },
+    );
+  }
+
+  private createBlockedDecisions(
+    snapshot: SandreZoneSnapshot,
+    error: unknown,
+  ): SandreSyncDecisionDraft[] {
+    const feature = snapshot.features[0];
+    if (!feature) {
+      return [];
+    }
+    return [
+      {
+        decisionKey: `department:${snapshot.snapshotHash}`,
+        zoneType: feature.type,
+        sourceCode: feature.codeSandre,
+        action: 'BLOCK_DEPARTMENT',
+        outcome: 'blocked',
+        reason: 'DEPARTMENT_VALIDATION_FAILED',
+        evidence: { error: this.sandreFailureReason(error) },
+      },
+    ];
+  }
+
+  private async persistSandreDecisions(
+    executor: Pick<DataSource | EntityManager, 'query'>,
+    depCode: string,
+    batchId: string,
+    decisions: SandreSyncDecisionDraft[],
+  ): Promise<void> {
+    if (decisions.length === 0) {
+      return;
+    }
+    await executor.query(
+      `
+        INSERT INTO sandre_zone_sync_decision (
+          "batchId", "departementId", "zoneAlerteId",
+          "candidateZoneAlerteId", "decisionKey", "zoneType",
+          "sourceCode", "targetCode", action, outcome, reason, evidence
+        )
+        SELECT
+          $1::bigint,
+          departement.id,
+          decision."zoneAlerteId",
+          decision."candidateZoneAlerteId",
+          decision."decisionKey",
+          decision."zoneType",
+          decision."sourceCode",
+          decision."targetCode",
+          decision.action,
+          decision.outcome,
+          decision.reason,
+          decision.evidence
+        FROM departement
+        CROSS JOIN jsonb_to_recordset($3::jsonb) AS decision(
+          "zoneAlerteId" integer,
+          "candidateZoneAlerteId" integer,
+          "decisionKey" text,
+          "zoneType" text,
+          "sourceCode" text,
+          "targetCode" text,
+          action text,
+          outcome text,
+          reason text,
+          evidence jsonb
+        )
+        WHERE departement.code = $2
+        ON CONFLICT ("batchId", "decisionKey") DO NOTHING
+      `,
+      [batchId, depCode, JSON.stringify(decisions)],
+    );
+  }
+
+  private sandreFailureReason(error: unknown): string {
+    return (error instanceof Error ? error.message : String(error)).slice(
+      0,
+      2000,
+    );
+  }
+
   private async hasSandreChanges(
     depCode: string,
     state: SandreZoneSyncState,
   ): Promise<boolean> {
-    if (state.featureCount === 0) {
+    const observedFeatureCount =
+      state.observedSnapshotHash === null ||
+      state.observedSnapshotHash === undefined
+        ? state.featureCount
+        : state.observedFeatureCount;
+    if (observedFeatureCount === 0) {
       return (await this.fetchSandreFeatureCount(depCode)) > 0;
     }
-    if (!state.sourceUpdatedAt || !state.latestFeaturesHash) {
+    const observedSourceUpdatedAt =
+      state.observedSourceUpdatedAt ?? state.sourceUpdatedAt;
+    const observedLatestFeaturesHash =
+      state.observedLatestFeaturesHash ?? state.latestFeaturesHash;
+    if (!observedSourceUpdatedAt || !observedLatestFeaturesHash) {
       return false;
     }
 
     const latestFeatures = await this.fetchSandreDepartmentSnapshot(
       depCode,
-      state.sourceUpdatedAt,
+      observedSourceUpdatedAt,
       true,
     );
-    return latestFeatures.snapshotHash !== state.latestFeaturesHash;
+    return latestFeatures.snapshotHash !== observedLatestFeaturesHash;
   }
 
   private async fetchSandreFeatureCount(
@@ -477,6 +1078,7 @@ export class ZoneAlerteService {
     depCode: string,
     snapshot: SandreZoneSnapshot,
     snapshotStartedAt: Date,
+    batchId: string | null = null,
   ): Promise<SandreSnapshotApplication> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -509,14 +1111,34 @@ export class ZoneAlerteService {
       const staleByStart =
         state?.snapshotStartedAt &&
         state.snapshotStartedAt.getTime() >= snapshotStartedAt.getTime();
+      const appliedSourceUpdatedAt =
+        state?.appliedSourceUpdatedAt ?? state?.sourceUpdatedAt;
       const staleBySourceDate =
-        state?.sourceUpdatedAt &&
+        appliedSourceUpdatedAt &&
         snapshot.sourceUpdatedAt &&
-        state.sourceUpdatedAt > snapshot.sourceUpdatedAt;
+        appliedSourceUpdatedAt > snapshot.sourceUpdatedAt;
       if (staleByStart || staleBySourceDate) {
         this.logger.warn(
           `INSTANTANE SANDRE IGNORE CAR PLUS ANCIEN POUR LE DEPARTEMENT ${depCode}`,
         );
+        const decisions = snapshot.features.map(
+          (feature): SandreSyncDecisionDraft => ({
+            decisionKey: `${feature.codeSandre}:stale`,
+            zoneType: feature.type,
+            sourceCode: feature.codeSandre,
+            action: 'IGNORE_SNAPSHOT',
+            outcome: 'deferred',
+            reason: 'STALE_SNAPSHOT',
+          }),
+        );
+        if (batchId) {
+          await this.persistSandreDecisions(
+            queryRunner.manager,
+            depCode,
+            batchId,
+            decisions,
+          );
+        }
         await queryRunner.commitTransaction();
         return {
           result: {
@@ -526,6 +1148,7 @@ export class ZoneAlerteService {
             unchanged: snapshot.featureCount,
           },
           recomputeRequired: false,
+          decisions,
         };
       }
 
@@ -536,6 +1159,7 @@ export class ZoneAlerteService {
         unchanged: 0,
       };
       const activeZoneIds = new Set<number>();
+      const decisions: SandreSyncDecisionDraft[] = [];
       let recomputeRequired = false;
       const activeFeatures = snapshot.features.filter(
         (feature) => feature.status === SANDRE_VALID_STATUS,
@@ -548,6 +1172,10 @@ export class ZoneAlerteService {
         activeFeatures,
       );
 
+      const resolvedActiveFeatures: Array<{
+        feature: SandreZoneFeature;
+        match: SandreZoneMatch | null;
+      }> = [];
       for (const feature of activeFeatures) {
         const match = await this.findSandreZoneMatch(
           queryRunner.manager,
@@ -559,6 +1187,28 @@ export class ZoneAlerteService {
             `Multiple active Sandre codes resolve to local zone ${match.zone.id}`,
           );
         }
+        if (match) {
+          activeZoneIds.add(match.zone.id);
+        }
+        resolvedActiveFeatures.push({ feature, match });
+      }
+
+      const resolvedInactiveFeatures: Array<{
+        feature: SandreZoneFeature;
+        match: SandreZoneMatch | null;
+      }> = [];
+      for (const feature of inactiveFeatures) {
+        const match = await this.findSandreZoneMatch(
+          queryRunner.manager,
+          departement,
+          feature,
+        );
+        resolvedInactiveFeatures.push({ feature, match });
+      }
+
+      const activeZonesByCode = new Map<string, ZoneAlerte>();
+      for (const { feature, match } of resolvedActiveFeatures) {
+        const countersBefore = { ...result };
         const upsert = await this.upsertActiveSandreZone(
           queryRunner.manager,
           departement,
@@ -567,17 +1217,51 @@ export class ZoneAlerteService {
           result,
         );
         activeZoneIds.add(upsert.zone.id);
+        activeZonesByCode.set(feature.codeSandre, upsert.zone);
         recomputeRequired ||= upsert.recomputeRequired;
+        const reason =
+          result.added > countersBefore.added
+            ? 'ACTIVE_ZONE_CREATED'
+            : result.updated > countersBefore.updated
+              ? 'ACTIVE_ZONE_UPDATED'
+              : 'ACTIVE_ZONE_UNCHANGED';
+        decisions.push({
+          decisionKey: `${feature.codeSandre}:active`,
+          zoneType: feature.type,
+          sourceCode: feature.codeSandre,
+          zoneAlerteId: upsert.zone.id,
+          action: 'UPSERT_ACTIVE',
+          outcome: 'applied',
+          reason,
+          evidence: { matchType: match?.matchType ?? null },
+        });
       }
 
-      for (const feature of inactiveFeatures) {
-        const match = await this.findSandreZoneMatch(
-          queryRunner.manager,
-          departement,
-          feature,
-        );
+      await this.reconcileOperationalFrozenZones(
+        queryRunner.manager,
+        departement,
+        snapshot,
+        resolvedInactiveFeatures,
+        activeZoneIds,
+        activeZonesByCode,
+        decisions,
+      );
+
+      // A local zone is disabled only when Sandre explicitly returns it as frozen.
+      for (const { feature, match } of resolvedInactiveFeatures) {
         if (!match || activeZoneIds.has(match.zone.id)) {
           result.unchanged++;
+          decisions.push({
+            decisionKey: `${feature.codeSandre}:inactive`,
+            zoneType: feature.type,
+            sourceCode: feature.codeSandre,
+            zoneAlerteId: match?.zone.id ?? null,
+            action: 'KEEP_ZONE_STATE',
+            outcome: 'applied',
+            reason: match
+              ? 'ACTIVE_CANONICAL_MATCH_TAKES_PRECEDENCE'
+              : 'INACTIVE_ZONE_NOT_LOCAL',
+          });
           continue;
         }
 
@@ -590,6 +1274,15 @@ export class ZoneAlerteService {
           zone.sandrePayloadHash !== feature.payloadHash;
         if (!changed) {
           result.unchanged++;
+          decisions.push({
+            decisionKey: `${feature.codeSandre}:inactive`,
+            zoneType: feature.type,
+            sourceCode: feature.codeSandre,
+            zoneAlerteId: zone.id,
+            action: 'KEEP_ZONE_STATE',
+            outcome: 'applied',
+            reason: 'FROZEN_ZONE_UNCHANGED',
+          });
           continue;
         }
 
@@ -604,6 +1297,15 @@ export class ZoneAlerteService {
         await queryRunner.manager.getRepository(ZoneAlerte).save(zone);
         result.disabled++;
         recomputeRequired ||= zoneWasActive;
+        decisions.push({
+          decisionKey: `${feature.codeSandre}:inactive`,
+          zoneType: feature.type,
+          sourceCode: feature.codeSandre,
+          zoneAlerteId: zone.id,
+          action: 'DISABLE_EXPLICITLY_FROZEN',
+          outcome: 'applied',
+          reason: 'EXPLICIT_SANDRE_FROZEN_STATUS',
+        });
       }
 
       state ??= stateRepository.create({ departement });
@@ -614,20 +1316,323 @@ export class ZoneAlerteService {
       state.lastFullSyncAt = now;
       state.lastSuccessAt = now;
       state.featureCount = snapshot.featureCount;
+      state.appliedSourceUpdatedAt = snapshot.sourceUpdatedAt;
+      state.appliedSnapshotHash = snapshot.snapshotHash;
+      state.appliedFeatureCount = snapshot.featureCount;
+      state.lastAppliedAt = now;
+      state.blockedAt = null;
+      state.blockedReason = null;
+      state.blockedSnapshotHash = null;
       state.needsRecompute = Boolean(state.needsRecompute) || recomputeRequired;
       if (recomputeRequired) {
         state.recomputeRevision = (state.recomputeRevision ?? 0) + 1;
       }
       await stateRepository.save(state);
+      if (batchId) {
+        await this.persistSandreDecisions(
+          queryRunner.manager,
+          depCode,
+          batchId,
+          decisions,
+        );
+      }
       await queryRunner.commitTransaction();
 
-      return { result, recomputeRequired };
+      return { result, recomputeRequired, decisions };
     } catch (error) {
       await queryRunner.rollbackTransaction();
       throw error;
     } finally {
       await queryRunner.release();
     }
+  }
+
+  private async getZoneReferenceCounts(
+    manager: EntityManager,
+    zoneAlerteId: number,
+  ): Promise<ZoneReferenceCounts> {
+    const rows =
+      (await manager.query(
+        `
+          SELECT
+            (
+              SELECT count(*) FROM arrete_cadre_zone_alerte link
+              WHERE link."zoneAlerteId" = $1
+            )::integer AS "arreteCadre",
+            (
+              SELECT count(*)
+              FROM arrete_cadre_zone_alerte link
+              JOIN arrete_cadre ac ON ac.id = link."arreteCadreId"
+              WHERE link."zoneAlerteId" = $1 AND ac.statut <> 'abroge'
+            )::integer AS "nonAbrogeArreteCadre",
+            (
+              SELECT count(*)
+              FROM restriction reference
+              JOIN arrete_restriction ar
+                ON ar.id = reference."arreteRestrictionId"
+              WHERE reference."zoneAlerteId" = $1 AND ar.statut <> 'abroge'
+            )::integer AS restrictions,
+            (
+              SELECT count(*)
+              FROM arrete_cadre_zone_alerte_communes reference
+              JOIN arrete_cadre ac ON ac.id = reference."arreteCadreId"
+              WHERE reference."zoneAlerteId" = $1 AND ac.statut <> 'abroge'
+            )::integer AS customizations
+        `,
+        [zoneAlerteId],
+      )) ?? [];
+    return {
+      arreteCadre: Number(rows[0]?.arreteCadre ?? 0),
+      nonAbrogeArreteCadre: Number(rows[0]?.nonAbrogeArreteCadre ?? 0),
+      restrictions: Number(rows[0]?.restrictions ?? 0),
+      customizations: Number(rows[0]?.customizations ?? 0),
+    };
+  }
+
+  private async reconcileOperationalFrozenZones(
+    manager: EntityManager,
+    departement: Departement,
+    snapshot: SandreZoneSnapshot,
+    resolvedInactiveFeatures: Array<{
+      feature: SandreZoneFeature;
+      match: SandreZoneMatch | null;
+    }>,
+    activeZoneIds: Set<number>,
+    activeZonesByCode: Map<string, ZoneAlerte>,
+    decisions: SandreSyncDecisionDraft[],
+  ): Promise<void> {
+    const referencedSources: Array<{
+      feature: SandreZoneFeature;
+      zone: ZoneAlerte;
+      references: ZoneReferenceCounts;
+    }> = [];
+
+    for (const { feature, match } of resolvedInactiveFeatures) {
+      if (
+        !match ||
+        match.zone.disabled === true ||
+        activeZoneIds.has(match.zone.id)
+      ) {
+        continue;
+      }
+      const references = await this.getZoneReferenceCounts(
+        manager,
+        match.zone.id,
+      );
+      const operationalReferenceCount =
+        references.nonAbrogeArreteCadre +
+        references.restrictions +
+        references.customizations;
+      if (operationalReferenceCount > 0) {
+        referencedSources.push({ feature, zone: match.zone, references });
+      }
+    }
+
+    if (referencedSources.length === 0) {
+      return;
+    }
+
+    let relations: SandreGenealogyRelation[];
+    try {
+      relations = await this.getSandreGenealogyRelations();
+    } catch (error) {
+      throw new SandreDepartmentBlockedError(
+        `Official Sandre genealogy is unavailable: ${this.sandreFailureReason(error)}`,
+        referencedSources.map(({ feature, zone, references }) => ({
+          decisionKey: `${feature.codeSandre}:reconciliation`,
+          zoneType: feature.type,
+          sourceCode: feature.codeSandre,
+          zoneAlerteId: zone.id,
+          action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+          outcome: 'blocked',
+          reason: 'GENEALOGY_SOURCE_UNAVAILABLE',
+          evidence: { references },
+        })),
+      );
+    }
+
+    const localZonesById = new Map<
+      number,
+      Parameters<typeof buildReconciliationResults>[2][number]
+    >();
+    const activeTargetsById = new Map<number, ZoneAlerte>();
+    for (const [codeSandre, zone] of activeZonesByCode) {
+      activeTargetsById.set(zone.id, zone);
+      localZonesById.set(zone.id, {
+        id: zone.id,
+        idSandre: zone.idSandre ?? null,
+        codeSandre,
+        disabled: false,
+        departmentId: departement.id,
+        departmentCode: departement.code,
+        type: zone.type as 'SOU' | 'SUP',
+        sandrePayloadHash: zone.sandrePayloadHash ?? null,
+      });
+    }
+
+    const referenceCounts = new Map<number, ZoneReferenceCounts>();
+    for (const { feature, zone, references } of referencedSources) {
+      localZonesById.set(zone.id, {
+        id: zone.id,
+        idSandre: zone.idSandre ?? feature.gid,
+        codeSandre: zone.codeSandre ?? feature.codeSandre,
+        // The official snapshot is authoritative for this transaction.
+        disabled: true,
+        departmentId: departement.id,
+        departmentCode: departement.code,
+        type: feature.type,
+        sandrePayloadHash: zone.sandrePayloadHash ?? null,
+      });
+      referenceCounts.set(zone.id, references);
+    }
+
+    const officialZones = snapshot.features.map((feature) => ({
+      code: feature.codeSandre,
+      gid: feature.gid,
+      status: feature.status,
+      departmentCode: departement.code,
+      type: feature.type,
+      payloadHash: feature.payloadHash,
+    }));
+    const localZones = [...localZonesById.values()];
+    const results = buildReconciliationResults(
+      relations,
+      officialZones,
+      localZones,
+      referenceCounts,
+      { requireNonAbrogeArreteCadreReference: false },
+    );
+    const blockedResults = results.filter(
+      (result) => result.status !== 'APPLICABLE',
+    );
+    if (blockedResults.length > 0) {
+      throw new SandreDepartmentBlockedError(
+        `Official Sandre reconciliation blocked for ${blockedResults.map((result) => `${result.oldCodeSandre}:${result.reason}`).join(', ')}`,
+        results.map((result) => ({
+          decisionKey: `${result.oldCodeSandre}:reconciliation`,
+          zoneType: localZonesById.get(result.oldZoneId)?.type ?? 'SUP',
+          sourceCode: result.oldCodeSandre,
+          targetCode: result.newCodeSandre,
+          zoneAlerteId: result.oldZoneId,
+          candidateZoneAlerteId: result.newZoneId,
+          action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+          outcome: result.status === 'APPLICABLE' ? 'deferred' : 'blocked',
+          reason: result.reason,
+          evidence: {
+            genealogyPath: result.genealogyPath,
+            references: result.references,
+          },
+        })),
+      );
+    }
+
+    let mappings;
+    try {
+      mappings = mappingsFromResults(results, localZones);
+    } catch (error) {
+      throw new SandreDepartmentBlockedError(
+        `Official Sandre reconciliation is not one-to-one: ${this.sandreFailureReason(error)}`,
+        results.map((result) => ({
+          decisionKey: `${result.oldCodeSandre}:reconciliation`,
+          zoneType: localZonesById.get(result.oldZoneId)?.type ?? 'SUP',
+          sourceCode: result.oldCodeSandre,
+          targetCode: result.newCodeSandre,
+          zoneAlerteId: result.oldZoneId,
+          candidateZoneAlerteId: result.newZoneId,
+          action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+          outcome: 'blocked',
+          reason: 'NOT_STRICT_ONE_TO_ONE',
+          evidence: { genealogyPath: result.genealogyPath },
+        })),
+      );
+    }
+    if (mappings.length !== referencedSources.length) {
+      throw new SandreDepartmentBlockedError(
+        'Official Sandre reconciliation did not cover every operational zone',
+      );
+    }
+
+    const resultsByOldZoneId = new Map(
+      results.map((result) => [result.oldZoneId, result]),
+    );
+    for (const mapping of mappings) {
+      const target = activeTargetsById.get(mapping.newZoneId);
+      if (!target) {
+        throw new SandreDepartmentBlockedError(
+          `Active Sandre successor ${mapping.newZoneId} disappeared during reconciliation`,
+        );
+      }
+      await this.ensureSandreAlias(
+        manager,
+        departement,
+        target,
+        mapping.oldCodeSandre,
+        'sandre_genealogy',
+      );
+      const reconciliation = resultsByOldZoneId.get(mapping.oldZoneId);
+      decisions.push({
+        decisionKey: `${mapping.oldCodeSandre}:reconciliation`,
+        zoneType: mapping.zoneType,
+        sourceCode: mapping.oldCodeSandre,
+        targetCode: mapping.newCodeSandre,
+        zoneAlerteId: mapping.oldZoneId,
+        candidateZoneAlerteId: mapping.newZoneId,
+        action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+        outcome: 'applied',
+        reason: 'OFFICIAL_LINEAR_SUCCESSOR',
+        evidence: { genealogyPath: reconciliation?.genealogyPath ?? [] },
+      });
+    }
+  }
+
+  private async getSandreGenealogyRelations(): Promise<
+    SandreGenealogyRelation[]
+  > {
+    if (
+      this.sandreGenealogyCache &&
+      this.sandreGenealogyCache.expiresAt > Date.now()
+    ) {
+      return this.sandreGenealogyCache.relations;
+    }
+    if (!this.sandreGenealogyFetch) {
+      this.sandreGenealogyFetch = this.fetchSandreGenealogyRelations().finally(
+        () => {
+          this.sandreGenealogyFetch = null;
+        },
+      );
+    }
+    const relations = await this.sandreGenealogyFetch;
+    this.sandreGenealogyCache = {
+      expiresAt: Date.now() + SANDRE_GENEALOGY_CACHE_MS,
+      relations,
+    };
+    return relations;
+  }
+
+  private async fetchSandreGenealogyRelations(): Promise<
+    SandreGenealogyRelation[]
+  > {
+    const { data: metadata } = await firstValueFrom(
+      this.httpService.get(SANDRE_GENEALOGY_METADATA_URL, {
+        responseType: 'text',
+        timeout: SANDRE_HTTP_TIMEOUT_MS,
+        maxContentLength: SANDRE_GENEALOGY_METADATA_MAX_BYTES,
+        maxBodyLength: SANDRE_GENEALOGY_METADATA_MAX_BYTES,
+      }),
+    );
+    const csvUrl = discoverGenealogyCsvUrl(
+      String(metadata),
+      SANDRE_GENEALOGY_METADATA_URL,
+    );
+    const { data: csv } = await firstValueFrom(
+      this.httpService.get(csvUrl, {
+        responseType: 'text',
+        timeout: SANDRE_HTTP_TIMEOUT_MS,
+        maxContentLength: SANDRE_GENEALOGY_CSV_MAX_BYTES,
+        maxBodyLength: SANDRE_GENEALOGY_CSV_MAX_BYTES,
+      }),
+    );
+    return parseGenealogyCsv(String(csv));
   }
 
   private getLatestSandreFeaturesHash(

@@ -1,0 +1,161 @@
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { CronExpression } from '@nestjs/schedule';
+import {
+  areScheduledJobsDisabled,
+  BusinessCron,
+  isBusinessSchedulerProcess,
+} from '../core/scheduling/business-cron';
+import {
+  getScheduledCivilDate,
+  NATIONAL_DAILY_COMPUTE_JOB_KEY,
+  NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+  shiftCivilDate,
+} from '../core/scheduling/daily-job-schedule';
+import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
+import { RegleauLogger } from '../logger/regleau.logger';
+import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import { ZonePublicationService } from '../zone_publication/zone_publication.service';
+import { ArreteCadreService } from './arrete_cadre.service';
+
+const NATIONAL_COMPUTE_START_HOUR = 2;
+
+@Injectable()
+export class ArreteCadreScheduler implements OnModuleInit {
+  private readonly logger = new RegleauLogger('ArreteCadreScheduler');
+  private catchUpScheduled = false;
+
+  constructor(
+    private readonly arreteCadreService: ArreteCadreService,
+    private readonly registry: ExternalPublicationRegistryService,
+    private readonly zonePublicationService: ZonePublicationService,
+  ) {}
+
+  onModuleInit(): void {
+    if (
+      !isBusinessSchedulerProcess() ||
+      areScheduledJobsDisabled() ||
+      this.catchUpScheduled
+    ) {
+      return;
+    }
+    this.catchUpScheduled = true;
+    setTimeout(() => {
+      void this.updateIfDue().catch((error) => {
+        this.logger.error('NATIONAL COMPUTE CATCH-UP ERROR', error);
+      });
+    }, 0).unref();
+  }
+
+  @BusinessCron(CronExpression.EVERY_5_MINUTES)
+  async updateIfDue(now = new Date()): Promise<void> {
+    const scheduledFor = getScheduledCivilDate(
+      now,
+      NATIONAL_COMPUTE_START_HOUR,
+    );
+    if (!isZonePublicationEnabled()) {
+      await this.updateLegacyIfDue(scheduledFor, now);
+      return;
+    }
+
+    const expectedSourceRevision =
+      await this.zonePublicationService.getSourceRevision();
+    const currentResult = await this.registry.executeDailyRun(
+      NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      scheduledFor,
+      async () => {
+        const result = (await this.arreteCadreService.updateArreteCadreStatut(
+          false,
+        )) as {
+          result?: { publicationId?: unknown; sourceRevision?: unknown };
+        };
+        const publicationId = result?.result?.publicationId;
+        const sourceRevision = result?.result?.sourceRevision;
+        if (
+          typeof publicationId !== 'string' ||
+          (typeof sourceRevision !== 'string' &&
+            typeof sourceRevision !== 'number')
+        ) {
+          throw new Error(
+            'National computation did not produce a versioned publication',
+          );
+        }
+        const computedSourceRevision = String(sourceRevision);
+        await this.assertSourceRevision(computedSourceRevision);
+        return { publicationId, sourceRevision: computedSourceRevision };
+      },
+      now,
+      { identity: { sourceRevision: expectedSourceRevision } },
+    );
+    if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
+      return;
+    }
+
+    const currentMetadata = await this.registry.getSucceededRunMetadata(
+      NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      scheduledFor,
+    );
+    const publicationId = currentMetadata?.publicationId;
+    const sourceRevision = currentMetadata?.sourceRevision;
+    if (
+      typeof publicationId !== 'string' ||
+      (typeof sourceRevision !== 'string' && typeof sourceRevision !== 'number')
+    ) {
+      throw new Error(
+        'National computation metadata is missing its publication revision',
+      );
+    }
+    const computedSourceRevision = String(sourceRevision);
+    await this.assertSourceRevision(computedSourceRevision);
+    const historicIdentity = { sourceRevision: computedSourceRevision };
+
+    const historicResult = await this.registry.executeDailyRun(
+      NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+      scheduledFor,
+      async () => {
+        await this.arreteCadreService.catchUpHistoricComputations(
+          shiftCivilDate(scheduledFor, -1),
+        );
+        await this.assertSourceRevision(computedSourceRevision);
+        return historicIdentity;
+      },
+      now,
+      { identity: historicIdentity },
+    );
+    if (['succeeded', 'already_succeeded'].includes(historicResult)) {
+      await this.assertSourceRevision(computedSourceRevision);
+    }
+  }
+
+  private async assertSourceRevision(expected: string): Promise<void> {
+    const current = await this.zonePublicationService.getSourceRevision();
+    if (current !== expected) {
+      throw new Error(
+        `Zone source revision changed during computation (${expected} -> ${current})`,
+      );
+    }
+  }
+
+  private async updateLegacyIfDue(
+    scheduledFor: string,
+    now: Date,
+  ): Promise<void> {
+    const currentResult = await this.registry.executeDailyRun(
+      NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      scheduledFor,
+      () => this.arreteCadreService.updateArreteCadreStatut(false),
+      now,
+    );
+    if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
+      return;
+    }
+    await this.registry.executeDailyRun(
+      NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+      scheduledFor,
+      () =>
+        this.arreteCadreService.catchUpHistoricComputations(
+          shiftCivilDate(scheduledFor, -1),
+        ),
+      now,
+    );
+  }
+}

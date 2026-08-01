@@ -45,9 +45,12 @@ export interface LocalZoneRecord {
 export interface ZoneReferenceCounts {
   arreteCadre: number;
   nonAbrogeArreteCadre: number;
-  manualReviewArreteCadre: number;
   restrictions: number;
   customizations: number;
+}
+
+export interface ReconciliationOptions {
+  requireNonAbrogeArreteCadreReference?: boolean;
 }
 
 export interface ReconciliationResult {
@@ -69,7 +72,6 @@ export interface ReconciliationResult {
     | 'SUCCESSOR_NOT_ACTIVE'
     | 'MULTIPLE_LOCAL_SUCCESSORS'
     | 'SELF_MAPPING'
-    | 'MANUAL_REVIEW_ARRETE_CADRE_REFERENCE'
     | 'NO_NON_ABROGATED_AC_REFERENCE';
   departmentCode: string;
   oldZoneId: number;
@@ -250,6 +252,7 @@ export function buildReconciliationResults(
   officialZones: OfficialZoneRecord[],
   localZones: LocalZoneRecord[],
   referenceCounts: Map<number, ZoneReferenceCounts> = new Map(),
+  options: ReconciliationOptions = {},
 ): ReconciliationResult[] {
   const officialByCode = groupBy(officialZones, (zone) => zone.code);
   const officialByGid = groupBy(officialZones, (zone) => String(zone.gid));
@@ -270,18 +273,9 @@ export function buildReconciliationResults(
       const references = referenceCounts.get(oldZone.id) ?? {
         arreteCadre: 0,
         nonAbrogeArreteCadre: 0,
-        manualReviewArreteCadre: 0,
         restrictions: 0,
         customizations: 0,
       };
-      if (references.manualReviewArreteCadre > 0) {
-        return result(
-          oldZone,
-          references,
-          'AMBIGUOUS',
-          'MANUAL_REVIEW_ARRETE_CADRE_REFERENCE',
-        );
-      }
       const sourceMatches = oldZone.codeSandre
         ? (officialByCode.get(oldZone.codeSandre) ?? [])
         : (officialByGid.get(String(oldZone.idSandre)) ?? []);
@@ -471,7 +465,10 @@ export function buildReconciliationResults(
           target.id,
         );
       }
-      if (references.nonAbrogeArreteCadre === 0) {
+      if (
+        options.requireNonAbrogeArreteCadreReference !== false &&
+        references.nonAbrogeArreteCadre === 0
+      ) {
         return result(
           oldZone,
           references,
@@ -502,7 +499,7 @@ export function mappingsFromResults(
   localZones: LocalZoneRecord[],
 ): ReconciliationMapping[] {
   const zonesById = new Map(localZones.map((zone) => [zone.id, zone]));
-  return results
+  const mappings = results
     .filter(
       (
         item,
@@ -532,6 +529,45 @@ export function mappingsFromResults(
       };
     })
     .sort(compareMappings);
+  assertStrictOfficialOneToOneMappings(results, mappings);
+  return mappings;
+}
+
+export function assertStrictOfficialOneToOneMappings(
+  results: ReconciliationResult[],
+  mappings: ReconciliationMapping[],
+): void {
+  const resultsByOldZoneId = new Map(
+    results.map((item) => [item.oldZoneId, item]),
+  );
+  const oldZoneIds = new Set<number>();
+  const newZoneIds = new Set<number>();
+
+  for (const mapping of mappings) {
+    const item = resultsByOldZoneId.get(mapping.oldZoneId);
+    if (
+      !item ||
+      item.status !== 'APPLICABLE' ||
+      item.reason !== 'OFFICIAL_LINEAR_SUCCESSOR' ||
+      item.newZoneId !== mapping.newZoneId ||
+      item.oldCodeSandre !== mapping.oldCodeSandre ||
+      item.newCodeSandre !== mapping.newCodeSandre ||
+      item.departmentCode !== mapping.departmentCode ||
+      item.genealogyPath.length < 2
+    ) {
+      throw new Error(
+        `Reconciliation mapping ${mapping.oldZoneId}:${mapping.newZoneId} is not a strict official 1:1 successor`,
+      );
+    }
+    if (
+      oldZoneIds.has(mapping.oldZoneId) ||
+      newZoneIds.has(mapping.newZoneId)
+    ) {
+      throw new Error('Reconciliation mappings contain a split or merge');
+    }
+    oldZoneIds.add(mapping.oldZoneId);
+    newZoneIds.add(mapping.newZoneId);
+  }
 }
 
 export function findBlockingCollisions(
@@ -636,10 +672,28 @@ export function transformDatabaseState(
   const mapZoneId = (zoneId: number) =>
     mappingByOld.get(zoneId)?.newZoneId ?? zoneId;
 
-  const aliases = state.aliases.map((alias) => ({
-    ...alias,
-    zoneAlerteId: mapZoneId(alias.zoneAlerteId),
-  }));
+  const aliasesByIdentity = new Map<string, DatabaseAliasState>();
+  state.aliases.forEach((alias) => {
+    const remappedAlias = {
+      ...alias,
+      zoneAlerteId: mapZoneId(alias.zoneAlerteId),
+    };
+    aliasesByIdentity.set(aliasIdentity(remappedAlias), remappedAlias);
+  });
+  mappings.forEach((mapping) => {
+    const canonicalAlias: DatabaseAliasState = {
+      departmentId: mapping.departmentId,
+      zoneAlerteId: mapping.newZoneId,
+      zoneType: mapping.zoneType,
+      aliasType: 'cd_zas',
+      aliasValue: mapping.oldCodeSandre,
+      source: 'manual_reconciliation',
+    };
+    const identity = aliasIdentity(canonicalAlias);
+    if (!aliasesByIdentity.has(identity)) {
+      aliasesByIdentity.set(identity, canonicalAlias);
+    }
+  });
 
   return normalizeDatabaseState({
     zones: state.zones,
@@ -658,8 +712,12 @@ export function transformDatabaseState(
       ...customization,
       zoneAlerteId: mapZoneId(customization.zoneAlerteId),
     })),
-    aliases,
+    aliases: [...aliasesByIdentity.values()],
   });
+}
+
+function aliasIdentity(alias: DatabaseAliasState): string {
+  return `${alias.departmentId}:${alias.zoneType}:${alias.aliasType}:${alias.aliasValue}`;
 }
 
 export function earliestMappedRestrictionDate(

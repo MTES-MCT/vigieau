@@ -3,7 +3,14 @@ import { Interval } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { createHash, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
+import {
+  buildZonePublicationAggregate,
+  computeZonePublicationFingerprint,
+  type ZonePublicationAggregatePayload,
+  type ZonePublicationMaterializedZone,
+} from '@shared/zone_publication_materialization';
 import { RegleauLogger } from '../logger/regleau.logger';
+import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
 import {
   isZonePublicationEnabled,
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
@@ -16,6 +23,12 @@ export interface ZonePublicationArtifacts {
   geojsonChecksum: string;
   pmtilesUrl: string;
   pmtilesChecksum: string;
+}
+
+export interface ActiveZonePublicationGate extends ZonePublicationArtifacts {
+  publicationId: string;
+  sourceRevision: string;
+  sourceComputedAt: string;
 }
 
 export interface BuildZonePublicationOptions extends ZonePublicationArtifacts {
@@ -32,10 +45,40 @@ export interface ZonePublicationActivationResult {
     | 'failed'
     | 'no_candidate'
     | 'not_ready'
+    | 'rollback_cancelled'
     | 'superseded';
   publicationId?: string;
   liveInstances?: number;
   readyInstances?: number;
+  rollback?: boolean;
+}
+
+export interface ZonePublicationRollbackResult {
+  status:
+    | 'disabled'
+    | 'no_active_publication'
+    | 'no_target'
+    | 'blocked'
+    | 'candidate_pending'
+    | 'dry_run'
+    | 'prepared';
+  activePublicationId?: string;
+  targetPublicationId?: string;
+  minimumReadyInstances?: number;
+  liveInstances?: number;
+  readyInstances?: number;
+  blockers?: string[];
+  pendingCandidate?: {
+    id: string;
+    status: string;
+    replaceable: boolean;
+  };
+  replacedCandidatePublicationId?: string;
+}
+
+interface ZonePublicationSnapshotCounts {
+  zoneCount: number;
+  communeLinkCount: number;
 }
 
 export interface ZoneSourceRow {
@@ -87,6 +130,7 @@ export function computeZonePublicationRetryBackoffSeconds(
   if (!Number.isInteger(failureCount) || failureCount <= 0) {
     return 0;
   }
+
   let backoffSeconds = Math.min(baseSeconds, maxSeconds);
   for (
     let failureIndex = 1;
@@ -193,6 +237,60 @@ export class ZonePublicationService {
     return String(state.revision);
   }
 
+  async getActivePublicationGate(
+    scheduledFor: string,
+  ): Promise<ActiveZonePublicationGate | null> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduledFor)) {
+      throw new Error(`Invalid publication gate date: ${scheduledFor}`);
+    }
+    const [publication] = await this.dataSource.query(
+      `
+        SELECT
+          publication."id" AS "publicationId",
+          publication."sourceRevision",
+          publication."sourceComputedAt",
+          publication."geojsonUrl",
+          publication."geojsonChecksum",
+          publication."pmtilesUrl",
+          publication."pmtilesChecksum"
+        FROM "zone_publication_state" state
+        JOIN "zone_publication" publication
+          ON publication."id" = state."activePublicationId"
+        JOIN "zone_publication_source_state" source ON source."id" = 1
+        WHERE state."id" = 1
+          AND publication."status" = 'active'
+          AND publication."sourceRevision" = source."revision"
+          AND (publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date = $1::date
+          AND publication."legacyPromotedAt" IS NOT NULL
+          AND publication."dataGouvPromotedAt" IS NOT NULL
+          AND publication."geojsonUrl" IS NOT NULL
+          AND publication."geojsonChecksum" IS NOT NULL
+          AND publication."pmtilesUrl" IS NOT NULL
+          AND publication."pmtilesChecksum" IS NOT NULL
+        LIMIT 1
+      `,
+      [scheduledFor],
+    );
+    if (!publication) {
+      return null;
+    }
+    const sourceComputedAt = new Date(publication.sourceComputedAt);
+    if (Number.isNaN(sourceComputedAt.getTime())) {
+      throw new Error(
+        `Active publication ${publication.publicationId} has an invalid computation date`,
+      );
+    }
+    return {
+      publicationId: publication.publicationId,
+      sourceRevision: String(publication.sourceRevision),
+      sourceComputedAt: sourceComputedAt.toISOString(),
+      geojsonUrl: publication.geojsonUrl,
+      geojsonChecksum: publication.geojsonChecksum,
+      pmtilesUrl: publication.pmtilesUrl,
+      pmtilesChecksum: publication.pmtilesChecksum,
+    };
+  }
+
   async bumpSourceRevision(): Promise<string> {
     const result = await this.dataSource.query(`
       UPDATE "zone_publication_source_state"
@@ -252,6 +350,32 @@ export class ZonePublicationService {
           );
         }
         await this.assertPlausibleSnapshot(manager, counts);
+        const aggregate = buildZonePublicationAggregate(
+          snapshotRows.map((row) => row.publicPayload),
+          counts.communeLinkCount,
+        );
+        await this.insertAggregate(manager, publicationId, aggregate);
+        const contentFingerprint = await this.computeMaterializationFingerprint(
+          manager,
+          publicationId,
+          aggregate,
+        );
+        const validationReport = {
+          schemaVersion: 1,
+          validatedAt: new Date().toISOString(),
+          checks: {
+            artifacts: 'passed',
+            snapshotStructure: 'passed',
+            semanticPayload: 'passed',
+            communeLinks: 'passed',
+            plausibility: 'passed',
+            aggregate: 'passed',
+            fingerprint: 'passed',
+          },
+          counts: aggregate.counts,
+          departmentCount: Object.keys(aggregate.departments).length,
+          contentFingerprint,
+        };
         const validated = unwrapTypeOrmDmlReturningRows<{ id: string }>(
           await manager.query(
             `
@@ -259,11 +383,21 @@ export class ZonePublicationService {
               SET "status" = 'validated',
                   "validatedAt" = now(),
                   "zoneCount" = $2,
-                  "communeLinkCount" = $3
+                  "communeLinkCount" = $3,
+                  "departmentCount" = $4,
+                  "contentFingerprint" = $5,
+                  "validationReport" = $6
               WHERE "id" = $1 AND "status" = 'building'
               RETURNING "id"
           `,
-            [publicationId, counts.zoneCount, counts.communeLinkCount],
+            [
+              publicationId,
+              counts.zoneCount,
+              counts.communeLinkCount,
+              Object.keys(aggregate.departments).length,
+              contentFingerprint,
+              validationReport,
+            ],
           ),
         );
         if (validated.length !== 1) {
@@ -318,6 +452,7 @@ export class ZonePublicationService {
           active."materializationVersion" AS "activeMaterializationVersion",
           candidate."sourceRevision" AS "candidateRevision",
           candidate."materializationVersion" AS "candidateMaterializationVersion",
+          state."automaticPublishingPaused" AS "automaticPublishingPaused",
           failures."failureCount" AS "failureCount",
           failures."lastFailureAt" AS "lastFailureAt",
           now() AS "databaseNow",
@@ -350,6 +485,9 @@ export class ZonePublicationService {
     );
     if (!status) {
       throw new Error('Zone publication state is missing');
+    }
+    if (status.automaticPublishingPaused === true) {
+      return false;
     }
     const sourceRevision = String(status.sourceRevision);
     const activeIsCurrent =
@@ -389,9 +527,15 @@ export class ZonePublicationService {
       const [sourceState] = await manager.query(
         `SELECT "revision" FROM "zone_publication_source_state" WHERE "id" = 1 FOR UPDATE`,
       );
-      const [state] = await manager.query(
-        `SELECT * FROM "zone_publication_state" WHERE "id" = 1 FOR UPDATE`,
-      );
+      const [state] = await manager.query(`
+        SELECT state.*,
+               candidate."status" AS "candidateStatus"
+        FROM "zone_publication_state" state
+        LEFT JOIN "zone_publication" candidate
+          ON candidate."id" = state."candidatePublicationId"
+        WHERE state."id" = 1
+        FOR UPDATE OF state
+      `);
       const [publication] = await manager.query(
         `SELECT * FROM "zone_publication" WHERE "id" = $1 FOR UPDATE`,
         [publicationId],
@@ -400,6 +544,16 @@ export class ZonePublicationService {
         throw new Error(
           `Publication ${publicationId} is not available for candidacy`,
         );
+      }
+      if (
+        state.automaticPublishingPaused === true ||
+        state.candidateStatus === 'retired'
+      ) {
+        await manager.query(
+          `UPDATE "zone_publication" SET "status" = 'superseded' WHERE "id" = $1 AND "status" = 'validated'`,
+          [publicationId],
+        );
+        return false;
       }
       if (String(sourceState.revision) !== String(publication.sourceRevision)) {
         await manager.query(
@@ -452,7 +606,9 @@ export class ZonePublicationService {
       await manager.query(
         `
           UPDATE "zone_publication_state"
-          SET "candidatePublicationId" = $1, "updatedAt" = now()
+          SET "candidatePublicationId" = $1,
+              "candidateRequestedAt" = now(),
+              "updatedAt" = now()
           WHERE "id" = 1
         `,
         [publicationId],
@@ -535,18 +691,20 @@ export class ZonePublicationService {
     publicationId: string;
     zoneCount: number;
     communeLinkCount: number;
+    contentFingerprint?: string | null;
     error?: string | null;
   }): Promise<void> {
     await this.dataSource.query(
       `
         INSERT INTO "zone_publication_instance" (
           "instanceId", "candidatePublicationId", "zoneCount",
-          "communeLinkCount", "lastError", "heartbeatAt"
-        ) VALUES ($1, $2, $3, $4, $5, now())
+          "communeLinkCount", "contentFingerprint", "lastError", "heartbeatAt"
+        ) VALUES ($1, $2, $3, $4, $5, $6, now())
         ON CONFLICT ("instanceId") DO UPDATE SET
           "candidatePublicationId" = EXCLUDED."candidatePublicationId",
           "zoneCount" = EXCLUDED."zoneCount",
           "communeLinkCount" = EXCLUDED."communeLinkCount",
+          "contentFingerprint" = EXCLUDED."contentFingerprint",
           "lastError" = EXCLUDED."lastError",
           "heartbeatAt" = EXCLUDED."heartbeatAt"
       `,
@@ -555,6 +713,7 @@ export class ZonePublicationService {
         input.publicationId,
         input.zoneCount,
         input.communeLinkCount,
+        input.contentFingerprint || null,
         input.error || null,
       ],
     );
@@ -596,18 +755,38 @@ export class ZonePublicationService {
         `SELECT * FROM "zone_publication" WHERE "id" = $1 FOR UPDATE`,
         [state.candidatePublicationId],
       );
-      if (publication && publication.status !== 'candidate') {
+      const rollback = publication?.status === 'retired';
+      if (
+        publication &&
+        publication.status !== 'candidate' &&
+        publication.status !== 'retired'
+      ) {
         throw new Error(
           `Publication ${publication.id} has unexpected status ${publication.status}`,
         );
       }
+      if (!publication) {
+        await manager.query(
+          `
+            UPDATE "zone_publication_state"
+            SET "candidatePublicationId" = NULL,
+                "candidateRequestedAt" = NULL,
+                "updatedAt" = now()
+            WHERE "id" = 1
+          `,
+        );
+        return {
+          status: 'superseded',
+          publicationId: state.candidatePublicationId,
+        };
+      }
       if (
-        !publication ||
-        String(publication.sourceRevision) !== String(sourceState.revision) ||
-        Number(publication.materializationVersion) !==
-          ZONE_PUBLICATION_MATERIALIZATION_VERSION
+        !rollback &&
+        (String(publication.sourceRevision) !== String(sourceState.revision) ||
+          Number(publication.materializationVersion) !==
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION)
       ) {
-        if (publication) {
+        if (publication.status === 'candidate') {
           await manager.query(
             `UPDATE "zone_publication" SET "status" = 'superseded' WHERE "id" = $1`,
             [publication.id],
@@ -616,7 +795,9 @@ export class ZonePublicationService {
         await manager.query(
           `
             UPDATE "zone_publication_state"
-            SET "candidatePublicationId" = NULL, "updatedAt" = now()
+            SET "candidatePublicationId" = NULL,
+                "candidateRequestedAt" = NULL,
+                "updatedAt" = now()
             WHERE "id" = 1
           `,
         );
@@ -635,6 +816,10 @@ export class ZonePublicationService {
                 AND "lastError" IS NULL
                 AND "zoneCount" = $3
                 AND "communeLinkCount" = $4
+                AND (
+                  $5::varchar IS NULL
+                  OR "contentFingerprint" = $5
+                )
             )::integer AS "readyInstances"
           FROM "zone_publication_instance"
           WHERE "heartbeatAt" >= now() - ($2 * interval '1 second')
@@ -644,6 +829,7 @@ export class ZonePublicationService {
           leaseSeconds,
           publication.zoneCount,
           publication.communeLinkCount,
+          publication.contentFingerprint,
         ],
       );
       const liveInstances = Number(instances.liveInstances);
@@ -654,42 +840,51 @@ export class ZonePublicationService {
       ) {
         if (
           readyInstances < liveInstances &&
-          this.isCandidateExpired(publication, candidateTimeoutSeconds)
+          this.isCandidateExpired(
+            publication,
+            candidateTimeoutSeconds,
+            state.candidateRequestedAt,
+          )
         ) {
           const failureReason =
             `Candidate preload timed out after ${candidateTimeoutSeconds}s: ` +
             `${readyInstances}/${liveInstances} live instances ready`;
-          const failed = unwrapTypeOrmDmlReturningRows<{ id: string }>(
-            await manager.query(
-              `
-                UPDATE "zone_publication"
-                SET "status" = 'failed',
-                    "failedAt" = now(),
-                    "validationError" = $2
-                WHERE "id" = $1 AND "status" = 'candidate'
-                RETURNING "id"
-              `,
-              [publication.id, failureReason],
-            ),
-          );
-          if (failed.length !== 1) {
-            throw new Error(
-              `Unable to expire zone publication ${publication.id}`,
+          if (!rollback) {
+            const failed = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+              await manager.query(
+                `
+                  UPDATE "zone_publication"
+                  SET "status" = 'failed',
+                      "failedAt" = now(),
+                      "validationError" = $2
+                  WHERE "id" = $1 AND "status" = 'candidate'
+                  RETURNING "id"
+                `,
+                [publication.id, failureReason],
+              ),
             );
+            if (failed.length !== 1) {
+              throw new Error(
+                `Unable to expire zone publication ${publication.id}`,
+              );
+            }
           }
           await manager.query(
             `
               UPDATE "zone_publication_state"
-              SET "candidatePublicationId" = NULL, "updatedAt" = now()
+              SET "candidatePublicationId" = NULL,
+                  "candidateRequestedAt" = NULL,
+                  "updatedAt" = now()
               WHERE "id" = 1 AND "candidatePublicationId" = $1
             `,
             [publication.id],
           );
           return {
-            status: 'failed',
+            status: rollback ? 'rollback_cancelled' : 'failed',
             publicationId: publication.id,
             liveInstances,
             readyInstances,
+            ...(rollback ? { rollback: true } : {}),
           };
         }
         return {
@@ -697,6 +892,7 @@ export class ZonePublicationService {
           publicationId: publication.id,
           liveInstances,
           readyInstances,
+          ...(rollback ? { rollback: true } : {}),
         };
       }
 
@@ -710,6 +906,7 @@ export class ZonePublicationService {
           publicationId: publication.id,
           liveInstances,
           readyInstances,
+          ...(rollback ? { rollback: true } : {}),
         };
       }
 
@@ -726,11 +923,17 @@ export class ZonePublicationService {
         await manager.query(
           `
             UPDATE "zone_publication"
-            SET "status" = 'active', "activatedAt" = now()
-            WHERE "id" = $1 AND "status" = 'candidate'
+            SET "status" = 'active',
+                "activatedAt" = now(),
+                "legacyPromotedAt" = CASE WHEN $2 THEN NULL ELSE "legacyPromotedAt" END,
+                "dataGouvPromotedAt" = CASE WHEN $2 THEN NULL ELSE "dataGouvPromotedAt" END,
+                "promotionLastAttemptAt" = CASE WHEN $2 THEN NULL ELSE "promotionLastAttemptAt" END,
+                "promotionError" = CASE WHEN $2 THEN NULL ELSE "promotionError" END
+            WHERE "id" = $1
+              AND "status" = CASE WHEN $2 THEN 'retired' ELSE 'candidate' END
             RETURNING "id"
           `,
-          [publication.id],
+          [publication.id, rollback],
         ),
       );
       if (activated.length !== 1) {
@@ -741,16 +944,26 @@ export class ZonePublicationService {
           UPDATE "zone_publication_state"
           SET "activePublicationId" = $1,
               "candidatePublicationId" = NULL,
+              "candidateRequestedAt" = NULL,
+              "automaticPublishingPaused" = CASE
+                WHEN $2 THEN true
+                ELSE "automaticPublishingPaused"
+              END,
+              "automaticPublishingPausedAt" = CASE
+                WHEN $2 THEN COALESCE("automaticPublishingPausedAt", now())
+                ELSE "automaticPublishingPausedAt"
+              END,
               "updatedAt" = now()
           WHERE "id" = 1
         `,
-        [publication.id],
+        [publication.id, rollback],
       );
       return {
         status: 'activated',
         publicationId: publication.id,
         liveInstances,
         readyInstances,
+        ...(rollback ? { rollback: true } : {}),
       };
     });
   }
@@ -868,7 +1081,11 @@ export class ZonePublicationService {
 
   @Interval(PUBLICATION_ACTIVATION_INTERVAL_MS)
   async activateCandidateOnSchedule(): Promise<void> {
-    if (!isZonePublicationEnabled() || this.activationInProgress) {
+    if (
+      !shouldRunWebScheduledJobs() ||
+      !isZonePublicationEnabled() ||
+      this.activationInProgress
+    ) {
       return;
     }
     this.activationInProgress = true;
@@ -895,7 +1112,7 @@ export class ZonePublicationService {
 
   @Interval(PUBLICATION_RECOVERY_INTERVAL_MS)
   async recoverStalePublicationsOnSchedule(): Promise<void> {
-    if (this.recoveryInProgress) {
+    if (!shouldRunWebScheduledJobs() || this.recoveryInProgress) {
       return;
     }
     this.recoveryInProgress = true;
@@ -916,7 +1133,7 @@ export class ZonePublicationService {
 
   @Interval(PUBLICATION_RETENTION_INTERVAL_MS)
   async purgePublicationsOnSchedule(): Promise<void> {
-    if (this.retentionInProgress) {
+    if (!shouldRunWebScheduledJobs() || this.retentionInProgress) {
       return;
     }
     this.retentionInProgress = true;
@@ -965,7 +1182,7 @@ export class ZonePublicationService {
   }
 
   private async verifyPublicArtifacts(
-    options: ZonePublicationArtifacts,
+    options: BuildZonePublicationOptions,
   ): Promise<void> {
     const timeoutMs = this.readPositiveInteger(
       'ZONE_PUBLICATION_ARTIFACT_TIMEOUT_MS',
@@ -978,6 +1195,7 @@ export class ZonePublicationService {
         timeoutMs,
         false,
         options.geojsonChecksum,
+        options.artifactZoneCount,
       ),
       this.verifyPublicArtifact(
         options.pmtilesUrl,
@@ -985,6 +1203,7 @@ export class ZonePublicationService {
         timeoutMs,
         true,
         options.pmtilesChecksum,
+        options.artifactZoneCount,
       ),
     ]);
   }
@@ -995,6 +1214,7 @@ export class ZonePublicationService {
     timeoutMs: number,
     expectPmtilesHeader: boolean,
     expectedChecksum: string,
+    expectedFeatureCount: number,
   ): Promise<void> {
     let parsedUrl: URL;
     try {
@@ -1020,6 +1240,7 @@ export class ZonePublicationService {
     const checksum = createHash('sha256');
     let firstBytes = Buffer.alloc(0);
     let totalBytes = 0;
+    const geojsonChunks: Buffer[] = [];
     if (response.body) {
       const reader = response.body.getReader();
       try {
@@ -1029,11 +1250,15 @@ export class ZonePublicationService {
             break;
           }
           if (chunk.value.byteLength > 0) {
-            checksum.update(chunk.value);
+            const content = Buffer.from(chunk.value);
+            checksum.update(content);
+            if (!expectPmtilesHeader) {
+              geojsonChunks.push(content);
+            }
             if (firstBytes.length < 127) {
               firstBytes = Buffer.concat([
                 firstBytes,
-                Buffer.from(chunk.value.subarray(0, 127 - firstBytes.length)),
+                content.subarray(0, 127 - firstBytes.length),
               ]);
             }
             totalBytes += chunk.value.byteLength;
@@ -1048,6 +1273,9 @@ export class ZonePublicationService {
       checksum.update(content);
       firstBytes = content.subarray(0, 127);
       totalBytes = content.length;
+      if (!expectPmtilesHeader) {
+        geojsonChunks.push(content);
+      }
     }
     if (totalBytes === 0) {
       throw new Error(`${label} publication artifact is empty`);
@@ -1057,7 +1285,70 @@ export class ZonePublicationService {
       throw new Error(`${label} publication artifact checksum is invalid`);
     }
     if (expectPmtilesHeader) {
-      this.assertPmtilesHeader(firstBytes, totalBytes, label);
+      this.assertPmtilesHeader(
+        firstBytes,
+        totalBytes,
+        label,
+        expectedFeatureCount > 0,
+      );
+    } else {
+      this.assertGeojsonArtifact(
+        Buffer.concat(geojsonChunks),
+        expectedFeatureCount,
+        label,
+      );
+    }
+  }
+
+  private assertGeojsonArtifact(
+    content: Buffer,
+    expectedFeatureCount: number,
+    label: string,
+  ): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content.toString('utf8'));
+    } catch {
+      throw new Error(`${label} publication artifact is not valid JSON`);
+    }
+    const artifact = parsed as {
+      type?: unknown;
+      features?: unknown;
+    };
+    if (
+      !artifact ||
+      artifact.type !== 'FeatureCollection' ||
+      !Array.isArray(artifact.features)
+    ) {
+      throw new Error(
+        `${label} publication artifact is not a valid FeatureCollection`,
+      );
+    }
+    if (artifact.features.length !== expectedFeatureCount) {
+      throw new Error(
+        `${label} publication artifact contains ${artifact.features.length} features; expected ${expectedFeatureCount}`,
+      );
+    }
+    const invalidFeature = artifact.features.some((value) => {
+      const feature = value as {
+        type?: unknown;
+        geometry?: { type?: unknown; coordinates?: unknown } | null;
+        properties?: unknown;
+      };
+      return (
+        !feature ||
+        feature.type !== 'Feature' ||
+        !feature.geometry ||
+        typeof feature.geometry.type !== 'string' ||
+        feature.geometry.coordinates === undefined ||
+        !feature.properties ||
+        typeof feature.properties !== 'object'
+      );
+    });
+    if (invalidFeature) {
+      throw new Error(
+        `${label} publication artifact contains an invalid feature`,
+      );
     }
   }
 
@@ -1065,6 +1356,7 @@ export class ZonePublicationService {
     header: Buffer,
     totalBytes: number,
     label: string,
+    expectTileContent: boolean,
   ): void {
     if (
       header.length < 127 ||
@@ -1089,6 +1381,16 @@ export class ZonePublicationService {
     const maxZoom = header.readUInt8(101);
     if (invalidSection || header.readUInt8(99) !== 1 || minZoom > maxZoom) {
       throw new Error(`${label} publication artifact header is invalid`);
+    }
+    if (
+      expectTileContent &&
+      (header.readBigUInt64LE(16) === 0n ||
+        header.readBigUInt64LE(64) === 0n ||
+        header.readBigUInt64LE(72) === 0n ||
+        header.readBigUInt64LE(80) === 0n ||
+        header.readBigUInt64LE(88) === 0n)
+    ) {
+      throw new Error(`${label} publication artifact contains no tile data`);
     }
   }
 
@@ -1280,10 +1582,75 @@ export class ZonePublicationService {
     );
   }
 
+  private async insertAggregate(
+    manager: EntityManager,
+    publicationId: string,
+    aggregate: ZonePublicationAggregatePayload,
+  ): Promise<void> {
+    const inserted = unwrapTypeOrmDmlReturningRows<{ publicationId: string }>(
+      await manager.query(
+        `
+          INSERT INTO "zone_publication_aggregate" ("publicationId", "payload")
+          VALUES ($1, $2)
+          RETURNING "publicationId"
+        `,
+        [publicationId, aggregate],
+      ),
+    );
+    if (inserted.length !== 1) {
+      throw new Error(
+        `Unable to materialize aggregate for publication ${publicationId}`,
+      );
+    }
+  }
+
+  private async computeMaterializationFingerprint(
+    manager: EntityManager,
+    publicationId: string,
+    aggregate: ZonePublicationAggregatePayload,
+  ): Promise<string> {
+    const rows = await manager.query(
+      `
+        SELECT
+          zone."sourceZoneId" AS "sourceZoneId",
+          zone."departmentCode" AS "departmentCode",
+          zone."type" AS "type",
+          ST_AsGeoJSON(ST_Transform(zone."geom", 4326)) AS "geometry",
+          zone."publicPayload" AS "publicPayload",
+          COALESCE(
+            array_agg(commune."communeCode" ORDER BY commune."communeCode")
+              FILTER (WHERE commune."communeCode" IS NOT NULL),
+            ARRAY[]::varchar[]
+          ) AS "communeCodes"
+        FROM "zone_publication_zone" zone
+        LEFT JOIN "zone_publication_commune" commune
+          ON commune."publicationId" = zone."publicationId"
+         AND commune."publicationZoneId" = zone."id"
+        WHERE zone."publicationId" = $1
+        GROUP BY zone."id"
+        ORDER BY zone."sourceZoneId"
+      `,
+      [publicationId],
+    );
+    return computeZonePublicationFingerprint({
+      zones: rows.map(
+        (row): ZonePublicationMaterializedZone => ({
+          sourceZoneId: row.sourceZoneId,
+          departmentCode: row.departmentCode,
+          type: row.type,
+          geometry: row.geometry || '',
+          publicPayload: row.publicPayload || {},
+          communeCodes: row.communeCodes || [],
+        }),
+      ),
+      aggregate,
+    });
+  }
+
   private async validateSnapshot(
     manager: EntityManager,
     publicationId: string,
-  ): Promise<{ zoneCount: number; communeLinkCount: number }> {
+  ): Promise<ZonePublicationSnapshotCounts> {
     const [invalid] = await manager.query(
       `
         SELECT COUNT(*)::integer AS "count"
@@ -1300,6 +1667,34 @@ export class ZonePublicationService {
             ])
             OR ("publicPayload" ->> 'id')::integer <> "sourceZoneId"
             OR "publicPayload" ->> 'type' <> "type"
+            OR NULLIF(btrim("publicPayload" ->> 'nom'), '') IS NULL
+            OR jsonb_typeof("publicPayload" -> 'ressourceInfluencee') <> 'boolean'
+            OR jsonb_typeof("publicPayload" -> 'arrete') <> 'object'
+            OR (
+              "publicPayload" ->> 'niveauGravite' IS NOT NULL
+              AND "publicPayload" ->> 'niveauGravite' NOT IN (
+                'vigilance', 'alerte', 'alerte_renforcee', 'crise'
+              )
+            )
+            OR (
+              "publicPayload" ? 'departement'
+              AND (
+                NULLIF(btrim("publicPayload" ->> 'departement'), '') IS NULL
+                OR NOT ("publicPayload" ? 'usages')
+                OR jsonb_typeof("publicPayload" -> 'usages') <> 'array'
+                OR NOT (("publicPayload" -> 'arrete') ? 'id')
+              )
+            )
+            OR (
+              "publicPayload" ? 'usages'
+              AND EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements("publicPayload" -> 'usages') usage
+                WHERE jsonb_typeof(usage) <> 'object'
+                  OR NOT (usage ?& ARRAY['id', 'nom', 'description'])
+                  OR NULLIF(btrim(usage ->> 'nom'), '') IS NULL
+              )
+            )
           )
       `,
       [publicationId],
@@ -1550,9 +1945,11 @@ export class ZonePublicationService {
       createdAt?: Date | string | null;
     },
     timeoutSeconds: number,
+    requestedAt?: Date | string | null,
   ): boolean {
     const startedAt = new Date(
-      publication.candidateAt ||
+      requestedAt ||
+        publication.candidateAt ||
         publication.validatedAt ||
         publication.createdAt ||
         '',
