@@ -24,7 +24,6 @@ cp env.example .env
 - WEBSITE_URL : Site web du frontend (http://localhost:3000 en local)
 - DOMAIN : Domaine sur lequel tourne le serveur (localhost en local)
 - API_DATAGOUV : Informations pour se connecter à Datagouv et pouvoir upload automatiquement les données de VigiEau
-- ADMINJS : User / password pour accéder au backend AdminJS
 - S3 : Informations pour se connecter aux buckets S3
 - MAIL : Informations pour se connecter à la boite mail
 - MAIL_MTE : Mail générique à renseigner pour l'envoi de mail systématique à une adresse

@@ -3,20 +3,16 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { BrevoService } from './brevo.service';
 import { CommunesService } from '../communes/communes.service';
-import * as Brevo from '@getbrevo/brevo';
+import { BrevoClient } from '@getbrevo/brevo';
 
-// Mock de Brevo local à ce fichier de test
-const mockTransactionalEmailsApi = {
-  authentications: { apiKey: { apiKey: '' } },
-  sendTransacEmail: jest.fn(), // Mock de la méthode `sendTransacEmail`
-};
-
-// Mock de SendSmtpEmail
-const mockSendSmtpEmail = jest.fn();
+const mockSendTransacEmail = jest.fn();
 
 jest.mock('@getbrevo/brevo', () => ({
-  TransactionalEmailsApi: jest.fn(() => mockTransactionalEmailsApi),
-  SendSmtpEmail: jest.fn(() => mockSendSmtpEmail),
+  BrevoClient: jest.fn(() => ({
+    transactionalEmails: {
+      sendTransacEmail: mockSendTransacEmail,
+    },
+  })),
 }));
 
 describe('BrevoService', () => {
@@ -24,12 +20,8 @@ describe('BrevoService', () => {
   let configService: ConfigService;
   let jwtService: JwtService;
   let communesService: CommunesService;
-  let apiInstanceMock: any;
 
   beforeEach(async () => {
-    // Mock de l'API Brevo
-    apiInstanceMock = mockTransactionalEmailsApi;
-
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BrevoService,
@@ -79,9 +71,10 @@ describe('BrevoService', () => {
 
   describe('Initialisation', () => {
     it('devrait initialiser le service avec la clé API Brevo', () => {
-      expect(apiInstanceMock.authentications.apiKey.apiKey).toBe(
-        'test-api-key',
-      );
+      expect(BrevoClient).toHaveBeenCalledWith({
+        apiKey: 'test-api-key',
+        maxRetries: 0,
+      });
     });
   });
 
@@ -100,7 +93,7 @@ describe('BrevoService', () => {
         profil: 'user_profile',
       };
 
-      // @ts-ignore
+      // @ts-expect-error The mocked SDK result is reduced to a string.
       jest.spyOn(service, 'sendMail').mockResolvedValueOnce('Email sent');
 
       const result = await service.sendSituationUpdate(
@@ -130,9 +123,8 @@ describe('BrevoService', () => {
     });
 
     it('devrait utiliser le libellé de localisation si la commune est introuvable', async () => {
-      // @ts-ignore
       jest.spyOn(communesService, 'getCommune').mockReturnValueOnce(undefined);
-      // @ts-ignore
+      // @ts-expect-error The mocked SDK result is reduced to a string.
       jest.spyOn(service, 'sendMail').mockResolvedValueOnce('Email sent');
 
       await service.sendSituationUpdate(
@@ -158,7 +150,6 @@ describe('BrevoService', () => {
     });
 
     it('ne devrait pas envoyer d’email si les notifications sont désactivées', async () => {
-      // @ts-ignore
       jest.spyOn(configService, 'get').mockImplementation((key) => {
         if (key === 'EMAIL_NOTIFICATIONS_ENABLED') return '0'; // Désactive les notifications
         return 'some-value';
@@ -178,7 +169,7 @@ describe('BrevoService', () => {
       );
 
       expect(result).toBeUndefined();
-      expect(apiInstanceMock.sendTransacEmail).not.toHaveBeenCalled();
+      expect(mockSendTransacEmail).not.toHaveBeenCalled();
     });
   });
 
@@ -201,8 +192,22 @@ describe('BrevoService', () => {
   });
 
   describe('sendMail', () => {
+    const createServiceWithoutApiKey = (nodeEnv: string) => {
+      const configServiceWithoutApiKey = {
+        get: jest.fn((key: string) =>
+          key === 'NODE_ENV' ? nodeEnv : undefined,
+        ),
+      } as unknown as ConfigService;
+
+      return new BrevoService(
+        jwtService,
+        configServiceWithoutApiKey,
+        communesService,
+      );
+    };
+
     it('devrait envoyer un email via Brevo', async () => {
-      apiInstanceMock.sendTransacEmail.mockResolvedValueOnce({
+      mockSendTransacEmail.mockResolvedValueOnce({
         messageId: '12345',
       });
 
@@ -210,24 +215,42 @@ describe('BrevoService', () => {
         param1: 'value1',
       });
 
-      expect(apiInstanceMock.sendTransacEmail).toHaveBeenCalledWith(
-        expect.objectContaining({
-          templateId: 65,
-          to: [{ email: 'user@example.com' }],
-          params: { param1: 'value1' },
-        }),
-      );
+      expect(mockSendTransacEmail).toHaveBeenCalledWith({
+        templateId: 65,
+        to: [{ email: 'user@example.com' }],
+        params: { param1: 'value1' },
+      });
       expect(result).toEqual({ messageId: '12345' });
     });
 
     it('devrait gérer les erreurs lors de l’envoi d’email', async () => {
-      apiInstanceMock.sendTransacEmail.mockRejectedValueOnce(
-        new Error('API Error'),
-      );
+      mockSendTransacEmail.mockRejectedValueOnce(new Error('API Error'));
 
       await expect(
         service['sendMail'](65, 'user@example.com', { param1: 'value1' }),
       ).rejects.toThrow('API Error');
+    });
+
+    it("ne devrait pas envoyer d'email sans clé API hors production", () => {
+      const serviceWithoutApiKey = createServiceWithoutApiKey('test');
+
+      expect(
+        serviceWithoutApiKey.sendMail(65, 'user@example.com', {
+          param1: 'value1',
+        }),
+      ).toBeUndefined();
+      expect(mockSendTransacEmail).not.toHaveBeenCalled();
+    });
+
+    it('devrait refuser de démarrer un envoi sans clé API en production', () => {
+      const serviceWithoutApiKey = createServiceWithoutApiKey('production');
+
+      expect(() =>
+        serviceWithoutApiKey.sendMail(65, 'user@example.com', {
+          param1: 'value1',
+        }),
+      ).toThrow('BREVO_API_KEY is required');
+      expect(mockSendTransacEmail).not.toHaveBeenCalled();
     });
   });
 });
