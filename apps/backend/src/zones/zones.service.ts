@@ -37,9 +37,14 @@ type ZoneCacheError = {
   phase: string;
 };
 
+type ZoneSpatialFeature = Readonly<{
+  geometry: string;
+  zoneId: string | number;
+}>;
+
 type ZoneCacheSnapshot = Readonly<{
   zones: readonly any[];
-  features: readonly any[];
+  features: readonly ZoneSpatialFeature[];
   zonesIndex: Readonly<Record<string, any>>;
   zonesCommunesIndex: Readonly<Record<string, readonly any[]>>;
   zoneTree: any;
@@ -133,13 +138,14 @@ export class ZonesService implements OnModuleInit {
     string,
     Promise<ZoneCacheSnapshot>
   >();
+  private secondarySnapshotLoadQueue: Promise<void> = Promise.resolve();
   private availablePublicationState: PublicationState = {
     activePublicationId: null,
     candidatePublicationId: null,
   };
   private arretesMunicipauxLoadPromise: Promise<Commune[]> | null = null;
   private arretesMunicipauxRefreshPromise: Promise<void> | null = null;
-  private readonly maxCachedPublications = 4;
+  private readonly maxCachedPublications = 2;
 
   constructor(
     @InjectRepository(ZoneAlerteComputed)
@@ -275,8 +281,10 @@ export class ZonesService implements OnModuleInit {
     const zones = snapshot.zoneTree
       .search(lon, lat, lon, lat)
       .map((idx) => snapshot.features[idx])
-      .filter((feature) => booleanPointInPolygon([lon, lat], feature))
-      .map((feature) => snapshot.zonesIndex[feature.properties.idZone])
+      .filter((feature) =>
+        booleanPointInPolygon([lon, lat], JSON.parse(feature.geometry)),
+      )
+      .map((feature) => snapshot.zonesIndex[feature.zoneId])
       .filter(Boolean);
 
     const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
@@ -707,9 +715,10 @@ export class ZonesService implements OnModuleInit {
     heartbeatTimer.unref();
 
     try {
-      return await this.getOrLoadPublicationSnapshot(publicationId, [
-        'candidate',
-      ]);
+      return await this.withSecondarySnapshotLoad(async () => {
+        this.prunePublicationSnapshotsForCandidate(publicationId);
+        return this.getOrLoadPublicationSnapshot(publicationId, ['candidate']);
+      });
     } finally {
       clearInterval(heartbeatTimer);
     }
@@ -907,6 +916,72 @@ export class ZonesService implements OnModuleInit {
     }
   }
 
+  private prunePublicationSnapshotsForCandidate(publicationId: string): void {
+    const protectedIds = new Set([
+      this.activeSnapshot?.publication?.id,
+      this.availablePublicationState.activePublicationId,
+      publicationId,
+    ]);
+    for (const cachedPublicationId of this.publicationSnapshots.keys()) {
+      if (!protectedIds.has(cachedPublicationId)) {
+        this.publicationSnapshots.delete(cachedPublicationId);
+      }
+    }
+  }
+
+  private async getOrLoadRetiredSnapshot(
+    publicationId: string,
+  ): Promise<ZoneCacheSnapshot> {
+    return this.withSecondarySnapshotLoad(async () => {
+      const cached = this.publicationSnapshots.get(publicationId);
+      if (cached) return cached;
+      if (
+        this.availablePublicationState.candidatePublicationId ||
+        this.availablePublicationState.activePublicationId !==
+          (this.activeSnapshot?.publication?.id || null)
+      ) {
+        throw new HttpException(
+          `Cette publication est temporairement indisponible.`,
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
+      }
+
+      this.prunePublicationSnapshotsForRetiredPin(publicationId);
+      return this.getOrLoadPublicationSnapshot(publicationId, ['retired']);
+    });
+  }
+
+  private async withSecondarySnapshotLoad<T>(
+    load: () => Promise<T>,
+  ): Promise<T> {
+    let releaseQueue!: () => void;
+    const previousLoad = this.secondarySnapshotLoadQueue;
+    this.secondarySnapshotLoadQueue = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+    await previousLoad;
+
+    try {
+      return await load();
+    } finally {
+      releaseQueue();
+    }
+  }
+
+  private prunePublicationSnapshotsForRetiredPin(publicationId: string): void {
+    const protectedIds = new Set([
+      this.activeSnapshot?.publication?.id,
+      this.availablePublicationState.activePublicationId,
+      this.availablePublicationState.candidatePublicationId,
+      publicationId,
+    ]);
+    for (const cachedPublicationId of this.publicationSnapshots.keys()) {
+      if (!protectedIds.has(cachedPublicationId)) {
+        this.publicationSnapshots.delete(cachedPublicationId);
+      }
+    }
+  }
+
   private mapZonesWithRestrictions(zonesWithGeom: any[]): readonly any[] {
     return zonesWithGeom.map((z) => {
       const usages = z.restriction?.usages?.filter((u) => {
@@ -1074,13 +1149,13 @@ export class ZonesService implements OnModuleInit {
     zonesWithGeom: any[],
     zones: readonly any[],
   ): Promise<{
-    features: readonly any[];
+    features: readonly ZoneSpatialFeature[];
     zonesIndex: Readonly<Record<string, any>>;
     zonesCommunesIndex: Readonly<Record<string, readonly any[]>>;
     zoneTree: any;
     communeAssociationCount: number;
   }> {
-    const features: any[] = [];
+    const features: ZoneSpatialFeature[] = [];
     const zonesCommunesIndex: Record<string, any[]> = {};
     const zonesIndex = keyBy(zones, 'id');
     let communeAssociationCount = 0;
@@ -1102,17 +1177,13 @@ export class ZonesService implements OnModuleInit {
     for (const zone of zones) {
       const fullZone = zonesWithGeom.find((z) => z.id === zone.id);
       const geojson = JSON.parse(fullZone.geom);
-      geojson.properties = Object.freeze({
-        idZone: zone.id,
-        code: zone.code,
-        nom: zone.nom,
-        type: zone.type,
-        ressourceInfluencee: zone.ressourceInfluencee,
-        niveauGravite: zone.niveauGravite,
-      });
-
       const bbox = computeBbox(geojson);
-      features.push(Object.freeze(geojson));
+      features.push(
+        Object.freeze({
+          geometry: fullZone.geom,
+          zoneId: zone.id,
+        }),
+      );
       zoneTree.add(bbox[0], bbox[1], bbox[2], bbox[3]);
 
       for (const commune of fullZone.communes) {
@@ -1471,13 +1542,12 @@ export class ZonesService implements OnModuleInit {
     ) {
       throw this.publicationGone();
     }
-
     let snapshot: ZoneCacheSnapshot;
     try {
-      snapshot = await this.getOrLoadPublicationSnapshot(publicationId, [
-        'active',
-        'retired',
-      ]);
+      snapshot =
+        publication.status === 'retired'
+          ? await this.getOrLoadRetiredSnapshot(publicationId)
+          : await this.getOrLoadPublicationSnapshot(publicationId, ['active']);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       throw this.publicationUnavailable(error);

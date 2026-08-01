@@ -100,7 +100,7 @@ initiale lors d'une nouvelle révision ou version.
 Une promotion externe en échec est retentée après
 `ZONE_PUBLICATION_PROMOTION_RETRY_SECONDS`. Les appels de mise à jour des
 ressources data.gouv.fr sont bornés par `ZONE_PUBLICATION_DATAGOUV_TIMEOUT_MS` et
-l'ensemble des copies S3 d'une promotion par `ZONE_PUBLICATION_S3_TIMEOUT_MS`.
+chaque copie S3 d'une promotion par `ZONE_PUBLICATION_S3_TIMEOUT_MS`.
 Les erreurs restent portées par la publication active sans dégrader son statut.
 
 Le contrat d'une publication vide valide est explicite : `zoneCount=0`,

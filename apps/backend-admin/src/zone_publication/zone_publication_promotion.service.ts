@@ -360,33 +360,40 @@ export class ZonePublicationPromotionService {
     const day = date.toISOString().split('T')[0];
     const immutableGeojson = `zones_arretes_en_vigueur_${publication.geojsonChecksum}.geojson`;
     const immutablePmtiles = `zones_arretes_en_vigueur_${publication.pmtilesChecksum}.pmtiles`;
-    const abortSignal = AbortSignal.timeout(
-      this.readPositiveInteger('ZONE_PUBLICATION_S3_TIMEOUT_MS', 60_000),
+    const timeoutMs = this.readPositiveInteger(
+      'ZONE_PUBLICATION_S3_TIMEOUT_MS',
+      60_000,
     );
+    const copyFile = (
+      source: string,
+      destination: string,
+      prefix: string,
+    ) =>
+      this.s3Service.copyFile(source, destination, prefix, {
+        // A copy must get its own deadline: the four sequential copies can
+        // legitimately take longer than the timeout of one S3 operation.
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      });
 
-    await this.s3Service.copyFile(
+    await copyFile(
       immutableGeojson,
       `zones_arretes_en_vigueur_${day}.geojson`,
       'geojson/',
-      { abortSignal },
     );
-    await this.s3Service.copyFile(
+    await copyFile(
       immutablePmtiles,
       `zones_arretes_en_vigueur_${day}.pmtiles`,
       'pmtiles/',
-      { abortSignal },
     );
-    await this.s3Service.copyFile(
+    await copyFile(
       immutableGeojson,
       'zones_arretes_en_vigueur.geojson',
       'geojson/',
-      { abortSignal },
     );
-    await this.s3Service.copyFile(
+    await copyFile(
       immutablePmtiles,
       'zones_arretes_en_vigueur.pmtiles',
       'pmtiles/',
-      { abortSignal },
     );
   }
 

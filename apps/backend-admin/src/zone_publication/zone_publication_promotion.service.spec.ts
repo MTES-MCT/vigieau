@@ -151,6 +151,7 @@ describe('ZonePublicationPromotionService', () => {
       'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
       ['vigieau:zone-publication-stable-promotion'],
     );
+    expect(timeout).toHaveBeenCalledTimes(4);
     expect(timeout).toHaveBeenCalledWith(42_500);
     expect(harness.s3Service.copyFile.mock.calls).toEqual([
       [
@@ -178,6 +179,10 @@ describe('ZonePublicationPromotionService', () => {
         { abortSignal: expect.any(AbortSignal) },
       ],
     ]);
+    const copySignals = harness.s3Service.copyFile.mock.calls.map(
+      ([, , , options]) => options.abortSignal,
+    );
+    expect(new Set(copySignals).size).toBe(4);
     const configUpdateIndex = harness.manager.query.mock.calls.findIndex(
       ([sql]) => sql.includes('UPDATE "config"'),
     );

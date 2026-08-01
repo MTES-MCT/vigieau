@@ -192,8 +192,8 @@ describe('ZonesService', () => {
   const makeSnapshot = (id: number, snapshotVersion = version) => {
     const zone = makeZone(id);
     const feature = {
-      ...polygon,
-      properties: { idZone: id },
+      geometry: JSON.stringify(polygon),
+      zoneId: id,
     };
     return Object.freeze({
       zones: Object.freeze([zone]),
@@ -864,6 +864,15 @@ describe('ZonesService', () => {
         publicationId,
       ),
     ).resolves.toMatchObject([{ id: 1 }]);
+    await expect(
+      service.find('1', '1', undefined, undefined, undefined, publicationId),
+    ).resolves.toMatchObject([{ id: 1 }]);
+    expect(
+      service['publicationSnapshots'].get(publicationId)?.features[0],
+    ).toEqual({
+      geometry: JSON.stringify(polygon),
+      zoneId: 1,
+    });
     expect(mockZonePublicationInstanceRepository.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         activePublicationId: publicationId,
@@ -1100,6 +1109,33 @@ describe('ZonesService', () => {
       }),
       ['instanceId'],
     );
+  });
+
+  it('evicts older publications before preloading a candidate', async () => {
+    const activeId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const retiredId = '8b9289cb-93f5-4eed-b2f9-a8f88d0bb095';
+    const candidateId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    const activeSnapshot = makeVersionedSnapshot(activeId);
+    service['activeSnapshot'] = activeSnapshot as any;
+    service['availablePublicationState'] = {
+      activePublicationId: activeId,
+      candidatePublicationId: candidateId,
+    };
+    service['publicationSnapshots'].set(
+      retiredId,
+      makeVersionedSnapshot(retiredId, 3, 'retired') as any,
+    );
+    service['publicationSnapshots'].set(activeId, activeSnapshot as any);
+    mockZonePublicationRepository.query.mockResolvedValueOnce([
+      makePublicationRow(candidateId, 'candidate', 2),
+    ]);
+
+    await service['preloadCandidateSnapshot'](candidateId);
+
+    expect([...service['publicationSnapshots'].keys()]).toEqual([
+      activeId,
+      candidateId,
+    ]);
   });
 
   it('keeps heartbeats alive without acknowledging a candidate before preload completes', async () => {
@@ -1344,13 +1380,14 @@ describe('ZonesService', () => {
   it('serves a retained publication but never reads a building publication', async () => {
     const retainedId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
     installSnapshot();
+    service['publicationSnapshots'].set(
+      retainedId,
+      makeVersionedSnapshot(retainedId, 1, 'retired') as any,
+    );
     mockZonePublicationRepository.findOne.mockResolvedValueOnce({
       id: retainedId,
       status: 'retired',
     });
-    mockZonePublicationRepository.query.mockResolvedValueOnce([
-      makePublicationRow(retainedId, 'retired'),
-    ]);
 
     await expect(
       service.find(
@@ -1382,6 +1419,45 @@ describe('ZonesService', () => {
     expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
   });
 
+  it('replaces the retained snapshot before loading another retired pin', async () => {
+    const activeId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const retainedId = '8b9289cb-93f5-4eed-b2f9-a8f88d0bb095';
+    const requestedId = 'a782b6c6-646d-4c80-b20a-4ec13173e90d';
+    const activeSnapshot = makeVersionedSnapshot(activeId);
+    service['activeSnapshot'] = activeSnapshot as any;
+    service['availablePublicationState'] = {
+      activePublicationId: activeId,
+      candidatePublicationId: null,
+    };
+    service['publicationSnapshots'].set(activeId, activeSnapshot as any);
+    service['publicationSnapshots'].set(
+      retainedId,
+      makeVersionedSnapshot(retainedId, 2, 'retired') as any,
+    );
+    mockZonePublicationRepository.findOne.mockResolvedValueOnce({
+      id: requestedId,
+      status: 'retired',
+    });
+    mockZonePublicationRepository.query.mockResolvedValueOnce([
+      makePublicationRow(requestedId, 'retired', 3),
+    ]);
+
+    await expect(
+      service.find(
+        undefined,
+        undefined,
+        '65440',
+        undefined,
+        undefined,
+        requestedId,
+      ),
+    ).resolves.toMatchObject([{ id: 3 }]);
+    expect([...service['publicationSnapshots'].keys()]).toEqual([
+      activeId,
+      requestedId,
+    ]);
+  });
+
   it('returns 503 and retains the active snapshot when pinned publication metadata cannot be read', async () => {
     const activeSnapshot = installSnapshot();
     const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
@@ -1403,7 +1479,7 @@ describe('ZonesService', () => {
     expect(service['lastCacheError']).toBeNull();
   });
 
-  it('keeps a retired pinned read error out of cache health and candidate quorum', async () => {
+  it('keeps an uncached retired pin out of memory during candidate preload', async () => {
     const activeId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
     const candidateId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
     const publicationId = '8b9289cb-93f5-4eed-b2f9-a8f88d0bb095';
@@ -1421,10 +1497,6 @@ describe('ZonesService', () => {
       id: publicationId,
       status: 'retired',
     });
-    mockZonePublicationRepository.query.mockRejectedValueOnce(
-      new Error('database unavailable'),
-    );
-
     await expect(
       service.find(
         undefined,
@@ -1437,6 +1509,7 @@ describe('ZonesService', () => {
     ).rejects.toMatchObject({ status: HttpStatus.SERVICE_UNAVAILABLE });
     expect(service['activeSnapshot']).toBe(activeSnapshot);
     expect(service['lastCacheError']).toBeNull();
+    expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
 
     await service['writePublicationHeartbeat'](true);
 
@@ -1450,6 +1523,40 @@ describe('ZonesService', () => {
         lastError: null,
       }),
     );
+  });
+
+  it('keeps an uncached retired pin out of memory during activation', async () => {
+    const previousId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const activeId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    const publicationId = '8b9289cb-93f5-4eed-b2f9-a8f88d0bb095';
+    const previousSnapshot = makeVersionedSnapshot(previousId);
+    service['activeSnapshot'] = previousSnapshot as any;
+    service['availablePublicationState'] = {
+      activePublicationId: activeId,
+      candidatePublicationId: null,
+    };
+    service['publicationSnapshots'].set(previousId, previousSnapshot as any);
+    service['publicationSnapshots'].set(
+      activeId,
+      makeVersionedSnapshot(activeId, 2) as any,
+    );
+    mockZonePublicationRepository.findOne.mockResolvedValueOnce({
+      id: publicationId,
+      status: 'retired',
+    });
+
+    await expect(
+      service.find(
+        undefined,
+        undefined,
+        '65440',
+        undefined,
+        undefined,
+        publicationId,
+      ),
+    ).rejects.toMatchObject({ status: HttpStatus.SERVICE_UNAVAILABLE });
+    expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
+    expect(service['publicationSnapshots'].size).toBe(2);
   });
 
   it('keeps municipal decrees in formatting without mutating the snapshot', () => {
