@@ -58,6 +58,8 @@ export const STRICT_GEOMETRY_THRESHOLDS = Object.freeze({
 });
 
 export const SANDRE_BLOCKED_RETRY_INTERVAL_MS = 5 * 60 * 1000;
+const SANDRE_FORCE_FULL_AUDIT_AFTER_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 export function parseSandreZoneSyncMode(
   value: string | null | undefined,
@@ -66,6 +68,40 @@ export function parseSandreZoneSyncMode(
   return ['paused', 'audit', 'safe'].includes(normalized)
     ? (normalized as SandreZoneSyncMode)
     : null;
+}
+
+export function parseSandreForceFullAuditAfter(
+  value: string | null | undefined,
+  now = new Date(),
+): Date | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  if (!SANDRE_FORCE_FULL_AUDIT_AFTER_PATTERN.test(normalized)) {
+    throw new Error(
+      'SANDRE_FORCE_FULL_AUDIT_AFTER must be an ISO 8601 UTC timestamp such as 2026-08-02T12:00:00Z',
+    );
+  }
+
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(
+      'SANDRE_FORCE_FULL_AUDIT_AFTER must be an ISO 8601 UTC timestamp such as 2026-08-02T12:00:00Z',
+    );
+  }
+  const canonical = normalized.includes('.')
+    ? parsed.toISOString()
+    : parsed.toISOString().replace('.000Z', 'Z');
+  if (canonical !== normalized) {
+    throw new Error(
+      'SANDRE_FORCE_FULL_AUDIT_AFTER must be an ISO 8601 UTC timestamp such as 2026-08-02T12:00:00Z',
+    );
+  }
+  if (parsed.getTime() > now.getTime()) {
+    throw new Error('SANDRE_FORCE_FULL_AUDIT_AFTER must not be in the future');
+  }
+  return parsed;
 }
 
 export function isSandreBlockedRetryDue(

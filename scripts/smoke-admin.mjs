@@ -101,6 +101,8 @@ const sandreSummaryKeys = [
   "totalDepartments",
   "trackedDepartments",
   "staleDepartments",
+  "forcedAuditCompletedDepartments",
+  "pendingForcedAuditDepartments",
   "appliedDepartments",
   "staleAppliedDepartments",
   "pendingApplicationDepartments",
@@ -135,6 +137,22 @@ for (const key of [
     Number(sandreSynchronization.summary[key]),
     0,
     `SANDRE synchronization reports ${key}`,
+  );
+}
+if (["audit", "safe"].includes(sandreSynchronization.mode)) {
+  assert.ok(
+    sandreSynchronization.requiredObservationAfter,
+    "The rollout audit cutoff is not configured",
+  );
+  assert.equal(
+    Number(sandreSynchronization.summary.forcedAuditCompletedDepartments),
+    expectedDepartmentCount,
+    "Not every department completed a fresh rollout audit",
+  );
+  assert.equal(
+    Number(sandreSynchronization.summary.pendingForcedAuditDepartments),
+    0,
+    "Some departments still require a fresh rollout audit",
   );
 }
 if (sandreSynchronization.mode === "safe") {

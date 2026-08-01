@@ -3,6 +3,9 @@ import { XMLParser } from 'fast-xml-parser';
 
 export const SANDRE_PAGE_SIZE = 1000;
 export const SANDRE_MAX_PAGES_PER_DEPARTMENT = 100;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+const SANDRE_CODE_MAX_LENGTH = 32;
+const SANDRE_NAME_MAX_LENGTH = 200;
 
 export interface SandreZoneFeature {
   gid: number;
@@ -145,7 +148,9 @@ export function parseSandreZoneFeature(
   if (
     gid === null ||
     !codeSandre ||
+    codeSandre.length > SANDRE_CODE_MAX_LENGTH ||
     !name ||
+    name.length > SANDRE_NAME_MAX_LENGTH ||
     !['SOU', 'SUP'].includes(type) ||
     !['Gelé', 'Validé'].includes(status) ||
     !sourceUpdatedAt ||
@@ -167,10 +172,17 @@ export function parseSandreZoneFeature(
     explicitAlternateCode ??
     extractPreferredAlternateCode(properties.CodesAlternatifs);
   const versionValue = optionalNonNegativeInteger(properties.NumeroVersionZAS);
+  const hasVersion = ![null, undefined, ''].includes(
+    properties.NumeroVersionZAS,
+  );
   const influencedResource = binaryIndicator(properties.RessInfluenceeZAS);
-  if (influencedResource === null) {
+  if (
+    influencedResource === null ||
+    (preferredAlternateCode?.length ?? 0) > SANDRE_CODE_MAX_LENGTH ||
+    (hasVersion && versionValue === null)
+  ) {
     throw new Error(
-      `Invalid Sandre influenced resource for zone ${codeSandre}`,
+      `Invalid Sandre zone payload for department ${departmentCode}`,
     );
   }
   const feature: Omit<SandreZoneFeature, 'payloadHash'> = {
@@ -418,7 +430,7 @@ function positiveInteger(value: unknown): number | null {
     return null;
   }
   const parsed = Number(value);
-  return parsed > 0 ? parsed : null;
+  return parsed > 0 && parsed <= POSTGRES_INTEGER_MAX ? parsed : null;
 }
 
 function optionalNonNegativeInteger(value: unknown): number | null {
@@ -434,7 +446,7 @@ function optionalNonNegativeInteger(value: unknown): number | null {
     return null;
   }
   const parsed = Number(value);
-  return parsed >= 0 ? parsed : null;
+  return parsed >= 0 && parsed <= POSTGRES_INTEGER_MAX ? parsed : null;
 }
 
 function binaryIndicator(value: unknown): boolean | null {

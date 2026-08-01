@@ -1,6 +1,7 @@
 import {
   isSandreBlockedRetryDue,
   isStrictOneToOneGeometry,
+  parseSandreForceFullAuditAfter,
   parseSandreZoneSyncMode,
   SANDRE_BLOCKED_RETRY_INTERVAL_MS,
   STRICT_GEOMETRY_THRESHOLDS,
@@ -12,6 +13,35 @@ describe('Sandre zone governance', () => {
     expect(parseSandreZoneSyncMode(' audit ')).toBe('audit');
     expect(parseSandreZoneSyncMode('safe')).toBe('safe');
     expect(parseSandreZoneSyncMode('enabled')).toBeNull();
+  });
+
+  it('parses only explicit ISO UTC forced-audit cutoffs', () => {
+    expect(parseSandreForceFullAuditAfter(undefined)).toBeNull();
+    expect(parseSandreForceFullAuditAfter('   ')).toBeNull();
+    expect(
+      parseSandreForceFullAuditAfter(
+        '2026-08-02T12:00:00Z',
+        new Date('2026-08-02T13:00:00Z'),
+      ),
+    ).toEqual(new Date('2026-08-02T12:00:00Z'));
+    expect(
+      parseSandreForceFullAuditAfter(
+        '2026-08-02T12:00:00.123Z',
+        new Date('2026-08-02T13:00:00Z'),
+      ),
+    ).toEqual(new Date('2026-08-02T12:00:00.123Z'));
+    expect(() => parseSandreForceFullAuditAfter('2026-08-02 12:00:00')).toThrow(
+      'SANDRE_FORCE_FULL_AUDIT_AFTER',
+    );
+    expect(() =>
+      parseSandreForceFullAuditAfter('2026-02-30T12:00:00Z'),
+    ).toThrow('SANDRE_FORCE_FULL_AUDIT_AFTER');
+    expect(() =>
+      parseSandreForceFullAuditAfter(
+        '2026-08-02T14:00:00Z',
+        new Date('2026-08-02T13:00:00Z'),
+      ),
+    ).toThrow('must not be in the future');
   });
 
   it('accepts a strict unambiguous one-to-one geometry', () => {

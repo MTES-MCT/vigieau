@@ -5,7 +5,10 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { DataSource } from 'typeorm';
 import { ClockHeartbeatService } from '../core/scheduling/clock-heartbeat.service';
 import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
-import { parseSandreZoneSyncMode } from '../zone_alerte/sandre-zone-governance';
+import {
+  parseSandreForceFullAuditAfter,
+  parseSandreZoneSyncMode,
+} from '../zone_alerte/sandre-zone-governance';
 
 type SandreSynchronizationStatus =
   | 'healthy'
@@ -23,12 +26,15 @@ interface SandreSynchronizationHealth {
   status: SandreSynchronizationStatus;
   mode: 'paused' | 'audit' | 'safe' | 'invalid';
   staleAfterSeconds: number;
+  requiredObservationAfter: string | null;
   oldestObservationAt: string | null;
   latestObservationAt: string | null;
   summary: {
     totalDepartments: number;
     trackedDepartments: number;
     staleDepartments: number;
+    forcedAuditCompletedDepartments: number;
+    pendingForcedAuditDepartments: number;
     appliedDepartments: number;
     staleAppliedDepartments: number;
     pendingApplicationDepartments: number;
@@ -161,6 +167,28 @@ export class HealthController {
       Number.isInteger(configuredStaleAfter) && configuredStaleAfter > 0
         ? configuredStaleAfter
         : 30 * 60 * 60;
+    let forceFullAuditAfter: Date | null = null;
+    if (mode === 'audit' || mode === 'safe') {
+      try {
+        forceFullAuditAfter = parseSandreForceFullAuditAfter(
+          this.configService.get<string>('SANDRE_FORCE_FULL_AUDIT_AFTER'),
+        );
+        if (!forceFullAuditAfter) {
+          throw new Error('Missing rollout audit cutoff');
+        }
+      } catch {
+        throw new ServiceUnavailableException({
+          status: 'invalid_configuration',
+          mode,
+          staleAfterSeconds,
+          requiredObservationAfter: null,
+          oldestObservationAt: null,
+          latestObservationAt: null,
+          summary: null,
+        });
+      }
+    }
+    const requiredObservationAfter = forceFullAuditAfter?.toISOString() ?? null;
 
     try {
       const [row] = await this.dataSource.query(
@@ -171,6 +199,19 @@ export class HealthController {
             FROM sandre_zone_sync_batch batch
             WHERE batch.kind = 'snapshot'
             ORDER BY batch."departementId", batch."startedAt" DESC, batch.id DESC
+          ), latest_rollout_audits AS (
+            SELECT DISTINCT ON (batch."departementId")
+              batch."departementId", batch.status
+            FROM sandre_zone_sync_batch batch
+            WHERE $2::timestamptz IS NOT NULL
+              AND batch.kind = 'snapshot'
+              AND batch.mode = 'audit'
+              AND batch."startedAt" >= $2::timestamptz
+            ORDER BY batch."departementId", batch."startedAt" DESC, batch.id DESC
+          ), completed_forced_audits AS (
+            SELECT latest_rollout_audits."departementId"
+            FROM latest_rollout_audits
+            WHERE latest_rollout_audits.status = 'observed'
           )
           SELECT
             count(DISTINCT departement.id)::integer AS "totalDepartments",
@@ -179,6 +220,12 @@ export class HealthController {
               WHERE state."lastObservedAt" IS NULL
                  OR state."lastObservedAt" < now() - ($1::integer * interval '1 second')
             )::integer AS "staleDepartments",
+            count(DISTINCT completed_forced_audits."departementId")::integer
+              AS "forcedAuditCompletedDepartments",
+            count(DISTINCT departement.id) FILTER (
+              WHERE $2::timestamptz IS NOT NULL
+                AND completed_forced_audits."departementId" IS NULL
+            )::integer AS "pendingForcedAuditDepartments",
             count(DISTINCT state."departementId") FILTER (
               WHERE state."lastAppliedAt" IS NOT NULL
             )::integer AS "appliedDepartments",
@@ -206,13 +253,21 @@ export class HealthController {
             ON state."departementId" = departement.id
           LEFT JOIN latest_batches
             ON latest_batches."departementId" = departement.id
+          LEFT JOIN completed_forced_audits
+            ON completed_forced_audits."departementId" = departement.id
         `,
-        [staleAfterSeconds],
+        [staleAfterSeconds, forceFullAuditAfter],
       );
       const summary = {
         totalDepartments: Number(row?.totalDepartments ?? 0),
         trackedDepartments: Number(row?.trackedDepartments ?? 0),
         staleDepartments: Number(row?.staleDepartments ?? 0),
+        forcedAuditCompletedDepartments: Number(
+          row?.forcedAuditCompletedDepartments ?? 0,
+        ),
+        pendingForcedAuditDepartments: Number(
+          row?.pendingForcedAuditDepartments ?? 0,
+        ),
         appliedDepartments: Number(row?.appliedDepartments ?? 0),
         staleAppliedDepartments: Number(row?.staleAppliedDepartments ?? 0),
         pendingApplicationDepartments: Number(
@@ -238,7 +293,8 @@ export class HealthController {
         status = 'never_observed';
       } else if (
         summary.trackedDepartments !== summary.totalDepartments ||
-        summary.staleDepartments > 0
+        summary.staleDepartments > 0 ||
+        summary.pendingForcedAuditDepartments > 0
       ) {
         status = 'stale';
       } else if (
@@ -256,6 +312,7 @@ export class HealthController {
         status,
         mode: mode ?? 'invalid',
         staleAfterSeconds,
+        requiredObservationAfter,
         oldestObservationAt: row?.oldestObservationAt
           ? new Date(row.oldestObservationAt).toISOString()
           : null,
@@ -276,6 +333,7 @@ export class HealthController {
         status: 'unavailable',
         mode: mode ?? 'invalid',
         staleAfterSeconds,
+        requiredObservationAfter,
         oldestObservationAt: null,
         latestObservationAt: null,
         summary: null,

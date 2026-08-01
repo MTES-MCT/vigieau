@@ -145,7 +145,27 @@ heartbeat et rend le processus volontairement non sain.
 `SANDRE_ZONE_SYNC_MODE=paused` ne contacte pas le référentiel,
 `SANDRE_ZONE_SYNC_MODE=audit` enregistre les décisions sans modifier les zones,
 et `SANDRE_ZONE_SYNC_MODE=safe` applique uniquement les rapprochements non
-ambigus. Un département bloqué est réévalué au cron suivant après cinq minutes.
+ambigus. `SANDRE_FORCE_FULL_AUDIT_AFTER` accepte uniquement un instant UTC ISO
+8601 non futur, par exemple `2026-08-02T12:00:00Z`. Il est obligatoire dans les
+deux modes actifs `audit` et `safe`. Chaque département dont le dernier lot
+`snapshot/audit` démarré après cet instant n'est pas `observed` est audité, y
+compris si son observation précédente a moins de 24 heures. Un dernier lot
+`blocked` prouve seulement que l'audit a été tenté et tempère sa relance
+immédiate; un lot `blocked`, `failed` ou `started` plus récent invalide toujours
+un ancien lot `observed` et n'autorise jamais le passage en `safe`. Sous le verrou
+SANDRE national, `safe` vérifie d'abord que, pour chacun des 101 départements, le
+dernier lot `snapshot/audit` postérieur au cutoff est `observed`, avant tout appel
+SANDRE et toute écriture métier. Une valeur absente ou invalide interrompt le job
+avant tout contact SANDRE et rend le health de synchronisation invalide. Seul le
+mode `paused` autorise une valeur vide.
+
+Un département bloqué est actuellement réévalué au plus tôt après cinq minutes,
+donc à chaque cron de dix minutes tant que le blocage persiste. Ce choix permet
+une reprise rapide après correction mais peut entretenir des appels SANDRE en cas
+d'anomalie durable. Surveiller `blockedDepartments` et `blockedBatches`; une
+valeur non nulle persistante doit déclencher une alerte opérateur et le passage en
+`paused` pendant l'analyse. Aucun backoff implicite n'est ajouté sans état de
+tentative persisté, afin d'éviter un délai caché ou incohérent après redémarrage.
 Une zone gelée encore utilisée n'est rapprochée que si la généalogie officielle
 SANDRE fournit un successeur linéaire strictement 1:1, actif, de même département
 et de même type. Les références opérationnelles sont alors remappées dans la
@@ -235,12 +255,32 @@ n'effectue volontairement aucune écriture.
    sélection de commune, adresse précise et carte. Vérifier le rendu non vide de
    la carte, les requêtes de tuiles, la console, la date courante et une date
    historique.
-10. Passer SANDRE en `audit`, puis démarrer exactement `clock=1` en taille `2XL`.
+10. Avec `clock=0`, fixer un cutoff et passer SANDRE en `audit`, puis démarrer
+    exactement `clock=1` en taille `2XL` :
+
+    ```bash
+    SANDRE_AUDIT_AFTER=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    scalingo --app regleau-back-preprod env-set \
+      SANDRE_FORCE_FULL_AUDIT_AFTER="$SANDRE_AUDIT_AFTER" \
+      SANDRE_ZONE_SYNC_MODE=audit
+    scalingo --app regleau-back-preprod scale --synchronous clock:1:2XL
+    ```
+
     Vérifier le verrou singleton, le heartbeat, la mémoire et l'absence d'OOM.
     Attendre un cycle complet : le health audit doit être `healthy`, avec
     `trackedDepartments=totalDepartments=101`, `staleDepartments=0`,
-    `blockedDepartments=0`, `failedBatches=0` et `blockedBatches=0`. Après examen
-    des décisions, passer en `safe`. Au cron suivant, au plus dix minutes plus
+    `forcedAuditCompletedDepartments=totalDepartments=101`,
+    `pendingForcedAuditDepartments=0`, `blockedDepartments=0`, `failedBatches=0`
+    et `blockedBatches=0`. `requiredObservationAfter` doit correspondre au cutoff
+    configuré. Après examen des décisions, passer en `safe` en conservant
+    exactement le même cutoff :
+
+    ```bash
+    scalingo --app regleau-back-preprod env-set \
+      SANDRE_ZONE_SYNC_MODE=safe
+    ```
+
+    Au cron suivant, au plus dix minutes plus
     tard, le retraitement de chaque département jamais appliqué ou dont les hash
     ou dates source observés et appliqués diffèrent est déclenché sans attendre le
     cycle complet de 24 heures. La durée totale dépend ensuite du référentiel et
@@ -394,7 +434,8 @@ configurée côté hébergeur avant la mise en production.
 
 ## Rollback
 
-1. Mettre `clock=0` et `SANDRE_ZONE_SYNC_MODE=paused`. Laisser
+1. Mettre `clock=0`, `SANDRE_ZONE_SYNC_MODE=paused` et vider
+   `SANDRE_FORCE_FULL_AUDIT_AFTER`. Laisser
    `ZONE_PUBLICATION_ENABLED=true` pour permettre le préchargement de la cible.
 2. Appeler `POST /api/zone-publication/rollback` avec `apply=false` et un
    `publicationId` explicite. Vérifier la cible et les bloqueurs, puis répéter avec

@@ -169,6 +169,48 @@ describe('Sandre zone synchronization helpers', () => {
     );
   });
 
+  it('accepts Sandre values exactly at the persisted field bounds', () => {
+    expect(
+      parseSandreZoneFeature(
+        feature({
+          gid: '2147483647',
+          CdZAS: 'C'.repeat(32),
+          LbZAS: 'N'.repeat(200),
+          CdAltZAS: 'A'.repeat(32),
+          NumeroVersionZAS: '2147483647',
+          NumCircAdminBassin: 2_147_483_647,
+        }),
+        '65',
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        gid: 2_147_483_647,
+        codeSandre: 'C'.repeat(32),
+        name: 'N'.repeat(200),
+        preferredAlternateCode: 'A'.repeat(32),
+        version: 2_147_483_647,
+        basinCode: 2_147_483_647,
+      }),
+    );
+  });
+
+  it.each([
+    ['canonical code', { CdZAS: 'C'.repeat(33) }],
+    ['name', { LbZAS: 'N'.repeat(201) }],
+    ['explicit preferred code', { CdAltZAS: 'A'.repeat(33) }],
+    ['nested preferred code', { CodesAlternatifs: [{ code: 'A'.repeat(33) }] }],
+    ['numeric gid', { gid: 2_147_483_648 }],
+    ['string gid', { gid: '2147483648' }],
+    ['numeric basin', { NumCircAdminBassin: 2_147_483_648 }],
+    ['string basin', { NumCircAdminBassin: '2147483648' }],
+    ['numeric version', { NumeroVersionZAS: 2_147_483_648 }],
+    ['string version', { NumeroVersionZAS: '2147483648' }],
+  ])('rejects an out-of-range %s', (_name, overrides) => {
+    expect(() => parseSandreZoneFeature(feature(overrides), '65')).toThrow(
+      'Invalid Sandre zone payload for department 65',
+    );
+  });
+
   it('accepts an inactive feature without geometry and normalizes an optional version', () => {
     const rawFeature = feature({
       StZAS: 'Gelé',

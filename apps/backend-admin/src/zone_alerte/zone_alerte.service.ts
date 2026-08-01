@@ -47,6 +47,7 @@ import {
 } from './sandre-zone-sync';
 import {
   isSandreBlockedRetryDue,
+  parseSandreForceFullAuditAfter,
   parseSandreZoneSyncMode,
   SandreDepartmentBlockedError,
   SandreOperatorStatus,
@@ -117,10 +118,30 @@ interface SandreZoneMatch {
   zone: ZoneAlerte;
 }
 
+interface SandreRolloutAuditCoverage {
+  observedDepartmentIds: Set<number>;
+  attemptedDepartmentIds: Set<number>;
+}
+
+interface SandreSnapshotPreflight {
+  departement: Departement;
+  resolvedActiveFeatures: Array<{
+    feature: SandreZoneFeature;
+    match: SandreZoneMatch | null;
+    bassinVersant: BassinVersant;
+  }>;
+  resolvedInactiveFeatures: Array<{
+    feature: SandreZoneFeature;
+    match: SandreZoneMatch | null;
+  }>;
+  activeZoneIds: Set<number>;
+}
+
 interface SandreSnapshotApplication {
   result: SandreSyncResult;
   recomputeRequired: boolean;
   decisions: SandreSyncDecisionDraft[];
+  stale: boolean;
 }
 
 interface OperationalDisabledZoneSource {
@@ -471,6 +492,7 @@ export class ZoneAlerteService {
       }
       return;
     }
+    const forceFullAuditAfter = this.getRequiredSandreAuditCutoff(syncMode);
     if (!isMainThread || this.sandreSyncRunning) {
       return;
     }
@@ -488,6 +510,14 @@ export class ZoneAlerteService {
       }
       this.sandreGlobalLockHeld = true;
       const departements = await this.departementService.findAllLight();
+      const auditCoverage =
+        await this.getRolloutAuditCoverage(forceFullAuditAfter);
+      if (syncMode === 'safe') {
+        this.assertSafeRolloutAuditComplete(
+          departements,
+          auditCoverage.observedDepartmentIds,
+        );
+      }
 
       for (const d of departements) {
         let recomputeWasPending = false;
@@ -508,8 +538,10 @@ export class ZoneAlerteService {
           const fullSyncExpired =
             !lastFullSyncAt ||
             Date.now() - lastFullSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
-          const blockedRetryDue =
-            syncMode === 'safe' && isSandreBlockedRetryDue(state?.blockedAt);
+          const forcedAuditDue =
+            syncMode === 'audit' &&
+            !auditCoverage.attemptedDepartmentIds.has(d.id);
+          const blockedRetryDue = isSandreBlockedRetryDue(state?.blockedAt);
           const applicationPending =
             syncMode === 'safe' &&
             (!state?.lastAppliedAt ||
@@ -517,12 +549,14 @@ export class ZoneAlerteService {
               state.observedSourceUpdatedAt !== state.appliedSourceUpdatedAt);
           const sourceChanged =
             !fullSyncExpired &&
+            !forcedAuditDue &&
             !blockedRetryDue &&
             !applicationPending &&
             (await this.hasSandreChanges(d.code, state));
 
           if (
             fullSyncExpired ||
+            forcedAuditDue ||
             blockedRetryDue ||
             applicationPending ||
             sourceChanged
@@ -580,6 +614,7 @@ export class ZoneAlerteService {
     if (syncMode === 'paused') {
       return { added: 0, updated: 0, disabled: 0, unchanged: 0 };
     }
+    const forceFullAuditAfter = this.getRequiredSandreAuditCutoff(syncMode);
 
     if (this.sandreGlobalLockHeld) {
       return this.updateDepartementZonesWithMode(depCode, syncMode);
@@ -590,6 +625,15 @@ export class ZoneAlerteService {
     }
     let operationError: unknown;
     try {
+      if (syncMode === 'safe') {
+        const departements = await this.departementService.findAllLight();
+        const auditCoverage =
+          await this.getRolloutAuditCoverage(forceFullAuditAfter);
+        this.assertSafeRolloutAuditComplete(
+          departements,
+          auditCoverage.observedDepartmentIds,
+        );
+      }
       return await this.updateDepartementZonesWithMode(depCode, syncMode);
     } catch (error) {
       operationError = error;
@@ -627,17 +671,22 @@ export class ZoneAlerteService {
       await this.finishSandreBatch(batchId, 'failed', null, error);
       throw error;
     }
-    await this.recordSandreObservation(depCode, snapshot, startedAt);
-
     if (syncMode === 'audit') {
+      await this.recordSandreObservation(depCode, snapshot, startedAt);
       try {
-        const decisions = await this.createAuditDecisions(depCode, snapshot);
+        const preflight = await this.createSandreSnapshotPreflight(
+          this.dataSource.manager,
+          depCode,
+          snapshot,
+        );
+        const decisions = await this.createAuditDecisions(snapshot, preflight);
         await this.persistSandreDecisions(
           this.dataSource,
           depCode,
           batchId,
           decisions,
         );
+        await this.clearSandreDepartmentBlocked(depCode);
         await this.finishSandreBatch(batchId, 'observed', snapshot);
         return {
           added: 0,
@@ -686,15 +735,22 @@ export class ZoneAlerteService {
       throw error;
     }
     try {
-      await this.finishSandreBatch(batchId, 'applied', snapshot);
+      await this.finishSandreBatch(
+        batchId,
+        application.stale ? 'observed' : 'applied',
+        snapshot,
+      );
     } catch (error) {
       this.logger.error(
-        `SYNCHRONISATION SANDRE APPLIQUEE MAIS LOT ${batchId} NON FINALISE`,
+        `SYNCHRONISATION SANDRE ${application.stale ? 'IGNOREE' : 'APPLIQUEE'} MAIS LOT ${batchId} NON FINALISE`,
         error,
       );
     }
 
     const { result, recomputeRequired } = application;
+    if (application.stale) {
+      return result;
+    }
 
     this.logger.log(`${result.updated} ZONES D'ALERTES MISES A JOUR`);
     this.logger.log(`${result.added} ZONES D'ALERTES AJOUTEES`);
@@ -834,6 +890,71 @@ export class ZoneAlerteService {
     return String(batch.id);
   }
 
+  private getRequiredSandreAuditCutoff(
+    syncMode: Exclude<SandreZoneSyncMode, 'paused'>,
+  ): Date {
+    const cutoff = parseSandreForceFullAuditAfter(
+      this.configService.get<string>('SANDRE_FORCE_FULL_AUDIT_AFTER'),
+    );
+    if (!cutoff) {
+      throw new Error(
+        `SANDRE_FORCE_FULL_AUDIT_AFTER is required in ${syncMode} mode`,
+      );
+    }
+    return cutoff;
+  }
+
+  private async getRolloutAuditCoverage(
+    forceFullAuditAfter: Date,
+  ): Promise<SandreRolloutAuditCoverage> {
+    const rows = await this.dataSource.query(
+      `
+        SELECT latest."departementId", latest.status
+        FROM (
+          SELECT DISTINCT ON (batch."departementId")
+            batch."departementId", batch.status
+          FROM sandre_zone_sync_batch batch
+          WHERE batch.kind = 'snapshot'
+            AND batch.mode = 'audit'
+            AND batch."startedAt" >= $1
+          ORDER BY batch."departementId", batch."startedAt" DESC, batch.id DESC
+        ) latest
+      `,
+      [forceFullAuditAfter],
+    );
+    const observedDepartmentIds = new Set<number>();
+    const attemptedDepartmentIds = new Set<number>();
+    for (const row of rows) {
+      const id = Number(row.departementId);
+      if (!Number.isInteger(id)) {
+        continue;
+      }
+      if (row.status === 'observed') {
+        observedDepartmentIds.add(id);
+        attemptedDepartmentIds.add(id);
+      } else if (row.status === 'blocked') {
+        attemptedDepartmentIds.add(id);
+      }
+    }
+    return { observedDepartmentIds, attemptedDepartmentIds };
+  }
+
+  private assertSafeRolloutAuditComplete(
+    departements: Array<{ id: number; code: string }>,
+    observedDepartmentIds: Set<number>,
+  ): void {
+    const missingDepartments = departements.filter(
+      (departement) => !observedDepartmentIds.has(departement.id),
+    );
+    if (missingDepartments.length > 0) {
+      throw new Error(
+        `SANDRE safe mode requires a successful rollout audit for every department; missing ${missingDepartments
+          .map((departement) => departement.code)
+          .join(', ')}`,
+      );
+    }
+  }
+
   private async finishSandreBatch(
     batchId: string,
     status: 'observed' | 'applied' | 'blocked' | 'failed',
@@ -925,9 +1046,144 @@ export class ZoneAlerteService {
     );
   }
 
-  private async createAuditDecisions(
+  private async clearSandreDepartmentBlocked(depCode: string): Promise<void> {
+    await this.dataSource.query(
+      `
+        UPDATE sandre_zone_sync_state state
+        SET
+          "blockedAt" = NULL,
+          "blockedReason" = NULL,
+          "blockedSnapshotHash" = NULL,
+          "updatedAt" = now()
+        FROM departement
+        WHERE state."departementId" = departement.id
+          AND departement.code = $1
+          AND state."blockedAt" IS NOT NULL
+      `,
+      [depCode],
+    );
+  }
+
+  private async createSandreSnapshotPreflight(
+    manager: EntityManager,
     depCode: string,
     snapshot: SandreZoneSnapshot,
+    lockedDepartement?: Departement,
+  ): Promise<SandreSnapshotPreflight> {
+    const departement =
+      lockedDepartement ??
+      (await manager.getRepository(Departement).findOne({
+        where: { code: depCode },
+      }));
+    if (!departement) {
+      throw new Error(`Unknown department ${depCode}`);
+    }
+
+    const activeFeatures = snapshot.features.filter(
+      (feature) => feature.status === SANDRE_VALID_STATUS,
+    );
+    await this.assertValidSandreGeometries(manager, activeFeatures);
+
+    const basinRepository = manager.getRepository(BassinVersant);
+    const basinsByCode = new Map<number, BassinVersant>();
+    for (const feature of activeFeatures) {
+      if (basinsByCode.has(feature.basinCode)) {
+        continue;
+      }
+      const bassinVersant = await basinRepository.findOne({
+        where: { code: feature.basinCode },
+      });
+      if (!bassinVersant) {
+        throw new Error(
+          `Unknown basin ${feature.basinCode} for Sandre zone ${feature.codeSandre}`,
+        );
+      }
+      basinsByCode.set(feature.basinCode, bassinVersant);
+    }
+
+    const activeZoneIds = new Set<number>();
+    const resolvedActiveFeatures: SandreSnapshotPreflight['resolvedActiveFeatures'] =
+      [];
+    for (const feature of activeFeatures) {
+      const bassinVersant = basinsByCode.get(feature.basinCode)!;
+      const match = await this.findSandreZoneMatch(
+        manager,
+        departement,
+        feature,
+      );
+      if (!match) {
+        resolvedActiveFeatures.push({ feature, match, bassinVersant });
+        continue;
+      }
+      if (activeZoneIds.has(match.zone.id)) {
+        throw new Error(
+          `Multiple active Sandre codes resolve to local zone ${match.zone.id}`,
+        );
+      }
+      activeZoneIds.add(match.zone.id);
+      if (
+        match.matchType === 'alias' &&
+        match.zone.codeSandre &&
+        match.zone.codeSandre !== feature.codeSandre
+      ) {
+        await this.assertSandreAliasAvailable(
+          manager,
+          departement,
+          match.zone,
+          match.zone.codeSandre,
+        );
+      }
+      resolvedActiveFeatures.push({ feature, match, bassinVersant });
+    }
+
+    const resolvedInactiveFeatures: SandreSnapshotPreflight['resolvedInactiveFeatures'] =
+      [];
+    for (const feature of snapshot.features.filter(
+      (item) => item.status === 'Gelé',
+    )) {
+      resolvedInactiveFeatures.push({
+        feature,
+        match: await this.findSandreZoneMatch(manager, departement, feature),
+      });
+    }
+
+    return {
+      departement,
+      resolvedActiveFeatures,
+      resolvedInactiveFeatures,
+      activeZoneIds,
+    };
+  }
+
+  private async assertSandreAliasAvailable(
+    manager: EntityManager,
+    departement: Departement,
+    zone: ZoneAlerte,
+    aliasValue: string,
+  ): Promise<void> {
+    const existingAlias = await manager.getRepository(SandreZoneAlias).findOne({
+      where: {
+        departement: {
+          id: departement.id,
+        },
+        zoneType: zone.type,
+        aliasType: 'cd_zas',
+        aliasValue,
+      },
+      relations: {
+        zoneAlerte: true,
+      },
+    });
+    if (existingAlias && existingAlias.zoneAlerte.id !== zone.id) {
+      throw new Error(
+        `Sandre alias ${aliasValue} is already assigned to zone ${existingAlias.zoneAlerte.id}`,
+      );
+    }
+  }
+
+  private async createAuditDecisions(
+    snapshot: SandreZoneSnapshot,
+    preflight: SandreSnapshotPreflight,
   ): Promise<SandreSyncDecisionDraft[]> {
     const decisions: SandreSyncDecisionDraft[] = snapshot.features.map(
       (feature) =>
@@ -962,32 +1218,11 @@ export class ZoneAlerteService {
     );
 
     const manager = this.dataSource.manager;
-    const departement = await manager.getRepository(Departement).findOne({
-      where: { code: depCode },
-    });
-    if (!departement) {
-      throw new Error(`Unknown department ${depCode}`);
-    }
-
-    const activeZoneIds = new Set<number>();
+    const { departement, resolvedInactiveFeatures } = preflight;
+    const activeZoneIds = new Set(preflight.activeZoneIds);
     const activeZonesByCode = new Map<string, ZoneAlerte>();
     let virtualZoneId = -1;
-    for (const feature of snapshot.features.filter(
-      (item) => item.status === SANDRE_VALID_STATUS,
-    )) {
-      const match = await this.findSandreZoneMatch(
-        manager,
-        departement,
-        feature,
-      );
-      if (match && activeZoneIds.has(match.zone.id)) {
-        throw new Error(
-          `Multiple active Sandre codes resolve to local zone ${match.zone.id}`,
-        );
-      }
-      if (match) {
-        activeZoneIds.add(match.zone.id);
-      }
+    for (const { feature, match } of preflight.resolvedActiveFeatures) {
       const decision = decisionsByKey.get(`${feature.codeSandre}:active`);
       if (decision) {
         decision.zoneAlerteId = match?.zone.id ?? null;
@@ -1010,18 +1245,7 @@ export class ZoneAlerteService {
       );
     }
 
-    const resolvedInactiveFeatures: Array<{
-      feature: SandreZoneFeature;
-      match: SandreZoneMatch | null;
-    }> = [];
-    for (const feature of snapshot.features.filter(
-      (item) => item.status === 'Gelé',
-    )) {
-      const match = await this.findSandreZoneMatch(
-        manager,
-        departement,
-        feature,
-      );
+    for (const { feature, match } of resolvedInactiveFeatures) {
       const decision = decisionsByKey.get(`${feature.codeSandre}:inactive`);
       if (decision) {
         decision.zoneAlerteId = match?.zone.id ?? null;
@@ -1030,7 +1254,6 @@ export class ZoneAlerteService {
           matchType: match?.matchType ?? null,
         };
       }
-      resolvedInactiveFeatures.push({ feature, match });
     }
 
     try {
@@ -1282,6 +1505,7 @@ export class ZoneAlerteService {
           },
           recomputeRequired: false,
           decisions,
+          stale: true,
         };
       }
 
@@ -1291,53 +1515,19 @@ export class ZoneAlerteService {
         disabled: 0,
         unchanged: 0,
       };
-      const activeZoneIds = new Set<number>();
       const decisions: SandreSyncDecisionDraft[] = [];
       let recomputeRequired = false;
-      const activeFeatures = snapshot.features.filter(
-        (feature) => feature.status === SANDRE_VALID_STATUS,
-      );
-      const inactiveFeatures = snapshot.features.filter(
-        (feature) => feature.status === 'Gelé',
-      );
-      await this.assertValidSandreGeometries(
+      const preflight = await this.createSandreSnapshotPreflight(
         queryRunner.manager,
-        activeFeatures,
+        depCode,
+        snapshot,
+        departement,
       );
-
-      const resolvedActiveFeatures: Array<{
-        feature: SandreZoneFeature;
-        match: SandreZoneMatch | null;
-      }> = [];
-      for (const feature of activeFeatures) {
-        const match = await this.findSandreZoneMatch(
-          queryRunner.manager,
-          departement,
-          feature,
-        );
-        if (match && activeZoneIds.has(match.zone.id)) {
-          throw new Error(
-            `Multiple active Sandre codes resolve to local zone ${match.zone.id}`,
-          );
-        }
-        if (match) {
-          activeZoneIds.add(match.zone.id);
-        }
-        resolvedActiveFeatures.push({ feature, match });
-      }
-
-      const resolvedInactiveFeatures: Array<{
-        feature: SandreZoneFeature;
-        match: SandreZoneMatch | null;
-      }> = [];
-      for (const feature of inactiveFeatures) {
-        const match = await this.findSandreZoneMatch(
-          queryRunner.manager,
-          departement,
-          feature,
-        );
-        resolvedInactiveFeatures.push({ feature, match });
-      }
+      const {
+        activeZoneIds,
+        resolvedActiveFeatures,
+        resolvedInactiveFeatures,
+      } = preflight;
 
       let genealogyLoad: SandreGenealogyLoad | undefined;
       if (
@@ -1367,13 +1557,14 @@ export class ZoneAlerteService {
       ]);
 
       const activeZonesByCode = new Map<string, ZoneAlerte>();
-      for (const { feature, match } of resolvedActiveFeatures) {
+      for (const { feature, match, bassinVersant } of resolvedActiveFeatures) {
         const countersBefore = { ...result };
         const upsert = await this.upsertActiveSandreZone(
           queryRunner.manager,
           departement,
           feature,
           match,
+          bassinVersant,
           result,
         );
         activeZoneIds.add(upsert.zone.id);
@@ -1489,6 +1680,12 @@ export class ZoneAlerteService {
       state.lastFullSyncAt = now;
       state.lastSuccessAt = now;
       state.featureCount = snapshot.featureCount;
+      state.observedSourceUpdatedAt = snapshot.sourceUpdatedAt;
+      state.observedSnapshotHash = snapshot.snapshotHash;
+      state.observedLatestFeaturesHash =
+        this.getLatestSandreFeaturesHash(snapshot);
+      state.observedFeatureCount = snapshot.featureCount;
+      state.lastObservedAt = snapshotStartedAt;
       state.appliedSourceUpdatedAt = snapshot.sourceUpdatedAt;
       state.appliedSnapshotHash = snapshot.snapshotHash;
       state.appliedFeatureCount = snapshot.featureCount;
@@ -1511,7 +1708,7 @@ export class ZoneAlerteService {
       }
       await queryRunner.commitTransaction();
 
-      return { result, recomputeRequired, decisions };
+      return { result, recomputeRequired, decisions, stale: false };
     } catch (error) {
       await queryRunner.rollbackTransaction();
       throw error;
@@ -2453,20 +2650,10 @@ export class ZoneAlerteService {
     departement: Departement,
     feature: SandreZoneFeature,
     match: SandreZoneMatch | null,
+    bassinVersant: BassinVersant,
     result: SandreSyncResult,
   ): Promise<{ zone: ZoneAlerte; recomputeRequired: boolean }> {
     const zoneRepository = manager.getRepository(ZoneAlerte);
-    const bassinVersant = await manager.getRepository(BassinVersant).findOne({
-      where: {
-        code: feature.basinCode,
-      },
-    });
-    if (!bassinVersant) {
-      throw new Error(
-        `Unknown basin ${feature.basinCode} for Sandre zone ${feature.codeSandre}`,
-      );
-    }
-
     const zone = match?.zone ?? zoneRepository.create();
     const isNew = !match;
     const displayCode =
