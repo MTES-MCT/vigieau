@@ -142,6 +142,7 @@ const getRequestedZoneSource = (
 };
 let firstSymbolId: any;
 let mapPopupRequestId = 0;
+let initialMapStyleLoaded = false;
 let mapViewRequestId = 0;
 let componentMounted = false;
 let displayedZoneSource: ZoneSourceState | null = null;
@@ -327,6 +328,7 @@ const mapInitializer = createRetryableInitializer(() => {
   mapInstance.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
 
   mapInstance.on('load', () => {
+    initialMapStyleLoaded = true;
     const layers = mapInstance.getStyle().layers;
     for (let i = 0; i < layers.length; i++) {
       if (layers[i].type === 'symbol') {
@@ -433,6 +435,7 @@ onBeforeUnmount(() => {
   popup.remove();
   map.value?.remove();
   map.value = null;
+  initialMapStyleLoaded = false;
   displayedZoneSource = null;
   pendingZoneSourceTransition = null;
   requestedZoneSourceKey = null;
@@ -831,7 +834,7 @@ const displayZoneLayers = async (
   currentDate: boolean,
 ): Promise<boolean> => {
   if (
-    !map.value?.isStyleLoaded() ||
+    !initialMapStyleLoaded ||
     !isMapViewRequestCurrent(requestId, dateValue, currentDate)
   ) {
     return false;
@@ -878,7 +881,7 @@ const displayZoneLayers = async (
               !isMapViewRequestCurrent(requestId, dateValue, currentDate) ||
               getRequestedZoneSource(dateValue)?.sourceKey !==
                 requestedSource.sourceKey ||
-              !map.value?.isStyleLoaded()
+              !initialMapStyleLoaded
             ) {
               throw createAbortError();
             }
@@ -895,7 +898,7 @@ const displayZoneLayers = async (
           !isMapViewRequestCurrent(requestId, dateValue, currentDate) ||
           getRequestedZoneSource(dateValue)?.sourceKey !==
             requestedSource.sourceKey ||
-          !map.value?.isStyleLoaded()
+          !initialMapStyleLoaded
         ) {
           throw createAbortError();
         }
