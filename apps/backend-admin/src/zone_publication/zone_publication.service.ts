@@ -9,6 +9,7 @@ import {
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
   ZONE_PUBLICATION_STABLE_PROMOTION_LOCK,
 } from './zone_publication.config';
+import { unwrapTypeOrmDmlReturningRows } from './typeorm-query-result';
 
 export interface ZonePublicationArtifacts {
   geojsonUrl: string;
@@ -193,12 +194,13 @@ export class ZonePublicationService {
   }
 
   async bumpSourceRevision(): Promise<string> {
-    const [state] = await this.dataSource.query(`
+    const result = await this.dataSource.query(`
       UPDATE "zone_publication_source_state"
       SET "revision" = "revision" + 1, "updatedAt" = now()
       WHERE "id" = 1
       RETURNING "revision"
     `);
+    const [state] = unwrapTypeOrmDmlReturningRows<{ revision: string }>(result);
     if (!state) {
       throw new Error('Zone publication source state is missing');
     }
@@ -250,8 +252,9 @@ export class ZonePublicationService {
           );
         }
         await this.assertPlausibleSnapshot(manager, counts);
-        const validated = await manager.query(
-          `
+        const validated = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+          await manager.query(
+            `
               UPDATE "zone_publication"
               SET "status" = 'validated',
                   "validatedAt" = now(),
@@ -259,8 +262,9 @@ export class ZonePublicationService {
                   "communeLinkCount" = $3
               WHERE "id" = $1 AND "status" = 'building'
               RETURNING "id"
-            `,
-          [publicationId, counts.zoneCount, counts.communeLinkCount],
+          `,
+            [publicationId, counts.zoneCount, counts.communeLinkCount],
+          ),
         );
         if (validated.length !== 1) {
           throw new Error(
@@ -429,14 +433,16 @@ export class ZonePublicationService {
           [state.candidatePublicationId],
         );
       }
-      const marked = await manager.query(
-        `
-          UPDATE "zone_publication"
-          SET "status" = 'candidate', "candidateAt" = now()
-          WHERE "id" = $1 AND "status" = 'validated'
-          RETURNING "id"
-        `,
-        [publicationId],
+      const marked = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+        await manager.query(
+          `
+            UPDATE "zone_publication"
+            SET "status" = 'candidate', "candidateAt" = now()
+            WHERE "id" = $1 AND "status" = 'validated'
+            RETURNING "id"
+          `,
+          [publicationId],
+        ),
       );
       if (marked.length !== 1) {
         throw new Error(
@@ -653,16 +659,18 @@ export class ZonePublicationService {
           const failureReason =
             `Candidate preload timed out after ${candidateTimeoutSeconds}s: ` +
             `${readyInstances}/${liveInstances} live instances ready`;
-          const failed = await manager.query(
-            `
-              UPDATE "zone_publication"
-              SET "status" = 'failed',
-                  "failedAt" = now(),
-                  "validationError" = $2
-              WHERE "id" = $1 AND "status" = 'candidate'
-              RETURNING "id"
-            `,
-            [publication.id, failureReason],
+          const failed = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+            await manager.query(
+              `
+                UPDATE "zone_publication"
+                SET "status" = 'failed',
+                    "failedAt" = now(),
+                    "validationError" = $2
+                WHERE "id" = $1 AND "status" = 'candidate'
+                RETURNING "id"
+              `,
+              [publication.id, failureReason],
+            ),
           );
           if (failed.length !== 1) {
             throw new Error(
@@ -714,14 +722,16 @@ export class ZonePublicationService {
           [state.activePublicationId],
         );
       }
-      const activated = await manager.query(
-        `
-          UPDATE "zone_publication"
-          SET "status" = 'active', "activatedAt" = now()
-          WHERE "id" = $1 AND "status" = 'candidate'
-          RETURNING "id"
-        `,
-        [publication.id],
+      const activated = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+        await manager.query(
+          `
+            UPDATE "zone_publication"
+            SET "status" = 'active', "activatedAt" = now()
+            WHERE "id" = $1 AND "status" = 'candidate'
+            RETURNING "id"
+          `,
+          [publication.id],
+        ),
       );
       if (activated.length !== 1) {
         throw new Error(`Unable to activate publication ${publication.id}`);
@@ -755,8 +765,9 @@ export class ZonePublicationService {
     const retentionHours =
       input?.retentionHours ??
       this.readPositiveInteger('ZONE_PUBLICATION_RETENTION_HOURS', 48);
-    const deleted = await this.dataSource.query(
-      `
+    const deleted = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await this.dataSource.query(
+        `
         WITH protected_retired AS MATERIALIZED (
           SELECT publication."id"
           FROM "zone_publication" publication
@@ -784,8 +795,9 @@ export class ZonePublicationService {
         USING eligible
         WHERE publication."id" = eligible."id"
         RETURNING publication."id"
-      `,
-      [retainedRetiredCount, retentionHours],
+        `,
+        [retainedRetiredCount, retentionHours],
+      ),
     );
     return deleted.map((row) => String(row.id));
   }
@@ -796,8 +808,9 @@ export class ZonePublicationService {
       75 * 60,
     ),
   ): Promise<string[]> {
-    const failedBuilding = await this.dataSource.query(
-      `
+    const failedBuilding = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await this.dataSource.query(
+        `
         UPDATE "zone_publication" publication
         SET "status" = 'failed',
             "failedAt" = now(),
@@ -809,11 +822,13 @@ export class ZonePublicationService {
           AND publication."id" IS DISTINCT FROM state."activePublicationId"
           AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
         RETURNING publication."id"
-      `,
-      [orphanTimeoutSeconds],
+        `,
+        [orphanTimeoutSeconds],
+      ),
     );
-    const supersededValidated = await this.dataSource.query(
-      `
+    const supersededValidated = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await this.dataSource.query(
+        `
         UPDATE "zone_publication" publication
         SET "status" = 'superseded'
         FROM "zone_publication_state" state
@@ -823,8 +838,9 @@ export class ZonePublicationService {
           AND publication."id" IS DISTINCT FROM state."activePublicationId"
           AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
         RETURNING publication."id"
-      `,
-      [orphanTimeoutSeconds],
+        `,
+        [orphanTimeoutSeconds],
+      ),
     );
     return [...failedBuilding, ...supersededValidated].map((row) =>
       String(row.id),
@@ -837,13 +853,15 @@ export class ZonePublicationService {
       24,
     ),
   ): Promise<string[]> {
-    const deleted = await this.dataSource.query(
-      `
+    const deleted = unwrapTypeOrmDmlReturningRows<{ instanceId: string }>(
+      await this.dataSource.query(
+        `
         DELETE FROM "zone_publication_instance"
         WHERE "heartbeatAt" < now() - ($1 * interval '1 hour')
         RETURNING "instanceId"
-      `,
-      [retentionHours],
+        `,
+        [retentionHours],
+      ),
     );
     return deleted.map((row) => String(row.instanceId));
   }

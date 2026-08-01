@@ -176,6 +176,15 @@ describe('ZonePublicationService', () => {
     }
   });
 
+  it('unwraps the PostgreSQL DML result when bumping the source revision', async () => {
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([[{ revision: '12' }], 1]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(service.bumpSourceRevision()).resolves.toBe('12');
+  });
+
   it('requests recomputation only when neither active nor candidate matches', async () => {
     const dataSource = {
       query: jest
@@ -468,7 +477,7 @@ describe('ZonePublicationService', () => {
       query: jest.fn(async (sql: string) => {
         executed.push(sql);
         if (sql.includes(`SET "status" = 'failed'`)) {
-          return [{ id: 'candidate' }];
+          return [[{ id: 'candidate' }], 1];
         }
         if (sql.includes('FROM "zone_publication_state"')) {
           return [
@@ -607,7 +616,7 @@ describe('ZonePublicationService', () => {
           return [{ locked: true }];
         }
         if (sql.includes(`SET "status" = 'active'`)) {
-          return [{ id: 'candidate' }];
+          return [[{ id: 'candidate' }], 1];
         }
         if (sql.includes('FROM "zone_publication_state"')) {
           return [
@@ -758,7 +767,7 @@ describe('ZonePublicationService', () => {
 
   it('purges only expired disposable publications with safe defaults', async () => {
     const dataSource = {
-      query: jest.fn().mockResolvedValue([{ id: 'expired-retired' }]),
+      query: jest.fn().mockResolvedValue([[{ id: 'expired-retired' }], 1]),
     };
     const service = new ZonePublicationService(dataSource as any);
 
@@ -799,8 +808,8 @@ describe('ZonePublicationService', () => {
     const dataSource = {
       query: jest
         .fn()
-        .mockResolvedValueOnce([{ id: 'building' }])
-        .mockResolvedValueOnce([{ id: 'validated' }]),
+        .mockResolvedValueOnce([[{ id: 'building' }], 1])
+        .mockResolvedValueOnce([[{ id: 'validated' }], 1]),
     };
     const service = new ZonePublicationService(dataSource as any);
 
@@ -822,7 +831,7 @@ describe('ZonePublicationService', () => {
 
   it('purges stale instance heartbeats independently from publications', async () => {
     const dataSource = {
-      query: jest.fn().mockResolvedValue([{ instanceId: 'old-process' }]),
+      query: jest.fn().mockResolvedValue([[{ instanceId: 'old-process' }], 1]),
     };
     const service = new ZonePublicationService(dataSource as any);
 
@@ -1074,7 +1083,7 @@ describe('ZonePublicationService', () => {
           return [{ zoneCount: 1, communeLinkCount: 1 }];
         }
         if (sql.includes(`SET "status" = 'validated'`)) {
-          return [{ id: 'publication' }];
+          return [[{ id: 'publication' }], 1];
         }
         return [];
       }),

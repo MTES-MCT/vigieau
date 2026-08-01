@@ -10,6 +10,7 @@ import {
   ZONE_PUBLICATION_DATAGOUV_PROMOTION_LOCK,
   ZONE_PUBLICATION_STABLE_PROMOTION_LOCK,
 } from './zone_publication.config';
+import { unwrapTypeOrmDmlReturningRows } from './typeorm-query-result';
 
 const ZONE_PUBLICATION_PROMOTION_INTERVAL_MS = 60_000;
 
@@ -115,8 +116,9 @@ export class ZonePublicationPromotionService {
           manager,
           new Date(publication.sourceComputedAt),
         );
-        const promoted = await manager.query(
-          `
+        const promoted = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+          await manager.query(
+            `
               UPDATE "zone_publication" publication
               SET "legacyPromotedAt" = now(),
                   "promotionLastAttemptAt" = NULL,
@@ -127,8 +129,9 @@ export class ZonePublicationPromotionService {
                 AND state."id" = 1
                 AND state."activePublicationId" = publication."id"
               RETURNING publication."id"
-            `,
-          [publication.id],
+              `,
+            [publication.id],
+          ),
         );
         if (promoted.length !== 1) {
           throw new Error(
@@ -198,8 +201,9 @@ export class ZonePublicationPromotionService {
         true,
         { timeoutMs },
       );
-      const promoted = await this.dataSource.query(
-        `
+      const promoted = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+        await this.dataSource.query(
+          `
           UPDATE "zone_publication" publication
           SET "dataGouvPromotedAt" = now(),
               "promotionLastAttemptAt" = NULL,
@@ -210,8 +214,9 @@ export class ZonePublicationPromotionService {
             AND state."id" = 1
             AND state."activePublicationId" = publication."id"
           RETURNING publication."id"
-        `,
-        [publication.id],
+          `,
+          [publication.id],
+        ),
       );
       return promoted.length === 1 ? 'promoted' : 'nothing_to_do';
     } catch (error) {
@@ -306,8 +311,11 @@ export class ZonePublicationPromotionService {
     manager: EntityManager,
     computationDate: Date,
   ): Promise<void> {
-    const updated = await manager.query(
-      `
+    const updated = unwrapTypeOrmDmlReturningRows<{
+      computeZoneAlerteComputedDate: Date | string;
+    }>(
+      await manager.query(
+        `
         UPDATE "config"
         SET "computeZoneAlerteComputedDate" = $1
         WHERE "id" = 1
@@ -316,8 +324,9 @@ export class ZonePublicationPromotionService {
             OR "computeZoneAlerteComputedDate" IS NULL
           )
         RETURNING "computeZoneAlerteComputedDate"
-      `,
-      [computationDate],
+        `,
+        [computationDate],
+      ),
     );
     const [config] =
       updated.length > 0

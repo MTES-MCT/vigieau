@@ -29,15 +29,18 @@ function createHarness(options?: {
       }
       if (sql.includes('UPDATE "config"')) {
         return [
-          {
-            computeZoneAlerteComputedDate: new Date('2026-07-31T12:00:00Z'),
-          },
+          [
+            {
+              computeZoneAlerteComputedDate: new Date('2026-07-31T12:00:00Z'),
+            },
+          ],
+          1,
         ];
       }
       if (sql.includes('RETURNING publication."id"')) {
         return options?.stableCompletion === false
-          ? []
-          : [{ id: activePublication().id }];
+          ? [[], 0]
+          : [[{ id: activePublication().id }], 1];
       }
       return [];
     }),
@@ -52,7 +55,7 @@ function createHarness(options?: {
         throw error;
       }
     }),
-    query: jest.fn().mockResolvedValue([{ id: activePublication().id }]),
+    query: jest.fn().mockResolvedValue([[{ id: activePublication().id }], 1]),
   };
   const s3Service = {
     copyFile: jest.fn().mockResolvedValue(undefined),
