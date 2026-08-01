@@ -99,7 +99,7 @@ export class HealthController {
               ON parent.id = reference."arreteRestrictionId"
             JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
             WHERE zone.disabled = true
-              AND parent.statut <> 'abroge'
+              AND parent.statut IN ('a_venir', 'publie')
           ) AS "arreteRestrictions",
           (
             SELECT COUNT(*)::integer
@@ -107,7 +107,7 @@ export class HealthController {
             JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
             JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
             WHERE zone.disabled = true
-              AND parent.statut <> 'abroge'
+              AND parent.statut IN ('a_venir', 'publie')
           ) AS "arreteCadres",
           (
             SELECT COUNT(*)::integer
@@ -115,7 +115,7 @@ export class HealthController {
             JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
             JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
             WHERE zone.disabled = true
-              AND parent.statut <> 'abroge'
+              AND parent.statut IN ('a_venir', 'publie')
           ) AS customizations
       `);
       const invalidReferences = {

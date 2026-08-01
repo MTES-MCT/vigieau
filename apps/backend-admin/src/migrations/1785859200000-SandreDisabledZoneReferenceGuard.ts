@@ -2,6 +2,22 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
+    await this.install(queryRunner, 'legacy');
+  }
+
+  public async install(
+    queryRunner: QueryRunner,
+    statusPolicy: 'legacy' | 'current',
+  ): Promise<void> {
+    const operationalParentPredicate =
+      statusPolicy === 'current'
+        ? "parent.statut IN ('a_venir', 'publie')"
+        : "parent.statut <> 'abroge'";
+    const skipParentActivationPredicate =
+      statusPolicy === 'current'
+        ? "OLD.statut IN ('a_venir', 'publie') OR NEW.statut NOT IN ('a_venir', 'publie')"
+        : "OLD.statut IS DISTINCT FROM 'abroge' OR NEW.statut = 'abroge'";
+
     await queryRunner.query(`
       CREATE OR REPLACE FUNCTION resolve_active_sandre_zone_alias(
         source_zone_id integer
@@ -38,7 +54,7 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
       DECLARE
         unresolved_zone_id integer;
       BEGIN
-        IF OLD.statut IS DISTINCT FROM 'abroge' OR NEW.statut = 'abroge' THEN
+        IF ${skipParentActivationPredicate} THEN
           RETURN NEW;
         END IF;
 
@@ -66,6 +82,28 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
                   'Impossible de réactiver l''arrêté de restriction %s : zone désactivée %s sans alias SANDRE actif',
                   NEW.id,
                   unresolved_zone_id
+                );
+            END IF;
+
+            IF EXISTS (
+              SELECT 1
+              FROM (
+                SELECT resolve_active_sandre_zone_alias(source.id)
+                  AS target_zone_id
+                FROM restriction source_reference
+                JOIN zone_alerte source
+                  ON source.id = source_reference."zoneAlerteId"
+                 AND source.disabled = true
+                WHERE source_reference."arreteRestrictionId" = NEW.id
+                GROUP BY resolve_active_sandre_zone_alias(source.id)
+                HAVING count(*) > 1
+              ) converging_references
+            ) THEN
+              RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = format(
+                  'Impossible de réactiver l''arrêté de restriction %s : plusieurs zones SANDRE convergent vers la même cible',
+                  NEW.id
                 );
             END IF;
 
@@ -141,6 +179,28 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
 
             IF EXISTS (
               SELECT 1
+              FROM (
+                SELECT resolve_active_sandre_zone_alias(source.id)
+                  AS target_zone_id
+                FROM arrete_cadre_zone_alerte_communes source_reference
+                JOIN zone_alerte source
+                  ON source.id = source_reference."zoneAlerteId"
+                 AND source.disabled = true
+                WHERE source_reference."arreteCadreId" = NEW.id
+                GROUP BY resolve_active_sandre_zone_alias(source.id)
+                HAVING count(*) > 1
+              ) converging_references
+            ) THEN
+              RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = format(
+                  'Impossible de réactiver l''arrêté cadre %s : plusieurs personnalisations SANDRE convergent vers la même cible',
+                  NEW.id
+                );
+            END IF;
+
+            IF EXISTS (
+              SELECT 1
               FROM arrete_cadre_zone_alerte_communes source_reference
               JOIN zone_alerte source
                 ON source.id = source_reference."zoneAlerteId"
@@ -201,8 +261,15 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
         source_disabled boolean;
         target_zone_id integer;
         reference_is_operational boolean;
+        current_reference_id integer;
       BEGIN
         IF TG_OP = 'UPDATE' THEN
+          IF TG_TABLE_NAME IN (
+            'restriction',
+            'arrete_cadre_zone_alerte_communes'
+          ) THEN
+            current_reference_id := OLD.id;
+          END IF;
           IF NEW."zoneAlerteId" IS NOT DISTINCT FROM OLD."zoneAlerteId" THEN
             RETURN NEW;
           END IF;
@@ -210,19 +277,19 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
 
         CASE TG_TABLE_NAME
           WHEN 'restriction' THEN
-            SELECT parent.statut <> 'abroge'
+            SELECT ${operationalParentPredicate}
             INTO reference_is_operational
             FROM arrete_restriction parent
             WHERE parent.id = NEW."arreteRestrictionId"
             FOR SHARE OF parent;
           WHEN 'arrete_cadre_zone_alerte' THEN
-            SELECT parent.statut <> 'abroge'
+            SELECT ${operationalParentPredicate}
             INTO reference_is_operational
             FROM arrete_cadre parent
             WHERE parent.id = NEW."arreteCadreId"
             FOR SHARE OF parent;
           WHEN 'arrete_cadre_zone_alerte_communes' THEN
-            SELECT parent.statut <> 'abroge'
+            SELECT ${operationalParentPredicate}
             INTO reference_is_operational
             FROM arrete_cadre parent
             WHERE parent.id = NEW."arreteCadreId"
@@ -259,6 +326,70 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
             );
         END IF;
 
+        CASE TG_TABLE_NAME
+          WHEN 'restriction' THEN
+            IF EXISTS (
+              SELECT 1
+              FROM restriction existing_reference
+              JOIN zone_alerte existing_zone
+                ON existing_zone.id = existing_reference."zoneAlerteId"
+              WHERE existing_reference."arreteRestrictionId" =
+                    NEW."arreteRestrictionId"
+                AND (
+                  current_reference_id IS NULL
+                  OR existing_reference.id <> current_reference_id
+                )
+                AND (
+                  existing_reference."zoneAlerteId" = target_zone_id
+                  OR (
+                    existing_zone.disabled = true
+                    AND resolve_active_sandre_zone_alias(existing_zone.id) =
+                        target_zone_id
+                  )
+                )
+            ) THEN
+              RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = format(
+                  'Impossible d''ajouter la restriction : une autre zone SANDRE de l''arrêté %s converge déjà vers la zone %s',
+                  NEW."arreteRestrictionId",
+                  target_zone_id
+                );
+            END IF;
+
+          WHEN 'arrete_cadre_zone_alerte_communes' THEN
+            IF EXISTS (
+              SELECT 1
+              FROM arrete_cadre_zone_alerte_communes existing_reference
+              JOIN zone_alerte existing_zone
+                ON existing_zone.id = existing_reference."zoneAlerteId"
+              WHERE existing_reference."arreteCadreId" = NEW."arreteCadreId"
+                AND (
+                  current_reference_id IS NULL
+                  OR existing_reference.id <> current_reference_id
+                )
+                AND (
+                  existing_reference."zoneAlerteId" = target_zone_id
+                  OR (
+                    existing_zone.disabled = true
+                    AND resolve_active_sandre_zone_alias(existing_zone.id) =
+                        target_zone_id
+                  )
+                )
+            ) THEN
+              RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = format(
+                  'Impossible d''ajouter la personnalisation : une autre zone SANDRE de l''arrêté cadre %s converge déjà vers la zone %s',
+                  NEW."arreteCadreId",
+                  target_zone_id
+                );
+            END IF;
+
+          ELSE
+            NULL;
+        END CASE;
+
         NEW."zoneAlerteId" := target_zone_id;
         RETURN NEW;
       END;
@@ -282,7 +413,7 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
             FROM arrete_cadre_zone_alerte link
             JOIN arrete_cadre parent ON parent.id = link."arreteCadreId"
             WHERE link."zoneAlerteId" = OLD.id
-              AND parent.statut <> 'abroge'
+              AND ${operationalParentPredicate}
           )
           OR EXISTS (
             SELECT 1
@@ -290,7 +421,7 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
             JOIN arrete_restriction parent
               ON parent.id = reference."arreteRestrictionId"
             WHERE reference."zoneAlerteId" = OLD.id
-              AND parent.statut <> 'abroge'
+              AND ${operationalParentPredicate}
           )
           OR EXISTS (
             SELECT 1
@@ -298,7 +429,7 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
             JOIN arrete_cadre parent
               ON parent.id = reference."arreteCadreId"
             WHERE reference."zoneAlerteId" = OLD.id
-              AND parent.statut <> 'abroge'
+              AND ${operationalParentPredicate}
           )
         INTO has_references;
 
@@ -325,7 +456,7 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
             ON target."arreteRestrictionId" = source."arreteRestrictionId"
             AND target."zoneAlerteId" = target_zone_id
           WHERE source."zoneAlerteId" = OLD.id
-            AND parent.statut <> 'abroge'
+            AND ${operationalParentPredicate}
         ) THEN
           RAISE EXCEPTION USING
             ERRCODE = '23514',
@@ -345,7 +476,7 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
             ON target."arreteCadreId" = source."arreteCadreId"
             AND target."zoneAlerteId" = target_zone_id
           WHERE source."zoneAlerteId" = OLD.id
-            AND parent.statut <> 'abroge'
+            AND ${operationalParentPredicate}
         ) THEN
           RAISE EXCEPTION USING
             ERRCODE = '23514',
@@ -364,28 +495,28 @@ export class SandreDisabledZoneReferenceGuard1785859200000 implements MigrationI
         FROM arrete_cadre_zone_alerte link
         JOIN arrete_cadre parent ON parent.id = link."arreteCadreId"
         WHERE link."zoneAlerteId" = OLD.id
-          AND parent.statut <> 'abroge'
+          AND ${operationalParentPredicate}
         ON CONFLICT DO NOTHING;
 
         DELETE FROM arrete_cadre_zone_alerte link
         USING arrete_cadre parent
         WHERE link."arreteCadreId" = parent.id
           AND link."zoneAlerteId" = OLD.id
-          AND parent.statut <> 'abroge';
+          AND ${operationalParentPredicate};
 
         UPDATE restriction reference
         SET "zoneAlerteId" = target_zone_id
         FROM arrete_restriction parent
         WHERE reference."arreteRestrictionId" = parent.id
           AND reference."zoneAlerteId" = OLD.id
-          AND parent.statut <> 'abroge';
+          AND ${operationalParentPredicate};
 
         UPDATE arrete_cadre_zone_alerte_communes reference
         SET "zoneAlerteId" = target_zone_id
         FROM arrete_cadre parent
         WHERE reference."arreteCadreId" = parent.id
           AND reference."zoneAlerteId" = OLD.id
-          AND parent.statut <> 'abroge';
+          AND ${operationalParentPredicate};
 
         RETURN NEW;
       END;

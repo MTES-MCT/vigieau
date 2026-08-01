@@ -893,7 +893,7 @@ export async function loadReferenceCounts(
           JOIN arrete_cadre ac ON ac.id = az."arreteCadreId"
           JOIN zone_alerte za ON za.id = az."zoneAlerteId"
           WHERE za."departementId" = ANY($1::integer[])
-            AND ac.statut <> 'abroge'
+            AND ac.statut IN ('a_venir', 'publie')
           GROUP BY az."zoneAlerteId"
         `,
         [departmentIds],
@@ -905,7 +905,7 @@ export async function loadReferenceCounts(
           JOIN arrete_restriction ar ON ar.id = r."arreteRestrictionId"
           JOIN zone_alerte za ON za.id = r."zoneAlerteId"
           WHERE za."departementId" = ANY($1::integer[])
-            AND ar.statut <> 'abroge'
+            AND ar.statut IN ('a_venir', 'publie')
           GROUP BY r."zoneAlerteId"
         `,
         [departmentIds],
@@ -917,7 +917,7 @@ export async function loadReferenceCounts(
           JOIN arrete_cadre ac ON ac.id = c."arreteCadreId"
           JOIN zone_alerte za ON za.id = c."zoneAlerteId"
           WHERE za."departementId" = ANY($1::integer[])
-            AND ac.statut <> 'abroge'
+            AND ac.statut IN ('a_venir', 'publie')
           GROUP BY c."zoneAlerteId"
         `,
         [departmentIds],
@@ -999,7 +999,7 @@ export async function loadDatabaseState(
           FROM arrete_cadre_zone_alerte link
           JOIN arrete_cadre ac ON ac.id = link."arreteCadreId"
           WHERE link."zoneAlerteId" = ANY($1::integer[])
-            AND ac.statut <> 'abroge'
+            AND ac.statut IN ('a_venir', 'publie')
           ORDER BY link."arreteCadreId", link."zoneAlerteId"
         `,
         [zoneIds],
@@ -1019,7 +1019,7 @@ export async function loadDatabaseState(
           JOIN arrete_restriction ar
             ON ar.id = restriction_row."arreteRestrictionId"
           WHERE restriction_row."zoneAlerteId" = ANY($1::integer[])
-            AND ar.statut <> 'abroge'
+            AND ar.statut IN ('a_venir', 'publie')
           ORDER BY restriction_row.id
         `,
         [zoneIds],
@@ -1034,7 +1034,7 @@ export async function loadDatabaseState(
           FROM arrete_cadre_zone_alerte_communes customization
           JOIN arrete_cadre ac ON ac.id = customization."arreteCadreId"
           WHERE customization."zoneAlerteId" = ANY($1::integer[])
-            AND ac.statut <> 'abroge'
+            AND ac.statut IN ('a_venir', 'publie')
           ORDER BY customization.id
         `,
         [zoneIds],
@@ -1715,7 +1715,7 @@ export async function moveOperationalReferences(
     JOIN arrete_cadre parent ON parent.id = link."arreteCadreId"
     JOIN sandre_reconciliation_mapping mapping
       ON mapping.old_zone_id = link."zoneAlerteId"
-    WHERE parent.statut <> 'abroge'
+    WHERE parent.statut IN ('a_venir', 'publie')
     ON CONFLICT DO NOTHING
   `);
   await executor.query(`
@@ -1723,7 +1723,7 @@ export async function moveOperationalReferences(
     USING sandre_reconciliation_mapping mapping, arrete_cadre parent
     WHERE link."arreteCadreId" = parent.id
       AND link."zoneAlerteId" = mapping.old_zone_id
-      AND parent.statut <> 'abroge'
+      AND parent.statut IN ('a_venir', 'publie')
   `);
   await executor.query(`
     UPDATE restriction reference
@@ -1731,7 +1731,7 @@ export async function moveOperationalReferences(
     FROM sandre_reconciliation_mapping mapping, arrete_restriction parent
     WHERE reference."arreteRestrictionId" = parent.id
       AND reference."zoneAlerteId" = mapping.old_zone_id
-      AND parent.statut <> 'abroge'
+      AND parent.statut IN ('a_venir', 'publie')
   `);
   await executor.query(`
     UPDATE arrete_cadre_zone_alerte_communes reference
@@ -1739,7 +1739,7 @@ export async function moveOperationalReferences(
     FROM sandre_reconciliation_mapping mapping, arrete_cadre parent
     WHERE reference."arreteCadreId" = parent.id
       AND reference."zoneAlerteId" = mapping.old_zone_id
-      AND parent.statut <> 'abroge'
+      AND parent.statut IN ('a_venir', 'publie')
   `);
 }
 
@@ -1796,7 +1796,7 @@ export async function lockAffectedRows(
       JOIN arrete_restriction parent
         ON parent.id = reference."arreteRestrictionId"
       WHERE reference."zoneAlerteId" = ANY($1::integer[])
-        AND parent.statut <> 'abroge'
+        AND parent.statut IN ('a_venir', 'publie')
       ORDER BY reference.id
       FOR UPDATE OF reference
     `,
@@ -1808,7 +1808,7 @@ export async function lockAffectedRows(
       FROM arrete_cadre_zone_alerte_communes reference
       JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
       WHERE reference."zoneAlerteId" = ANY($1::integer[])
-        AND parent.statut <> 'abroge'
+        AND parent.statut IN ('a_venir', 'publie')
       ORDER BY reference.id
       FOR UPDATE OF reference
     `,
@@ -1820,7 +1820,7 @@ export async function lockAffectedRows(
       FROM arrete_cadre_zone_alerte link
       JOIN arrete_cadre parent ON parent.id = link."arreteCadreId"
       WHERE link."zoneAlerteId" = ANY($1::integer[])
-        AND parent.statut <> 'abroge'
+        AND parent.statut IN ('a_venir', 'publie')
       ORDER BY link."arreteCadreId", link."zoneAlerteId"
       FOR UPDATE OF link
     `,
@@ -1902,7 +1902,7 @@ export async function assertNoOldReferences(
         FROM arrete_cadre_zone_alerte reference
         JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
         WHERE reference."zoneAlerteId" = mapping.old_zone_id
-          AND parent.statut <> 'abroge'
+          AND parent.statut IN ('a_venir', 'publie')
       )
       OR EXISTS (
         SELECT 1
@@ -1910,14 +1910,14 @@ export async function assertNoOldReferences(
         JOIN arrete_restriction parent
           ON parent.id = reference."arreteRestrictionId"
         WHERE reference."zoneAlerteId" = mapping.old_zone_id
-          AND parent.statut <> 'abroge'
+          AND parent.statut IN ('a_venir', 'publie')
       )
       OR EXISTS (
         SELECT 1
         FROM arrete_cadre_zone_alerte_communes reference
         JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
         WHERE reference."zoneAlerteId" = mapping.old_zone_id
-          AND parent.statut <> 'abroge'
+          AND parent.statut IN ('a_venir', 'publie')
       )
       OR EXISTS (
         SELECT 1
@@ -2096,7 +2096,7 @@ function nullableNumber(value: unknown): number | null {
 }
 
 function isOperationalParentStatus(value: unknown): boolean {
-  return typeof value === 'string' && value !== 'abroge';
+  return value === 'a_venir' || value === 'publie';
 }
 
 function writeApplyOutcome(

@@ -132,15 +132,15 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
       customizations: 4,
     });
     const statements = executor.query.mock.calls.map(([sql]) => sql);
-    expect(statements[0]).toContain("ac.statut <> 'abroge'");
+    expect(statements[0]).toContain("ac.statut IN ('a_venir', 'publie')");
     expect(statements[1]).toContain(
       'JOIN arrete_restriction ar ON ar.id = r."arreteRestrictionId"',
     );
-    expect(statements[1]).toContain("ar.statut <> 'abroge'");
+    expect(statements[1]).toContain("ar.statut IN ('a_venir', 'publie')");
     expect(statements[2]).toContain(
       'JOIN arrete_cadre ac ON ac.id = c."arreteCadreId"',
     );
-    expect(statements[2]).toContain("ac.statut <> 'abroge'");
+    expect(statements[2]).toContain("ac.statut IN ('a_venir', 'publie')");
   });
 
   it('excludes historical references from the approved database fingerprint', async () => {
@@ -275,7 +275,9 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     expect(fingerprint(firstState)).toBe(fingerprint(secondState));
 
     const statements = firstExecutor.query.mock.calls.map(([sql]) => sql);
-    expect(statements.join('\n').match(/statut <> 'abroge'/g)).toHaveLength(3);
+    expect(
+      statements.join('\n').match(/statut IN \('a_venir', 'publie'\)/g),
+    ).toHaveLength(3);
     const communeQuery = firstExecutor.query.mock.calls.find(([sql]) =>
       sql.includes('FROM ac_za_communes'),
     );
@@ -290,7 +292,7 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     const statements = executor.query.mock.calls.map(([sql]) => sql);
     expect(statements).toHaveLength(4);
     statements.forEach((sql) =>
-      expect(sql).toContain("parent.statut <> 'abroge'"),
+      expect(sql).toContain("parent.statut IN ('a_venir', 'publie')"),
     );
     expect(statements[0]).toContain('JOIN arrete_cadre parent');
     expect(statements[1]).toContain('arrete_cadre parent');
@@ -309,7 +311,7 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     expect(statements[1]).toContain('UNION');
     expect(statements[2]).toContain('FROM arrete_restriction parent');
     statements.slice(3, 6).forEach((sql) => {
-      expect(sql).toContain("parent.statut <> 'abroge'");
+      expect(sql).toContain("parent.statut IN ('a_venir', 'publie')");
       expect(sql).toContain('FOR UPDATE OF');
     });
   });
@@ -333,7 +335,9 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     ).resolves.toBeUndefined();
 
     const sql = executor.query.mock.calls[0][0];
-    expect(sql.match(/parent.statut <> 'abroge'/g)).toHaveLength(3);
+    expect(sql.match(/parent.statut IN \('a_venir', 'publie'\)/g)).toHaveLength(
+      3,
+    );
     expect(sql).toContain('FROM sandre_zone_alias');
   });
 

@@ -75,6 +75,14 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     syncMode?: string;
     invalidGeometryCodes?: string[];
     referencedZoneIds?: number[];
+    historicalReferencedZoneIds?: number[];
+    operationalDisabledSources?: Array<{
+      id: number;
+      idSandre: number | null;
+      codeSandre: string | null;
+      type: 'SOU' | 'SUP';
+    }>;
+    collisionZoneIds?: number[];
     genealogyRelations?: Array<{
       id: string;
       parentCode: string;
@@ -135,17 +143,44 @@ describe('ZoneAlerteService Sandre synchronization', () => {
           }));
         }
         if (query.includes('AS "nonAbrogeArreteCadre"')) {
-          const referenced = (options?.referencedZoneIds ?? []).includes(
+          const operationallyReferenced = (
+            options?.referencedZoneIds ?? []
+          ).includes(parameters?.[0]);
+          const historicallyReferenced = (
+            options?.historicalReferencedZoneIds ?? []
+          ).includes(parameters?.[0]);
+          const referenced = operationallyReferenced || historicallyReferenced;
+          return [
+            {
+              arreteCadre: referenced ? 1 : 0,
+              nonAbrogeArreteCadre: operationallyReferenced ? 1 : 0,
+              allRestrictions: referenced ? 1 : 0,
+              restrictions: 0,
+              allCustomizations: 0,
+              customizations: 0,
+            },
+          ];
+        }
+        if (
+          query.includes('FROM zone_alerte zone') &&
+          query.includes('zone.disabled = true')
+        ) {
+          return options?.operationalDisabledSources ?? [];
+        }
+        if (query.includes('AS "restrictionCollision"')) {
+          const collides = (options?.collisionZoneIds ?? []).includes(
             parameters?.[0],
           );
           return [
             {
-              arreteCadre: referenced ? 1 : 0,
-              nonAbrogeArreteCadre: referenced ? 1 : 0,
-              restrictions: 0,
-              customizations: 0,
+              restrictionCollision: collides,
+              customizationCollision: false,
+              aliasCollision: false,
             },
           ];
+        }
+        if (query.includes('remap_operational_sandre_zone_references')) {
+          return [{ targetZoneId: parameters?.[1] }];
         }
         return [];
       }),
@@ -181,6 +216,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       release: jest.fn().mockResolvedValue(undefined),
     };
     const dataSource = {
+      manager,
       createQueryRunner: jest.fn(() => queryRunner),
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
@@ -250,9 +286,10 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       dataSource as any,
     );
     (service as any).runCurrentZoneComputeWorker = runCurrentZoneComputeWorker;
-    (service as any).getSandreGenealogyRelations = jest
+    const getSandreGenealogyRelations = jest
       .fn()
       .mockResolvedValue(options?.genealogyRelations ?? []);
+    (service as any).getSandreGenealogyRelations = getSandreGenealogyRelations;
 
     return {
       aliasRepository,
@@ -267,6 +304,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       service,
       stateRepository,
       zoneRepository,
+      getSandreGenealogyRelations,
       runCurrentZoneComputeWorker,
     };
   };
@@ -538,7 +576,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(zoneFind).toHaveBeenCalledTimes(2);
   });
 
-  it('rolls back the whole department when a referenced frozen zone has no official successor', async () => {
+  it('reports stale or missing genealogy for a newer frozen zone without a successor', async () => {
     const activeFeature = rawFeature();
     const frozenFeature = rawFeature({
       gid: 1380,
@@ -578,7 +616,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     });
 
     await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
-      'NO_TYPE_2_SUCCESSOR',
+      'GENEALOGY_STALE_OR_MISSING',
     );
 
     expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
@@ -587,6 +625,212 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       expect.stringContaining('"blockedSnapshotHash"'),
       expect.any(Array),
     );
+    const decisionCall = harness.dataSource.query.mock.calls.find(([query]) =>
+      query.includes('INSERT INTO sandre_zone_sync_decision'),
+    );
+    expect(decisionCall?.[1]?.[2]).toContain('GENEALOGY_STALE_OR_MISSING');
+  });
+
+  it.each(['audit', 'safe'])(
+    'blocks a conflicting frozen alias consistently in %s mode',
+    async (syncMode) => {
+      const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+      const frozenFeature = rawFeature({
+        gid: 1380,
+        CdZAS: 'OLD_ALIAS',
+        LbZAS: 'Zone historique',
+        StZAS: 'Gelé',
+      });
+      const activeZone = {
+        id: 201,
+        idSandre: 3201,
+        codeSandre: 'NEW',
+        disabled: false,
+        type: 'SUP',
+        departement: department,
+        bassinVersant: basin,
+      };
+      const conflictingFrozenZone = {
+        id: 102,
+        idSandre: 1380,
+        codeSandre: 'OTHER_CANONICAL_CODE',
+        disabled: true,
+        type: 'SUP',
+        departement: department,
+        bassinVersant: basin,
+      };
+      const harness = createHarness({
+        syncMode,
+        httpResponses: [
+          countResponse(2),
+          { data: { features: [activeFeature, frozenFeature] } },
+          countResponse(2),
+        ],
+        zoneFind: jest
+          .fn()
+          .mockResolvedValueOnce([activeZone])
+          .mockResolvedValueOnce([]),
+        aliasFind: jest.fn().mockResolvedValue({
+          id: 10,
+          zoneAlerte: conflictingFrozenZone,
+        }),
+        referencedZoneIds: [102],
+      });
+
+      await expect(
+        harness.service.updateDepartementZones('65'),
+      ).rejects.toThrow('conflicts with canonical zone identity');
+
+      const decisionCall = harness.dataSource.query.mock.calls.find(([query]) =>
+        query.includes('INSERT INTO sandre_zone_sync_decision'),
+      );
+      expect(decisionCall?.[1]?.[2]).toContain(
+        'SOURCE_CANONICAL_IDENTITY_CONFLICT',
+      );
+      expect(harness.zoneRepository.save.mock.calls).not.toEqual(
+        expect.arrayContaining([
+          [expect.objectContaining({ id: conflictingFrozenZone.id })],
+        ]),
+      );
+      if (syncMode === 'safe') {
+        expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(
+          1,
+        );
+      }
+      expect(harness.manager.query).not.toHaveBeenCalledWith(
+        expect.stringContaining('remap_operational_sandre_zone_references'),
+        expect.any(Array),
+      );
+    },
+  );
+
+  it.each(['audit', 'safe'])(
+    'blocks an unverified frozen alias identity consistently in %s mode',
+    async (syncMode) => {
+      const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+      const frozenFeature = rawFeature({
+        gid: 1380,
+        CdZAS: 'OLD',
+        LbZAS: 'Zone historique',
+        StZAS: 'Gelé',
+      });
+      const activeZone = {
+        id: 201,
+        idSandre: 3201,
+        codeSandre: 'NEW',
+        disabled: false,
+        type: 'SUP',
+        departement: department,
+        bassinVersant: basin,
+      };
+      const unverifiedFrozenZone = {
+        id: 102,
+        idSandre: 9999,
+        codeSandre: null,
+        disabled: true,
+        type: 'SUP',
+        departement: department,
+        bassinVersant: basin,
+      };
+      const harness = createHarness({
+        syncMode,
+        httpResponses: [
+          countResponse(2),
+          { data: { features: [activeFeature, frozenFeature] } },
+          countResponse(2),
+        ],
+        zoneFind: jest
+          .fn()
+          .mockResolvedValueOnce([activeZone])
+          .mockResolvedValueOnce([]),
+        aliasFind: jest.fn().mockResolvedValue({
+          id: 10,
+          zoneAlerte: unverifiedFrozenZone,
+        }),
+        referencedZoneIds: [102],
+      });
+
+      await expect(
+        harness.service.updateDepartementZones('65'),
+      ).rejects.toThrow('identity is unresolved');
+
+      const decisionCall = harness.dataSource.query.mock.calls.find(([query]) =>
+        query.includes('INSERT INTO sandre_zone_sync_decision'),
+      );
+      expect(decisionCall?.[1]?.[2]).toContain('SOURCE_IDENTITY_UNRESOLVED');
+      expect(harness.zoneRepository.save.mock.calls).not.toEqual(
+        expect.arrayContaining([
+          [expect.objectContaining({ id: unverifiedFrozenZone.id })],
+        ]),
+      );
+      if (syncMode === 'safe') {
+        expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(
+          1,
+        );
+      }
+    },
+  );
+
+  it('defers an unverified historical identity without blocking safe sync', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const unverifiedFrozenZone = {
+      id: 102,
+      idSandre: 9999,
+      codeSandre: null,
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([]),
+      aliasFind: jest.fn().mockResolvedValue({
+        id: 10,
+        zoneAlerte: unverifiedFrozenZone,
+      }),
+      historicalReferencedZoneIds: [102],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.objectContaining({ disabled: 1 }),
+    );
+
+    expect(unverifiedFrozenZone).toEqual(
+      expect.objectContaining({
+        disabled: true,
+        idSandre: 9999,
+        codeSandre: null,
+      }),
+    );
+    expect(harness.aliasRepository.save).not.toHaveBeenCalled();
+    const decisionCall = harness.manager.query.mock.calls.find(([query]) =>
+      query.includes('INSERT INTO sandre_zone_sync_decision'),
+    );
+    expect(decisionCall?.[1]?.[2]).toContain('SOURCE_IDENTITY_UNRESOLVED');
+    expect(decisionCall?.[1]?.[2]).toContain('"outcome":"deferred"');
   });
 
   it('reconciles a referenced frozen zone only through a strict official successor', async () => {
@@ -657,6 +901,515 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
     expect(frozenZone.disabled).toBe(true);
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs operational references from an already disabled frozen zone', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      code: '73_65_14',
+      nom: 'Zone actuelle',
+      type: 'SUP',
+      numeroVersionSandre: 1,
+      ressourceInfluencee: false,
+      disabled: false,
+      departement: department,
+      bassinVersant: basin,
+      geom: activeFeature.geometry,
+      codesAlternatifs: ['73_65_14'],
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: 'OLD',
+      disabled: true,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      aliasFind: jest.fn().mockResolvedValue({
+        id: 10,
+        zoneAlerte: activeZone,
+      }),
+      referencedZoneIds: [102],
+      operationalDisabledSources: [
+        { id: 102, idSandre: 1380, codeSandre: 'OLD', type: 'SUP' },
+      ],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.any(Object),
+    );
+
+    expect(harness.aliasRepository.save).not.toHaveBeenCalled();
+    expect(harness.manager.query).toHaveBeenCalledWith(
+      'SELECT remap_operational_sandre_zone_references($1, $2)',
+      [102, 201],
+    );
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65]);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+
+    const parentLockCalls = harness.manager.query.mock.calls
+      .map(([query], index) => ({ index, query }))
+      .filter(({ query }) => query.includes('FOR SHARE OF parent'));
+    expect(parentLockCalls).toHaveLength(2);
+    expect(parentLockCalls[0].query).toContain('FROM arrete_cadre parent');
+    expect(parentLockCalls[1].query).toContain(
+      'FROM arrete_restriction parent',
+    );
+    expect(
+      harness.manager.query.mock.calls[parentLockCalls[0].index][1],
+    ).toEqual([[102]]);
+    expect(
+      harness.manager.query.mock.invocationCallOrder[parentLockCalls[1].index],
+    ).toBeLessThan(harness.zoneRepository.save.mock.invocationCallOrder[0]);
+  });
+
+  it('provisions a strict successor alias without moving historical references', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: 'OLD',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      historicalReferencedZoneIds: [102],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.objectContaining({ disabled: 1 }),
+    );
+
+    expect(harness.aliasRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        zoneAlerte: expect.objectContaining({ id: 201 }),
+        aliasValue: 'OLD',
+        source: 'sandre_genealogy',
+      }),
+    );
+    expect(harness.manager.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('remap_operational_sandre_zone_references'),
+      expect.any(Array),
+    );
+    const firstParentLockCall = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('FOR SHARE OF parent'),
+    );
+    expect(firstParentLockCall).toBeGreaterThanOrEqual(0);
+    expect(
+      harness.getSandreGenealogyRelations.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[firstParentLockCall],
+    );
+  });
+
+  it('backfills a verified legacy gid before repairing its references', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: null,
+      disabled: true,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([frozenZone]),
+      referencedZoneIds: [102],
+      operationalDisabledSources: [
+        { id: 102, idSandre: 1380, codeSandre: null, type: 'SUP' },
+      ],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.any(Object),
+    );
+
+    expect(harness.zoneRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 102, idSandre: 1380, codeSandre: 'OLD' }),
+    );
+    expect(harness.aliasRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        zoneAlerte: expect.objectContaining({ id: 201 }),
+        aliasValue: 'OLD',
+      }),
+    );
+    const sourceSaveIndex = harness.zoneRepository.save.mock.calls.findIndex(
+      ([zone]) => zone.id === 102,
+    );
+    const repairCallIndex = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('remap_operational_sandre_zone_references'),
+    );
+    expect(sourceSaveIndex).toBeGreaterThanOrEqual(0);
+    expect(repairCallIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      harness.zoneRepository.save.mock.invocationCallOrder[sourceSaveIndex],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[repairCallIndex],
+    );
+  });
+
+  it('moves an existing source alias only after strict reconciliation', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: 'OLD',
+      disabled: true,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const existingAlias = {
+      id: 10,
+      zoneAlerte: frozenZone,
+      source: 'manual_reconciliation',
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      aliasFind: jest.fn().mockResolvedValue(existingAlias),
+      referencedZoneIds: [102],
+      operationalDisabledSources: [
+        { id: 102, idSandre: 1380, codeSandre: 'OLD', type: 'SUP' },
+      ],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await harness.service.updateDepartementZones('65');
+
+    expect(harness.aliasRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 10,
+        zoneAlerte: activeZone,
+        source: 'sandre_genealogy',
+      }),
+    );
+  });
+
+  it('rolls back before remapping when operational references collide', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: 'OLD',
+      disabled: true,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      referencedZoneIds: [102],
+      operationalDisabledSources: [
+        { id: 102, idSandre: 1380, codeSandre: 'OLD', type: 'SUP' },
+      ],
+      collisionZoneIds: [102],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'restriction collision',
+    );
+
+    expect(harness.aliasRepository.save).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('remap_operational_sandre_zone_references'),
+      expect.any(Array),
+    );
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('audits the same strict reconciliation without remapping references', async () => {
+    const activeFeature = rawFeature({ gid: 3201, CdZAS: 'NEW' });
+    const frozenFeature = rawFeature({
+      gid: 1380,
+      CdZAS: 'OLD',
+      LbZAS: 'Zone historique',
+      StZAS: 'Gelé',
+    });
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: 'NEW',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const frozenZone = {
+      id: 102,
+      idSandre: 1380,
+      codeSandre: 'OLD',
+      disabled: true,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      syncMode: 'audit',
+      httpResponses: [
+        countResponse(2),
+        { data: { features: [activeFeature, frozenFeature] } },
+        countResponse(2),
+      ],
+      zoneFind: jest
+        .fn()
+        .mockResolvedValueOnce([activeZone])
+        .mockResolvedValueOnce([frozenZone]),
+      referencedZoneIds: [102],
+      operationalDisabledSources: [
+        { id: 102, idSandre: 1380, codeSandre: 'OLD', type: 'SUP' },
+      ],
+      genealogyRelations: [
+        {
+          id: '1',
+          parentCode: 'OLD',
+          childCode: 'NEW',
+          modificationDate: '2026-07-01',
+          modificationType: '2',
+          reason: 'Remplacement',
+        },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.objectContaining({ unchanged: 2 }),
+    );
+
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(harness.aliasRepository.save).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('remap_operational_sandre_zone_references'),
+      expect.any(Array),
+    );
+    const decisionCall = harness.dataSource.query.mock.calls.find(([query]) =>
+      query.includes('INSERT INTO sandre_zone_sync_decision'),
+    );
+    expect(decisionCall?.[1]?.[2]).toContain('OFFICIAL_LINEAR_SUCCESSOR');
+    expect(decisionCall?.[1]?.[2]).toContain('"outcome":"deferred"');
+  });
+
+  it('blocks audit when an operational disabled zone has no Sandre identity', async () => {
+    const harness = createHarness({
+      syncMode: 'audit',
+      operationalDisabledSources: [
+        { id: 501, idSandre: null, codeSandre: null, type: 'SUP' },
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'no unambiguous Sandre identity',
+    );
+
+    const decisionCall = harness.dataSource.query.mock.calls.find(([query]) =>
+      query.includes('INSERT INTO sandre_zone_sync_decision'),
+    );
+    expect(decisionCall?.[1]?.[2]).toContain('SOURCE_IDENTITY_UNRESOLVED');
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('locks parents of unidentified operational zones before any active-zone write', async () => {
+    const activeFeature = rawFeature();
+    const activeZone = {
+      id: 201,
+      idSandre: 3201,
+      codeSandre: '3201',
+      disabled: true,
+      type: 'SUP',
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      zoneFind: jest.fn().mockResolvedValueOnce([activeZone]),
+      operationalDisabledSources: [
+        { id: 501, idSandre: null, codeSandre: null, type: 'SUP' },
+      ],
+      httpResponses: [
+        countResponse(1),
+        { data: { features: [activeFeature] } },
+        countResponse(1),
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'no unambiguous Sandre identity',
+    );
+
+    const parentLockCalls = harness.manager.query.mock.calls
+      .map(([query], index) => ({ index, query }))
+      .filter(({ query }) => query.includes('FOR SHARE OF parent'));
+    expect(parentLockCalls).toHaveLength(2);
+    expect(
+      harness.manager.query.mock.calls[parentLockCalls[0].index][1],
+    ).toEqual([[501]]);
+    expect(
+      harness.manager.query.mock.invocationCallOrder[parentLockCalls[1].index],
+    ).toBeLessThan(harness.zoneRepository.save.mock.invocationCallOrder[0]);
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('rolls back the entire department when an active zone is invalid', async () => {

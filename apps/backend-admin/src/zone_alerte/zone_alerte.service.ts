@@ -34,6 +34,7 @@ import {
   discoverGenealogyCsvUrl,
   mappingsFromResults,
   parseGenealogyCsv,
+  ReconciliationMapping,
   SANDRE_GENEALOGY_METADATA_URL,
   SandreGenealogyRelation,
   ZoneReferenceCounts,
@@ -121,6 +122,23 @@ interface SandreSnapshotApplication {
   recomputeRequired: boolean;
   decisions: SandreSyncDecisionDraft[];
 }
+
+interface OperationalDisabledZoneSource {
+  id: number;
+  idSandre: number | null;
+  codeSandre: string | null;
+  legacyCode: string;
+  type: 'SOU' | 'SUP';
+}
+
+interface ZoneReferenceInventory extends ZoneReferenceCounts {
+  allRestrictions: number;
+  allCustomizations: number;
+}
+
+type SandreGenealogyLoad =
+  | { relations: SandreGenealogyRelation[]; error?: never }
+  | { relations?: never; error: unknown };
 
 @Injectable()
 export class ZoneAlerteService {
@@ -612,20 +630,36 @@ export class ZoneAlerteService {
     await this.recordSandreObservation(depCode, snapshot, startedAt);
 
     if (syncMode === 'audit') {
-      const decisions = this.createAuditDecisions(snapshot);
-      await this.persistSandreDecisions(
-        this.dataSource,
-        depCode,
-        batchId,
-        decisions,
-      );
-      await this.finishSandreBatch(batchId, 'observed', snapshot);
-      return {
-        added: 0,
-        updated: 0,
-        disabled: 0,
-        unchanged: snapshot.featureCount,
-      };
+      try {
+        const decisions = await this.createAuditDecisions(depCode, snapshot);
+        await this.persistSandreDecisions(
+          this.dataSource,
+          depCode,
+          batchId,
+          decisions,
+        );
+        await this.finishSandreBatch(batchId, 'observed', snapshot);
+        return {
+          added: 0,
+          updated: 0,
+          disabled: 0,
+          unchanged: snapshot.featureCount,
+        };
+      } catch (error) {
+        const decisions =
+          error instanceof SandreDepartmentBlockedError
+            ? error.decisions
+            : this.createBlockedDecisions(snapshot, error);
+        await this.persistSandreDecisions(
+          this.dataSource,
+          depCode,
+          batchId,
+          decisions,
+        );
+        await this.markSandreDepartmentBlocked(depCode, snapshot, error);
+        await this.finishSandreBatch(batchId, 'blocked', snapshot, error);
+        throw error;
+      }
     }
 
     let application: SandreSnapshotApplication;
@@ -891,36 +925,135 @@ export class ZoneAlerteService {
     );
   }
 
-  private createAuditDecisions(
+  private async createAuditDecisions(
+    depCode: string,
     snapshot: SandreZoneSnapshot,
-  ): SandreSyncDecisionDraft[] {
-    return snapshot.features.map((feature) =>
-      feature.status === SANDRE_VALID_STATUS
-        ? {
-            decisionKey: `${feature.codeSandre}:active`,
-            zoneType: feature.type,
-            sourceCode: feature.codeSandre,
-            action: 'UPSERT_ACTIVE',
-            outcome: 'observed',
-            reason: 'AUDIT_MODE_NO_WRITE',
-            evidence: {
-              status: feature.status,
-              payloadHash: feature.payloadHash,
+  ): Promise<SandreSyncDecisionDraft[]> {
+    const decisions: SandreSyncDecisionDraft[] = snapshot.features.map(
+      (feature) =>
+        feature.status === SANDRE_VALID_STATUS
+          ? {
+              decisionKey: `${feature.codeSandre}:active`,
+              zoneType: feature.type,
+              sourceCode: feature.codeSandre,
+              action: 'UPSERT_ACTIVE',
+              outcome: 'observed',
+              reason: 'AUDIT_MODE_NO_WRITE',
+              evidence: {
+                status: feature.status,
+                payloadHash: feature.payloadHash,
+              },
+            }
+          : {
+              decisionKey: `${feature.codeSandre}:inactive`,
+              zoneType: feature.type,
+              sourceCode: feature.codeSandre,
+              action: 'REVIEW_INACTIVE',
+              outcome: 'deferred',
+              reason: 'AUDIT_MODE_NO_WRITE',
+              evidence: {
+                status: feature.status,
+                payloadHash: feature.payloadHash,
+              },
             },
-          }
-        : {
-            decisionKey: `${feature.codeSandre}:inactive`,
-            zoneType: feature.type,
-            sourceCode: feature.codeSandre,
-            action: 'REVIEW_INACTIVE',
-            outcome: 'deferred',
-            reason: 'AUDIT_MODE_NO_WRITE',
-            evidence: {
-              status: feature.status,
-              payloadHash: feature.payloadHash,
-            },
-          },
     );
+    const decisionsByKey = new Map(
+      decisions.map((decision) => [decision.decisionKey, decision]),
+    );
+
+    const manager = this.dataSource.manager;
+    const departement = await manager.getRepository(Departement).findOne({
+      where: { code: depCode },
+    });
+    if (!departement) {
+      throw new Error(`Unknown department ${depCode}`);
+    }
+
+    const activeZoneIds = new Set<number>();
+    const activeZonesByCode = new Map<string, ZoneAlerte>();
+    let virtualZoneId = -1;
+    for (const feature of snapshot.features.filter(
+      (item) => item.status === SANDRE_VALID_STATUS,
+    )) {
+      const match = await this.findSandreZoneMatch(
+        manager,
+        departement,
+        feature,
+      );
+      if (match && activeZoneIds.has(match.zone.id)) {
+        throw new Error(
+          `Multiple active Sandre codes resolve to local zone ${match.zone.id}`,
+        );
+      }
+      if (match) {
+        activeZoneIds.add(match.zone.id);
+      }
+      const decision = decisionsByKey.get(`${feature.codeSandre}:active`);
+      if (decision) {
+        decision.zoneAlerteId = match?.zone.id ?? null;
+        decision.evidence = {
+          ...decision.evidence,
+          matchType: match?.matchType ?? null,
+        };
+      }
+      activeZonesByCode.set(
+        feature.codeSandre,
+        match?.zone ??
+          ({
+            id: virtualZoneId--,
+            idSandre: feature.gid,
+            codeSandre: feature.codeSandre,
+            disabled: false,
+            type: feature.type,
+            departement,
+          } as ZoneAlerte),
+      );
+    }
+
+    const resolvedInactiveFeatures: Array<{
+      feature: SandreZoneFeature;
+      match: SandreZoneMatch | null;
+    }> = [];
+    for (const feature of snapshot.features.filter(
+      (item) => item.status === 'Gelé',
+    )) {
+      const match = await this.findSandreZoneMatch(
+        manager,
+        departement,
+        feature,
+      );
+      const decision = decisionsByKey.get(`${feature.codeSandre}:inactive`);
+      if (decision) {
+        decision.zoneAlerteId = match?.zone.id ?? null;
+        decision.evidence = {
+          ...decision.evidence,
+          matchType: match?.matchType ?? null,
+        };
+      }
+      resolvedInactiveFeatures.push({ feature, match });
+    }
+
+    try {
+      await this.reconcileOperationalFrozenZones(
+        manager,
+        departement,
+        snapshot,
+        resolvedInactiveFeatures,
+        activeZoneIds,
+        activeZonesByCode,
+        decisions,
+        false,
+      );
+    } catch (error) {
+      if (error instanceof SandreDepartmentBlockedError) {
+        throw new SandreDepartmentBlockedError(error.reason, [
+          ...decisions,
+          ...error.decisions,
+        ]);
+      }
+      throw error;
+    }
+    return decisions;
   }
 
   private createBlockedDecisions(
@@ -1206,6 +1339,33 @@ export class ZoneAlerteService {
         resolvedInactiveFeatures.push({ feature, match });
       }
 
+      let genealogyLoad: SandreGenealogyLoad | undefined;
+      if (
+        resolvedInactiveFeatures.some(
+          ({ match }) => match && !activeZoneIds.has(match.zone.id),
+        )
+      ) {
+        try {
+          genealogyLoad = {
+            relations: await this.getSandreGenealogyRelations(),
+          };
+        } catch (error) {
+          genealogyLoad = { error };
+        }
+      }
+
+      const operationalDisabledSources =
+        await this.getOperationalDisabledZoneSources(
+          queryRunner.manager,
+          departement.id,
+        );
+      await this.lockOperationalParentsForSandreSources(queryRunner.manager, [
+        ...resolvedInactiveFeatures.flatMap(({ match }) =>
+          match ? [match.zone.id] : [],
+        ),
+        ...operationalDisabledSources.map((source) => source.id),
+      ]);
+
       const activeZonesByCode = new Map<string, ZoneAlerte>();
       for (const { feature, match } of resolvedActiveFeatures) {
         const countersBefore = { ...result };
@@ -1237,15 +1397,20 @@ export class ZoneAlerteService {
         });
       }
 
-      await this.reconcileOperationalFrozenZones(
-        queryRunner.manager,
-        departement,
-        snapshot,
-        resolvedInactiveFeatures,
-        activeZoneIds,
-        activeZonesByCode,
-        decisions,
-      );
+      const operationalReferencesReconciled =
+        await this.reconcileOperationalFrozenZones(
+          queryRunner.manager,
+          departement,
+          snapshot,
+          resolvedInactiveFeatures,
+          activeZoneIds,
+          activeZonesByCode,
+          decisions,
+          true,
+          operationalDisabledSources,
+          genealogyLoad,
+        );
+      recomputeRequired ||= operationalReferencesReconciled;
 
       // A local zone is disabled only when Sandre explicitly returns it as frozen.
       for (const { feature, match } of resolvedInactiveFeatures) {
@@ -1267,8 +1432,15 @@ export class ZoneAlerteService {
 
         const zone = match.zone;
         const zoneWasActive = zone.disabled !== true;
+        const missingVerifiedIdentity =
+          !zone.codeSandre &&
+          ['alias', 'legacy_gid'].includes(match.matchType) &&
+          (zone.idSandre === null ||
+            zone.idSandre === undefined ||
+            zone.idSandre === feature.gid);
         const changed =
           zoneWasActive ||
+          missingVerifiedIdentity ||
           zone.statutSandre !== feature.status ||
           zone.dateMajSandre !== feature.sourceUpdatedAt ||
           zone.sandrePayloadHash !== feature.payloadHash;
@@ -1291,7 +1463,8 @@ export class ZoneAlerteService {
         zone.dateMajSandre = feature.sourceUpdatedAt;
         zone.codesAlternatifs = feature.alternateCodes;
         zone.sandrePayloadHash = feature.payloadHash;
-        if (match.matchType === 'legacy_gid' && !zone.codeSandre) {
+        if (missingVerifiedIdentity) {
+          zone.idSandre = feature.gid;
           zone.codeSandre = feature.codeSandre;
         }
         await queryRunner.manager.getRepository(ZoneAlerte).save(zone);
@@ -1350,7 +1523,7 @@ export class ZoneAlerteService {
   private async getZoneReferenceCounts(
     manager: EntityManager,
     zoneAlerteId: number,
-  ): Promise<ZoneReferenceCounts> {
+  ): Promise<ZoneReferenceInventory> {
     const rows =
       (await manager.query(
         `
@@ -1363,20 +1536,33 @@ export class ZoneAlerteService {
               SELECT count(*)
               FROM arrete_cadre_zone_alerte link
               JOIN arrete_cadre ac ON ac.id = link."arreteCadreId"
-              WHERE link."zoneAlerteId" = $1 AND ac.statut <> 'abroge'
+              WHERE link."zoneAlerteId" = $1
+                AND ac.statut IN ('a_venir', 'publie')
             )::integer AS "nonAbrogeArreteCadre",
+            (
+              SELECT count(*)
+              FROM restriction reference
+              WHERE reference."zoneAlerteId" = $1
+            )::integer AS "allRestrictions",
             (
               SELECT count(*)
               FROM restriction reference
               JOIN arrete_restriction ar
                 ON ar.id = reference."arreteRestrictionId"
-              WHERE reference."zoneAlerteId" = $1 AND ar.statut <> 'abroge'
+              WHERE reference."zoneAlerteId" = $1
+                AND ar.statut IN ('a_venir', 'publie')
             )::integer AS restrictions,
             (
               SELECT count(*)
               FROM arrete_cadre_zone_alerte_communes reference
+              WHERE reference."zoneAlerteId" = $1
+            )::integer AS "allCustomizations",
+            (
+              SELECT count(*)
+              FROM arrete_cadre_zone_alerte_communes reference
               JOIN arrete_cadre ac ON ac.id = reference."arreteCadreId"
-              WHERE reference."zoneAlerteId" = $1 AND ac.statut <> 'abroge'
+              WHERE reference."zoneAlerteId" = $1
+                AND ac.statut IN ('a_venir', 'publie')
             )::integer AS customizations
         `,
         [zoneAlerteId],
@@ -1384,7 +1570,9 @@ export class ZoneAlerteService {
     return {
       arreteCadre: Number(rows[0]?.arreteCadre ?? 0),
       nonAbrogeArreteCadre: Number(rows[0]?.nonAbrogeArreteCadre ?? 0),
+      allRestrictions: Number(rows[0]?.allRestrictions ?? 0),
       restrictions: Number(rows[0]?.restrictions ?? 0),
+      allCustomizations: Number(rows[0]?.allCustomizations ?? 0),
       customizations: Number(rows[0]?.customizations ?? 0),
     };
   }
@@ -1400,19 +1588,52 @@ export class ZoneAlerteService {
     activeZoneIds: Set<number>,
     activeZonesByCode: Map<string, ZoneAlerte>,
     decisions: SandreSyncDecisionDraft[],
-  ): Promise<void> {
-    const referencedSources: Array<{
+    apply = true,
+    operationalDisabledSources?: OperationalDisabledZoneSource[],
+    genealogyLoad?: SandreGenealogyLoad,
+  ): Promise<boolean> {
+    const resolvedInactiveZoneIds = new Set(
+      resolvedInactiveFeatures.flatMap(({ match }) =>
+        match ? [match.zone.id] : [],
+      ),
+    );
+    const unidentifiedSources = (
+      operationalDisabledSources ??
+      (await this.getOperationalDisabledZoneSources(manager, departement.id))
+    ).filter(
+      (source) =>
+        !resolvedInactiveZoneIds.has(source.id) &&
+        !activeZoneIds.has(source.id),
+    );
+    if (unidentifiedSources.length > 0) {
+      throw new SandreDepartmentBlockedError(
+        `${unidentifiedSources.length} operational disabled zone(s) have no unambiguous Sandre identity`,
+        unidentifiedSources.map((source) => ({
+          decisionKey: `zone:${source.id}:reconciliation`,
+          zoneType: source.type,
+          sourceCode: source.codeSandre,
+          zoneAlerteId: source.id,
+          action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+          outcome: 'blocked',
+          reason: 'SOURCE_IDENTITY_UNRESOLVED',
+          evidence: {
+            idSandre: source.idSandre,
+            legacyCode: source.legacyCode,
+          },
+        })),
+      );
+    }
+
+    let referencedSources: Array<{
       feature: SandreZoneFeature;
+      matchType: SandreZoneMatch['matchType'];
       zone: ZoneAlerte;
-      references: ZoneReferenceCounts;
+      references: ZoneReferenceInventory;
+      operationalReferenceCount: number;
     }> = [];
 
     for (const { feature, match } of resolvedInactiveFeatures) {
-      if (
-        !match ||
-        match.zone.disabled === true ||
-        activeZoneIds.has(match.zone.id)
-      ) {
+      if (!match || activeZoneIds.has(match.zone.id)) {
         continue;
       }
       const references = await this.getZoneReferenceCounts(
@@ -1423,32 +1644,118 @@ export class ZoneAlerteService {
         references.nonAbrogeArreteCadre +
         references.restrictions +
         references.customizations;
-      if (operationalReferenceCount > 0) {
-        referencedSources.push({ feature, zone: match.zone, references });
+      const potentialReferenceCount =
+        references.arreteCadre +
+        references.allRestrictions +
+        references.allCustomizations;
+      if (potentialReferenceCount > 0) {
+        referencedSources.push({
+          feature,
+          matchType: match.matchType,
+          zone: match.zone,
+          references,
+          operationalReferenceCount,
+        });
       }
     }
 
+    const sourcesWithUnverifiedIdentity = referencedSources.flatMap(
+      (source) => {
+        const canonicalConflict =
+          source.matchType === 'alias' &&
+          Boolean(source.zone.codeSandre) &&
+          source.zone.codeSandre !== source.feature.codeSandre;
+        const missingVerifiedIdentity =
+          !source.zone.codeSandre &&
+          (!['alias', 'legacy_gid'].includes(source.matchType) ||
+            (source.zone.idSandre !== null &&
+              source.zone.idSandre !== undefined &&
+              source.zone.idSandre !== source.feature.gid));
+        return canonicalConflict || missingVerifiedIdentity
+          ? [
+              {
+                source,
+                reason: canonicalConflict
+                  ? 'SOURCE_CANONICAL_IDENTITY_CONFLICT'
+                  : 'SOURCE_IDENTITY_UNRESOLVED',
+              },
+            ]
+          : [];
+      },
+    );
+    const identityDecisions = sourcesWithUnverifiedIdentity.map(
+      ({ source, reason }) => ({
+        decisionKey: `zone:${source.zone.id}:reconciliation`,
+        zoneType: source.feature.type,
+        sourceCode: source.feature.codeSandre,
+        zoneAlerteId: source.zone.id,
+        action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+        outcome: source.operationalReferenceCount > 0 ? 'blocked' : 'deferred',
+        reason,
+        evidence: {
+          idSandre: source.zone.idSandre ?? null,
+          matchedCode: source.feature.codeSandre,
+          matchedCanonicalCode: source.zone.codeSandre ?? null,
+          matchType: source.matchType,
+        },
+      }),
+    );
+    if (
+      sourcesWithUnverifiedIdentity.some(
+        ({ source }) => source.operationalReferenceCount > 0,
+      )
+    ) {
+      throw new SandreDepartmentBlockedError(
+        sourcesWithUnverifiedIdentity.some(
+          ({ reason }) => reason === 'SOURCE_CANONICAL_IDENTITY_CONFLICT',
+        )
+          ? 'Operational frozen Sandre alias conflicts with canonical zone identity'
+          : 'Operational frozen Sandre source identity is unresolved',
+        identityDecisions as SandreSyncDecisionDraft[],
+      );
+    }
+    decisions.push(...(identityDecisions as SandreSyncDecisionDraft[]));
+    const unverifiedSourceIds = new Set(
+      sourcesWithUnverifiedIdentity.map(({ source }) => source.zone.id),
+    );
+    referencedSources = referencedSources.filter(
+      (source) => !unverifiedSourceIds.has(source.zone.id),
+    );
+
     if (referencedSources.length === 0) {
-      return;
+      return false;
     }
 
     let relations: SandreGenealogyRelation[];
     try {
-      relations = await this.getSandreGenealogyRelations();
+      if (genealogyLoad && 'error' in genealogyLoad) {
+        throw genealogyLoad.error;
+      }
+      relations =
+        genealogyLoad?.relations ?? (await this.getSandreGenealogyRelations());
     } catch (error) {
-      throw new SandreDepartmentBlockedError(
-        `Official Sandre genealogy is unavailable: ${this.sandreFailureReason(error)}`,
-        referencedSources.map(({ feature, zone, references }) => ({
+      const unavailableDecisions = referencedSources.map(
+        ({ feature, zone, references, operationalReferenceCount }) => ({
           decisionKey: `${feature.codeSandre}:reconciliation`,
           zoneType: feature.type,
           sourceCode: feature.codeSandre,
           zoneAlerteId: zone.id,
           action: 'RECONCILE_OFFICIAL_SUCCESSOR',
-          outcome: 'blocked',
+          outcome: operationalReferenceCount > 0 ? 'blocked' : 'deferred',
           reason: 'GENEALOGY_SOURCE_UNAVAILABLE',
           evidence: { references },
-        })),
+        }),
       );
+      if (
+        referencedSources.some((source) => source.operationalReferenceCount > 0)
+      ) {
+        throw new SandreDepartmentBlockedError(
+          `Official Sandre genealogy is unavailable: ${this.sandreFailureReason(error)}`,
+          unavailableDecisions as SandreSyncDecisionDraft[],
+        );
+      }
+      decisions.push(...(unavailableDecisions as SandreSyncDecisionDraft[]));
+      return false;
     }
 
     const localZonesById = new Map<
@@ -1475,7 +1782,7 @@ export class ZoneAlerteService {
       localZonesById.set(zone.id, {
         id: zone.id,
         idSandre: zone.idSandre ?? feature.gid,
-        codeSandre: zone.codeSandre ?? feature.codeSandre,
+        codeSandre: feature.codeSandre,
         // The official snapshot is authoritative for this transaction.
         disabled: true,
         departmentId: departement.id,
@@ -1502,33 +1809,117 @@ export class ZoneAlerteService {
       referenceCounts,
       { requireNonAbrogeArreteCadreReference: false },
     );
-    const blockedResults = results.filter(
-      (result) => result.status !== 'APPLICABLE',
+    const genealogyLatestDate = relations
+      .map((relation) => relation.modificationDate)
+      .filter(
+        (value): value is string =>
+          typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value),
+      )
+      .sort()
+      .at(-1);
+    const featuresByCode = new Map(
+      snapshot.features.map((feature) => [feature.codeSandre, feature]),
     );
-    if (blockedResults.length > 0) {
+    const decisionReason = (result: (typeof results)[number]): string => {
+      const sourceFeature = result.oldCodeSandre
+        ? featuresByCode.get(result.oldCodeSandre)
+        : null;
+      return result.reason === 'NO_TYPE_2_SUCCESSOR' &&
+        (!genealogyLatestDate ||
+          Boolean(
+            sourceFeature &&
+            sourceFeature.sourceUpdatedAt > genealogyLatestDate,
+          ))
+        ? 'GENEALOGY_STALE_OR_MISSING'
+        : result.reason;
+    };
+    const targetCounts = new Map<number, number>();
+    for (const result of results) {
+      if (result.status === 'APPLICABLE' && result.newZoneId !== null) {
+        targetCounts.set(
+          result.newZoneId,
+          (targetCounts.get(result.newZoneId) ?? 0) + 1,
+        );
+      }
+    }
+    const effectiveReason = (result: (typeof results)[number]): string =>
+      result.status === 'APPLICABLE' &&
+      result.newZoneId !== null &&
+      (targetCounts.get(result.newZoneId) ?? 0) > 1
+        ? 'NOT_STRICT_ONE_TO_ONE'
+        : decisionReason(result);
+    const isStrictlyApplicable = (result: (typeof results)[number]): boolean =>
+      result.status === 'APPLICABLE' &&
+      result.newZoneId !== null &&
+      (targetCounts.get(result.newZoneId) ?? 0) === 1;
+    const referencedSourcesByZoneId = new Map(
+      referencedSources.map((source) => [source.zone.id, source]),
+    );
+    const nonApplicableResults = results.filter(
+      (result) => !isStrictlyApplicable(result),
+    );
+    const blockingResults = nonApplicableResults.filter(
+      (result) =>
+        (referencedSourcesByZoneId.get(result.oldZoneId)
+          ?.operationalReferenceCount ?? 0) > 0,
+    );
+    if (blockingResults.length > 0) {
       throw new SandreDepartmentBlockedError(
-        `Official Sandre reconciliation blocked for ${blockedResults.map((result) => `${result.oldCodeSandre}:${result.reason}`).join(', ')}`,
+        `Official Sandre reconciliation blocked for ${blockingResults.map((result) => `${result.oldCodeSandre}:${effectiveReason(result)}`).join(', ')}`,
         results.map((result) => ({
           decisionKey: `${result.oldCodeSandre}:reconciliation`,
           zoneType: localZonesById.get(result.oldZoneId)?.type ?? 'SUP',
           sourceCode: result.oldCodeSandre,
           targetCode: result.newCodeSandre,
           zoneAlerteId: result.oldZoneId,
-          candidateZoneAlerteId: result.newZoneId,
+          candidateZoneAlerteId:
+            result.newZoneId && result.newZoneId > 0 ? result.newZoneId : null,
           action: 'RECONCILE_OFFICIAL_SUCCESSOR',
-          outcome: result.status === 'APPLICABLE' ? 'deferred' : 'blocked',
-          reason: result.reason,
+          outcome:
+            !isStrictlyApplicable(result) &&
+            (referencedSourcesByZoneId.get(result.oldZoneId)
+              ?.operationalReferenceCount ?? 0) > 0
+              ? 'blocked'
+              : 'deferred',
+          reason: effectiveReason(result),
           evidence: {
             genealogyPath: result.genealogyPath,
+            genealogyLatestDate: genealogyLatestDate ?? null,
+            sourceUpdatedAt: result.oldCodeSandre
+              ? (featuresByCode.get(result.oldCodeSandre)?.sourceUpdatedAt ??
+                null)
+              : null,
             references: result.references,
           },
         })),
       );
     }
 
+    for (const result of nonApplicableResults) {
+      decisions.push({
+        decisionKey: `${result.oldCodeSandre}:reconciliation`,
+        zoneType: localZonesById.get(result.oldZoneId)?.type ?? 'SUP',
+        sourceCode: result.oldCodeSandre,
+        targetCode: result.newCodeSandre,
+        zoneAlerteId: result.oldZoneId,
+        candidateZoneAlerteId:
+          result.newZoneId && result.newZoneId > 0 ? result.newZoneId : null,
+        action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+        outcome: 'deferred',
+        reason: effectiveReason(result),
+        evidence: {
+          genealogyPath: result.genealogyPath,
+          references: result.references,
+        },
+      });
+    }
+
     let mappings;
     try {
-      mappings = mappingsFromResults(results, localZones);
+      mappings = mappingsFromResults(
+        results.filter(isStrictlyApplicable),
+        localZones,
+      );
     } catch (error) {
       throw new SandreDepartmentBlockedError(
         `Official Sandre reconciliation is not one-to-one: ${this.sandreFailureReason(error)}`,
@@ -1538,7 +1929,8 @@ export class ZoneAlerteService {
           sourceCode: result.oldCodeSandre,
           targetCode: result.newCodeSandre,
           zoneAlerteId: result.oldZoneId,
-          candidateZoneAlerteId: result.newZoneId,
+          candidateZoneAlerteId:
+            result.newZoneId && result.newZoneId > 0 ? result.newZoneId : null,
           action: 'RECONCILE_OFFICIAL_SUCCESSOR',
           outcome: 'blocked',
           reason: 'NOT_STRICT_ONE_TO_ONE',
@@ -1546,7 +1938,16 @@ export class ZoneAlerteService {
         })),
       );
     }
-    if (mappings.length !== referencedSources.length) {
+    const mappedSourceIds = new Set(
+      mappings.map((mapping) => mapping.oldZoneId),
+    );
+    if (
+      referencedSources.some(
+        (source) =>
+          source.operationalReferenceCount > 0 &&
+          !mappedSourceIds.has(source.zone.id),
+      )
+    ) {
       throw new SandreDepartmentBlockedError(
         'Official Sandre reconciliation did not cover every operational zone',
       );
@@ -1555,6 +1956,7 @@ export class ZoneAlerteService {
     const resultsByOldZoneId = new Map(
       results.map((result) => [result.oldZoneId, result]),
     );
+    let operationalReferencesReconciled = false;
     for (const mapping of mappings) {
       const target = activeTargetsById.get(mapping.newZoneId);
       if (!target) {
@@ -1562,13 +1964,76 @@ export class ZoneAlerteService {
           `Active Sandre successor ${mapping.newZoneId} disappeared during reconciliation`,
         );
       }
-      await this.ensureSandreAlias(
-        manager,
-        departement,
-        target,
-        mapping.oldCodeSandre,
-        'sandre_genealogy',
-      );
+      const source = referencedSourcesByZoneId.get(mapping.oldZoneId);
+      if (!source) {
+        throw new SandreDepartmentBlockedError(
+          `Referenced Sandre source ${mapping.oldZoneId} disappeared during reconciliation`,
+        );
+      }
+      try {
+        await this.assertNoOperationalReferenceCollision(manager, mapping);
+      } catch (error) {
+        if (source.operationalReferenceCount > 0) {
+          throw error;
+        }
+        decisions.push({
+          decisionKey: `${mapping.oldCodeSandre}:reconciliation`,
+          zoneType: mapping.zoneType,
+          sourceCode: mapping.oldCodeSandre,
+          targetCode: mapping.newCodeSandre,
+          zoneAlerteId: mapping.oldZoneId,
+          candidateZoneAlerteId: mapping.newZoneId,
+          action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+          outcome: 'deferred',
+          reason: 'REFERENCE_OR_ALIAS_COLLISION',
+          evidence: { error: this.sandreFailureReason(error) },
+        });
+        continue;
+      }
+      if (apply) {
+        if (!source.zone.codeSandre) {
+          source.zone.idSandre = source.feature.gid;
+          source.zone.codeSandre = source.feature.codeSandre;
+          await manager.getRepository(ZoneAlerte).save(source.zone);
+        }
+        await this.ensureSandreAlias(
+          manager,
+          departement,
+          target,
+          mapping.oldCodeSandre,
+          'sandre_genealogy',
+          mapping.oldZoneId,
+        );
+        if (source.operationalReferenceCount > 0) {
+          try {
+            await manager.query(
+              'SELECT remap_operational_sandre_zone_references($1, $2)',
+              [mapping.oldZoneId, mapping.newZoneId],
+            );
+            operationalReferencesReconciled = true;
+          } catch (error) {
+            throw new SandreDepartmentBlockedError(
+              `Operational Sandre reference remap blocked for ${mapping.oldCodeSandre}: ${this.sandreFailureReason(error)}`,
+              [
+                {
+                  decisionKey: `${mapping.oldCodeSandre}:reconciliation`,
+                  zoneType: mapping.zoneType,
+                  sourceCode: mapping.oldCodeSandre,
+                  targetCode: mapping.newCodeSandre,
+                  zoneAlerteId: mapping.oldZoneId,
+                  candidateZoneAlerteId: mapping.newZoneId,
+                  action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+                  outcome: 'blocked',
+                  reason: 'OPERATIONAL_REFERENCE_REMAP_BLOCKED',
+                  evidence: {
+                    error: this.sandreFailureReason(error),
+                  },
+                },
+              ],
+            );
+          }
+        }
+      }
       const reconciliation = resultsByOldZoneId.get(mapping.oldZoneId);
       decisions.push({
         decisionKey: `${mapping.oldCodeSandre}:reconciliation`,
@@ -1576,12 +2041,204 @@ export class ZoneAlerteService {
         sourceCode: mapping.oldCodeSandre,
         targetCode: mapping.newCodeSandre,
         zoneAlerteId: mapping.oldZoneId,
-        candidateZoneAlerteId: mapping.newZoneId,
+        candidateZoneAlerteId: mapping.newZoneId > 0 ? mapping.newZoneId : null,
         action: 'RECONCILE_OFFICIAL_SUCCESSOR',
-        outcome: 'applied',
+        outcome: apply ? 'applied' : 'deferred',
         reason: 'OFFICIAL_LINEAR_SUCCESSOR',
-        evidence: { genealogyPath: reconciliation?.genealogyPath ?? [] },
+        evidence: {
+          genealogyPath: reconciliation?.genealogyPath ?? [],
+          operationalReferencesRemapped:
+            apply && source.operationalReferenceCount > 0,
+        },
       });
+    }
+    return apply && operationalReferencesReconciled;
+  }
+
+  private async getOperationalDisabledZoneSources(
+    manager: EntityManager,
+    departmentId: number,
+  ): Promise<OperationalDisabledZoneSource[]> {
+    const rows =
+      (await manager.query(
+        `
+          SELECT
+            zone.id,
+            zone."idSandre",
+            zone."codeSandre",
+            zone.code AS "legacyCode",
+            zone.type
+          FROM zone_alerte zone
+          WHERE zone."departementId" = $1
+            AND zone.disabled = true
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM arrete_cadre_zone_alerte reference
+                JOIN arrete_cadre parent
+                  ON parent.id = reference."arreteCadreId"
+                WHERE reference."zoneAlerteId" = zone.id
+                  AND parent.statut IN ('a_venir', 'publie')
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM restriction reference
+                JOIN arrete_restriction parent
+                  ON parent.id = reference."arreteRestrictionId"
+                WHERE reference."zoneAlerteId" = zone.id
+                  AND parent.statut IN ('a_venir', 'publie')
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM arrete_cadre_zone_alerte_communes reference
+                JOIN arrete_cadre parent
+                  ON parent.id = reference."arreteCadreId"
+                WHERE reference."zoneAlerteId" = zone.id
+                  AND parent.statut IN ('a_venir', 'publie')
+              )
+            )
+          ORDER BY zone.id
+        `,
+        [departmentId],
+      )) ?? [];
+    return rows.map((row) => ({
+      id: Number(row.id),
+      idSandre:
+        row.idSandre === null || row.idSandre === undefined
+          ? null
+          : Number(row.idSandre),
+      codeSandre: row.codeSandre ?? null,
+      legacyCode: String(row.legacyCode),
+      type: row.type as 'SOU' | 'SUP',
+    }));
+  }
+
+  private async lockOperationalParentsForSandreSources(
+    manager: EntityManager,
+    sourceZoneIds: number[],
+  ): Promise<void> {
+    const uniqueSourceZoneIds = [...new Set(sourceZoneIds)].sort(
+      (left, right) => left - right,
+    );
+    if (uniqueSourceZoneIds.length === 0) {
+      return;
+    }
+
+    await manager.query(
+      `
+        SELECT parent.id
+        FROM arrete_cadre parent
+        WHERE parent.statut IN ('a_venir', 'publie')
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM arrete_cadre_zone_alerte reference
+              WHERE reference."arreteCadreId" = parent.id
+                AND reference."zoneAlerteId" = ANY($1::integer[])
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM arrete_cadre_zone_alerte_communes reference
+              WHERE reference."arreteCadreId" = parent.id
+                AND reference."zoneAlerteId" = ANY($1::integer[])
+            )
+          )
+        ORDER BY parent.id
+        FOR SHARE OF parent
+      `,
+      [uniqueSourceZoneIds],
+    );
+    await manager.query(
+      `
+        SELECT parent.id
+        FROM arrete_restriction parent
+        WHERE parent.statut IN ('a_venir', 'publie')
+          AND EXISTS (
+            SELECT 1
+            FROM restriction reference
+            WHERE reference."arreteRestrictionId" = parent.id
+              AND reference."zoneAlerteId" = ANY($1::integer[])
+          )
+        ORDER BY parent.id
+        FOR SHARE OF parent
+      `,
+      [uniqueSourceZoneIds],
+    );
+  }
+
+  private async assertNoOperationalReferenceCollision(
+    manager: EntityManager,
+    mapping: ReconciliationMapping,
+  ): Promise<void> {
+    const rows =
+      (await manager.query(
+        `
+          SELECT
+            EXISTS (
+              SELECT 1
+              FROM restriction source
+              JOIN arrete_restriction parent
+                ON parent.id = source."arreteRestrictionId"
+              JOIN restriction target
+                ON target."arreteRestrictionId" = source."arreteRestrictionId"
+                AND target."zoneAlerteId" = $2
+              WHERE source."zoneAlerteId" = $1
+                AND parent.statut IN ('a_venir', 'publie')
+            ) AS "restrictionCollision",
+            EXISTS (
+              SELECT 1
+              FROM arrete_cadre_zone_alerte_communes source
+              JOIN arrete_cadre parent
+                ON parent.id = source."arreteCadreId"
+              JOIN arrete_cadre_zone_alerte_communes target
+                ON target."arreteCadreId" = source."arreteCadreId"
+                AND target."zoneAlerteId" = $2
+              WHERE source."zoneAlerteId" = $1
+                AND parent.statut IN ('a_venir', 'publie')
+            ) AS "customizationCollision",
+            EXISTS (
+              SELECT 1
+              FROM sandre_zone_alias alias
+              WHERE alias."departementId" = $3
+                AND alias."zoneType" = $4
+                AND alias."aliasType" = 'cd_zas'
+                AND alias."aliasValue" = $5
+                AND alias."zoneAlerteId" NOT IN ($1, $2)
+            ) AS "aliasCollision"
+        `,
+        [
+          mapping.oldZoneId,
+          mapping.newZoneId,
+          mapping.departmentId,
+          mapping.zoneType,
+          mapping.oldCodeSandre,
+        ],
+      )) ?? [];
+    const collision = rows[0];
+    const collisionTypes = [
+      collision?.restrictionCollision === true ? 'restriction' : null,
+      collision?.customizationCollision === true ? 'customization' : null,
+      collision?.aliasCollision === true ? 'alias' : null,
+    ].filter(Boolean);
+    if (collisionTypes.length > 0) {
+      throw new SandreDepartmentBlockedError(
+        `Official Sandre reconciliation has ${collisionTypes.join(', ')} collision(s) for ${mapping.oldCodeSandre}`,
+        [
+          {
+            decisionKey: `${mapping.oldCodeSandre}:reconciliation`,
+            zoneType: mapping.zoneType,
+            sourceCode: mapping.oldCodeSandre,
+            targetCode: mapping.newCodeSandre,
+            zoneAlerteId: mapping.oldZoneId,
+            candidateZoneAlerteId:
+              mapping.newZoneId > 0 ? mapping.newZoneId : null,
+            action: 'RECONCILE_OFFICIAL_SUCCESSOR',
+            outcome: 'blocked',
+            reason: 'OPERATIONAL_REFERENCE_COLLISION',
+            evidence: { collisionTypes },
+          },
+        ],
+      );
     }
   }
 
@@ -1889,6 +2546,7 @@ export class ZoneAlerteService {
     zone: ZoneAlerte,
     aliasValue: string,
     source: 'sandre_genealogy' | 'manual_reconciliation',
+    replacesZoneId?: number,
   ): Promise<void> {
     const aliasRepository = manager.getRepository(SandreZoneAlias);
     const existingAlias = await aliasRepository.findOne({
@@ -1905,6 +2563,12 @@ export class ZoneAlerteService {
       },
     });
     if (existingAlias?.zoneAlerte.id === zone.id) {
+      return;
+    }
+    if (existingAlias?.zoneAlerte.id === replacesZoneId) {
+      existingAlias.zoneAlerte = zone;
+      existingAlias.source = source;
+      await aliasRepository.save(existingAlias);
       return;
     }
     if (existingAlias) {

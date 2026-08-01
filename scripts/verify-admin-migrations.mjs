@@ -250,19 +250,32 @@ async function verifySandreReferenceGuards() {
       `UPDATE "zone_alerte" SET "disabled" = true WHERE "id" = $1`,
       [disabledZoneId],
     );
-    const orderId = await insertRestrictionOrder();
-    const [remappedReference] = await runner.query(
+    const draftOrderId = await insertRestrictionOrder("a_valider");
+    const [draftReference] = await runner.query(
       `
         INSERT INTO "restriction" ("arreteRestrictionId", "zoneAlerteId")
         VALUES ($1, $2)
         RETURNING "zoneAlerteId"
       `,
-      [orderId, disabledZoneId],
+      [draftOrderId, disabledZoneId],
     );
     assert.equal(
-      remappedReference.zoneAlerteId,
+      draftReference.zoneAlerteId,
+      disabledZoneId,
+      "A draft reference to a disabled SANDRE zone was unexpectedly remapped",
+    );
+    await runner.query(
+      `UPDATE "arrete_restriction" SET "statut" = 'a_venir' WHERE "id" = $1`,
+      [draftOrderId],
+    );
+    const [activatedReference] = await runner.query(
+      `SELECT "zoneAlerteId" FROM "restriction" WHERE "arreteRestrictionId" = $1`,
+      [draftOrderId],
+    );
+    assert.equal(
+      activatedReference.zoneAlerteId,
       targetZoneId,
-      "A future reference to a disabled SANDRE zone was not remapped",
+      "Activating a draft order did not remap its disabled SANDRE zone reference",
     );
 
     const referencedZoneId = await insertZone(
@@ -270,7 +283,7 @@ async function verifySandreReferenceGuards() {
       "TEST_REFERENCED_OLD",
     );
     await insertAlias("TEST_REFERENCED_OLD", targetZoneId);
-    const referencedOrderId = await insertRestrictionOrder();
+    const referencedOrderId = await insertRestrictionOrder("publie");
     await runner.query(
       `INSERT INTO "restriction" ("arreteRestrictionId", "zoneAlerteId") VALUES ($1, $2)`,
       [referencedOrderId, referencedZoneId],
@@ -297,7 +310,7 @@ async function verifySandreReferenceGuards() {
       `UPDATE "zone_alerte" SET "disabled" = true WHERE "id" = $1`,
       [unresolvedZoneId],
     );
-    const unresolvedOrderId = await insertRestrictionOrder();
+    const unresolvedOrderId = await insertRestrictionOrder("publie");
     await runner.query("SAVEPOINT unresolved_reference");
     let blocked = false;
     try {
@@ -540,7 +553,7 @@ try {
           ON parent.id = reference."arreteRestrictionId"
         JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
         WHERE zone.disabled = true
-          AND parent.statut <> 'abroge'
+          AND parent.statut IN ('a_venir', 'publie')
       ) AS "arreteRestrictions",
       (
         SELECT COUNT(*)::integer
@@ -548,7 +561,7 @@ try {
         JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
         JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
         WHERE zone.disabled = true
-          AND parent.statut <> 'abroge'
+          AND parent.statut IN ('a_venir', 'publie')
       ) AS "arreteCadres",
       (
         SELECT COUNT(*)::integer
@@ -556,7 +569,7 @@ try {
         JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
         JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
         WHERE zone.disabled = true
-          AND parent.statut <> 'abroge'
+          AND parent.statut IN ('a_venir', 'publie')
       ) AS customizations
   `);
   assert.deepEqual(
@@ -567,6 +580,31 @@ try {
     },
     { arreteRestrictions: 0, arreteCadres: 0, customizations: 0 },
     "An operational order references a disabled alert zone",
+  );
+  const [customizationUniqueness] = await dataSource.query(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_constraint constraint_definition
+      WHERE constraint_definition.conrelid =
+          '"arrete_cadre_zone_alerte_communes"'::regclass
+        AND constraint_definition.conname =
+          'UQ_ac_za_communes_arrete_cadre_zone'
+        AND constraint_definition.contype = 'u'
+        AND ARRAY(
+          SELECT attribute.attname::text
+          FROM unnest(constraint_definition.conkey) WITH ORDINALITY
+            AS key_column(attnum, position)
+          JOIN pg_attribute attribute
+            ON attribute.attrelid = constraint_definition.conrelid
+            AND attribute.attnum = key_column.attnum
+          ORDER BY key_column.position
+        ) = ARRAY['arreteCadreId', 'zoneAlerteId']::text[]
+    ) AS "exists"
+  `);
+  assert.equal(
+    customizationUniqueness.exists,
+    true,
+    "The framework-order customization uniqueness constraint is missing",
   );
   const durabilityConstraints = await dataSource.query(`
     SELECT conname

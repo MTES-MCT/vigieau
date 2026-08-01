@@ -111,7 +111,7 @@ describe('HealthController', () => {
       },
     });
     expect(dataSource.query).toHaveBeenCalledWith(
-      expect.stringContaining("parent.statut <> 'abroge'"),
+      expect.stringContaining("parent.statut IN ('a_venir', 'publie')"),
     );
   });
 

@@ -149,9 +149,19 @@ ambigus. Un département bloqué est réévalué au cron suivant après cinq min
 Une zone gelée encore utilisée n'est rapprochée que si la généalogie officielle
 SANDRE fournit un successeur linéaire strictement 1:1, actif, de même département
 et de même type. Les références opérationnelles sont alors remappées dans la
-transaction; les arrêtés abrogés conservent leur historique. Toute branche,
-collision, source indisponible ou cible ambiguë bloque le département sans
-écriture persistée.
+transaction. Une référence est opérationnelle uniquement lorsque son arrêté est
+`a_venir` ou `publie`. Les brouillons `a_valider` et les arrêtés `abroge`
+conservent leur zone historique; lorsqu'une filiation 1:1 est certaine, son alias
+est toutefois provisionné sans déplacer ces références afin que leur éventuelle
+activation future soit remappée par le garde-fou PostgreSQL. Toute branche,
+collision, source indisponible, généalogie périmée ou cible ambiguë bloque le
+département si une référence opérationnelle est concernée. Le même cas reste
+simplement différé pour un brouillon ou un historique.
+
+Le champ d'affichage historique `zone_alerte.code`, les noms et la proximité des
+géométries ne constituent jamais une identité SANDRE automatique. Une fusion ou
+un découpage 1:N exige une décision métier et un rapprochement one-shot approuvé;
+le mode `safe` doit rester bloquant plutôt que d'inférer ce choix.
 `SANDRE_HEALTH_STALE_AFTER_SECONDS=108000` fixe le délai maximal sans observation
 réussie. `/api/health/sandre-synchronization` ne passe au vert en production que
 si le mode est `safe`, `trackedDepartments=totalDepartments=101`,
@@ -246,8 +256,10 @@ n'effectue volontairement aucune écriture.
     ```
 
     `sandre-references` doit renvoyer `status=healthy` et `total=0`. Il ignore les
-    références purement historiques des arrêtés abrogés, mais bloque la reprise
-    dès qu'un arrêté opérationnel utilise encore une zone SANDRE désactivée.
+    brouillons `a_valider` et les références purement historiques des arrêtés
+    abrogés, mais bloque la reprise dès qu'un arrêté `a_venir` ou `publie` utilise
+    encore une zone SANDRE désactivée. Le passage ultérieur d'un brouillon ou
+    d'un arrêté abrogé vers un de ces statuts est contrôlé transactionnellement.
     En mode `safe`, le health SANDRE doit en plus afficher
     `trackedDepartments=appliedDepartments=totalDepartments=101`, avec
     `staleDepartments=0`, `staleAppliedDepartments=0`,
