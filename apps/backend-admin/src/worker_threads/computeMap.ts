@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DataSource, QueryRunner } from 'typeorm';
 import { workerData, parentPort } from 'worker_threads';
 import { RegleauLogger } from '../logger/regleau.logger';
+import { withZoneComputeLock } from './zone-compute-lock';
 
 const logger = new RegleauLogger('ComputeMapWorker');
 const COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
@@ -10,113 +11,7 @@ const COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 interface WorkerData {
   depsIds: number[];
   computeHistoric: boolean;
-}
-
-async function acquireComputeLock(
-  dataSource: DataSource,
-): Promise<QueryRunner> {
-  const deadline = Date.now() + COMPUTE_LOCK_TIMEOUT_MS;
-  while (true) {
-    const queryRunner = dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      const [lockResult] = await queryRunner.query(
-        "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS locked",
-      );
-      if (lockResult?.locked === true) {
-        return queryRunner;
-      }
-    } catch (error) {
-      await queryRunner.release();
-      throw error;
-    }
-    await queryRunner.release();
-    if (Date.now() >= deadline) {
-      throw new Error('Timed out waiting for the zone compute lock');
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-}
-
-async function acquireDepartmentLocks(
-  queryRunner: QueryRunner,
-  depsIds: number[],
-  acquiredDepartmentIds: number[],
-): Promise<void> {
-  const departmentIds =
-    depsIds.length > 0
-      ? [...new Set(depsIds)].sort((left, right) => left - right)
-      : (await queryRunner.query('SELECT id FROM departement ORDER BY id')).map(
-          (row) => Number(row.id),
-        );
-  const deadline = Date.now() + COMPUTE_LOCK_TIMEOUT_MS;
-
-  for (const departmentId of departmentIds) {
-    while (true) {
-      const [lockResult] = await queryRunner.query(
-        "SELECT pg_try_advisory_lock(hashtext('vigieau:sandre-zone-sync'), $1) AS locked",
-        [departmentId],
-      );
-      if (lockResult?.locked === true) {
-        acquiredDepartmentIds.push(departmentId);
-        break;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for department ${departmentId} zone synchronization`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-}
-
-async function withComputeLock<T>(
-  dataSource: DataSource,
-  depsIds: number[],
-  task: () => Promise<T>,
-): Promise<T> {
-  const queryRunner = await acquireComputeLock(dataSource);
-  const departmentIds: number[] = [];
-  try {
-    await acquireDepartmentLocks(queryRunner, depsIds, departmentIds);
-    return await task();
-  } finally {
-    let unlockError: unknown;
-    for (const departmentId of [...departmentIds].reverse()) {
-      try {
-        const [unlockResult] = await queryRunner.query(
-          "SELECT pg_advisory_unlock(hashtext('vigieau:sandre-zone-sync'), $1) AS unlocked",
-          [departmentId],
-        );
-        if (unlockResult?.unlocked !== true) {
-          throw new Error(
-            `Unable to release department ${departmentId} zone synchronization lock`,
-          );
-        }
-      } catch (error) {
-        unlockError ??= error;
-      }
-    }
-    try {
-      const [unlockResult] = await queryRunner.query(
-        "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-global')) AS unlocked",
-      );
-      if (unlockResult?.unlocked !== true) {
-        throw new Error('Unable to release the zone compute lock');
-      }
-    } catch (error) {
-      unlockError ??= error;
-    }
-    try {
-      await queryRunner.release();
-    } catch (error) {
-      unlockError ??= error;
-    }
-    if (unlockError) {
-      throw unlockError;
-    }
-  }
+  skipIfBusy?: boolean;
 }
 
 async function withHistoricComputeLock<T>(
@@ -185,15 +80,26 @@ async function run() {
     app = await NestFactory.createApplicationContext(AppModule);
     const zoneAlerteComputedService = app.get(ZoneAlerteComputedService);
     const dataSource = app.get(DataSource);
-    const { depsIds, computeHistoric } = workerData as WorkerData;
+    const { depsIds, computeHistoric, skipIfBusy } = workerData as WorkerData;
 
     logger.log(
       `Starting compute with depsIds: ${depsIds} and computeHistoric: ${computeHistoric}`,
     );
-    const result = await withComputeLock(dataSource, depsIds, () =>
-      zoneAlerteComputedService.computeAll(depsIds, false),
+    const lockResult = await withZoneComputeLock(
+      dataSource,
+      depsIds,
+      () => zoneAlerteComputedService.computeAll(depsIds, false),
+      { skipIfBusy },
     );
-    const response = { success: true, result };
+    if (!lockResult.acquired) {
+      logger.log('Another dyno is already computing zones; worker exits');
+      await closeApp(app);
+      app = undefined;
+      parentPort?.postMessage({ success: true, skipped: true });
+      responseSent = true;
+      return;
+    }
+    const response = { success: true, result: lockResult.value };
 
     if (computeHistoric) {
       parentPort?.postMessage(response);

@@ -19,6 +19,7 @@ import { ArretesRestrictionsModule } from './arretes_restrictions/arretes_restri
 import { DataModule } from './data/data.module';
 import path from 'path';
 import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
+import { HealthModule } from './health/health.module';
 
 const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 
@@ -86,6 +87,7 @@ const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
     UsageModule,
     ArretesRestrictionsModule,
     DataModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [

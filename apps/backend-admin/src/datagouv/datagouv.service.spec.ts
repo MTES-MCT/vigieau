@@ -419,6 +419,28 @@ describe('DatagouvService', () => {
     );
   });
 
+  it('applies an explicit timeout to URL resource updates', async () => {
+    const harness = createHarness('/tmp');
+
+    await harness.service.uploadToDatagouv(
+      'pmtiles',
+      'https://objects.example.test/zones.pmtiles',
+      'PMTiles',
+      true,
+      { timeoutMs: 12_500 },
+    );
+
+    expect(harness.httpService.put).toHaveBeenCalledWith(
+      'https://www.data.gouv.fr/api/1/datasets/dataset-id/resources/a101ef59-0999-4b9a-a682-6f9b79d53c7e/',
+      {
+        title: 'PMTiles',
+        url: 'https://objects.example.test/zones.pmtiles',
+      },
+      expect.objectContaining({ timeout: 12_500 }),
+    );
+    expect(harness.httpService.post).not.toHaveBeenCalled();
+  });
+
   it('skips the annual query when its resource is not configured', async () => {
     const harness = createHarness('/tmp');
 

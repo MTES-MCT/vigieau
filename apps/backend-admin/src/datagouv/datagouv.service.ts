@@ -495,6 +495,7 @@ export class DatagouvService {
     fileName: string,
     title: string,
     isUrl = false,
+    options?: { timeoutMs?: number },
   ): Promise<void> {
     this.logger.log(`ENVOI VERS DATAGOUV - ${resource}`);
 
@@ -512,7 +513,7 @@ export class DatagouvService {
     const body: any = { title };
     if (isUrl) body.url = fileName;
 
-    await this.updateDataGouvResource(resourceId, body);
+    await this.updateDataGouvResource(resourceId, body, options?.timeoutMs);
   }
 
   private getDataGouvResourceId(resource: string): string | undefined {
@@ -562,6 +563,7 @@ export class DatagouvService {
   private async updateDataGouvResource(
     resourceId: string,
     body: Record<string, unknown>,
+    timeoutMs?: number,
   ): Promise<void> {
     const url = `${this.datagouvApiUrl}/resources/${resourceId}/`;
     await lastValueFrom(
@@ -571,6 +573,7 @@ export class DatagouvService {
             Accept: 'application/json',
             'X-Api-Key': this.datagouvApiKey,
           },
+          ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
         })
         .pipe(
           catchError((error: AxiosError) => {

@@ -9,7 +9,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Session } from '@shared/entities/session.entity';
 import { UserModule } from './user/user.module';
 import { ZoneAlerteModule } from './zone_alerte/zone_alerte.module';
-import { DataSource, QueryRunner } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { Region } from '@shared/entities/region.entity';
 import { ScheduleModule } from '@nestjs/schedule';
 import { DepartementModule } from './departement/departement.module';
@@ -35,38 +35,12 @@ import { ArreteMunicipalModule } from './arrete_municipal/arrete_municipal.modul
 import { AbonnementMailModule } from './abonnement_mail/abonnement_mail.module';
 import * as path from 'path';
 import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
+import { ZonePublicationModule } from './zone_publication/zone_publication.module';
+import { bootstrapSchema } from './schema-bootstrap';
 
 const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 const scheduledJobsEnabled =
   process.env.DISABLE_SCHEDULED_JOBS?.trim() !== 'true';
-const SCHEMA_BOOTSTRAP_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
-
-async function acquireSchemaBootstrapLock(
-  dataSource: DataSource,
-): Promise<QueryRunner> {
-  const deadline = Date.now() + SCHEMA_BOOTSTRAP_LOCK_TIMEOUT_MS;
-  while (true) {
-    const queryRunner = dataSource.createQueryRunner();
-    await queryRunner.connect();
-    try {
-      const [lockResult] = await queryRunner.query(
-        "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('schema-bootstrap')) AS locked",
-      );
-      if (lockResult?.locked === true) {
-        return queryRunner;
-      }
-    } catch (error) {
-      await queryRunner.release();
-      throw error;
-    }
-    await queryRunner.release();
-    if (Date.now() >= deadline) {
-      throw new Error('Timed out waiting for the schema bootstrap lock');
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-}
-
 @Module({
   imports: [
     ...(isSentryEnabled() ? [SentryModule.forRoot()] : []),
@@ -111,22 +85,7 @@ async function acquireSchemaBootstrapLock(
       dataSourceFactory: async (options) => {
         const dataSource = await new DataSource(options).initialize();
         if (process.env.SKIP_SCHEMA_BOOTSTRAP?.trim() !== 'true') {
-          const queryRunner = await acquireSchemaBootstrapLock(dataSource);
-          try {
-            await dataSource.synchronize();
-            await dataSource.runMigrations();
-          } finally {
-            try {
-              const [unlockResult] = await queryRunner.query(
-                "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('schema-bootstrap'))",
-              );
-              if (unlockResult?.pg_advisory_unlock !== true) {
-                throw new Error('Unable to release the schema bootstrap lock');
-              }
-            } finally {
-              await queryRunner.release();
-            }
-          }
+          await bootstrapSchema(dataSource);
         }
         return dataSource;
       },
@@ -160,6 +119,7 @@ async function acquireSchemaBootstrapLock(
     FichierModule,
     ParametresModule,
     ZoneAlerteComputedModule,
+    ZonePublicationModule,
     UsageFeedbackModule,
     StatisticModule,
     ArreteMunicipalModule,

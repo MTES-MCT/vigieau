@@ -1,4 +1,5 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { ConfigService as NestConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Departement } from '@shared/entities/departement.entity';
@@ -10,6 +11,7 @@ import { writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
 import * as util from 'util';
 import { Worker } from 'worker_threads';
+import { createHash } from 'node:crypto';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '../config/config.service';
@@ -28,15 +30,24 @@ import {
 } from '../worker_threads/config';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { ZoneAlerteComputedHistoricService } from './zone_alerte_computed_historic.service';
+import { ZonePublicationService } from '../zone_publication/zone_publication.service';
+import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import { generateEmptyPmtiles } from './empty-pmtiles';
 
 export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
+const ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS = 30 * 1000;
 
 @Injectable()
 export class ZoneAlerteComputedService {
   private readonly logger = new RegleauLogger('ZoneAlerteComputedService');
   private isComputing = false;
   private askForCompute = false;
-  private departementsToUpdate = [];
+  private departementsToUpdate: number[] = [];
+  private pendingComputeHistoric = false;
+  private pendingNormalCompute = false;
+  private activeComputeWorker: Worker | null = null;
+  private computeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private publicationWatchdogInProgress = false;
   private readonly historicComputedStartDate = '2024-04-29';
   // Promisifier exec
   private execPromise = util.promisify(exec);
@@ -63,6 +74,7 @@ export class ZoneAlerteComputedService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
+    private readonly zonePublicationService: ZonePublicationService,
   ) {}
 
   findOne(id: number): Promise<any> {
@@ -81,20 +93,21 @@ export class ZoneAlerteComputedService {
       .getRawOne();
   }
 
-  async askCompute(depsIds?: number[], force = false, computeHistoric = false) {
-    this.departementsToUpdate = this.departementsToUpdate.concat(depsIds);
-    if (
-      (this.isComputing && this.askForCompute && !force) ||
-      (!this.askForCompute && force)
-    ) {
+  async askCompute(
+    depsIds?: number[],
+    force = false,
+    computeHistoric = false,
+    skipIfBusy = false,
+  ) {
+    this.departementsToUpdate = this.departementsToUpdate.concat(depsIds ?? []);
+    this.pendingComputeHistoric ||= computeHistoric;
+    this.pendingNormalCompute ||= !skipIfBusy;
+    if (force && !this.askForCompute) {
       return;
     }
     if (this.isComputing) {
       this.askForCompute = true;
-      // On check toutes les 10s si on peut calculer
-      setTimeout(() => {
-        this.askCompute([], true, computeHistoric);
-      }, 10 * 1000);
+      this.scheduleComputeRetry();
       return;
     }
     try {
@@ -102,17 +115,31 @@ export class ZoneAlerteComputedService {
       this.isComputing = true;
 
       const uniqueDepsIds = [...new Set(this.departementsToUpdate)];
+      this.departementsToUpdate = [];
+      const effectiveComputeHistoric = this.pendingComputeHistoric;
+      const effectiveSkipIfBusy = !this.pendingNormalCompute;
+      this.pendingComputeHistoric = false;
+      this.pendingNormalCompute = false;
 
       const worker = new Worker(workerThreadFilePath, {
         workerData: {
           depsIds: uniqueDepsIds,
-          computeHistoric,
+          computeHistoric: effectiveComputeHistoric,
+          skipIfBusy: effectiveSkipIfBusy,
         },
       });
+      this.activeComputeWorker = worker;
 
       return new Promise((resolve, reject) => {
         let currentResultReceived = false;
+        let promiseSettled = false;
         let timedOut = false;
+        const releaseComputeSlot = () => {
+          if (this.activeComputeWorker === worker) {
+            this.activeComputeWorker = null;
+            this.isComputing = false;
+          }
+        };
         const timeout = setTimeout(async () => {
           timedOut = true;
           const timeoutError = new Error('COMPUTE ALL worker timed out');
@@ -125,8 +152,9 @@ export class ZoneAlerteComputedService {
               error instanceof Error ? error.toString() : String(error),
             );
           }
-          if (!currentResultReceived) {
-            this.isComputing = false;
+          if (!promiseSettled) {
+            promiseSettled = true;
+            releaseComputeSlot();
             reject(timeoutError);
           }
         }, ZONE_COMPUTE_WORKER_TIMEOUT_MS);
@@ -136,7 +164,19 @@ export class ZoneAlerteComputedService {
             return;
           }
           currentResultReceived = true;
-          this.isComputing = false;
+          if (result?.success === false) {
+            clearTimeout(timeout);
+            promiseSettled = true;
+            releaseComputeSlot();
+            const error = new Error(
+              result.error || 'COMPUTE ALL worker reported an error',
+            );
+            this.logger.error('COMPUTE ALL WORKER ERROR', error.toString());
+            reject(error);
+            return;
+          }
+          promiseSettled = true;
+          releaseComputeSlot();
           resolve(result);
         });
 
@@ -145,27 +185,50 @@ export class ZoneAlerteComputedService {
             return;
           }
           clearTimeout(timeout);
+          releaseComputeSlot();
+          if (promiseSettled) {
+            return;
+          }
+          promiseSettled = true;
           this.logger.error('COMPUTE ALL WORKER ERROR', error.toString());
-          this.isComputing = false;
           reject(error);
         });
 
         worker.on('exit', (code) => {
           clearTimeout(timeout);
+          releaseComputeSlot();
           if (timedOut) {
             return;
           }
-          if (code !== 0) {
-            const errorMessage = `COMPUTE ALL Worker stopped with exit code ${code}`;
-            this.logger.error(errorMessage, '');
-            reject(new Error(errorMessage));
+          if (promiseSettled || currentResultReceived) {
+            return;
           }
+          promiseSettled = true;
+          const errorMessage =
+            code === 0
+              ? 'COMPUTE ALL worker exited without a result'
+              : `COMPUTE ALL Worker stopped with exit code ${code}`;
+          this.logger.error(errorMessage, '');
+          reject(new Error(errorMessage));
         });
       });
     } catch (e) {
       this.logger.error('COMPUTE ALL', e.toString());
+      this.activeComputeWorker = null;
       this.isComputing = false;
     }
+  }
+
+  private scheduleComputeRetry(): void {
+    if (this.computeRetryTimer) {
+      return;
+    }
+    this.computeRetryTimer = setTimeout(() => {
+      this.computeRetryTimer = null;
+      void this.askCompute([], true, false, true).catch((error) => {
+        this.logger.error('COMPUTE ALL QUEUED WORKER ERROR', error);
+      });
+    }, 10 * 1000);
   }
 
   async findOneWithCommuneZone(id: number, communeId: number): Promise<any> {
@@ -185,8 +248,33 @@ export class ZoneAlerteComputedService {
     return zoneFull;
   }
 
+  @Interval(ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS)
+  async ensureFreshZonePublication(): Promise<void> {
+    if (
+      !isZonePublicationEnabled() ||
+      this.isComputing ||
+      this.publicationWatchdogInProgress
+    ) {
+      return;
+    }
+    this.publicationWatchdogInProgress = true;
+    try {
+      if (await this.zonePublicationService.isRecomputeRequired()) {
+        await this.askCompute([], false, false, true);
+      }
+    } catch (error) {
+      this.logger.error('ZONE PUBLICATION WATCHDOG ERROR', error);
+    } finally {
+      this.publicationWatchdogInProgress = false;
+    }
+  }
+
   async computeAll(depsId?: number[], computeHistoric?: boolean) {
     this.logger.log(`COMPUTING ZONES D'ALERTES - BEGIN`);
+    const sourceRevision =
+      !depsId?.length && isZonePublicationEnabled()
+        ? await this.zonePublicationService.getSourceRevision()
+        : undefined;
     this.departementsToUpdate = [];
     let departements = await this.departementService.findAllLight();
     if (depsId && depsId.length > 0) {
@@ -229,7 +317,7 @@ export class ZoneAlerteComputedService {
     }
     // On récupère toutes les restrictions en cours
     this.logger.log(`COMPUTING ZONES D'ALERTES - END`);
-    await this.computeGeoJson(computeHistoric);
+    await this.computeGeoJson(computeHistoric, sourceRevision);
   }
 
   async computeRegleAr(departement: Departement) {
@@ -738,7 +826,7 @@ WITH cleaned_geometries AS (
 
     await Promise.all(
       groupedResults.map(async (row) => {
-        const { id, nom, type, niveauGravite, merged_geom } = row;
+        const { id, merged_geom } = row;
         return this.dataSource.query(
           `
 UPDATE zone_alerte_computed 
@@ -764,7 +852,8 @@ DELETE FROM zone_alerte_computed
     );
   }
 
-  async computeGeoJson(computeHistoric?: boolean) {
+  async computeGeoJson(computeHistoric?: boolean, sourceRevision?: string) {
+    const publicationEnabled = isZonePublicationEnabled();
     const allZonesComputed: any = await this.zoneAlerteComputedRepository.find(<
       FindManyOptions
     >{
@@ -894,72 +983,70 @@ DELETE FROM zone_alerte_computed
       originalname: `zones_arretes_en_vigueur.geojson`,
       buffer: dataGeojson,
     };
-    try {
-      // @ts-ignore
-      const s3ResponseGeojson = await this.s3Service.uploadFile(
-        fileToTransferGeojson as Express.Multer.File,
-        'geojson/',
-      );
-      const fileNameToSaveGeoJson = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.geojson`;
-      await this.s3Service.copyFile(
-        fileToTransferGeojson.originalname,
-        fileNameToSaveGeoJson,
-        'geojson/',
-      );
-      await this.datagouvService.uploadToDatagouv(
+    const geojsonChecksum = createHash('sha256')
+      .update(dataGeojson)
+      .digest('hex');
+    if (!publicationEnabled) {
+      await this.publishLegacyArtifact(
+        fileToTransferGeojson,
+        date,
         'geojson',
-        s3ResponseGeojson.Location,
         'Carte des zones et arrêtés en vigueur - GeoJSON',
-        true,
       );
-    } catch (e) {
-      this.logger.error('ERROR COPYING GEOJSON', e);
     }
+    let pmtilesChecksum: string | undefined;
+    let fileToTransferPmtiles:
+      | { originalname: string; buffer: Buffer }
+      | undefined;
     try {
-      await this.execPromise(
-        `${path}/tippecanoe_program/bin/tippecanoe \
-        -Z4 \
-        -zg \
-        --maximum-tile-byte=1000000 \
-        --force \
-        --read-parallel \
-        --detect-shared-borders \
-        --coalesce-densest-as-needed \
-        --simplification=28 \
-        --layer=zones_arretes_en_vigueur \
-        --output="${path}/zones_arretes_en_vigueur.pmtiles" \
-        "${path}/zones_arretes_en_vigueur.geojson"
-        `,
-      );
+      if (allZones.length === 0) {
+        await generateEmptyPmtiles({
+          workingDirectory: path,
+          outputPath: `${path}/zones_arretes_en_vigueur.pmtiles`,
+        });
+      } else {
+        await this.execPromise(
+          `${path}/tippecanoe_program/bin/tippecanoe \
+          -Z4 \
+          -zg \
+          --maximum-tile-byte=1000000 \
+          --force \
+          --read-parallel \
+          --detect-shared-borders \
+          --coalesce-densest-as-needed \
+          --simplification=28 \
+          --layer=zones_arretes_en_vigueur \
+          --output="${path}/zones_arretes_en_vigueur.pmtiles" \
+          "${path}/zones_arretes_en_vigueur.geojson"
+          `,
+        );
+      }
       const data = fs.readFileSync(`${path}/zones_arretes_en_vigueur.pmtiles`);
-      const fileToTransfer = {
+      pmtilesChecksum = createHash('sha256').update(data).digest('hex');
+      fileToTransferPmtiles = {
         originalname: 'zones_arretes_en_vigueur.pmtiles',
         buffer: data,
       };
-      // @ts-ignore
-      const s3Response = await this.s3Service.uploadFile(
-        fileToTransfer as Express.Multer.File,
-        'pmtiles/',
-      );
-      try {
-        const fileNameToSave = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.pmtiles`;
-        await this.s3Service.copyFile(
-          fileToTransfer.originalname,
-          fileNameToSave,
-          'pmtiles/',
-        );
-      } catch (e) {
-        this.logger.error('ERROR COPYING PMTILES', e);
-      }
-
-      await this.datagouvService.uploadToDatagouv(
-        'pmtiles',
-        s3Response.Location,
-        'Carte des zones et arrêtés en vigueur - PMTILES',
-        true,
-      );
     } catch (e) {
       this.logger.error('ERROR GENERATING PMTILES', e);
+    }
+
+    let immutableArtifacts: { geojsonUrl?: string; pmtilesUrl?: string } = {};
+    if (publicationEnabled) {
+      immutableArtifacts = await this.publishGeneratedZoneArtifacts({
+        sourceRevision,
+        geojsonFile: fileToTransferGeojson,
+        geojsonChecksum,
+        pmtilesFile: fileToTransferPmtiles,
+        pmtilesChecksum,
+      });
+    } else if (fileToTransferPmtiles) {
+      await this.publishLegacyArtifact(
+        fileToTransferPmtiles,
+        date,
+        'pmtiles',
+        'Carte des zones et arrêtés en vigueur - PMTILES',
+      );
     }
     await this.zoneAlerteComputedRepository
       .createQueryBuilder()
@@ -967,7 +1054,16 @@ DELETE FROM zone_alerte_computed
       .set({ enabled: true })
       .where('1 = 1')
       .execute();
-    await this.configService.setConfig(null, null, new Date());
+    await this.buildVersionedPublicationIfNational({
+      sourceRevision,
+      sourceComputedAt: date,
+      artifactZoneCount: allZones.length,
+      geojsonUrl: immutableArtifacts.geojsonUrl,
+      geojsonChecksum,
+      pmtilesUrl: immutableArtifacts.pmtilesUrl,
+      pmtilesChecksum,
+    });
+    await this.markLegacyComputationAvailable(new Date(), publicationEnabled);
     await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
       allZonesComputed,
       date,
@@ -982,6 +1078,143 @@ DELETE FROM zone_alerte_computed
     await this.statisticService.computeDepartementsSituation(allZonesComputed);
     if (computeHistoric) {
       this.computeHistoric();
+    }
+  }
+
+  private async publishGeneratedZoneArtifacts(input: {
+    sourceRevision?: string;
+    geojsonFile: { originalname: string; buffer: Buffer };
+    geojsonChecksum: string;
+    pmtilesFile?: { originalname: string; buffer: Buffer };
+    pmtilesChecksum?: string;
+  }): Promise<{ geojsonUrl?: string; pmtilesUrl?: string }> {
+    if (
+      !isZonePublicationEnabled() ||
+      input.sourceRevision === undefined ||
+      !input.pmtilesFile ||
+      !input.pmtilesChecksum
+    ) {
+      return {};
+    }
+
+    const geojsonUrl = await this.uploadImmutableArtifact(
+      input.geojsonFile,
+      input.geojsonChecksum,
+      'geojson',
+    );
+    const pmtilesUrl = await this.uploadImmutableArtifact(
+      input.pmtilesFile,
+      input.pmtilesChecksum,
+      'pmtiles',
+    );
+    return { geojsonUrl, pmtilesUrl };
+  }
+
+  private async markLegacyComputationAvailable(
+    date: Date,
+    publicationEnabled = isZonePublicationEnabled(),
+  ): Promise<void> {
+    if (!publicationEnabled) {
+      await this.configService.setConfig(null, null, date);
+    }
+  }
+
+  private async publishLegacyArtifact(
+    file: { originalname: string; buffer: Buffer },
+    date: Date,
+    kind: 'geojson' | 'pmtiles',
+    dataGouvTitle: string,
+  ): Promise<void> {
+    let stableUrl: string | undefined;
+    let datedCopySucceeded = false;
+    try {
+      const stableResponse = await this.s3Service.uploadFile(
+        file as Express.Multer.File,
+        `${kind}/`,
+      );
+      stableUrl = stableResponse?.Location;
+      if (!stableUrl) {
+        throw new Error(`Stable ${kind} upload returned no URL`);
+      }
+      const datedFileName = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.${kind}`;
+      await this.s3Service.copyFile(
+        file.originalname,
+        datedFileName,
+        `${kind}/`,
+      );
+      datedCopySucceeded = true;
+    } catch (error) {
+      this.logger.error(`ERROR COPYING ${kind.toUpperCase()}`, error);
+    }
+
+    if (stableUrl && (kind === 'pmtiles' || datedCopySucceeded)) {
+      try {
+        await this.datagouvService.uploadToDatagouv(
+          kind,
+          stableUrl,
+          dataGouvTitle,
+          true,
+        );
+      } catch (error) {
+        this.logger.error(
+          `ERROR UPLOADING ${kind.toUpperCase()} TO DATAGOUV`,
+          error,
+        );
+      }
+    }
+  }
+
+  private async uploadImmutableArtifact(
+    file: { originalname: string; buffer: Buffer },
+    checksum: string,
+    kind: 'geojson' | 'pmtiles',
+  ): Promise<string | undefined> {
+    try {
+      const immutableResponse = await this.s3Service.uploadFile(
+        {
+          ...file,
+          originalname: `zones_arretes_en_vigueur_${checksum}.${kind}`,
+        } as Express.Multer.File,
+        `${kind}/`,
+      );
+      const immutableUrl = immutableResponse?.Location;
+      if (!immutableUrl) {
+        throw new Error(`Immutable ${kind} upload returned no URL`);
+      }
+      return immutableUrl;
+    } catch (error) {
+      this.logger.error(
+        `ERROR UPLOADING IMMUTABLE ${kind.toUpperCase()}`,
+        error,
+      );
+      return undefined;
+    }
+  }
+
+  private async buildVersionedPublicationIfNational(input: {
+    sourceRevision?: string;
+    sourceComputedAt: Date;
+    artifactZoneCount: number;
+    geojsonUrl?: string;
+    geojsonChecksum?: string;
+    pmtilesUrl?: string;
+    pmtilesChecksum?: string;
+  }): Promise<void> {
+    if (!isZonePublicationEnabled() || input.sourceRevision === undefined) {
+      return;
+    }
+    try {
+      await this.zonePublicationService.buildCandidateFromCurrentComputed({
+        sourceRevision: input.sourceRevision,
+        sourceComputedAt: input.sourceComputedAt,
+        artifactZoneCount: input.artifactZoneCount,
+        geojsonUrl: input.geojsonUrl,
+        geojsonChecksum: input.geojsonChecksum,
+        pmtilesUrl: input.pmtilesUrl,
+        pmtilesChecksum: input.pmtilesChecksum,
+      });
+    } catch (error) {
+      this.logger.error('ERROR BUILDING VERSIONED ZONE PUBLICATION', error);
     }
   }
 
@@ -1142,7 +1375,6 @@ DELETE FROM zone_alerte_computed
       .leftJoin('zone_alerte_computed.departement', 'departement')
       .where('departement.id = :id', { id: departement.id })
       .getRawMany();
-    // @ts-ignore
     await Promise.all(
       zonesDepartement.map(async (z) => {
         z.restriction =

@@ -3,16 +3,22 @@ import { BassinVersant } from '../../dto/bassinVersant.dto';
 import { Region } from '../../dto/region.dto';
 import { Departement } from '../../dto/departement.dto';
 import { useRefDataStore } from '../../store/refData';
+import {
+  createLocalDateRollover,
+  formatLocalCivilDate,
+} from '../../utils/zone-publication';
+import type { LocalDateRollover } from '../../utils/zone-publication';
 
 const emit = defineEmits<{
   filterChange: any;
 }>();
 
 const refDataStore = useRefDataStore();
-const date = ref(new Date().toISOString().split('T')[0]);
-const currentDate = new Date();
+const date = ref(formatLocalCivilDate());
+const currentDate = ref(formatLocalCivilDate());
 const area = ref('');
 const computeDisabled = ref(true);
+let localDateRollover: LocalDateRollover | null = null;
 
 const areaOptions = ref([]);
 
@@ -27,7 +33,25 @@ const loadData = (() => {
 });
 
 onMounted(() => {
+  const initialCurrentDate = currentDate.value;
+  currentDate.value = formatLocalCivilDate();
+  if (date.value === initialCurrentDate) {
+    date.value = currentDate.value;
+  }
+  localDateRollover = createLocalDateRollover(
+    (nextCurrentDate, previousCurrentDate) => {
+      currentDate.value = nextCurrentDate;
+      if (computeDisabled.value && date.value === previousCurrentDate) {
+        date.value = nextCurrentDate;
+        loadData();
+      }
+    },
+  );
   loadData();
+});
+
+onBeforeUnmount(() => {
+  localDateRollover?.stop();
 });
 
 watch(() => refDataStore.departements, () => {
@@ -89,7 +113,7 @@ watch(() => refDataStore.departements, () => {
         type="date"
         name="dateCarte"
         min="2012-01-01"
-        :max="currentDate.toISOString().split('T')[0]"
+        :max="currentDate"
         required
       />
     </div>

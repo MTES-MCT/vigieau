@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { Ref } from 'vue';
+import {
+  createLocalDateRollover,
+  formatLocalCivilDate,
+} from '../../utils/zone-publication';
+import type { LocalDateRollover } from '../../utils/zone-publication';
 
 const props = defineProps<{
   embedded: any
@@ -10,7 +15,19 @@ const tabTitles = [
   { title: 'Données', tabId: 'tab-1', panelId: 'tab-content-1' },
 ];
 const selectedTabIndex: Ref<number> = ref(0);
-const dateCarte = ref(new Date().toISOString().split('T')[0]);
+const dateCarte = ref(formatLocalCivilDate());
+let localDateRollover: LocalDateRollover | null = null;
+
+onMounted(() => {
+  dateCarte.value = formatLocalCivilDate();
+  localDateRollover = createLocalDateRollover((currentDate) => {
+    dateCarte.value = currentDate;
+  });
+});
+
+onBeforeUnmount(() => {
+  localDateRollover?.stop();
+});
 </script>
 
 <template>

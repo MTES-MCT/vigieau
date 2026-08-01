@@ -1,13 +1,44 @@
 <script setup lang="ts">
 import * as maplibregl from 'maplibre-gl';
-import { PMTiles, Protocol } from 'pmtiles';
+import { PMTiles } from 'pmtiles';
 import { Ref } from 'vue';
 import api from '../../api';
+import type { ZonePublicationPin } from '../../api';
 import { useRefDataStore } from '../../store/refData';
+import { useZonePublicationStore } from '../../store/zonePublication';
+import {
+  ensureZonePmtilesProtocol,
+  preflightPmtiles,
+  subscribeZonePmtilesStatus,
+  zonePmtilesProtocol,
+} from '../../utils/pmtiles';
+import type { PmtilesStatus } from '../../utils/pmtiles';
+import { createRetryableInitializer } from '../../utils/retryable-initializer';
+import {
+  createAbortError,
+  createLatestTaskRunner,
+  createRetryScheduler,
+  isAbortError,
+  runRetryableTask,
+} from '../../utils/retryable-task';
+import {
+  createLocalDateRollover,
+  getMapPublicationStateKey,
+  isCurrentMapDate,
+  shouldReplaceZoneLayers,
+} from '../../utils/zone-publication';
+import type { LocalDateRollover } from '../../utils/zone-publication';
+import {
+  canRetainDisplayedZoneSource,
+  captureDisplayedZonePublicationPin,
+  getZoneSourceKey,
+  getZoneSourceLoadAction,
+  shouldResetZoneSourceRetryCycle,
+} from '../../utils/zone-source-transition';
 
 const props = defineProps<{
   embedded: any;
-  date: string;
+  date?: string;
   area: string;
   loading: boolean;
   hideDownloadBtn: boolean;
@@ -17,7 +48,11 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  downloadMap: any;
+  (event: 'downloadMap', typeEau: string): void;
+  (
+    event: 'displayedPublicationPin',
+    publicationPin: ZonePublicationPin | null,
+  ): void;
 }>();
 
 const modalOpened: Ref<boolean> = ref(false);
@@ -36,6 +71,7 @@ const departementCode = route.query.depCode;
 const showRestrictionsBtn = ref(true);
 const showError = ref(false);
 const refDataStore = useRefDataStore();
+const zonePublicationStore = useZonePublicationStore();
 const depsSelected = ref([]);
 
 const initialState = [
@@ -43,31 +79,208 @@ const initialState = [
   [11.403809, 51.248163],
 ];
 
-let protocol = new Protocol();
-maplibregl.addProtocol('pmtiles', (request) => {
-  return new Promise((resolve, reject) => {
-    const callback = (err, data) => {
-      if (err) {
-        showError.value = true;
-        reject(err);
-      } else {
-        showError.value = false;
-        resolve({ data });
-      }
-    };
-    protocol.tile(request, callback);
-  });
-});
+const protocol = zonePmtilesProtocol;
 const DEFAULT_PMTILES_URL = `${runtimeConfig.public.s3vhost}pmtiles/zones_arretes_en_vigueur.pmtiles`;
-const PMTILES_URL = String(
+const CONFIGURED_PMTILES_URL = String(
   runtimeConfig.public.pmtilesUrl || DEFAULT_PMTILES_URL,
 ).trim();
-const PMTILES_URL_TRUNC = PMTILES_URL.replace(/\.pmtiles$/, '');
-const p = new PMTiles(PMTILES_URL);
-// this is so we share one instance across the JS code and the map renderer
-protocol.add(p);
+const PMTILES_URL_TRUNC = CONFIGURED_PMTILES_URL.replace(/\.pmtiles$/, '');
+const PMTILES_PREFLIGHT_ATTEMPTS = 3;
+const PMTILES_PREFLIGHT_RETRY_MS = 500;
+const PMTILES_TILE_RETRY_LIMIT = 2;
+const PMTILES_TILE_RETRY_MS = 1_000;
+const PMTILES_RECOVERY_RETRY_MS = 60_000;
+
+interface ZoneSourceState {
+  pmtilesUrl: string;
+  publicationId: string | null;
+  restrictionsAvailable: boolean;
+  viewKey: string;
+  sourceKey: string;
+  pmtiles: PMTiles;
+  validated: boolean;
+}
+
+interface RequestedZoneSource {
+  pmtilesUrl: string;
+  publicationId: string | null;
+  restrictionsAvailable: boolean;
+  viewKey: string;
+  sourceKey: string;
+}
+
+interface PendingZoneSourceTransition {
+  candidate: ZoneSourceState;
+  previous: ZoneSourceState | null;
+}
+
+const getZoneSourceViewKey = (
+  restrictionsAvailable: boolean,
+  dateValue?: string,
+): string => (restrictionsAvailable ? 'current' : `historic:${dateValue}`);
+
+const getRequestedZoneSource = (
+  dateValue = props.date,
+): RequestedZoneSource | null => {
+  const restrictionsAvailable = isCurrentMapDate(dateValue);
+  const pmtilesUrl = restrictionsAvailable
+    ? zonePublicationStore.pmtilesUrl
+    : `${PMTILES_URL_TRUNC}_${dateValue}.pmtiles`;
+  if (!pmtilesUrl) {
+    return null;
+  }
+  const publicationId = restrictionsAvailable
+    ? (zonePublicationStore.publication?.id ?? null)
+    : null;
+  return {
+    pmtilesUrl,
+    publicationId,
+    restrictionsAvailable,
+    viewKey: getZoneSourceViewKey(restrictionsAvailable, dateValue),
+    sourceKey: getZoneSourceKey(pmtilesUrl, publicationId),
+  };
+};
 let firstSymbolId: any;
 let mapPopupRequestId = 0;
+let mapViewRequestId = 0;
+let componentMounted = false;
+let displayedZoneSource: ZoneSourceState | null = null;
+let pendingZoneSourceTransition: PendingZoneSourceTransition | null = null;
+let requestedZoneSourceKey: string | null = null;
+let scheduledZoneSourceKey: string | null = null;
+let scheduledZoneSourceRecoveryKey: string | null = null;
+let exhaustedZoneSourceKey: string | null = null;
+let zoneTileRetryCount = 0;
+let handledSuccessfulRefreshVersion =
+  zonePublicationStore.successfulRefreshVersion;
+let localDateRollover: LocalDateRollover | null = null;
+let unsubscribePmtilesStatus: (() => void) | null = null;
+const zoneLayerTaskRunner = createLatestTaskRunner();
+const zoneTileRetry = createRetryScheduler(() => {
+  const retrySourceKey = scheduledZoneSourceKey;
+  scheduledZoneSourceKey = null;
+  if (
+    componentMounted &&
+    retrySourceKey &&
+    getRequestedZoneSource()?.sourceKey === retrySourceKey
+  ) {
+    void synchronizeMapView();
+  }
+}, PMTILES_TILE_RETRY_MS);
+const clearZoneTileRetry = (): void => {
+  scheduledZoneSourceKey = null;
+  zoneTileRetry.clear();
+};
+const zoneSourceRecoveryRetry = createRetryScheduler(() => {
+  const recoverySourceKey = scheduledZoneSourceRecoveryKey;
+  scheduledZoneSourceRecoveryKey = null;
+  if (
+    componentMounted &&
+    recoverySourceKey &&
+    getRequestedZoneSource()?.sourceKey === recoverySourceKey
+  ) {
+    if (exhaustedZoneSourceKey === recoverySourceKey) {
+      exhaustedZoneSourceKey = null;
+    }
+    zoneTileRetryCount = 0;
+    void synchronizeMapView();
+  }
+}, PMTILES_RECOVERY_RETRY_MS);
+const clearZoneSourceRecovery = (): void => {
+  scheduledZoneSourceRecoveryKey = null;
+  zoneSourceRecoveryRetry.clear();
+};
+const scheduleZoneSourceRecovery = (sourceKey: string): void => {
+  scheduledZoneSourceRecoveryKey = sourceKey;
+  zoneSourceRecoveryRetry.schedule();
+};
+const requestMatchesPmtilesUrl = (
+  requestUrl: string,
+  pmtilesUrl?: string,
+): boolean => Boolean(pmtilesUrl && requestUrl.includes(pmtilesUrl));
+const updatePmtilesStatus = ({
+  failed,
+  requestUrl,
+  requestKind,
+}: PmtilesStatus): void => {
+  if (!componentMounted) {
+    return;
+  }
+  const requestedSource = getRequestedZoneSource();
+  const pendingTransition = pendingZoneSourceTransition;
+  const matchesRequested = requestMatchesPmtilesUrl(
+    requestUrl,
+    requestedSource?.pmtilesUrl,
+  );
+  const matchesDisplayed = requestMatchesPmtilesUrl(
+    requestUrl,
+    displayedZoneSource?.pmtilesUrl,
+  );
+  const matchesPendingCandidate = Boolean(
+    pendingTransition &&
+    displayedZoneSource === pendingTransition.candidate &&
+    requestMatchesPmtilesUrl(
+      requestUrl,
+      pendingTransition.candidate.pmtilesUrl,
+    ),
+  );
+  if (!matchesRequested && !matchesDisplayed && !matchesPendingCandidate) {
+    return;
+  }
+
+  const action = getZoneSourceLoadAction({
+    failed,
+    requestKind,
+    isPendingCandidate: matchesPendingCandidate,
+    candidateValidated: pendingTransition?.candidate.validated ?? false,
+    retryCount: zoneTileRetryCount,
+    retryLimit: PMTILES_TILE_RETRY_LIMIT,
+  });
+
+  if (failed) {
+    showError.value = true;
+  }
+
+  if (action === 'validate' && pendingTransition) {
+    pendingTransition.candidate.validated = true;
+    pendingZoneSourceTransition = null;
+    exhaustedZoneSourceKey = null;
+    zoneTileRetryCount = 0;
+    clearZoneTileRetry();
+    clearZoneSourceRecovery();
+    showError.value = false;
+    return;
+  }
+
+  if (
+    (action === 'restore' || action === 'restore-and-retry') &&
+    pendingTransition
+  ) {
+    pendingZoneSourceTransition = null;
+    restoreZoneSource(pendingTransition.previous);
+    if (
+      action === 'restore-and-retry' &&
+      requestedSource?.sourceKey === pendingTransition.candidate.sourceKey
+    ) {
+      zoneTileRetryCount += 1;
+      scheduledZoneSourceKey = pendingTransition.candidate.sourceKey;
+      zoneTileRetry.schedule();
+    } else if (action === 'restore') {
+      exhaustedZoneSourceKey = pendingTransition.candidate.sourceKey;
+      scheduleZoneSourceRecovery(pendingTransition.candidate.sourceKey);
+    }
+    return;
+  }
+
+  if (
+    !failed &&
+    requestKind === 'tile' &&
+    matchesDisplayed &&
+    displayedZoneSource?.validated
+  ) {
+    showError.value = false;
+  }
+};
 
 // Create a popup, but don't add it to the map yet.
 const popup = new maplibregl.Popup({
@@ -75,12 +288,18 @@ const popup = new maplibregl.Popup({
   closeOnClick: false,
 }).setMaxWidth('300px');
 
-onMounted(() => {
-  if (!isMapSupported) {
-    return;
+const mapInitializer = createRetryableInitializer(() => {
+  const initialPmtilesUrl = getRequestedZoneSource()?.pmtilesUrl;
+  if (
+    !componentMounted ||
+    !mapContainer.value ||
+    !initialPmtilesUrl ||
+    map.value
+  ) {
+    return map.value;
   }
 
-  map.value = new maplibregl.Map({
+  const mapInstance = new maplibregl.Map({
     container: mapContainer.value,
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
@@ -88,12 +307,13 @@ onMounted(() => {
     minZoom: 4,
     maxZoom: 14,
   });
+  map.value = mapInstance;
 
   // Add zoom and rotation controls to the map.
-  map.value?.addControl(new maplibregl.NavigationControl(), 'bottom-right');
+  mapInstance.addControl(new maplibregl.NavigationControl(), 'bottom-right');
 
   // Add geolocate control to the map.
-  map.value?.addControl(
+  mapInstance.addControl(
     new maplibregl.GeolocateControl({
       positionOptions: {
         enableHighAccuracy: true,
@@ -104,24 +324,26 @@ onMounted(() => {
   );
 
   // Add fullscreen control to the map.
-  map.value?.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
+  mapInstance.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
 
-  map.value?.on('load', () => {
-    const layers = map.value.getStyle().layers;
+  mapInstance.on('load', () => {
+    const layers = mapInstance.getStyle().layers;
     for (let i = 0; i < layers.length; i++) {
       if (layers[i].type === 'symbol') {
         firstSymbolId = layers[i].id;
         break;
       }
     }
-    map.value?.addSource('decoupage-administratif', {
-      type: 'vector',
-      url: `https://openmaptiles.data.gouv.fr/data/decoupage-administratif.json`,
-    });
-    addSourceAndLayerZones(PMTILES_URL);
+    if (!mapInstance.getSource('decoupage-administratif')) {
+      mapInstance.addSource('decoupage-administratif', {
+        type: 'vector',
+        url: `https://openmaptiles.data.gouv.fr/data/decoupage-administratif.json`,
+      });
+    }
+    void synchronizeMapView();
   });
 
-  map.value?.on('click', 'departements-overlay', async (e: any) => {
+  mapInstance.on('click', 'departements-overlay', async (e: any) => {
     const requestId = ++mapPopupRequestId;
     const features = map.value?.queryRenderedFeatures(e.point, {
       layers: ['zones-data'],
@@ -157,18 +379,64 @@ onMounted(() => {
     renderMapPopup(coordinates, properties, address, geo);
   });
 
-  map.value?.on('mouseenter', 'zones-data', () => {
+  mapInstance.on('mouseenter', 'zones-data', () => {
     // Change the cursor style as a UI indicator.
     map.value.getCanvas().style.cursor = 'pointer';
   });
 
-  map.value?.on('mouseleave', 'zones-data', () => {
+  mapInstance.on('mouseleave', 'zones-data', () => {
     map.value.getCanvas().style.cursor = '';
   });
+
+  return mapInstance;
 });
 
-onUnmounted(() => {
+const ensureMapInitialized = async (): Promise<boolean> => {
+  try {
+    const initializedMap = await mapInitializer.initialize();
+    if (initializedMap) {
+      return true;
+    }
+  } catch {
+    // A later manifest refresh can retry the exact same initialization.
+  }
+  showError.value = true;
+  const requestedSource = getRequestedZoneSource();
+  if (requestedSource) {
+    scheduleZoneSourceRecovery(requestedSource.sourceKey);
+  }
+  return false;
+};
+
+onMounted(async () => {
+  if (!isMapSupported) {
+    return;
+  }
+  componentMounted = true;
+  ensureZonePmtilesProtocol();
+  unsubscribePmtilesStatus = subscribeZonePmtilesStatus(updatePmtilesStatus);
+  localDateRollover = createLocalDateRollover(() => {
+    void synchronizeMapView();
+  });
+  await synchronizeMapView();
+});
+
+onBeforeUnmount(() => {
+  componentMounted = false;
+  mapViewRequestId += 1;
+  mapPopupRequestId += 1;
+  zoneLayerTaskRunner.cancel();
+  clearZoneTileRetry();
+  clearZoneSourceRecovery();
+  localDateRollover?.stop();
+  unsubscribePmtilesStatus?.();
+  popup.remove();
   map.value?.remove();
+  map.value = null;
+  displayedZoneSource = null;
+  pendingZoneSourceTransition = null;
+  requestedZoneSourceKey = null;
+  exhaustedZoneSourceKey = null;
 });
 
 const mapTags: Ref<any[]> = ref([
@@ -244,23 +512,29 @@ const flyToLocation = (bounds: any) => {
 };
 
 const updateLayerFilter = () => {
-  map.value?.setFilter('zones-data', ['==', 'type', selectedTypeEau.value]);
+  if (map.value?.getLayer('zones-data')) {
+    map.value.setFilter('zones-data', ['==', 'type', selectedTypeEau.value]);
+  }
 };
 
 const updateContourFilter = () => {
-  map.value?.setFilter('zones-contour', [
-    'all',
-    ['==', 'type', selectedTypeEau.value],
-    ['in', 'id', ...zonesSelected.value],
-  ]);
+  if (map.value?.getLayer('zones-contour')) {
+    map.value.setFilter('zones-contour', [
+      'all',
+      ['==', 'type', selectedTypeEau.value],
+      ['in', 'id', ...zonesSelected.value],
+    ]);
+  }
 };
 
 const updateDepartementsContourFilter = () => {
-  map.value?.setFilter('departements-contour', [
-    'in',
-    'code',
-    ...depsSelected.value.map((d: any) => d.code),
-  ]);
+  if (map.value?.getLayer('departements-contour')) {
+    map.value.setFilter('departements-contour', [
+      'in',
+      'code',
+      ...depsSelected.value.map((d: any) => d.code),
+    ]);
+  }
 };
 
 const closeModal = () => {
@@ -295,6 +569,9 @@ function bindMapPopupButton(
   if (!btn) {
     return;
   }
+  const publicationPin = captureDisplayedZonePublicationPin(
+    displayedZoneSource?.publicationId,
+  );
 
   btn.addEventListener('click', async () => {
     // On garde le lon/lat exact du clic, même quand le libellé vient d'un service externe.
@@ -325,11 +602,12 @@ function bindMapPopupButton(
       modalActions,
       modalOpened,
       loadingZones,
+      publicationPin,
     );
   });
 }
 
-const addSourceAndLayerZones = (pmtilesUrl: string) => {
+const removeZoneLayers = () => {
   if (map.value?.getLayer('zones-data')) {
     map.value?.removeLayer('zones-data');
   }
@@ -339,13 +617,18 @@ const addSourceAndLayerZones = (pmtilesUrl: string) => {
   if (map.value?.getLayer('departements-overlay')) {
     map.value?.removeLayer('departements-overlay');
   }
+  if (map.value?.getLayer('departements-contour')) {
+    map.value?.removeLayer('departements-contour');
+  }
   if (map.value?.getLayer('zones-contour')) {
     map.value?.removeLayer('zones-contour');
   }
   if (map.value?.getSource('zones')) {
     map.value?.removeSource('zones');
   }
+};
 
+const addSourceAndLayerZones = (pmtilesUrl: string) => {
   map.value?.addSource('zones', {
     type: 'vector',
     url: `pmtiles://${pmtilesUrl}`,
@@ -460,9 +743,299 @@ const addSourceAndLayerZones = (pmtilesUrl: string) => {
 };
 
 const resetZoneSelected = () => {
+  // Ignore geocoding responses started for a selection that is no longer visible.
+  mapPopupRequestId += 1;
   zonesSelected.value = [];
   updateContourFilter();
   popup.remove();
+};
+
+const publishDisplayedPublicationPin = (
+  source: ZoneSourceState | null,
+): void => {
+  emit(
+    'displayedPublicationPin',
+    source ? captureDisplayedZonePublicationPin(source.publicationId) : null,
+  );
+};
+
+const restoreZoneSource = (source: ZoneSourceState | null): void => {
+  resetZoneSelected();
+  removeZoneLayers();
+  displayedZoneSource = null;
+  if (!source) {
+    showRestrictionsBtn.value = false;
+    publishDisplayedPublicationPin(null);
+    return;
+  }
+
+  protocol.add(source.pmtiles);
+  addSourceAndLayerZones(source.pmtilesUrl);
+  displayedZoneSource = source;
+  showRestrictionsBtn.value = source.restrictionsAvailable;
+  publishDisplayedPublicationPin(source);
+};
+
+const replaceZoneLayers = (
+  requestedSource: RequestedZoneSource,
+  candidate: PMTiles,
+): void => {
+  const previous = canRetainDisplayedZoneSource(
+    displayedZoneSource?.viewKey,
+    requestedSource.viewKey,
+  )
+    ? displayedZoneSource
+    : null;
+  const candidateState: ZoneSourceState = {
+    ...requestedSource,
+    pmtiles: candidate,
+    validated: false,
+  };
+
+  resetZoneSelected();
+  removeZoneLayers();
+  displayedZoneSource = null;
+  protocol.add(candidateState.pmtiles);
+
+  try {
+    addSourceAndLayerZones(candidateState.pmtilesUrl);
+  } catch (error) {
+    restoreZoneSource(previous);
+    throw error;
+  }
+
+  displayedZoneSource = candidateState;
+  pendingZoneSourceTransition = {
+    candidate: candidateState,
+    previous,
+  };
+  showRestrictionsBtn.value = candidateState.restrictionsAvailable;
+  publishDisplayedPublicationPin(candidateState);
+  showError.value = false;
+};
+
+const isMapViewRequestCurrent = (
+  requestId: number,
+  dateValue: string | undefined,
+  currentDate: boolean,
+): boolean =>
+  componentMounted &&
+  requestId === mapViewRequestId &&
+  props.date === dateValue &&
+  isCurrentMapDate(props.date) === currentDate;
+
+const displayZoneLayers = async (
+  requestedSource: RequestedZoneSource,
+  requestId: number,
+  dateValue: string | undefined,
+  currentDate: boolean,
+): Promise<boolean> => {
+  if (
+    !map.value?.isStyleLoaded() ||
+    !isMapViewRequestCurrent(requestId, dateValue, currentDate)
+  ) {
+    return false;
+  }
+
+  if (
+    exhaustedZoneSourceKey === requestedSource.sourceKey &&
+    displayedZoneSource?.sourceKey !== requestedSource.sourceKey
+  ) {
+    return false;
+  }
+
+  const shouldReplaceSource =
+    shouldReplaceZoneLayers(
+      displayedZoneSource?.pmtilesUrl ?? null,
+      requestedSource.pmtilesUrl,
+      Boolean(map.value.getSource('zones')),
+    ) || displayedZoneSource?.sourceKey !== requestedSource.sourceKey;
+  if (!shouldReplaceSource) {
+    exhaustedZoneSourceKey = null;
+    clearZoneSourceRecovery();
+    if (displayedZoneSource) {
+      displayedZoneSource.publicationId = requestedSource.publicationId;
+      displayedZoneSource.restrictionsAvailable =
+        requestedSource.restrictionsAvailable;
+      displayedZoneSource.viewKey = requestedSource.viewKey;
+      displayedZoneSource.sourceKey = requestedSource.sourceKey;
+      publishDisplayedPublicationPin(displayedZoneSource);
+    }
+    showRestrictionsBtn.value = requestedSource.restrictionsAvailable;
+    return true;
+  }
+
+  try {
+    return await zoneLayerTaskRunner.run(
+      (signal) =>
+        runRetryableTask(
+          async (retrySignal) => {
+            const candidate = await preflightPmtiles(
+              requestedSource.pmtilesUrl,
+              retrySignal,
+            );
+            if (
+              !isMapViewRequestCurrent(requestId, dateValue, currentDate) ||
+              getRequestedZoneSource(dateValue)?.sourceKey !==
+                requestedSource.sourceKey ||
+              !map.value?.isStyleLoaded()
+            ) {
+              throw createAbortError();
+            }
+            return candidate;
+          },
+          {
+            attempts: PMTILES_PREFLIGHT_ATTEMPTS,
+            delayMs: PMTILES_PREFLIGHT_RETRY_MS,
+            signal,
+          },
+        ),
+      (candidate) => {
+        if (
+          !isMapViewRequestCurrent(requestId, dateValue, currentDate) ||
+          getRequestedZoneSource(dateValue)?.sourceKey !==
+            requestedSource.sourceKey ||
+          !map.value?.isStyleLoaded()
+        ) {
+          throw createAbortError();
+        }
+        replaceZoneLayers(requestedSource, candidate);
+      },
+    );
+  } catch (error) {
+    if (
+      !isAbortError(error) &&
+      isMapViewRequestCurrent(requestId, dateValue, currentDate)
+    ) {
+      showError.value = true;
+      exhaustedZoneSourceKey = requestedSource.sourceKey;
+      scheduleZoneSourceRecovery(requestedSource.sourceKey);
+    }
+    return false;
+  }
+};
+
+const updateTypeAvailability = (dateValue?: string): void => {
+  const date = dateValue ? new Date(dateValue) : new Date();
+  if (date < new Date('2024-04-28')) {
+    if (selectedTypeEau.value === 'AEP') {
+      selectedTypeEau.value = 'SUP';
+    }
+    typeEauTags.value[0].disabled = true;
+  } else {
+    typeEauTags.value[0].disabled = false;
+  }
+};
+
+const synchronizeMapView = async (): Promise<void> => {
+  if (!componentMounted) {
+    return;
+  }
+
+  const requestId = ++mapViewRequestId;
+  zoneLayerTaskRunner.cancel();
+  const dateValue = props.date;
+  const currentDate = isCurrentMapDate(dateValue);
+  const requestedViewKey = getZoneSourceViewKey(currentDate, dateValue);
+  if (
+    pendingZoneSourceTransition &&
+    !canRetainDisplayedZoneSource(
+      pendingZoneSourceTransition.candidate.viewKey,
+      requestedViewKey,
+    )
+  ) {
+    const previous = canRetainDisplayedZoneSource(
+      pendingZoneSourceTransition.previous?.viewKey,
+      requestedViewKey,
+    )
+      ? pendingZoneSourceTransition.previous
+      : null;
+    pendingZoneSourceTransition = null;
+    restoreZoneSource(previous);
+  } else if (
+    !pendingZoneSourceTransition &&
+    displayedZoneSource &&
+    !canRetainDisplayedZoneSource(displayedZoneSource.viewKey, requestedViewKey)
+  ) {
+    restoreZoneSource(null);
+  }
+  if (
+    currentDate &&
+    shouldResetZoneSourceRetryCycle(
+      handledSuccessfulRefreshVersion,
+      zonePublicationStore.successfulRefreshVersion,
+    )
+  ) {
+    handledSuccessfulRefreshVersion =
+      zonePublicationStore.successfulRefreshVersion;
+    exhaustedZoneSourceKey = null;
+    zoneTileRetryCount = 0;
+    clearZoneTileRetry();
+    clearZoneSourceRecovery();
+  }
+  updateTypeAvailability(dateValue);
+
+  if (currentDate) {
+    try {
+      await zonePublicationStore.loadPublication();
+    } catch {
+      if (isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
+        showError.value = true;
+      }
+      return;
+    }
+  } else {
+    void zonePublicationStore.loadPublication().catch(() => undefined);
+  }
+
+  if (!isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
+    return;
+  }
+  const requestedSource = getRequestedZoneSource(dateValue);
+  if (!requestedSource) {
+    requestedZoneSourceKey = null;
+    zoneTileRetryCount = 0;
+    clearZoneTileRetry();
+    clearZoneSourceRecovery();
+    showError.value = true;
+    return;
+  }
+
+  if (requestedSource.sourceKey !== requestedZoneSourceKey) {
+    requestedZoneSourceKey = requestedSource.sourceKey;
+    exhaustedZoneSourceKey = null;
+    zoneTileRetryCount = 0;
+    clearZoneTileRetry();
+    clearZoneSourceRecovery();
+    if (pendingZoneSourceTransition) {
+      const previous = canRetainDisplayedZoneSource(
+        pendingZoneSourceTransition.previous?.viewKey,
+        requestedSource.viewKey,
+      )
+        ? pendingZoneSourceTransition.previous
+        : null;
+      pendingZoneSourceTransition = null;
+      restoreZoneSource(previous);
+    }
+    if (
+      displayedZoneSource &&
+      !canRetainDisplayedZoneSource(
+        displayedZoneSource.viewKey,
+        requestedSource.viewKey,
+      )
+    ) {
+      restoreZoneSource(null);
+    }
+  }
+
+  if (!(await ensureMapInitialized())) {
+    return;
+  }
+  if (!isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
+    return;
+  }
+
+  await displayZoneLayers(requestedSource, requestId, dateValue, currentDate);
 };
 
 async function downloadMap() {
@@ -485,35 +1058,27 @@ watch(
 );
 
 watch(
-  () => props.date,
+  () => [
+    zonePublicationStore.publication,
+    getMapPublicationStateKey(
+      zonePublicationStore.publication?.id,
+      zonePublicationStore.manifestStatus,
+      zonePublicationStore.pmtilesUrl,
+    ),
+    zonePublicationStore.successfulRefreshVersion,
+  ],
   () => {
-    const date = new Date(props.date);
-    if (!date || !map.value) {
+    if (!componentMounted || !isCurrentMapDate(props.date)) {
       return;
     }
-    resetZoneSelected();
-    if (date < new Date('2024-04-28')) {
-      if (selectedTypeEau.value === 'AEP') {
-        selectedTypeEau.value = 'SUP';
-      }
-      typeEauTags.value[0].disabled = true;
-    } else {
-      typeEauTags.value[0].disabled = false;
-    }
-    const today = new Date();
-    if (
-      date.getFullYear() === today.getFullYear() &&
-      date.getMonth() === today.getMonth() &&
-      date.getDate() === today.getDate()
-    ) {
-      addSourceAndLayerZones(PMTILES_URL);
-      showRestrictionsBtn.value = true;
-    } else {
-      const p = new PMTiles(`${PMTILES_URL_TRUNC}_${props.date}.pmtiles`);
-      protocol.add(p);
-      addSourceAndLayerZones(`${PMTILES_URL_TRUNC}_${props.date}.pmtiles`);
-      showRestrictionsBtn.value = false;
-    }
+    void synchronizeMapView();
+  },
+);
+
+watch(
+  () => props.date,
+  () => {
+    void synchronizeMapView();
   },
 );
 
@@ -676,7 +1241,6 @@ watch(
     height: 100%;
     border-radius: 15px;
   }
-
 }
 
 .map-pre-actions,

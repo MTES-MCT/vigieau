@@ -297,5 +297,84 @@ describe('DepartementsService', () => {
         },
       ]);
     });
+
+    it('never lets an older asynchronous load replace the latest situation', async () => {
+      const today = new Date().toISOString().split('T')[0];
+      let resolveFirstDepartements!: (value: any[]) => void;
+      let resolveSecondDepartements!: (value: any[]) => void;
+      let resolveFirstStatistics!: (value: any[]) => void;
+      let resolveSecondStatistics!: (value: any[]) => void;
+      const departements = [
+        { code: '65', nom: 'Hautes-Pyrenees', region: { nom: 'Occitanie' } },
+      ];
+      const statistics = [{ date: today, departementSituation: {} }];
+
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirstDepartements = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveSecondDepartements = resolve;
+          }),
+        );
+      mockStatisticRepository.find = jest
+        .fn()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirstStatistics = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveSecondStatistics = resolve;
+          }),
+        );
+
+      const oldLoad = service.loadSituation([
+        { departement: '65', niveauGravite: 'vigilance', type: 'SUP' },
+      ]);
+      const latestLoad = service.loadSituation([
+        { departement: '65', niveauGravite: 'crise', type: 'SUP' },
+      ]);
+
+      resolveSecondDepartements(departements);
+      resolveSecondStatistics(statistics);
+      await latestLoad;
+      resolveFirstDepartements(departements);
+      resolveFirstStatistics(statistics);
+      await oldLoad;
+
+      expect(service['situationDepartements'][0].departementSituation[0]).toEqual(
+        expect.objectContaining({
+          code: '65',
+          niveauGraviteMax: 'crise',
+          niveauGraviteSupMax: 'crise',
+        }),
+      );
+    });
+
+    it('retries a transient situation load failure without exposing a partial cache', async () => {
+      const previousSituation = [
+        { date: '2026-07-30', departementSituation: [{ code: '65' }] },
+      ];
+      service['situationDepartements'] = previousSituation;
+      Object.defineProperty(service, 'situationLoadRetryDelayMs', { value: 0 });
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('database unavailable'))
+        .mockResolvedValueOnce([]);
+      mockStatisticRepository.find = jest.fn().mockResolvedValue([]);
+
+      const loading = service.loadSituation([]);
+      expect(service['situationDepartements']).toBe(previousSituation);
+      await loading;
+
+      expect(mockDepartementRepository.find).toHaveBeenCalledTimes(2);
+      expect(service['situationDepartements']).toEqual([]);
+    });
   });
 });

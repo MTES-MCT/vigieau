@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Ref } from 'vue';
+import type { ZonePublicationPin } from '../../api';
 import utils from '../../utils';
 import { Address } from '../../dto/address.dto';
 import { Geo } from '~/client/dto/geo.dto';
@@ -8,8 +9,13 @@ import { useAddressStore } from '../../store/address';
 import { helpers, required, requiredIf } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 
+const props = defineProps<{
+  pointSelected?: unknown;
+  publicationPin?: ZonePublicationPin;
+}>();
+
 const emit = defineEmits<{
-  formData: any,
+  formData: any;
 }>();
 
 const addressStore = useAddressStore();
@@ -42,7 +48,8 @@ const typeEauOptions = [
   {
     text: `Des cours d'eau, rivières`,
     value: 'SUP',
-  }, {
+  },
+  {
     text: `Des nappes (puits ou forage)`,
     value: 'SOU',
   },
@@ -72,7 +79,7 @@ const rules = computed(() => {
       required: helpers.withMessage('Le profil est obligatoire.', required),
     },
     typeEau: {
-      required: helpers.withMessage('Le type d\'eau est obligatoire.', required),
+      required: helpers.withMessage("Le type d'eau est obligatoire.", required),
     },
     address: {
       requiredIf: requiredIf(!formData.geo),
@@ -90,7 +97,20 @@ const searchZone = async () => {
   if (v$.value.$error) {
     return;
   }
-  utils.searchZones(formData.address, formData.geo, formData.profil, formData.typeEau, router, modalTitle, modalText, modalIcon, modalActions, modalOpened, loading.value);
+  utils.searchZones(
+    formData.address,
+    formData.geo,
+    formData.profil,
+    formData.typeEau,
+    router,
+    modalTitle,
+    modalText,
+    modalIcon,
+    modalActions,
+    modalOpened,
+    loading.value,
+    props.publicationPin,
+  );
 };
 
 const setAddress = (address: Address | null, geo: Geo | null) => {
@@ -128,30 +148,38 @@ const closeModal = (): void => {
       </DsfrInputGroup>
     </div>
     <div>
-      <p class="fr-mb-0">Cliquez sur la carte pour indiquer où se situe votre {{ formData.profil === 'particulier' ? 'adresse' : 'point de prélèvement'}}</p>
+      <p class="fr-mb-0">
+        Cliquez sur la carte pour indiquer où se situe votre
+        {{
+          formData.profil === 'particulier' ? 'adresse' : 'point de prélèvement'
+        }}
+      </p>
     </div>
     <div class="divider fr-my-1w">ou</div>
     <div>
-      <MixinsSearchAddress @search="setAddress($event.address, $event.geo)"
-                           :required="true"
-                           :query="query"
-                           :light="true"
-                           :showGeoloc="true"
-                           :loading="loading" />
+      <MixinsSearchAddress
+        @search="setAddress($event.address, $event.geo)"
+        :required="true"
+        :query="query"
+        :light="true"
+        :showGeoloc="true"
+        :loading="loading"
+      />
     </div>
     <div class="fr-mt-2w">
-      <DsfrButton @click="searchZone()"
-                  :disabled="loading || v$.$invalid">
+      <DsfrButton @click="searchZone()" :disabled="loading || v$.$invalid">
         Je consulte les restrictions
       </DsfrButton>
     </div>
   </div>
 
-  <DsfrModal :opened="modalOpened"
-             :title="modalTitle"
-             :icon="modalIcon"
-             :actions=modalActions
-             @close="closeModal">
+  <DsfrModal
+    :opened="modalOpened"
+    :title="modalTitle"
+    :icon="modalIcon"
+    :actions="modalActions"
+    @close="closeModal"
+  >
     <div v-html="modalText"></div>
   </DsfrModal>
 </template>

@@ -1,6 +1,7 @@
 import { FetchError } from 'ofetch';
 import { Ref } from 'vue';
 import api from '../api';
+import type { ZonePublicationPin } from '../api';
 import { Address } from '../dto/address.dto';
 import { Geo } from '../dto/geo.dto';
 import niveauxGravite from '../dto/niveauGravite';
@@ -145,6 +146,7 @@ const index = {
     modalActions?: Ref<any[]>,
     modalOpened?: Ref<boolean>,
     loadingRestrictions?: Ref<boolean>,
+    publicationPin?: ZonePublicationPin,
   ) {
     const addressStore = useAddressStore();
     const restrictionStore = useZoneStore();
@@ -154,8 +156,8 @@ const index = {
     if (loadingRestrictions) loadingRestrictions.value = true;
 
     const { data, error } = address
-      ? await api.searchZonesByAdress(address)
-      : await api.searchZonesByGeo(geo);
+      ? await api.searchZonesByAdress(address, publicationPin)
+      : await api.searchZonesByGeo(geo, publicationPin);
 
     // STATS MATOMO
     try {

@@ -17,6 +17,9 @@ export class DepartementsService {
   departements: any[];
   regions: Region[];
   bassinsVersants: BassinVersant[];
+  private situationLoadGeneration = 0;
+  private readonly situationLoadMaxAttempts = 3;
+  private readonly situationLoadRetryDelayMs = 100;
 
   constructor(
     @InjectRepository(Departement)
@@ -138,34 +141,69 @@ export class DepartementsService {
    */
   async loadSituation(currentZones) {
     this.logger.log('LOAD SITUATION DEPARTEMENTS - BEGIN');
-    const departements = await this.departementRepository.find(<
-      FindManyOptions
-    >{
-      select: {
-        id: true,
-        code: true,
-        nom: true,
-        region: {
+    const generation = ++this.situationLoadGeneration;
+    let lastError: unknown;
+
+    for (
+      let attempt = 1;
+      attempt <= this.situationLoadMaxAttempts;
+      attempt += 1
+    ) {
+      if (generation !== this.situationLoadGeneration) {
+        return;
+      }
+      try {
+        const nextSituation = await this.buildSituation(currentZones);
+        if (generation !== this.situationLoadGeneration) {
+          return;
+        }
+        this.situationDepartements = nextSituation;
+        this.logger.log('LOAD SITUATION DEPARTEMENTS - END');
+        return;
+      } catch (error) {
+        if (generation !== this.situationLoadGeneration) {
+          return;
+        }
+        lastError = error;
+        if (attempt < this.situationLoadMaxAttempts) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, this.situationLoadRetryDelayMs),
+          );
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  private async buildSituation(currentZones): Promise<any[]> {
+    const [departements, statistics] = await Promise.all([
+      this.departementRepository.find(<FindManyOptions>{
+        select: {
+          id: true,
+          code: true,
           nom: true,
+          region: {
+            nom: true,
+          },
         },
-      },
-      relations: ['region'],
-      order: {
-        code: 'ASC',
-      },
-    });
+        relations: ['region'],
+        order: {
+          code: 'ASC',
+        },
+      }),
+      this.statisticRepository.find({
+        select: {
+          date: true,
+          departementSituation: true,
+        },
+        order: {
+          date: 'ASC',
+        },
+      }),
+    ]);
 
-    const statistics = await this.statisticRepository.find({
-      select: {
-        date: true,
-        departementSituation: true,
-      },
-      order: {
-        date: 'ASC',
-      },
-    });
-
-    this.situationDepartements = statistics.map((s) => {
+    return statistics.map((s) => {
       return {
         date: s.date,
         departementSituation: departements.map((d) => {
@@ -209,7 +247,6 @@ export class DepartementsService {
         }),
       };
     });
-    this.logger.log('LOAD SITUATION DEPARTEMENTS - END');
   }
 
   /**

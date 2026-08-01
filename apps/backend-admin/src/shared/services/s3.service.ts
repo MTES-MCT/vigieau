@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { RegleauLogger } from '../../logger/regleau.logger';
-import { DeleteObjectCommand, CopyObjectCommand, S3 } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  CopyObjectCommand,
+  S3,
+  type CopyObjectCommandInput,
+} from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { ConfigService } from '@nestjs/config';
 
@@ -91,7 +96,12 @@ export class S3Service {
     }
   }
 
-  async copyFile(fileName: string, newFileName: string, prefix: string = '') {
+  async copyFile(
+    fileName: string,
+    newFileName: string,
+    prefix: string = '',
+    options?: { abortSignal?: AbortSignal },
+  ) {
     const oldFileUrl =
       '/' +
       this.configService.get('S3_BUCKET') +
@@ -104,14 +114,30 @@ export class S3Service {
     this.logger.log(`COPY FILE ${oldFileUrl} -> ${newFileUrl}`);
 
     const client = this.client;
-    const params = {
+    const params: CopyObjectCommandInput = {
       Bucket: this.configService.get('S3_BUCKET'),
       CopySource: encodeURI(oldFileUrl),
       Key: String(newFileUrl),
       ACL: 'public-read',
     };
-    //@ts-ignore
-    return await client.send(new CopyObjectCommand(params));
+    return await client.send(new CopyObjectCommand(params), {
+      abortSignal: options?.abortSignal,
+    });
+  }
+
+  getPublicFileUrl(fileName: string, prefix: string = ''): string {
+    const baseUrl = String(this.configService.get('S3_VHOST') || '').replace(
+      /\/+$/,
+      '',
+    );
+    if (!baseUrl) {
+      throw new Error('S3_VHOST is required to build a public file URL');
+    }
+    const key =
+      `${this.configService.get('S3_PREFIX') || ''}${prefix}${fileName}`
+        .replace(/^\/+/, '')
+        .replace(/\/{2,}/g, '/');
+    return `${baseUrl}/${key}`;
   }
 
   async s3_upload(file, bucket, name, mimetype) {

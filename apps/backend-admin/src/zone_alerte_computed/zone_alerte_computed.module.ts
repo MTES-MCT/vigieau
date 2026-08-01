@@ -15,6 +15,8 @@ import { ZoneAlerteComputedHistoric } from '@shared/entities/zone_alerte_compute
 import { StatisticDepartementModule } from '../statistic_departement/statistic_departement.module';
 import { StatisticCommuneModule } from '../statistic_commune/statistic_commune.module';
 import { ConfigModule } from '../config/config.module';
+import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
+import { ZonePublicationPromotionService } from '../zone_publication/zone_publication_promotion.service';
 
 @Module({
   imports: [
@@ -31,9 +33,14 @@ import { ConfigModule } from '../config/config.module';
     forwardRef(() => StatisticDepartementModule),
     forwardRef(() => StatisticCommuneModule),
     ConfigModule,
+    ZonePublicationModule,
   ],
   controllers: [],
-  providers: [ZoneAlerteComputedService, ZoneAlerteComputedHistoricService],
+  providers: [
+    ZoneAlerteComputedService,
+    ZoneAlerteComputedHistoricService,
+    ZonePublicationPromotionService,
+  ],
   exports: [ZoneAlerteComputedService, ZoneAlerteComputedHistoricService],
 })
 export class ZoneAlerteComputedModule {}
