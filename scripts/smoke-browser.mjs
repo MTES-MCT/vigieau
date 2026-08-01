@@ -24,6 +24,8 @@ const minZonePalettePixels = Number(
 const minZonePaletteRatio = Number(
   process.env.VIGIEAU_MIN_ZONE_PALETTE_RATIO || 0.001,
 );
+const tarbesCheckMode =
+  process.env.VIGIEAU_BROWSER_TARBES_MODE?.trim() || "strict";
 
 const zonePalette = [
   { name: "vigilance", rgb: [255, 237, 160] },
@@ -49,6 +51,10 @@ assert.ok(
     minZonePaletteRatio > 0 &&
     minZonePaletteRatio < 1,
   "VIGIEAU_MIN_ZONE_PALETTE_RATIO must be between 0 and 1",
+);
+assert.ok(
+  ["strict", "skip"].includes(tarbesCheckMode),
+  "VIGIEAU_BROWSER_TARBES_MODE must be strict or skip",
 );
 
 async function findChrome() {
@@ -373,12 +379,16 @@ const requests = new Map();
 const pmtilesResponses = [];
 const zoneLookupResponses = [];
 const fatalErrors = [];
+const serviceWorkerErrors = [];
+const serviceWorkerVersions = [];
 
 function resetObservations() {
   requests.clear();
   pmtilesResponses.length = 0;
   zoneLookupResponses.length = 0;
   fatalErrors.length = 0;
+  serviceWorkerErrors.length = 0;
+  serviceWorkerVersions.length = 0;
 }
 
 async function applyViewport(client, scenario) {
@@ -440,14 +450,26 @@ async function readServiceWorkerState(client) {
 
 async function prepareControlledServiceWorkerPage(client, url) {
   await navigate(client, url);
-  const activated = await waitFor(async () => {
+  let activated;
+  try {
+    activated = await waitFor(async () => {
+      const state = await readServiceWorkerState(client);
+      return state?.registrations.some(
+        ({ activeState }) => activeState === "activated",
+      )
+        ? state
+        : null;
+    }, "The application service worker activation");
+  } catch (error) {
     const state = await readServiceWorkerState(client);
-    return state?.registrations.some(
-      ({ activeState }) => activeState === "activated",
-    )
-      ? state
-      : null;
-  }, "The application service worker activation");
+    throw new Error(
+      `${error.message}: ${JSON.stringify({
+        state,
+        errors: serviceWorkerErrors,
+        versions: serviceWorkerVersions,
+      })}`,
+    );
+  }
   assert.equal(activated.supported, true, "Service workers are not supported");
 
   await client.evaluate(
@@ -497,16 +519,23 @@ async function inspectServiceWorkerCaches(client) {
       return { supported: false, cacheNames: [], entryCount: 0 };
     }
     const cacheNames = await caches.keys();
+    const precacheCacheNames = cacheNames.filter((cacheName) =>
+      cacheName.startsWith('workbox-precache')
+    );
     const sensitiveEntryCounts = {
       pmtiles: 0,
       api: 0,
       zonePublication: 0,
     };
     let entryCount = 0;
+    let precacheEntryCount = 0;
     for (const cacheName of cacheNames) {
       const cache = await caches.open(cacheName);
       const requests = await cache.keys();
       entryCount += requests.length;
+      if (precacheCacheNames.includes(cacheName)) {
+        precacheEntryCount += requests.length;
+      }
       for (const request of requests) {
         const pathname = new URL(request.url).pathname;
         if (/\\.pmtiles$/i.test(pathname)) sensitiveEntryCounts.pmtiles++;
@@ -520,12 +549,18 @@ async function inspectServiceWorkerCaches(client) {
       supported: true,
       cacheNames,
       entryCount,
+      precacheCacheNames,
+      precacheEntryCount,
       sensitiveEntryCounts,
       sensitiveEntryCount: Object.values(sensitiveEntryCounts)
         .reduce((total, count) => total + count, 0),
     };
   })()`);
   assert.equal(state.supported, true, "CacheStorage is not supported");
+  assert.ok(
+    state.precacheCacheNames.length > 0 && state.precacheEntryCount > 0,
+    `Service worker precache is empty: ${JSON.stringify(state)}`,
+  );
   assert.equal(
     state.sensitiveEntryCount,
     0,
@@ -844,7 +879,9 @@ async function runScenario(client, scenario) {
     ? await inspectServiceWorkerCaches(client)
     : null;
   const tarbesAddressJourney =
-    scenario.name === "desktop" ? await runTarbesAddressJourney(client) : null;
+    scenario.name === "desktop" && tarbesCheckMode === "strict"
+      ? await runTarbesAddressJourney(client)
+      : null;
   return {
     name: scenario.name,
     viewport: {
@@ -931,6 +968,10 @@ try {
           event.params.exceptionDetails?.text ||
           "Unhandled browser exception",
       );
+    } else if (event.method === "ServiceWorker.workerErrorReported") {
+      serviceWorkerErrors.push(event.params);
+    } else if (event.method === "ServiceWorker.workerVersionUpdated") {
+      serviceWorkerVersions.push(...event.params.versions);
     }
   });
 
@@ -938,6 +979,7 @@ try {
     client.send("Page.enable"),
     client.send("Runtime.enable"),
     client.send("Network.enable"),
+    client.send("ServiceWorker.enable"),
   ]);
 
   const results = [];
@@ -953,6 +995,7 @@ try {
         minPixels: minZonePalettePixels,
         minRatio: minZonePaletteRatio,
       },
+      tarbesCheckMode,
       scenarios: results,
     }),
   );
