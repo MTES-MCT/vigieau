@@ -11,6 +11,7 @@ import { RegleauLogger } from '../logger/regleau.logger';
 import { ConfigService } from '@nestjs/config';
 import { User } from '@shared/entities/user.entity';
 import { isDeepStrictEqual } from 'node:util';
+import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
 const MIN_COMMUNE_REFERENCE_COMPLETENESS_RATIO = 0.9;
 
@@ -44,7 +45,9 @@ export class CommuneService {
     private readonly departementService: DepartementService,
     private readonly configService: ConfigService,
   ) {
-    this.initDatas();
+    if (!shouldSkipStartupDataLoads()) {
+      void this.initDatas();
+    }
   }
 
   async initDatas() {

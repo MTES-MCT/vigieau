@@ -10,6 +10,7 @@ import { Repository } from 'typeorm';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { parseDepartementGeometryFeed } from './departement-geometry';
+import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
 const DEFAULT_DEPARTEMENTS_GEOJSON_URL =
   'https://etalab-datasets.geo.data.gouv.fr/contours-administratifs/2023/geojson/departements-5m.geojson';
@@ -27,7 +28,9 @@ export class DepartementService {
     private readonly abonnementMailService: AbonnementMailService,
   ) {
     // this.updateDepartementsGeom();
-    this.getAll();
+    if (!shouldSkipStartupDataLoads()) {
+      void this.getAll();
+    }
   }
 
   findAll(): Promise<Departement[]> {

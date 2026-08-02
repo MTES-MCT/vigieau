@@ -4,6 +4,7 @@ import { DataSource, QueryRunner } from 'typeorm';
 import { workerData, parentPort } from 'worker_threads';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { withZoneComputeLock } from './zone-compute-lock';
+import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
 
 const logger = new RegleauLogger('ComputeMapWorker');
 const COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
@@ -67,6 +68,7 @@ async function closeApp(app: INestApplicationContext | undefined) {
 async function run() {
   let app: INestApplicationContext | undefined;
   let responseSent = false;
+  process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
   process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
   process.env.SANDRE_ZONE_SYNC_MODE = 'paused';
   process.env.DISABLE_SCHEDULED_JOBS = 'true';

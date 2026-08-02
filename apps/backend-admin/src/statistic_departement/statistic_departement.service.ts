@@ -13,6 +13,7 @@ import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_c
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
+import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
 @Injectable()
 export class StatisticDepartementService {
@@ -34,7 +35,12 @@ export class StatisticDepartementService {
     private readonly zoneAlerteComputedHistoricService: ZoneAlerteComputedHistoricService,
     private readonly zoneAlerteService: ZoneAlerteService,
   ) {
-    void this.loadStatDep();
+    if (
+      !shouldSkipStartupDataLoads() &&
+      process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS !== 'true'
+    ) {
+      void this.loadStatDep();
+    }
   }
 
   async findAll(currentUser: User): Promise<StatisticDepartement[]> {

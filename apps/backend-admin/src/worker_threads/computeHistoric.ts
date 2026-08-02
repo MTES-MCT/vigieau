@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { workerData, parentPort } from 'worker_threads';
 import { RegleauLogger } from '../logger/regleau.logger';
 import moment from 'moment';
+import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
 
 const logger = new RegleauLogger('ComputeHistoricWorker');
 
@@ -19,6 +20,7 @@ async function run() {
   let app;
   let response: { success: boolean; result?: any; error?: string };
   try {
+    process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
     process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
     process.env.SANDRE_ZONE_SYNC_MODE = 'paused';
     process.env.DISABLE_SCHEDULED_JOBS = 'true';

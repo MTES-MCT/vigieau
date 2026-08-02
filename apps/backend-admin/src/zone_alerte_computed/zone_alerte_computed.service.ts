@@ -144,6 +144,13 @@ export class ZoneAlerteComputedService {
         queuedWaiters.splice(0).forEach(({ reject }) => reject(error));
       };
 
+      if (effectiveSkipIfBusy && (await this.isGlobalZoneComputeBusy())) {
+        const result = { success: true, skipped: true };
+        this.isComputing = false;
+        resolveQueuedWaiters(result);
+        return result;
+      }
+
       const worker = new Worker(workerThreadFilePath, {
         workerData: {
           depsIds: uniqueDepsIds,
@@ -248,6 +255,34 @@ export class ZoneAlerteComputedService {
       this.isComputing = false;
       queuedWaiters.splice(0).forEach(({ reject }) => reject(e));
       throw e;
+    }
+  }
+
+  private async isGlobalZoneComputeBusy(): Promise<boolean> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    let locked = false;
+    try {
+      const [lockResult] = await queryRunner.query(
+        "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS locked",
+      );
+      locked = lockResult?.locked === true;
+      return !locked;
+    } finally {
+      try {
+        if (locked) {
+          const [unlockResult] = await queryRunner.query(
+            "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-global')) AS unlocked",
+          );
+          if (unlockResult?.unlocked !== true) {
+            throw new Error(
+              'Unable to release the zone compute preflight lock',
+            );
+          }
+        }
+      } finally {
+        await queryRunner.release();
+      }
     }
   }
 

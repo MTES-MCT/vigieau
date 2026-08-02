@@ -1,4 +1,5 @@
 import { ConfigService } from './config.service';
+import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
 
 describe('ConfigService historic cursor advancement', () => {
   const createHarness = (affected: number) => {
@@ -70,5 +71,45 @@ describe('ConfigService historic cursor advancement', () => {
       '"computeStatsGeneration" + 1',
     );
     expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ConfigService startup', () => {
+  const previousSkipDataLoads = process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+
+  afterEach(() => {
+    if (previousSkipDataLoads === undefined) {
+      delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+    } else {
+      process.env[SKIP_STARTUP_DATA_LOADS_ENV] = previousSkipDataLoads;
+    }
+  });
+
+  function createRepository() {
+    return {
+      count: jest.fn().mockResolvedValue(0),
+      save: jest.fn().mockResolvedValue({}),
+    };
+  }
+
+  it('skips config initialization in a worker context', () => {
+    process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
+    const repository = createRepository();
+
+    new ConfigService(repository as any);
+
+    expect(repository.count).not.toHaveBeenCalled();
+    expect(repository.save).not.toHaveBeenCalled();
+  });
+
+  it('initializes config normally otherwise', async () => {
+    delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+    const repository = createRepository();
+
+    new ConfigService(repository as any);
+    await Promise.resolve();
+
+    expect(repository.count).toHaveBeenCalledTimes(1);
+    expect(repository.save).toHaveBeenCalledWith({});
   });
 });

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { Config } from '@shared/entities/config.entity';
+import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
 @Injectable()
 export class ConfigService {
@@ -9,7 +10,9 @@ export class ConfigService {
     @InjectRepository(Config)
     private readonly configRepository: Repository<Config>,
   ) {
-    this.initConfig();
+    if (!shouldSkipStartupDataLoads()) {
+      void this.initConfig();
+    }
   }
 
   async initConfig() {

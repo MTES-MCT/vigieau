@@ -1,5 +1,6 @@
 import { of } from 'rxjs';
 import { CommuneService } from './commune.service';
+import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
 
 const DEPARTEMENT = { id: 65, code: '65', nom: 'Hautes-Pyrenees' };
 const GEOMETRY = {
@@ -352,5 +353,45 @@ describe('CommuneService.updateCommuneRef', () => {
     );
     expect(harness.communeRepository.findOne).not.toHaveBeenCalled();
     expect(harness.communeRepository.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('CommuneService startup', () => {
+  const previousSkipDataLoads = process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+
+  afterEach(() => {
+    if (previousSkipDataLoads === undefined) {
+      delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+    } else {
+      process.env[SKIP_STARTUP_DATA_LOADS_ENV] = previousSkipDataLoads;
+    }
+  });
+
+  it('skips the startup load in a worker context', () => {
+    process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
+    const communeRepository = { count: jest.fn() };
+
+    new CommuneService(
+      {} as any,
+      communeRepository as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(communeRepository.count).not.toHaveBeenCalled();
+  });
+
+  it('loads commune references normally otherwise', () => {
+    delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+    const communeRepository = { count: jest.fn().mockResolvedValue(1) };
+
+    new CommuneService(
+      {} as any,
+      communeRepository as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(communeRepository.count).toHaveBeenCalledTimes(1);
   });
 });

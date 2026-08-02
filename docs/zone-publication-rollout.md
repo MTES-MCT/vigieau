@@ -15,8 +15,9 @@ utilisateur.
   seul, peut couvrir la révision source globale et produire une candidate.
 - Un verrou advisory PostgreSQL de session couvre tout recalcul, partiel ou
   national. Une demande utilisateur attend la fin du calcul en cours comme
-  auparavant; seul un worker de rattrapage du watchdog quitte proprement s'il est
-  concurrent, puis le watchdog réévalue la révision.
+  auparavant. Le watchdog teste ce verrou avant de créer son worker et rend la
+  main s'il est occupé; le worker conserve le même contrôle pour couvrir une
+  course entre ce pré-contrôle et son démarrage.
 - Le bootstrap du schéma exécute `synchronize` uniquement sur une base vierge,
   détectée par l'absence de la table baseline `user`, puis applique les
   migrations sous le même verrou. Dès cette table présente, tous les

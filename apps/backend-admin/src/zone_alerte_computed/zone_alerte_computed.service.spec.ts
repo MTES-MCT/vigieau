@@ -30,6 +30,12 @@ describe('ZoneAlerteComputedService', () => {
     getSourceRevision: jest.Mock;
     isRecomputeRequired: jest.Mock;
   };
+  let preflightQueryRunner: {
+    connect: jest.Mock;
+    query: jest.Mock;
+    release: jest.Mock;
+  };
+  let dataSource: { createQueryRunner: jest.Mock };
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
 
   beforeEach(() => {
@@ -49,6 +55,18 @@ describe('ZoneAlerteComputedService', () => {
       getSourceRevision: jest.fn().mockResolvedValue('1'),
       isRecomputeRequired: jest.fn().mockResolvedValue(false),
     };
+    preflightQueryRunner = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      query: jest.fn(async (sql: string) =>
+        sql.includes('pg_try_advisory_lock')
+          ? [{ locked: true }]
+          : [{ unlocked: true }],
+      ),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+    dataSource = {
+      createQueryRunner: jest.fn().mockReturnValue(preflightQueryRunner),
+    };
 
     service = new ZoneAlerteComputedService(
       {} as any,
@@ -64,7 +82,7 @@ describe('ZoneAlerteComputedService', () => {
       {} as any,
       statisticCommuneService as any,
       {} as any,
-      {} as any,
+      dataSource as any,
       configService as any,
       zonePublicationService as any,
     );
@@ -439,6 +457,13 @@ describe('ZoneAlerteComputedService', () => {
     const firstCompute = service.askCompute([65], false, false, true);
     const queuedWatchdog = service.askCompute([31], false, false, true);
     const queuedHistoric = service.askCompute([75], false, true, false);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(
+      preflightQueryRunner.query.mock.calls.some(([sql]) =>
+        sql.includes('pg_advisory_unlock'),
+      ),
+    ).toBe(true);
+    expect(preflightQueryRunner.release).toHaveBeenCalledTimes(1);
     firstWorker.emit('message', { success: true });
     await expect(firstCompute).resolves.toEqual({ success: true });
 
@@ -541,6 +566,85 @@ describe('ZoneAlerteComputedService', () => {
     secondWorker.emit('message', { success: false, error: 'queued failed' });
     await expect(queuedFirst).rejects.toThrow('queued failed');
     await expect(queuedSecond).rejects.toThrow('queued failed');
+  });
+
+  it('does not start a worker when a skip-if-busy preflight finds the global lock busy', async () => {
+    preflightQueryRunner.query.mockResolvedValueOnce([{ locked: false }]);
+
+    await expect(service.askCompute([65], false, false, true)).resolves.toEqual(
+      { success: true, skipped: true },
+    );
+
+    expect(Worker).not.toHaveBeenCalled();
+    expect(preflightQueryRunner.query).toHaveBeenCalledWith(
+      expect.stringContaining('pg_try_advisory_lock'),
+    );
+    expect(
+      preflightQueryRunner.query.mock.calls.some(([sql]) =>
+        sql.includes('pg_advisory_unlock'),
+      ),
+    ).toBe(false);
+    expect(preflightQueryRunner.release).toHaveBeenCalledTimes(1);
+    expect((service as any).isComputing).toBe(false);
+  });
+
+  it('resolves queued skip-if-busy callers when the cross-process lock remains busy', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+
+    const currentCompute = service.askCompute([65]);
+    const queuedFirst = service.askCompute([31], false, false, true);
+    const queuedSecond = service.askCompute([75], false, false, true);
+    worker.emit('message', { success: true });
+    await expect(currentCompute).resolves.toEqual({ success: true });
+    preflightQueryRunner.query.mockResolvedValueOnce([{ locked: false }]);
+
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    await expect(queuedFirst).resolves.toEqual({
+      success: true,
+      skipped: true,
+    });
+    await expect(queuedSecond).resolves.toEqual({
+      success: true,
+      skipped: true,
+    });
+    expect(Worker).toHaveBeenCalledTimes(1);
+    expect((service as any).isComputing).toBe(false);
+  });
+
+  it('keeps a normal request queued when a watchdog preflight finds the lock busy', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+    preflightQueryRunner.query.mockResolvedValueOnce([{ locked: false }]);
+
+    const watchdog = service.askCompute([65], false, false, true);
+    const normalRequest = service.askCompute([31]);
+
+    await expect(watchdog).resolves.toEqual({
+      success: true,
+      skipped: true,
+    });
+    expect(Worker).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    expect(Worker).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        workerData: {
+          depsIds: [31],
+          computeHistoric: false,
+          skipIfBusy: false,
+        },
+      }),
+    );
+    worker.emit('message', { success: true });
+    await expect(normalRequest).resolves.toEqual({ success: true });
   });
 
   it('requests a full recompute when the publication watchdog detects lag', async () => {
