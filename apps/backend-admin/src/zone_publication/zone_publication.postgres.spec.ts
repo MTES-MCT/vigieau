@@ -86,7 +86,9 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         "computeMapDate" date,
         "computeStatsDate" date,
         "computeMapGeneration" bigint NOT NULL DEFAULT 0,
-        "computeStatsGeneration" bigint NOT NULL DEFAULT 0
+        "computeStatsGeneration" bigint NOT NULL DEFAULT 0,
+        "computeMapUpdatedAt" timestamptz,
+        "computeStatsUpdatedAt" timestamptz
       ) ON COMMIT DROP;
       CREATE TEMP TABLE "external_publication_run" (
         "jobKey" varchar NOT NULL,
@@ -231,8 +233,10 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
           "id" integer PRIMARY KEY,
           "computeMapDate" date,
           "computeMapGeneration" bigint NOT NULL DEFAULT 0,
+          "computeMapUpdatedAt" timestamptz,
           "computeStatsDate" date,
           "computeStatsGeneration" bigint NOT NULL DEFAULT 0,
+          "computeStatsUpdatedAt" timestamptz,
           "computeZoneAlerteComputedDate" timestamp
         );
         CREATE TABLE "${schemaName}"."zone_publication_source_state" (
@@ -290,7 +294,8 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         `SELECT
            source."revision"::text AS "revision",
            config."computeMapDate"::text AS "computeMapDate",
-           config."computeMapGeneration"::text AS "computeMapGeneration"
+           config."computeMapGeneration"::text AS "computeMapGeneration",
+           config."computeMapUpdatedAt" AS "computeMapUpdatedAt"
          FROM "${schemaName}"."zone_publication_source_state" source
          CROSS JOIN "${schemaName}"."config" config
          WHERE source."id" = 1 AND config."id" = 1`,
@@ -299,6 +304,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         revision: '11',
         computeMapDate: null,
         computeMapGeneration: '0',
+        computeMapUpdatedAt: null,
       });
     } finally {
       if (revisionRunner.isTransactionActive) {
