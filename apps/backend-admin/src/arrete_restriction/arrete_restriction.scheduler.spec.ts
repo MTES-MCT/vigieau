@@ -41,7 +41,7 @@ const createService = (askCompute: jest.Mock) => {
     { setConfig: jest.fn() } as never,
     undefined as never,
   );
-  return { service, statisticDepartementService };
+  return { service, repository, statisticDepartementService };
 };
 
 describe('ArreteRestrictionService scheduled status update', () => {
@@ -73,6 +73,34 @@ describe('ArreteRestrictionService scheduled status update', () => {
 
     await expect(service.updateArreteRestrictionStatut()).rejects.toBe(
       expectedError,
+    );
+  });
+
+  it('does not issue status updates when no restriction changes status', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const { service, repository } = createService(askCompute);
+
+    await service.updateArreteRestrictionStatut();
+
+    expect(repository.update).not.toHaveBeenCalled();
+  });
+
+  it('passes the daily publication reuse context only to the scheduled compute', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const { service } = createService(askCompute);
+    const reuseContext = {
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+    };
+
+    await service.updateArreteRestrictionStatut(undefined, false, reuseContext);
+
+    expect(askCompute).toHaveBeenCalledWith(
+      [],
+      false,
+      false,
+      false,
+      reuseContext,
     );
   });
 });

@@ -35,6 +35,7 @@ import { MailService } from '../shared/services/mail.service';
 import { UsageService } from '../usage/usage.service';
 import { UserService } from '../user/user.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
+import type { DailyZonePublicationReuseContext } from '../zone_publication/zone_publication.service';
 import { arreteCadrePaginateConfig } from './dto/arrete_cadre.dto';
 import { CreateUpdateArreteCadreDto } from './dto/create_update_arrete_cadre.dto';
 import { PublishArreteCadreDto } from './dto/publish_arrete_cadre.dto';
@@ -816,17 +817,22 @@ export class ArreteCadreService {
   /**
    * Met à jour les statuts des AC et lance le recalcul national associé.
    */
-  async updateArreteCadreStatut(computeHistoric = true) {
+  async updateArreteCadreStatut(
+    computeHistoric = true,
+    dailyPublicationReuse?: DailyZonePublicationReuseContext,
+  ) {
     const acAVenir = await this.arreteCadreRepository.find(<FindManyOptions>{
       where: {
         statut: 'a_venir',
         dateDebut: LessThanOrEqual(new Date()),
       },
     });
-    await this.arreteCadreRepository.update(
-      { id: In(acAVenir.map((ac) => ac.id)) },
-      { statut: 'publie' },
-    );
+    if (acAVenir.length > 0) {
+      await this.arreteCadreRepository.update(
+        { id: In(acAVenir.map((ac) => ac.id)) },
+        { statut: 'publie' },
+      );
+    }
     this.logger.log(`${acAVenir.length} Arrêtés Cadre publiés`);
 
     const acPerime = await this.arreteCadreRepository.find(<FindManyOptions>{
@@ -835,12 +841,21 @@ export class ArreteCadreService {
         dateFin: LessThan(new Date()),
       },
     });
-    await this.arreteCadreRepository.update(
-      { id: In(acPerime.map((ac) => ac.id)) },
-      { statut: 'abroge' },
-    );
+    if (acPerime.length > 0) {
+      await this.arreteCadreRepository.update(
+        { id: In(acPerime.map((ac) => ac.id)) },
+        { statut: 'abroge' },
+      );
+    }
     this.logger.log(`${acPerime.length} Arrêtés Cadre abrogés`);
 
+    if (dailyPublicationReuse) {
+      return this.arreteRestrictionService.updateArreteRestrictionStatut(
+        null,
+        computeHistoric,
+        dailyPublicationReuse,
+      );
+    }
     return this.arreteRestrictionService.updateArreteRestrictionStatut(
       null,
       computeHistoric,

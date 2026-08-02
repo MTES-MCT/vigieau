@@ -33,7 +33,10 @@ import {
   HistoricCursorState,
   ZoneAlerteComputedHistoricService,
 } from './zone_alerte_computed_historic.service';
-import { ZonePublicationService } from '../zone_publication/zone_publication.service';
+import {
+  DailyZonePublicationReuseContext,
+  ZonePublicationService,
+} from '../zone_publication/zone_publication.service';
 import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
@@ -54,8 +57,13 @@ export class ZoneAlerteComputedService {
   private isComputing = false;
   private askForCompute = false;
   private departementsToUpdate: number[] = [];
+  private pendingNationalCompute = false;
   private pendingComputeHistoric = false;
   private pendingNormalCompute = false;
+  private pendingDailyPublicationReuse:
+    | DailyZonePublicationReuseContext
+    | null
+    | undefined;
   private activeComputeWorker: Worker | null = null;
   private computeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private queuedComputeWaiters: QueuedComputeWaiter[] = [];
@@ -110,10 +118,30 @@ export class ZoneAlerteComputedService {
     force = false,
     computeHistoric = false,
     skipIfBusy = false,
+    dailyPublicationReuse?: DailyZonePublicationReuseContext,
   ) {
     this.departementsToUpdate = this.departementsToUpdate.concat(depsIds ?? []);
+    if (!force && (!depsIds || depsIds.length === 0)) {
+      this.pendingNationalCompute = true;
+    }
     this.pendingComputeHistoric ||= computeHistoric;
     this.pendingNormalCompute ||= !skipIfBusy;
+    if (!skipIfBusy && !dailyPublicationReuse) {
+      this.pendingDailyPublicationReuse = null;
+    }
+    if (dailyPublicationReuse) {
+      if (this.pendingDailyPublicationReuse === undefined) {
+        this.pendingDailyPublicationReuse = { ...dailyPublicationReuse };
+      } else if (
+        this.pendingDailyPublicationReuse !== null &&
+        (this.pendingDailyPublicationReuse.scheduledFor !==
+          dailyPublicationReuse.scheduledFor ||
+          this.pendingDailyPublicationReuse.sourceRevision !==
+            dailyPublicationReuse.sourceRevision)
+      ) {
+        this.pendingDailyPublicationReuse = null;
+      }
+    }
     if (force && !this.askForCompute) {
       return;
     }
@@ -129,12 +157,18 @@ export class ZoneAlerteComputedService {
       this.askForCompute = false;
       this.isComputing = true;
 
-      const uniqueDepsIds = [...new Set(this.departementsToUpdate)];
+      const uniqueDepsIds = this.pendingNationalCompute
+        ? []
+        : [...new Set(this.departementsToUpdate)];
       this.departementsToUpdate = [];
+      this.pendingNationalCompute = false;
       const effectiveComputeHistoric = this.pendingComputeHistoric;
       const effectiveSkipIfBusy = !this.pendingNormalCompute;
+      const effectiveDailyPublicationReuse =
+        this.pendingDailyPublicationReuse ?? undefined;
       this.pendingComputeHistoric = false;
       this.pendingNormalCompute = false;
+      this.pendingDailyPublicationReuse = undefined;
       queuedWaiters = this.queuedComputeWaiters.splice(0);
 
       const resolveQueuedWaiters = (result: unknown) => {
@@ -156,6 +190,9 @@ export class ZoneAlerteComputedService {
           depsIds: uniqueDepsIds,
           computeHistoric: effectiveComputeHistoric,
           skipIfBusy: effectiveSkipIfBusy,
+          ...(effectiveDailyPublicationReuse
+            ? { dailyPublicationReuse: effectiveDailyPublicationReuse }
+            : {}),
         },
       });
       this.activeComputeWorker = worker;
@@ -386,6 +423,25 @@ export class ZoneAlerteComputedService {
     // On récupère toutes les restrictions en cours
     this.logger.log(`COMPUTING ZONES D'ALERTES - END`);
     return this.computeGeoJson(computeHistoric, sourceRevision);
+  }
+
+  async computeAllOrReuseDailyPublication(
+    depsIds: number[],
+    dailyPublicationReuse?: DailyZonePublicationReuseContext,
+  ) {
+    if (depsIds.length === 0 && dailyPublicationReuse) {
+      const reusablePublication =
+        await this.zonePublicationService.findReusableDailyPublication(
+          dailyPublicationReuse,
+        );
+      if (reusablePublication) {
+        this.logger.log(
+          `Reusing daily zone publication ${reusablePublication.publicationId} for ${dailyPublicationReuse.scheduledFor}`,
+        );
+        return reusablePublication;
+      }
+    }
+    return this.computeAll(depsIds, false);
   }
 
   async computeRegleAr(departement: Departement) {

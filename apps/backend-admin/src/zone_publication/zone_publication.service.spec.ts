@@ -212,6 +212,71 @@ describe('ZonePublicationService', () => {
     await expect(service.bumpSourceRevision()).resolves.toBe('12');
   });
 
+  it('reuses only a complete publication from the requested Paris civil day and revision', async () => {
+    const publication = {
+      publicationId: 'publication-1',
+      sourceRevision: '42',
+    };
+    const dataSource = {
+      query: jest.fn(
+        async (_sql: string, [sourceRevision, version, scheduledFor]) =>
+          sourceRevision === '42' &&
+          version === 2 &&
+          scheduledFor === '2026-08-02'
+            ? [publication]
+            : [],
+      ),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(
+      service.findReusableDailyPublication({
+        scheduledFor: '2026-08-02',
+        sourceRevision: '42',
+      }),
+    ).resolves.toEqual(publication);
+    await expect(
+      service.findReusableDailyPublication({
+        scheduledFor: '2026-08-01',
+        sourceRevision: '42',
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      service.findReusableDailyPublication({
+        scheduledFor: '2026-08-02',
+        sourceRevision: '41',
+      }),
+    ).resolves.toBeNull();
+
+    const sql = dataSource.query.mock.calls[0][0];
+    expect(sql).toContain('publication."status" = \'candidate\'');
+    expect(sql).toContain('publication."status" = \'active\'');
+    expect(sql).toContain('publication."materializationVersion" = $2');
+    expect(sql).toContain('publication."sourceRevision" = source."revision"');
+    expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
+    expect(sql).toContain('publication."validatedAt" IS NOT NULL');
+    expect(sql).toContain('FROM "zone_publication_aggregate" aggregate');
+  });
+
+  it('rejects malformed daily publication reuse identities before querying', async () => {
+    const dataSource = { query: jest.fn() };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(
+      service.findReusableDailyPublication({
+        scheduledFor: '02/08/2026',
+        sourceRevision: '42',
+      }),
+    ).rejects.toThrow('Invalid daily zone publication date');
+    await expect(
+      service.findReusableDailyPublication({
+        scheduledFor: '2026-08-02',
+        sourceRevision: '42 OR 1=1',
+      }),
+    ).rejects.toThrow('Invalid daily zone publication source revision');
+    expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
   it('opens the daily gate only for the fully promoted active publication', async () => {
     const sourceComputedAt = new Date('2026-08-01T08:00:00Z');
     const dataSource = {

@@ -11,6 +11,7 @@ describe('ClockHeartbeatService', () => {
   const previousExitCode = process.exitCode;
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
     process.exitCode = previousExitCode;
     if (previousRole === undefined) {
@@ -28,22 +29,30 @@ describe('ClockHeartbeatService', () => {
   function createService(
     query = jest.fn().mockResolvedValue([]),
     values: Record<string, string> = {},
-    leadershipAvailable = true,
+    leadershipAvailable: boolean | boolean[] = true,
     heartbeatResults: Array<{
       leadershipHeld: boolean;
       heartbeatRecorded: boolean;
     }> = [{ leadershipHeld: true, heartbeatRecorded: true }],
+    scheduledJobs: Array<{ stop: jest.Mock }> = [],
   ) {
     const configService = {
       get: jest.fn((key: string) => values[key]),
     };
     const connection = new EventEmitter();
+    let leadershipIndex = 0;
     let heartbeatIndex = 0;
     const queryRunner = {
       connect: jest.fn().mockResolvedValue(connection),
       query: jest.fn(async (sql: string) => {
         if (sql.includes('pg_try_advisory_lock')) {
-          return [{ locked: leadershipAvailable }];
+          const locked = Array.isArray(leadershipAvailable)
+            ? leadershipAvailable[
+                Math.min(leadershipIndex, leadershipAvailable.length - 1)
+              ]
+            : leadershipAvailable;
+          leadershipIndex += 1;
+          return [{ locked }];
         }
         if (sql.includes('INSERT INTO "scheduler_heartbeat"')) {
           const result =
@@ -61,15 +70,24 @@ describe('ClockHeartbeatService', () => {
       query,
       createQueryRunner: jest.fn(() => queryRunner),
     };
+    const cronJobs = new Map(
+      scheduledJobs.map((job, index) => [`job-${index}`, job]),
+    );
+    const schedulerRegistry = {
+      getCronJobs: jest.fn(() => cronJobs),
+    };
     return {
       service: new ClockHeartbeatService(
         dataSource as any,
         configService as any,
+        schedulerRegistry as any,
       ),
       query,
       queryRunner,
       connection,
       configService,
+      cronJobs,
+      schedulerRegistry,
     };
   }
 
@@ -105,16 +123,98 @@ describe('ClockHeartbeatService', () => {
     expect(disabled.queryRunner.connect).not.toHaveBeenCalled();
   });
 
-  it('refuses to start a second clock process', async () => {
+  it('acquires leadership after temporary rolling-deploy contention', async () => {
+    jest.useFakeTimers();
     process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
     delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
-    const second = createService(jest.fn(), {}, false);
-
-    await expect(second.service.onModuleInit()).rejects.toThrow(
-      'already owns the lock',
+    const clock = createService(
+      jest.fn(),
+      {
+        CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS: '10',
+        CLOCK_LEADERSHIP_RETRY_SECONDS: '1',
+      },
+      [false, false, true],
     );
+
+    const initialization = clock.service.onModuleInit();
+    await Promise.resolve();
+    expect(
+      clock.queryRunner.query.mock.calls.filter(([sql]) =>
+        sql.includes('INSERT INTO "scheduler_heartbeat"'),
+      ),
+    ).toHaveLength(0);
+    await jest.advanceTimersByTimeAsync(1000);
+    await jest.advanceTimersByTimeAsync(1000);
+    await initialization;
+
+    expect(
+      clock.queryRunner.query.mock.calls.filter(([sql]) =>
+        sql.includes('pg_try_advisory_lock'),
+      ),
+    ).toHaveLength(3);
+    expect(clock.queryRunner.release).not.toHaveBeenCalled();
+    expect(clock.queryRunner.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO "scheduler_heartbeat"'),
+      expect.any(Array),
+    );
+  });
+
+  it('fails and releases its connection after persistent contention', async () => {
+    jest.useFakeTimers();
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
+    delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
+    const second = createService(
+      jest.fn(),
+      {
+        CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS: '2',
+        CLOCK_LEADERSHIP_RETRY_SECONDS: '1',
+      },
+      false,
+    );
+
+    const rejection = expect(second.service.onModuleInit()).rejects.toThrow(
+      'still owns the lock after 2 seconds',
+    );
+    await jest.advanceTimersByTimeAsync(1000);
+    await jest.advanceTimersByTimeAsync(1000);
+    await rejection;
+
     expect(second.query).not.toHaveBeenCalled();
+    expect(
+      second.queryRunner.query.mock.calls.filter(([sql]) =>
+        sql.includes('pg_try_advisory_lock'),
+      ),
+    ).toHaveLength(3);
     expect(second.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a pending leadership wait during shutdown', async () => {
+    jest.useFakeTimers();
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
+    delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
+    const clock = createService(
+      jest.fn(),
+      {
+        CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS: '90',
+        CLOCK_LEADERSHIP_RETRY_SECONDS: '10',
+      },
+      false,
+    );
+
+    const initialization = clock.service.onModuleInit().catch((error) => error);
+    await Promise.resolve();
+    await clock.service.onModuleDestroy();
+
+    await expect(initialization).resolves.toThrow(
+      'leadership acquisition cancelled during shutdown',
+    );
+    expect(clock.queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(
+      clock.queryRunner.query.mock.calls.filter(([sql]) =>
+        sql.includes('pg_try_advisory_lock'),
+      ),
+    ).toHaveLength(1);
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it('releases leadership during a graceful shutdown', async () => {
@@ -124,6 +224,56 @@ describe('ClockHeartbeatService', () => {
 
     await clock.service.onModuleInit();
     await clock.service.onModuleDestroy();
+
+    expect(
+      clock.queryRunner.query.mock.calls.some(([sql]) =>
+        sql.includes('pg_advisory_unlock'),
+      ),
+    ).toBe(false);
+
+    await clock.service.beforeApplicationShutdown();
+
+    expect(clock.queryRunner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock($1, $2) AS unlocked',
+      [expect.any(Number), expect.any(Number)],
+    );
+    expect(clock.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('drains captured cron jobs before releasing leadership', async () => {
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
+    delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
+    let finishJob: () => void = () => undefined;
+    const stop = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishJob = resolve;
+        }),
+    );
+    const clock = createService(
+      jest.fn(),
+      {},
+      true,
+      [{ leadershipHeld: true, heartbeatRecorded: true }],
+      [{ stop }],
+    );
+
+    await clock.service.onModuleInit();
+    await clock.service.onModuleDestroy();
+    clock.cronJobs.clear();
+
+    const shutdown = clock.service.beforeApplicationShutdown();
+    await Promise.resolve();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(
+      clock.queryRunner.query.mock.calls.some(([sql]) =>
+        sql.includes('pg_advisory_unlock'),
+      ),
+    ).toBe(false);
+
+    finishJob();
+    await shutdown;
 
     expect(clock.queryRunner.query).toHaveBeenCalledWith(
       'SELECT pg_advisory_unlock($1, $2) AS unlocked',

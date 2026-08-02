@@ -37,6 +37,16 @@ export interface BuildZonePublicationOptions extends ZonePublicationArtifacts {
   artifactZoneCount: number;
 }
 
+export interface DailyZonePublicationReuseContext {
+  scheduledFor: string;
+  sourceRevision: string;
+}
+
+export interface ReusableZonePublication {
+  publicationId: string;
+  sourceRevision: string;
+}
+
 export interface ZonePublicationActivationResult {
   status:
     | 'activated'
@@ -235,6 +245,77 @@ export class ZonePublicationService {
       throw new Error('Zone publication source state is missing');
     }
     return String(state.revision);
+  }
+
+  async findReusableDailyPublication(
+    context: DailyZonePublicationReuseContext,
+  ): Promise<ReusableZonePublication | null> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(context.scheduledFor)) {
+      throw new Error(
+        `Invalid daily zone publication date: ${context.scheduledFor}`,
+      );
+    }
+    if (!/^\d+$/.test(context.sourceRevision)) {
+      throw new Error(
+        `Invalid daily zone publication source revision: ${context.sourceRevision}`,
+      );
+    }
+    const [publication] = await this.dataSource.query(
+      `
+        SELECT
+          publication."id" AS "publicationId",
+          publication."sourceRevision"
+        FROM "zone_publication_state" state
+        JOIN "zone_publication_source_state" source ON source."id" = 1
+        JOIN "zone_publication" publication
+          ON publication."id" IN (
+            state."activePublicationId",
+            state."candidatePublicationId"
+          )
+        WHERE state."id" = 1
+          AND source."revision" = $1
+          AND publication."sourceRevision" = source."revision"
+          AND publication."materializationVersion" = $2
+          AND (
+            (publication."id" = state."candidatePublicationId"
+              AND publication."status" = 'candidate')
+            OR
+            (publication."id" = state."activePublicationId"
+              AND publication."status" = 'active')
+          )
+          AND publication."validatedAt" IS NOT NULL
+          AND publication."contentFingerprint" IS NOT NULL
+          AND publication."validationReport" IS NOT NULL
+          AND publication."geojsonUrl" IS NOT NULL
+          AND publication."geojsonChecksum" IS NOT NULL
+          AND publication."pmtilesUrl" IS NOT NULL
+          AND publication."pmtilesChecksum" IS NOT NULL
+          AND (publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date = $3::date
+          AND EXISTS (
+            SELECT 1
+            FROM "zone_publication_aggregate" aggregate
+            WHERE aggregate."publicationId" = publication."id"
+          )
+        ORDER BY
+          CASE
+            WHEN publication."id" = state."candidatePublicationId" THEN 0
+            ELSE 1
+          END
+        LIMIT 1
+      `,
+      [
+        context.sourceRevision,
+        ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        context.scheduledFor,
+      ],
+    );
+    if (!publication) {
+      return null;
+    }
+    return {
+      publicationId: String(publication.publicationId),
+      sourceRevision: String(publication.sourceRevision),
+    };
   }
 
   async getActivePublicationGate(

@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { CronExpression } from '@nestjs/schedule';
 import {
   areScheduledJobsDisabled,
@@ -20,7 +20,7 @@ import { ArreteCadreService } from './arrete_cadre.service';
 const NATIONAL_COMPUTE_START_HOUR = 2;
 
 @Injectable()
-export class ArreteCadreScheduler implements OnModuleInit {
+export class ArreteCadreScheduler implements OnApplicationBootstrap {
   private readonly logger = new RegleauLogger('ArreteCadreScheduler');
   private catchUpScheduled = false;
   private updateInFlight: Promise<void> | null = null;
@@ -31,7 +31,7 @@ export class ArreteCadreScheduler implements OnModuleInit {
     private readonly zonePublicationService: ZonePublicationService,
   ) {}
 
-  onModuleInit(): void {
+  onApplicationBootstrap(): void {
     if (
       !isBusinessSchedulerProcess() ||
       areScheduledJobsDisabled() ||
@@ -81,6 +81,10 @@ export class ArreteCadreScheduler implements OnModuleInit {
       async () => {
         const result = (await this.arreteCadreService.updateArreteCadreStatut(
           false,
+          {
+            scheduledFor,
+            sourceRevision: expectedSourceRevision,
+          },
         )) as {
           result?: { publicationId?: unknown; sourceRevision?: unknown };
         };

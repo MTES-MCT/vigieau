@@ -38,6 +38,7 @@ import { MailService } from '../shared/services/mail.service';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { UserService } from '../user/user.service';
 import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
+import type { DailyZonePublicationReuseContext } from '../zone_publication/zone_publication.service';
 import { arreteRestrictionPaginateConfig } from './dto/arrete_restriction.dto';
 import { CreateUpdateArreteRestrictionDto } from './dto/create_update_arrete_restriction.dto';
 import { PublishArreteRestrictionDto } from './dto/publish_arrete_restriction.dto';
@@ -1025,6 +1026,7 @@ export class ArreteRestrictionService {
   async updateArreteRestrictionStatut(
     departements?: Departement[],
     computeHistoric?: boolean,
+    dailyPublicationReuse?: DailyZonePublicationReuseContext,
   ) {
     const arAVenir = await this.arreteRestrictionRepository.find(<
       FindManyOptions
@@ -1037,10 +1039,12 @@ export class ArreteRestrictionService {
         },
       },
     });
-    await this.arreteRestrictionRepository.update(
-      { id: In(arAVenir.map((ar) => ar.id)) },
-      { statut: 'publie' },
-    );
+    if (arAVenir.length > 0) {
+      await this.arreteRestrictionRepository.update(
+        { id: In(arAVenir.map((ar) => ar.id)) },
+        { statut: 'publie' },
+      );
+    }
     this.logger.log(`${arAVenir.length} Arrêtés Restriction publiés`);
 
     const minDateDebut =
@@ -1116,12 +1120,14 @@ export class ArreteRestrictionService {
         ar.dateFin = acDateFin.format('YYYY-MM-DD');
       }
     });
-    promises.push(
-      this.arreteRestrictionRepository.update(
-        { id: In(arPerime.map((ar) => ar.id)) },
-        { statut: 'abroge' },
-      ),
-    );
+    if (arPerime.length > 0) {
+      promises.push(
+        this.arreteRestrictionRepository.update(
+          { id: In(arPerime.map((ar) => ar.id)) },
+          { statut: 'abroge' },
+        ),
+      );
+    }
     await Promise.all(promises);
     this.logger.log(`${arPerime.length} Arrêtés Restriction abrogés`);
 
@@ -1144,8 +1150,20 @@ export class ArreteRestrictionService {
     } catch (e) {
       this.logger.error('ERREUR COMPUTE DEPARTEMENTS STATISTICS', e);
     }
+    const departementIds = departements
+      ? departements.map((departement) => departement.id)
+      : [];
+    if (dailyPublicationReuse) {
+      return this.zoneAlerteComputedService.askCompute(
+        departementIds,
+        false,
+        computeHistoric,
+        false,
+        dailyPublicationReuse,
+      );
+    }
     return this.zoneAlerteComputedService.askCompute(
-      departements ? departements.map((d) => d.id) : [],
+      departementIds,
       false,
       computeHistoric,
     );

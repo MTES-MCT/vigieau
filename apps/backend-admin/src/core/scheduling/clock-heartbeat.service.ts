@@ -1,6 +1,12 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Injectable,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CronExpression } from '@nestjs/schedule';
+import { CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
 import { RegleauLogger } from '../../logger/regleau.logger';
@@ -13,6 +19,8 @@ import {
 const CLOCK_HEARTBEAT_NAME = 'business-clock';
 const DEFAULT_STALE_AFTER_SECONDS = 5 * 60;
 const DEFAULT_HEALTH_CACHE_SECONDS = 15;
+const DEFAULT_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS = 90;
+const DEFAULT_LEADERSHIP_RETRY_SECONDS = 2;
 const CLOCK_LEADERSHIP_LOCK_NAMESPACE = 0x56494749;
 const CLOCK_LEADERSHIP_LOCK_ID = 0x434c4f43;
 
@@ -31,7 +39,9 @@ export interface ClockHeartbeatHealth {
 }
 
 @Injectable()
-export class ClockHeartbeatService implements OnModuleInit, OnModuleDestroy {
+export class ClockHeartbeatService
+  implements OnModuleInit, OnModuleDestroy, BeforeApplicationShutdown
+{
   private readonly logger = new RegleauLogger('ClockHeartbeatService');
   private cachedLastSeenAt:
     | { value: Date | null; expiresAt: number }
@@ -39,6 +49,12 @@ export class ClockHeartbeatService implements OnModuleInit, OnModuleDestroy {
   private lastSeenQuery: Promise<Date | null> | null = null;
   private leadershipRunner: QueryRunner | null = null;
   private leadershipConnection: LeadershipConnection | null = null;
+  private leadershipAcquisition: Promise<void> | null = null;
+  private cancelLeadershipRetryWait: (() => void) | null = null;
+  private scheduledJobsCaptured = false;
+  private scheduledJobsToDrain: Array<{
+    stop(): void | Promise<void>;
+  }> = [];
   private leadershipLost = false;
   private shutdownRequested = false;
   private destroying = false;
@@ -57,17 +73,37 @@ export class ClockHeartbeatService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
+    @Optional()
+    private readonly schedulerRegistry?: SchedulerRegistry,
   ) {}
 
   async onModuleInit(): Promise<void> {
     if (isBusinessSchedulerProcess() && !areScheduledJobsDisabled()) {
-      await this.acquireLeadership();
+      const acquisition = this.acquireLeadership();
+      this.leadershipAcquisition = acquisition;
+      try {
+        await acquisition;
+      } finally {
+        if (this.leadershipAcquisition === acquisition) {
+          this.leadershipAcquisition = null;
+        }
+      }
+      if (this.destroying) {
+        return;
+      }
       await this.recordHeartbeat();
     }
   }
 
   async onModuleDestroy(): Promise<void> {
-    this.destroying = true;
+    await this.prepareForShutdown();
+  }
+
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.prepareForShutdown();
+    await Promise.all(this.scheduledJobsToDrain.map((job) => job.stop()));
+    this.scheduledJobsToDrain = [];
+
     this.detachLeadershipConnectionListeners();
     const runner = this.leadershipRunner;
     this.leadershipRunner = null;
@@ -226,22 +262,100 @@ export class ClockHeartbeatService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async acquireLeadership(): Promise<void> {
+    const timeoutSeconds = this.readPositiveSeconds(
+      'CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS',
+      DEFAULT_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS,
+    );
+    const retrySeconds = this.readPositiveSeconds(
+      'CLOCK_LEADERSHIP_RETRY_SECONDS',
+      DEFAULT_LEADERSHIP_RETRY_SECONDS,
+    );
+    const deadline = Date.now() + timeoutSeconds * 1000;
     const runner = this.dataSource.createQueryRunner();
     const connection = (await runner.connect()) as LeadershipConnection;
+    let contentionObserved = false;
     try {
-      const [result] = await runner.query(
-        'SELECT pg_try_advisory_lock($1, $2) AS locked',
-        [CLOCK_LEADERSHIP_LOCK_NAMESPACE, CLOCK_LEADERSHIP_LOCK_ID],
-      );
-      if (result?.locked !== true) {
-        throw new Error('Another business clock process already owns the lock');
+      while (!this.destroying) {
+        const [result] = await runner.query(
+          'SELECT pg_try_advisory_lock($1, $2) AS locked',
+          [CLOCK_LEADERSHIP_LOCK_NAMESPACE, CLOCK_LEADERSHIP_LOCK_ID],
+        );
+        if (result?.locked === true) {
+          if (this.destroying) {
+            throw new Error(
+              'Business clock leadership acquisition cancelled during shutdown',
+            );
+          }
+          this.attachLeadershipConnectionListeners(connection);
+          this.leadershipRunner = runner;
+          this.leadershipConnection = connection;
+          if (contentionObserved) {
+            this.logger.log('CLOCK LEADERSHIP ACQUIRED AFTER CONTENTION');
+          }
+          return;
+        }
+        if (this.destroying) {
+          throw new Error(
+            'Business clock leadership acquisition cancelled during shutdown',
+          );
+        }
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          throw new Error(
+            `Another business clock process still owns the lock after ${timeoutSeconds} seconds`,
+          );
+        }
+        if (!contentionObserved) {
+          contentionObserved = true;
+          this.logger.warn(
+            `CLOCK LEADERSHIP WAITING: another process owns the lock; retrying for up to ${timeoutSeconds} seconds`,
+          );
+        }
+        await this.waitForLeadershipRetry(
+          Math.min(retrySeconds * 1000, remainingMs),
+        );
       }
-      this.leadershipRunner = runner;
-      this.leadershipConnection = connection;
-      this.attachLeadershipConnectionListeners(connection);
+
+      throw new Error(
+        'Business clock leadership acquisition cancelled during shutdown',
+      );
     } catch (error) {
       await runner.release();
       throw error;
+    }
+  }
+
+  private waitForLeadershipRetry(delayMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        if (this.cancelLeadershipRetryWait === finish) {
+          this.cancelLeadershipRetryWait = null;
+        }
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      this.cancelLeadershipRetryWait = finish;
+    });
+  }
+
+  private async prepareForShutdown(): Promise<void> {
+    this.destroying = true;
+    this.cancelLeadershipRetryWait?.();
+    const acquisition = this.leadershipAcquisition;
+    if (acquisition) {
+      try {
+        await acquisition;
+      } catch {
+        // The pending candidate releases its connection in acquireLeadership.
+      }
+    }
+    if (!this.scheduledJobsCaptured) {
+      this.scheduledJobsCaptured = true;
+      this.scheduledJobsToDrain = this.schedulerRegistry
+        ? Array.from(this.schedulerRegistry.getCronJobs().values())
+        : [];
     }
   }
 

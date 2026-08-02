@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { CronExpression } from '@nestjs/schedule';
 import {
   areScheduledJobsDisabled,
@@ -18,7 +18,7 @@ import { ZonePublicationService } from '../zone_publication/zone_publication.ser
 const DATAGOUV_JOB_KEY = 'datagouv:daily';
 
 @Injectable()
-export class DatagouvSchedulerService implements OnModuleInit {
+export class DatagouvSchedulerService implements OnApplicationBootstrap {
   private readonly logger = new RegleauLogger('DatagouvSchedulerService');
   private catchUpScheduled = false;
 
@@ -28,7 +28,7 @@ export class DatagouvSchedulerService implements OnModuleInit {
     private readonly zonePublicationService: ZonePublicationService,
   ) {}
 
-  onModuleInit(): void {
+  onApplicationBootstrap(): void {
     if (
       !isBusinessSchedulerProcess() ||
       areScheduledJobsDisabled() ||

@@ -34,9 +34,43 @@ describe('ArreteCadreService scheduled status update', () => {
     );
 
     await expect(service.updateArreteCadreStatut()).rejects.toBe(expectedError);
+    expect(repository.update).not.toHaveBeenCalled();
     expect(
       arreteRestrictionService.updateArreteRestrictionStatut,
     ).toHaveBeenCalledWith(null, true);
+  });
+
+  it('propagates the daily publication reuse context to the restriction update', async () => {
+    const repository = {
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 0 }),
+    };
+    const arreteRestrictionService = {
+      updateArreteRestrictionStatut: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new ArreteCadreService(
+      repository as never,
+      arreteRestrictionService as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+    );
+    const reuseContext = {
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+    };
+
+    await service.updateArreteCadreStatut(false, reuseContext);
+
+    expect(
+      arreteRestrictionService.updateArreteRestrictionStatut,
+    ).toHaveBeenCalledWith(null, false, reuseContext);
   });
 });
 
@@ -182,6 +216,13 @@ describe('ArreteCadreScheduler', () => {
 
     await harness.service.updateIfDue(now);
 
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledWith(false, {
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+    });
+
     expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
       1,
       NATIONAL_DAILY_COMPUTE_JOB_KEY,
@@ -289,7 +330,7 @@ describe('ArreteCadreScheduler', () => {
     process.env[DISABLE_SCHEDULED_JOBS_ENV] = 'true';
 
     try {
-      createScheduler().service.onModuleInit();
+      createScheduler().service.onApplicationBootstrap();
       expect(timeout).not.toHaveBeenCalled();
     } finally {
       timeout.mockRestore();
@@ -306,7 +347,7 @@ describe('ArreteCadreScheduler', () => {
     }
   });
 
-  it('schedules one immediate catch-up when the clock starts', async () => {
+  it('schedules no catch-up before bootstrap and exactly one after', async () => {
     const previousRole = process.env[BUSINESS_SCHEDULER_PROCESS_ENV];
     const previousDisabled = process.env[DISABLE_SCHEDULED_JOBS_ENV];
     process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
@@ -318,8 +359,11 @@ describe('ArreteCadreScheduler', () => {
       .mockResolvedValue(undefined);
 
     try {
-      harness.service.onModuleInit();
-      harness.service.onModuleInit();
+      expect(jest.getTimerCount()).toBe(0);
+      expect(updateIfDue).not.toHaveBeenCalled();
+
+      harness.service.onApplicationBootstrap();
+      harness.service.onApplicationBootstrap();
       jest.runOnlyPendingTimers();
       await Promise.resolve();
 

@@ -27,6 +27,7 @@ describe('ZoneAlerteComputedService', () => {
   let statisticCommuneService: { computeByMonth: jest.Mock };
   let zonePublicationService: {
     buildCandidateFromCurrentComputed: jest.Mock;
+    findReusableDailyPublication: jest.Mock;
     getSourceRevision: jest.Mock;
     isRecomputeRequired: jest.Mock;
   };
@@ -52,6 +53,7 @@ describe('ZoneAlerteComputedService', () => {
     };
     zonePublicationService = {
       buildCandidateFromCurrentComputed: jest.fn().mockResolvedValue(undefined),
+      findReusableDailyPublication: jest.fn().mockResolvedValue(null),
       getSourceRevision: jest.fn().mockResolvedValue('1'),
       isRecomputeRequired: jest.fn().mockResolvedValue(false),
     };
@@ -376,6 +378,242 @@ describe('ZoneAlerteComputedService', () => {
     await jest.advanceTimersByTimeAsync(ZONE_COMPUTE_WORKER_TIMEOUT_MS);
 
     expect(worker.terminate).not.toHaveBeenCalled();
+  });
+
+  it('passes the daily publication reuse identity to its worker', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+    const reuseContext = {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    };
+
+    const compute = service.askCompute([], false, false, false, reuseContext);
+
+    expect(Worker).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        workerData: {
+          depsIds: [],
+          computeHistoric: false,
+          skipIfBusy: false,
+          dailyPublicationReuse: reuseContext,
+        },
+      }),
+    );
+    worker.emit('message', {
+      success: true,
+      result: { publicationId: 'publication-1', sourceRevision: '42' },
+    });
+    await expect(compute).resolves.toEqual(
+      expect.objectContaining({ success: true }),
+    );
+  });
+
+  it('keeps the daily reuse identity while its compute waits in the local queue', async () => {
+    const firstWorker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    const dailyWorker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock)
+      .mockReturnValueOnce(firstWorker)
+      .mockReturnValueOnce(dailyWorker);
+    const reuseContext = {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    };
+
+    const currentCompute = service.askCompute([65]);
+    const dailyCompute = service.askCompute(
+      [],
+      false,
+      false,
+      false,
+      reuseContext,
+    );
+    firstWorker.emit('message', { success: true });
+    await expect(currentCompute).resolves.toEqual({ success: true });
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    expect(Worker).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        workerData: expect.objectContaining({
+          depsIds: [],
+          dailyPublicationReuse: reuseContext,
+        }),
+      }),
+    );
+    dailyWorker.emit('message', {
+      success: true,
+      result: { publicationId: 'publication-1', sourceRevision: '42' },
+    });
+    await expect(dailyCompute).resolves.toEqual(
+      expect.objectContaining({ success: true }),
+    );
+  });
+
+  it('lets a queued daily national compute dominate a watchdog partial compute', async () => {
+    const firstWorker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    const dailyWorker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock)
+      .mockReturnValueOnce(firstWorker)
+      .mockReturnValueOnce(dailyWorker);
+    const reuseContext = {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    };
+
+    const currentCompute = service.askCompute([31]);
+    const dailyCompute = service.askCompute(
+      [],
+      false,
+      false,
+      false,
+      reuseContext,
+    );
+    const watchdogCompute = service.askCompute([65], false, false, true);
+    firstWorker.emit('message', { success: true });
+    await expect(currentCompute).resolves.toEqual({ success: true });
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    expect(Worker).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        workerData: {
+          depsIds: [],
+          computeHistoric: false,
+          skipIfBusy: false,
+          dailyPublicationReuse: reuseContext,
+        },
+      }),
+    );
+    const result = {
+      success: true,
+      result: { publicationId: 'publication-1', sourceRevision: '42' },
+    };
+    dailyWorker.emit('message', result);
+    await expect(dailyCompute).resolves.toEqual(result);
+    await expect(watchdogCompute).resolves.toEqual(result);
+  });
+
+  it('invalidates queued daily reuse when a normal national compute joins it', async () => {
+    const firstWorker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    const nationalWorker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock)
+      .mockReturnValueOnce(firstWorker)
+      .mockReturnValueOnce(nationalWorker);
+    const reuseContext = {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    };
+
+    const currentCompute = service.askCompute([31]);
+    const dailyCompute = service.askCompute(
+      [],
+      false,
+      false,
+      false,
+      reuseContext,
+    );
+    const manualCompute = service.askCompute([]);
+    firstWorker.emit('message', { success: true });
+    await expect(currentCompute).resolves.toEqual({ success: true });
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    expect(Worker).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        workerData: {
+          depsIds: [],
+          computeHistoric: false,
+          skipIfBusy: false,
+        },
+      }),
+    );
+    const result = {
+      success: true,
+      result: { publicationId: 'publication-2', sourceRevision: '42' },
+    };
+    nationalWorker.emit('message', result);
+    await expect(dailyCompute).resolves.toEqual(result);
+    await expect(manualCompute).resolves.toEqual(result);
+  });
+
+  it('reuses a matching daily publication instead of recomputing', async () => {
+    const reuseContext = {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    };
+    const reusablePublication = {
+      publicationId: 'publication-1',
+      sourceRevision: '42',
+    };
+    zonePublicationService.findReusableDailyPublication.mockResolvedValue(
+      reusablePublication,
+    );
+    const computeAll = jest.spyOn(service, 'computeAll');
+
+    await expect(
+      service.computeAllOrReuseDailyPublication([], reuseContext),
+    ).resolves.toEqual(reusablePublication);
+
+    expect(
+      zonePublicationService.findReusableDailyPublication,
+    ).toHaveBeenCalledWith(reuseContext);
+    expect(computeAll).not.toHaveBeenCalled();
+  });
+
+  it('keeps the normal compute path when no daily publication is reusable', async () => {
+    const reuseContext = {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    };
+    const computed = { publicationId: 'publication-2', sourceRevision: '42' };
+    const computeAll = jest
+      .spyOn(service, 'computeAll')
+      .mockResolvedValue(computed);
+
+    await expect(
+      service.computeAllOrReuseDailyPublication([], reuseContext),
+    ).resolves.toEqual(computed);
+
+    expect(
+      zonePublicationService.findReusableDailyPublication,
+    ).toHaveBeenCalledWith(reuseContext);
+    expect(computeAll).toHaveBeenCalledWith([], false);
+  });
+
+  it('does not apply daily reuse to an ordinary scoped compute', async () => {
+    const computeAll = jest.spyOn(service, 'computeAll').mockResolvedValue({
+      publicationId: undefined,
+      sourceRevision: undefined,
+    });
+
+    await service.computeAllOrReuseDailyPublication([65], {
+      scheduledFor: '2026-08-02',
+      sourceRevision: '42',
+    });
+
+    expect(
+      zonePublicationService.findReusableDailyPublication,
+    ).not.toHaveBeenCalled();
+    expect(computeAll).toHaveBeenCalledWith([65], false);
   });
 
   it('rejects and releases the compute slot when the worker reports a failure', async () => {

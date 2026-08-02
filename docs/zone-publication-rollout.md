@@ -18,6 +18,11 @@ utilisateur.
   auparavant. Le watchdog teste ce verrou avant de créer son worker et rend la
   main s'il est occupé; le worker conserve le même contrôle pour couvrir une
   course entre ce pré-contrôle et son démarrage.
+- La reprise durable du calcul quotidien transporte sa date civile Paris et la
+  révision source attendue jusqu'au worker. Après acquisition du verrou global,
+  elle réutilise une candidate ou une active déjà complète uniquement si sa
+  date, sa révision et sa version de matérialisation correspondent exactement.
+  Une publication de la veille n'est jamais réutilisée pour le jour courant.
 - Le bootstrap du schéma exécute `synchronize` uniquement sur une base vierge,
   détectée par l'absence de la table baseline `user`, puis applique les
   migrations sous le même verrou. Dès cette table présente, tous les
@@ -169,6 +174,11 @@ connue est refusée avant toute écriture du département. Sur une base vide, la
 réponse détaillée est comparée à un second index léger de l'API GEO avant le
 bootstrap. Une exécution sans changement ne doit donc ni réécrire les communes ni
 faire progresser la révision source.
+
+Le rafraîchissement mensuel des géométries départementales applique la même
+discipline : il verrouille puis compare chaque géométrie en SRID 4326 avec
+`ST_Equals`, et n'écrit que les départements réellement différents. Il ne doit
+donc pas invalider une publication lorsque le flux source est inchangé.
 
 `SANDRE_ZONE_SYNC_MODE=paused` ne contacte pas le référentiel,
 `SANDRE_ZONE_SYNC_MODE=audit` enregistre les décisions sans modifier les zones,

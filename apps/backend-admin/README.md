@@ -29,6 +29,10 @@ cp env.example .env
 - MAIL_MTE : Mail générique à renseigner pour l'envoi de mail systématique à une adresse
 - DOMAIN_NAME : Domaine du frontend (localhost:3000 en local)
 - PATH_TO_WRITE_FILE : Dossier pour stocker les fichiers temporaires ou le serveur peut lire / écrire
+- CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS : Durée maximale pendant laquelle un nouveau processus `clock` attend la libération du verrou PostgreSQL lors d'un rolling deploy (90 secondes par défaut)
+- CLOCK_LEADERSHIP_RETRY_SECONDS : Intervalle entre deux tentatives d'acquisition du verrou du `clock` (2 secondes par défaut)
+
+Le processus `clock` ne publie son heartbeat et ne démarre ses tâches planifiées qu'après avoir acquis son verrou PostgreSQL exclusif. Pendant un rolling deploy, le nouveau processus retente ce verrou dans la fenêtre configurée ; si elle expire, son démarrage échoue au lieu de créer un second ordonnanceur. Lors d'un arrêt gracieux, l'ancien processus attend la fin de ses tâches planifiées avant de libérer le verrou.
 
 ### Publication des restrictions par commune
 

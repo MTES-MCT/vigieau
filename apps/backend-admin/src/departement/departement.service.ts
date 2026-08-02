@@ -143,20 +143,41 @@ export class DepartementService {
     const { data } = await firstValueFrom(this.httpService.get(sourceUrl));
     const toUpdate = parseDepartementGeometryFeed(data);
     await this.departementRepository.manager.transaction(async (manager) => {
-      await Promise.all(
-        toUpdate.map((tmp) =>
-          manager.update(
-            Departement,
-            { code: tmp.code },
-            { geom: tmp.geom as any },
-          ),
-        ),
-      );
-      await manager.update(
-        Departement,
-        {},
-        { geom: () => `ST_TRANSFORM(geom, 4326)` },
-      );
+      for (const departement of toUpdate) {
+        const geometry = JSON.stringify(departement.geom);
+        const [current] = await manager.query(
+          `
+            WITH incoming AS (
+              SELECT ST_SetSRID(ST_GeomFromGeoJSON($2::text), 4326) AS geom
+            )
+            SELECT
+              departement.id,
+              CASE
+                WHEN departement.geom IS NULL
+                  OR ST_SRID(departement.geom) <> 4326
+                THEN false
+                ELSE ST_Equals(departement.geom, incoming.geom)
+              END AS "matches"
+            FROM departement
+            CROSS JOIN incoming
+            WHERE departement.code = $1
+            FOR UPDATE OF departement
+          `,
+          [departement.code, geometry],
+        );
+        if (!current || current.matches === true) {
+          continue;
+        }
+
+        await manager.query(
+          `
+            UPDATE departement
+            SET geom = ST_SetSRID(ST_GeomFromGeoJSON($2::text), 4326)
+            WHERE id = $1
+          `,
+          [current.id, geometry],
+        );
+      }
     });
     this.logger.log('DEPARTEMENTS MIS A JOUR');
   }

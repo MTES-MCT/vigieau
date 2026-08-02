@@ -5,6 +5,7 @@ import { workerData, parentPort } from 'worker_threads';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { withZoneComputeLock } from './zone-compute-lock';
 import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
+import type { DailyZonePublicationReuseContext } from '../zone_publication/zone_publication.service';
 
 const logger = new RegleauLogger('ComputeMapWorker');
 const COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
@@ -13,6 +14,7 @@ interface WorkerData {
   depsIds: number[];
   computeHistoric: boolean;
   skipIfBusy?: boolean;
+  dailyPublicationReuse?: DailyZonePublicationReuseContext;
 }
 
 async function withHistoricComputeLock<T>(
@@ -82,7 +84,8 @@ async function run() {
     app = await NestFactory.createApplicationContext(AppModule);
     const zoneAlerteComputedService = app.get(ZoneAlerteComputedService);
     const dataSource = app.get(DataSource);
-    const { depsIds, computeHistoric, skipIfBusy } = workerData as WorkerData;
+    const { depsIds, computeHistoric, skipIfBusy, dailyPublicationReuse } =
+      workerData as WorkerData;
 
     logger.log(
       `Starting compute with depsIds: ${depsIds} and computeHistoric: ${computeHistoric}`,
@@ -90,7 +93,11 @@ async function run() {
     const lockResult = await withZoneComputeLock(
       dataSource,
       depsIds,
-      () => zoneAlerteComputedService.computeAll(depsIds, false),
+      () =>
+        zoneAlerteComputedService.computeAllOrReuseDailyPublication(
+          depsIds,
+          dailyPublicationReuse,
+        ),
       { skipIfBusy },
     );
     if (!lockResult.acquired) {

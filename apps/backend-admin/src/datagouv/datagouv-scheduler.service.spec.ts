@@ -186,10 +186,46 @@ describe('DatagouvSchedulerService', () => {
     process.env[DISABLE_SCHEDULED_JOBS_ENV] = 'true';
 
     try {
-      createService().service.onModuleInit();
+      createService().service.onApplicationBootstrap();
       expect(timeout).not.toHaveBeenCalled();
     } finally {
       timeout.mockRestore();
+      if (previousRole === undefined) {
+        delete process.env[BUSINESS_SCHEDULER_PROCESS_ENV];
+      } else {
+        process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = previousRole;
+      }
+      if (previousDisabled === undefined) {
+        delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
+      } else {
+        process.env[DISABLE_SCHEDULED_JOBS_ENV] = previousDisabled;
+      }
+    }
+  });
+
+  it('schedules no catch-up before bootstrap and exactly one after', async () => {
+    const previousRole = process.env[BUSINESS_SCHEDULER_PROCESS_ENV];
+    const previousDisabled = process.env[DISABLE_SCHEDULED_JOBS_ENV];
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
+    delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
+    jest.useFakeTimers();
+    const harness = createService();
+    const publishIfDue = jest
+      .spyOn(harness.service, 'publishIfDue')
+      .mockResolvedValue(undefined);
+
+    try {
+      expect(jest.getTimerCount()).toBe(0);
+      expect(publishIfDue).not.toHaveBeenCalled();
+
+      harness.service.onApplicationBootstrap();
+      harness.service.onApplicationBootstrap();
+      jest.runOnlyPendingTimers();
+      await Promise.resolve();
+
+      expect(publishIfDue).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
       if (previousRole === undefined) {
         delete process.env[BUSINESS_SCHEDULER_PROCESS_ENV];
       } else {
