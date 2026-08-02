@@ -9,6 +9,10 @@ import {
   parseSandreForceFullAuditAfter,
   parseSandreZoneSyncMode,
 } from '../zone_alerte/sandre-zone-governance';
+import {
+  PublicZonePublicationHealth,
+  ZonePublicationHealthService,
+} from './zone-publication-health.service';
 
 type SandreSynchronizationStatus =
   | 'healthy'
@@ -52,6 +56,7 @@ export class HealthController {
     private readonly externalPublicationRegistry: ExternalPublicationRegistryService,
     private readonly clockHeartbeat: ClockHeartbeatService,
     private readonly configService: ConfigService,
+    private readonly zonePublicationHealth: ZonePublicationHealthService,
   ) {}
 
   @Get()
@@ -83,6 +88,15 @@ export class HealthController {
   @Get('external-publications')
   externalPublications() {
     return this.externalPublicationRegistry.getHealthStatus();
+  }
+
+  @Get('zone-publication')
+  async zonePublication(): Promise<PublicZonePublicationHealth> {
+    const health = await this.zonePublicationHealth.getHealthStatus();
+    if (health.status === 'stale' || health.status === 'unavailable') {
+      throw new ServiceUnavailableException(health);
+    }
+    return health;
   }
 
   @Get('sandre-references')

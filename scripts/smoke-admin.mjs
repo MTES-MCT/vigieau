@@ -51,6 +51,17 @@ async function jsonUrl(url) {
   return body ? JSON.parse(body) : null;
 }
 
+function collectObjectKeys(value, keys = []) {
+  if (!value || typeof value !== "object") {
+    return keys;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    keys.push(key);
+    collectObjectKeys(child, keys);
+  }
+  return keys;
+}
+
 const frontResponse = await fetch(`${frontBase}/`, {
   headers: { Accept: "text/html", "Cache-Control": "no-cache" },
   signal: AbortSignal.timeout(timeoutMs),
@@ -78,6 +89,47 @@ assert.deepEqual(
   ready,
   { status: "ready", database: "up" },
   "The admin API is not ready",
+);
+
+const zonePublication = await json("health/zone-publication");
+assert.equal(
+  zonePublication.status,
+  "healthy",
+  "The zone publication is not fully synchronized",
+);
+assert.equal(
+  zonePublication.serving,
+  true,
+  "The active zone publication is not served by every live public instance",
+);
+for (const key of [
+  "enabled",
+  "automaticPublishing",
+  "clock",
+  "activeServing",
+  "activeCurrent",
+  "candidateClear",
+  "legacyPromotion",
+  "currentStatistics",
+  "currentSnapshot",
+  "historicStatistics",
+  "historicClean",
+  "historicCursors",
+  "certifiedRun",
+  "snapshotsComplete",
+]) {
+  assert.equal(
+    zonePublication.checks?.[key],
+    true,
+    `Zone publication check ${key} is not healthy`,
+  );
+}
+assert.equal(
+  collectObjectKeys(zonePublication).some((key) =>
+    /(^id$|Id$|revision|version|error)/i.test(key),
+  ),
+  false,
+  "The public zone publication health exposes an internal field",
 );
 
 const sandreReferences = await json("health/sandre-references");
@@ -229,6 +281,11 @@ assert.equal(
 console.log(
   JSON.stringify({
     status: "ok",
+    zonePublication: {
+      status: zonePublication.status,
+      businessDate: zonePublication.businessDate,
+      requiredHistoricThrough: zonePublication.requiredHistoricThrough,
+    },
     clock: {
       lastSeenAt: clock.lastSeenAt,
       ageSeconds: clock.ageSeconds,

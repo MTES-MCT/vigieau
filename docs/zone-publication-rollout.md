@@ -98,6 +98,7 @@ ZONE_PUBLICATION_ENABLED=false  # uniquement pendant bootstrap ou gel; true en e
 ZONE_PUBLICATION_MIN_READY_INSTANCES=1  # preprod
 ZONE_PUBLICATION_MIN_READY_INSTANCES=2  # prod
 ZONE_PUBLICATION_INSTANCE_LEASE_SECONDS=30
+ZONE_PUBLICATION_HEALTH_PROGRESS_STALE_AFTER_SECONDS=1800
 ZONE_PUBLICATION_CANDIDATE_TIMEOUT_SECONDS=300
 ZONE_PUBLICATION_RETRY_BACKOFF_SECONDS=300
 ZONE_PUBLICATION_RETRY_MAX_BACKOFF_SECONDS=21600
@@ -153,6 +154,18 @@ réécrire la version d'une publication existante. La version 3 introduit la
 barrière d'activation statistique : les exécutions quotidiennes et historiques
 l'incluent dans leur identité persistée, afin qu'un succès enregistré en version
 2 ne puisse pas empêcher le recalcul national en version 3.
+
+`ZONE_PUBLICATION_HEALTH_PROGRESS_STALE_AFTER_SECONDS` borne la durée pendant
+laquelle le health public peut répondre `updating`. Cette réponse n'est autorisée
+que si la publication active est encore réellement servie par toutes les instances
+publiques vivantes, en nombre au moins égal au minimum configuré, que le `clock`
+est sain et qu'un timestamp métier (état, snapshot, publication en cours ou
+préchargement de candidate) a progressé dans cette fenêtre. Le heartbeat de
+l'active prouve qu'elle est servie, mais ne suffit jamais à prolonger seul un
+calcul bloqué. Un snapshot ne compte comme progrès que s'il porte la révision
+source courante et concerne le jour métier ou la plage historique sale. Chaque
+avancement CAS des curseurs historiques persiste aussi son propre timestamp; il
+ne compte que pendant le run quotidien courant de même révision et version.
 
 Lors d'un upgrade avec une publication déjà active, des curseurs legacy
 `computeMapDate` et `computeStatsDate` tous deux nuls ne prouvent aucune date
@@ -331,16 +344,26 @@ n'effectue volontairement aucune écriture.
    Noter l'identifiant du nouveau backup et vérifier qu'il est le plus récent,
    au statut `done` et de taille strictement positive.
 
-5. Retirer `NODE_TLS_REJECT_UNAUTHORIZED=0`, déployer `regleau-back-preprod`,
-   conserver `clock=0`, puis restaurer `web` à sa formation initiale. Vérifier les
-   migrations, la base, OAuth, S3, SANDRE, l'envoi de mail et les départements.
+5. Retirer `NODE_TLS_REJECT_UNAUTHORIZED=0`, vérifier que
+   `SKIP_SCHEMA_BOOTSTRAP` est absent ou vaut `false`, déployer
+   `regleau-back-preprod`, conserver `clock=0`, puis restaurer `web` à sa
+   formation initiale. Vérifier les migrations, la base, OAuth, S3, SANDRE,
+   l'envoi de mail et les départements. `SKIP_SCHEMA_BOOTSTRAP=true` est réservé
+   aux tests qui créent eux-mêmes leur schéma : en exploitation il empêcherait
+   l'application des migrations au démarrage.
 6. Déployer `vigieau-api-preprod`. Attendre plus d'une durée de lease (30 s), puis
    vérifier que `liveInstances` correspond exactement à la formation publique.
-7. Passer uniquement `DISABLE_SCHEDULED_JOBS=false`, en gardant `clock=0`, les
-   écritures gelées et SANDRE en pause. Activer ensuite
-   `ZONE_PUBLICATION_ENABLED=true` et attendre la baseline complète : candidate,
+7. Passer uniquement `DISABLE_SCHEDULED_JOBS=false`, en gardant d'abord
+   `clock=0`, les écritures gelées et SANDRE en pause. Activer ensuite
+   `ZONE_PUBLICATION_ENABLED=true`, puis démarrer exactement `clock=1` en taille
+   `2XL` avec `SANDRE_ZONE_SYNC_MODE=paused`. Le `clock` est indispensable au
+   calcul quotidien et au rattrapage historique : attendre la baseline avec
+   `clock=0` ne peut pas fonctionner. Attendre la baseline complète : candidate,
    quorum, statut `active`, `legacyPromotedAt`, manifeste et artefacts valides.
-   Ne jamais modifier le pointeur actif directement en SQL.
+   `/api/health/zone-publication` peut répondre `updating` pendant la progression
+   réelle, mais doit finir à `healthy`. Ne jamais modifier le pointeur actif
+   directement en SQL. Avant l'audit SANDRE de l'étape 10, remettre le `clock` à
+   zéro pour fixer le cutoff, puis le redémarrer comme indiqué.
 8. Déployer les deux fronts `preservonsleau-front-preprod` et
    `regleau-front-preprod`, puis vérifier :
 
@@ -400,6 +423,7 @@ n'effectue volontairement aucune écriture.
 
     ```text
     GET https://api.admin.vigieau.incubateur.net/api/health/clock
+    GET https://api.admin.vigieau.incubateur.net/api/health/zone-publication
     GET https://api.admin.vigieau.incubateur.net/api/health/sandre-references
     GET https://api.admin.vigieau.incubateur.net/api/health/sandre-synchronization
     GET https://api.admin.vigieau.incubateur.net/api/health/map-archives
@@ -414,8 +438,13 @@ n'effectue volontairement aucune écriture.
     `trackedDepartments=appliedDepartments=totalDepartments=101`, avec
     `staleDepartments=0`, `staleAppliedDepartments=0`,
     `pendingApplicationDepartments=0`, `blockedDepartments=0`, `failedBatches=0`
-    et `blockedBatches=0`. Aucun front, cache ou dataset public ne doit être promu
-    avant que ces compteurs soient tous conformes.
+    et `blockedBatches=0`. Attendre ensuite le recalcul et l'activation d'une
+    publication alignée sur la nouvelle révision source : l'ancienne active peut
+    continuer à servir pendant ce calcul, mais ne constitue pas la validation de
+    sortie. `/api/health/zone-publication` doit répondre strictement `healthy`,
+    avec tous ses contrôles à `true` hors `recentProgress`, avant tout smoke final
+    et avant la levée du gel. Aucun front, cache ou dataset public ne doit être
+    promu avant que ces contrôles et compteurs soient tous conformes.
     Pendant la phase d'observation, utiliser directement le health de
     synchronisation avec le mode attendu `audit`. Le smoke admin complet exige
     aussi zéro référence SANDRE opérationnelle invalide : il peut donc échouer
@@ -426,8 +455,10 @@ n'effectue volontairement aucune écriture.
     dans ce contrôle de sortie.
 
 11. Exécuter seulement maintenant le smoke admin complet avec les URL front et
-    API preprod. Comme aucun dataset data.gouv.fr de test n'est configuré,
-    `never_succeeded` est attendu et exige
+    API preprod. Ce smoke exige `status=healthy` sur
+    `/api/health/zone-publication`; il n'accepte jamais `updating`, même avec une
+    ancienne active encore servie. Comme aucun dataset data.gouv.fr de test n'est
+    configuré, `never_succeeded` est attendu et exige
     `VIGIEAU_ALLOW_UNPUBLISHED_EXTERNAL=true`. Rejouer aussi les smokes public et
     navigateur; tous doivent être verts avant de remettre
     `ADMIN_WRITES_DISABLED=false`. `/resume` est lui-même bloqué pendant le gel :
@@ -473,6 +504,22 @@ Le endpoint `/api/health/ready` reste à `200` si un ancien snapshot utilisable 
 conservé. `/api/health/cache` passe à `503` si le pointeur, le préchargement ou le
 contrôle de version n'est pas à jour. Le diagnostic n'expose ni erreur brute, ni
 identifiant d'instance.
+
+`/api/health/zone-publication` synthétise la chaîne complète sans exposer
+d'identifiant, de révision numérique, de version ni d'erreur brute. `healthy`
+exige l'activation du mécanisme, l'absence de pause et de candidate, une active
+du jour et de la révision source courante sur la version de matérialisation du
+code, toutes les instances publiques vivantes prêtes avec le minimum configuré,
+la promotion legacy, les statistiques courantes du jour métier Paris avec un
+snapshot national complet de la même révision source,
+l'historique et les deux curseurs au moins à J-1, aucune plage sale et aucun
+snapshot incomplet. Il revalide aussi le succès exact des runs quotidien et
+historique avec les dates, curseurs et générations toujours présents en base.
+`updating` reste un `200` uniquement pendant une progression récente et
+vérifiable alors qu'une active continue d'être servie; le smoke de sortie la
+refuse. Sans progrès récent, l'endpoint répond `503 stale`. Le health
+data.gouv.fr reste volontairement séparé dans
+`/api/health/external-publications`.
 
 Dans `pgsql-console`, contrôler sans écrire :
 
@@ -526,7 +573,8 @@ plage historique à recalculer, le dernier snapshot mis à jour avec sa progress
 et le nombre de snapshots incomplets. Un snapshot `ready` a fini son calcul mais
 attend encore l'activation atomique; il n'est donc pas compté comme incomplet.
 Les endpoints
-`/api/health/clock`, `/api/health/external-publications`,
+`/api/health/clock`, `/api/health/zone-publication`,
+`/api/health/external-publications`,
 `/api/health/sandre-references`, `/api/health/sandre-synchronization` et
 `/api/health/map-archives` ne renvoient aucune erreur brute ni secret et
 servent aux alertes techniques. Le smoke admin passe aussi par

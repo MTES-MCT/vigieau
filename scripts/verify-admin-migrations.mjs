@@ -583,6 +583,33 @@ try {
     ],
     "The historic cursor generations are missing",
   );
+  const cursorProgressColumns = await dataSource.query(`
+    SELECT "column_name", "data_type", "is_nullable"
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'config'
+      AND "column_name" IN (
+        'computeMapUpdatedAt',
+        'computeStatsUpdatedAt'
+      )
+    ORDER BY "column_name"
+  `);
+  assert.deepEqual(
+    cursorProgressColumns,
+    [
+      {
+        column_name: "computeMapUpdatedAt",
+        data_type: "timestamp with time zone",
+        is_nullable: "YES",
+      },
+      {
+        column_name: "computeStatsUpdatedAt",
+        data_type: "timestamp with time zone",
+        is_nullable: "YES",
+      },
+    ],
+    "The historic cursor progress timestamps are missing",
+  );
 
   const publicationPauseColumns = await dataSource.query(`
     SELECT "column_name", "data_type", "is_nullable", "column_default"
@@ -890,7 +917,9 @@ try {
         "computeMapDate"::text AS "computeMapDate",
         "computeStatsDate"::text AS "computeStatsDate",
         "computeMapGeneration"::text AS "computeMapGeneration",
-        "computeStatsGeneration"::text AS "computeStatsGeneration"
+        "computeStatsGeneration"::text AS "computeStatsGeneration",
+        "computeMapUpdatedAt" AS "computeMapUpdatedAt",
+        "computeStatsUpdatedAt" AS "computeStatsUpdatedAt"
       FROM "config"
       WHERE "id" = 1
     `);
@@ -901,6 +930,8 @@ try {
         computeStatsDate: "2026-07-29",
         computeMapGeneration: "0",
         computeStatsGeneration: "0",
+        computeMapUpdatedAt: null,
+        computeStatsUpdatedAt: null,
       },
       "The upgrade did not preserve historic cursors with fresh generations",
     );

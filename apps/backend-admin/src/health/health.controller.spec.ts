@@ -31,17 +31,28 @@ describe('HealthController', () => {
         return values[key];
       }),
     };
+    const zonePublicationHealth = {
+      getHealthStatus: jest.fn().mockResolvedValue({
+        status: 'healthy',
+        serving: true,
+        businessDate: '2026-08-01',
+        requiredHistoricThrough: '2026-07-31',
+        checks: { activeCurrent: true },
+      }),
+    };
     return {
       controller: new HealthController(
         dataSource as any,
         registry as any,
         clockHeartbeat as any,
         config as any,
+        zonePublicationHealth as any,
       ),
       dataSource,
       registry,
       clockHeartbeat,
       config,
+      zonePublicationHealth,
     };
   }
 
@@ -51,6 +62,42 @@ describe('HealthController', () => {
     await expect(controller.externalPublications()).resolves.toEqual({
       status: 'healthy',
       lastSuccessAt: '2026-08-01T06:00:00.000Z',
+    });
+  });
+
+  it('returns healthy and updating zone publications but rejects stale ones', async () => {
+    const { controller, zonePublicationHealth } = createController();
+
+    await expect(controller.zonePublication()).resolves.toMatchObject({
+      status: 'healthy',
+      serving: true,
+    });
+
+    zonePublicationHealth.getHealthStatus.mockResolvedValueOnce({
+      status: 'updating',
+      serving: true,
+      businessDate: '2026-08-01',
+      requiredHistoricThrough: '2026-07-31',
+      checks: { activeCurrent: false, recentProgress: true },
+    });
+    await expect(controller.zonePublication()).resolves.toMatchObject({
+      status: 'updating',
+      serving: true,
+    });
+
+    zonePublicationHealth.getHealthStatus.mockResolvedValueOnce({
+      status: 'stale',
+      serving: true,
+      businessDate: '2026-08-01',
+      requiredHistoricThrough: '2026-07-31',
+      checks: { activeCurrent: false, recentProgress: false },
+    });
+    await expect(controller.zonePublication()).rejects.toMatchObject({
+      status: 503,
+      response: {
+        status: 'stale',
+        serving: true,
+      },
     });
   });
 
@@ -65,6 +112,12 @@ describe('HealthController', () => {
       Reflect.getMetadata(
         'THROTTLER:SKIPdefault',
         HealthController.prototype.externalPublications,
+      ),
+    ).not.toBe(true);
+    expect(
+      Reflect.getMetadata(
+        'THROTTLER:SKIPdefault',
+        HealthController.prototype.zonePublication,
       ),
     ).not.toBe(true);
     expect(

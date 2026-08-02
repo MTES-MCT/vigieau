@@ -37,7 +37,11 @@ describe('ConfigService historic cursor advancement', () => {
     expect(harness.queryBuilder.set).toHaveBeenCalledWith({
       computeMapDate: '2026-07-31',
       computeMapGeneration: expect.any(Function),
+      computeMapUpdatedAt: expect.any(Function),
     });
+    expect(
+      harness.queryBuilder.set.mock.calls[0][0].computeMapUpdatedAt(),
+    ).toBe('now()');
     expect(harness.queryBuilder.andWhere).toHaveBeenCalledWith(
       '"computeMapDate" IS NOT DISTINCT FROM :expectedCurrent',
       { expectedCurrent: '2026-07-30' },
@@ -77,6 +81,9 @@ describe('ConfigService historic cursor advancement', () => {
     await expect(
       harness.service.advanceComputeStatsDate('2026-07-30', '8', '2026-07-31'),
     ).resolves.toBe(false);
+    expect(
+      harness.queryBuilder.set.mock.calls[0][0].computeStatsUpdatedAt(),
+    ).toBe('now()');
   });
 
   it('guards statistics cursor advancement with the expected source revision', async () => {

@@ -12,11 +12,17 @@ export class Config extends BaseEntity {
   @Column({ type: "bigint", default: 0 })
   computeMapGeneration: string;
 
+  @Column({ type: "timestamptz", nullable: true })
+  computeMapUpdatedAt: Date;
+
   @Column({ type: "date", nullable: true })
   computeStatsDate: string;
 
   @Column({ type: "bigint", default: 0 })
   computeStatsGeneration: string;
+
+  @Column({ type: "timestamptz", nullable: true })
+  computeStatsUpdatedAt: Date;
 
   @Column({ type: "timestamp", nullable: true })
   computeZoneAlerteComputedDate: Date;

@@ -138,6 +138,7 @@ jobs:
         run: >-
           npm --prefix apps/backend-admin test -- --runInBand
           src/statistic_commune/statistic_commune.postgres.spec.ts
+          src/health/zone-publication-health.postgres.spec.ts
           src/zone_publication/zone_publication.postgres.spec.ts
         env:
           STATISTIC_COMMUNE_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci

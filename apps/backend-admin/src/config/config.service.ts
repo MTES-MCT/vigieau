@@ -39,6 +39,7 @@ export class ConfigService {
       .set({
         computeMapDate: completedThrough,
         computeMapGeneration: () => '"computeMapGeneration" + 1',
+        computeMapUpdatedAt: () => 'now()',
       })
       .where('id = 1')
       .andWhere('"computeMapDate" IS NOT DISTINCT FROM :expectedCurrent', {
@@ -75,6 +76,7 @@ export class ConfigService {
       .set({
         computeStatsDate: completedThrough,
         computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+        computeStatsUpdatedAt: () => 'now()',
       })
       .where('id = 1')
       .andWhere('"computeStatsDate" IS NOT DISTINCT FROM :expectedCurrent', {
