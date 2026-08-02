@@ -295,6 +295,58 @@ describe('ExternalPublicationRegistryService', () => {
     });
   });
 
+  it('reruns a successful compute job from an older materialization version', async () => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) {
+        return [
+          {
+            status: 'succeeded',
+            attempt: 1,
+            startedAt: '2026-08-01T02:00:00Z',
+            retryAfter: null,
+            metadata: {
+              sourceRevision: '42',
+              materializationVersion: 2,
+              publicationId: 'publication-v2',
+            },
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const harness = createHarness(query);
+    const run = jest.fn().mockResolvedValue({
+      sourceRevision: '42',
+      materializationVersion: 3,
+      publicationId: 'publication-v3',
+    });
+
+    await expect(
+      harness.service.executeDailyRun(
+        'compute:national-daily',
+        '2026-08-01',
+        run,
+        new Date('2026-08-01T03:00:00Z'),
+        {
+          identity: { sourceRevision: '42', materializationVersion: 3 },
+        },
+      ),
+    ).resolves.toBe('succeeded');
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const successUpdate = query.mock.calls.find(([sql]) =>
+      sql.includes('SET "status" = \'succeeded\''),
+    );
+    expect(JSON.parse(successUpdate?.[1]?.[3] as string)).toEqual({
+      sourceRevision: '42',
+      materializationVersion: 3,
+      publicationId: 'publication-v3',
+    });
+  });
+
   it('records the revision captured by the job after its source transitions', async () => {
     const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       void _params;

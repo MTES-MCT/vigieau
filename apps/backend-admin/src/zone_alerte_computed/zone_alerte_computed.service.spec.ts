@@ -36,7 +36,7 @@ describe('ZoneAlerteComputedService', () => {
     query: jest.Mock;
     release: jest.Mock;
   };
-  let dataSource: { createQueryRunner: jest.Mock };
+  let dataSource: { createQueryRunner: jest.Mock; query: jest.Mock };
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
 
   beforeEach(() => {
@@ -68,6 +68,17 @@ describe('ZoneAlerteComputedService', () => {
     };
     dataSource = {
       createQueryRunner: jest.fn().mockReturnValue(preflightQueryRunner),
+      query: jest.fn(async (sql: string) =>
+        sql.includes('EXISTS(SELECT 1 FROM published)')
+          ? [
+              {
+                published: true,
+                incompleteDate: null,
+                currentSourceRevision: '1',
+              },
+            ]
+          : [],
+      ),
     };
 
     service = new ZoneAlerteComputedService(
@@ -153,12 +164,27 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         _isAMomentObject: true,
       }),
+      undefined,
+      expect.objectContaining({
+        aggregateThrough: expect.objectContaining({
+          _isAMomentObject: true,
+        }),
+      }),
     );
     expect(
       statisticCommuneService.computeByMonth.mock.calls[0][0].format(
         'YYYY-MM-DD',
       ),
     ).toBe('2023-04-13');
+    expect(
+      statisticCommuneService.computeByMonth.mock.calls[0][2].aggregateThrough.format(
+        'YYYY-MM-DD',
+      ),
+    ).toBe('2024-04-28');
+    expect(
+      statisticCommuneService.computeByMonth.mock.calls[0][2]
+        .allowedReadySnapshot,
+    ).toBeUndefined();
   });
 
   it('starts computed historic workers from the dirty date after the computed map switch', async () => {
@@ -181,6 +207,27 @@ describe('ZoneAlerteComputedService', () => {
       '7',
       '8',
     );
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('"historicDirtyFrom"'),
+      ['2026-03-25', '2026-06-22'],
+    );
+    const dirtyRangeSql = dataSource.query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO "statistic_publication_state"'),
+    )?.[0];
+    expect(dirtyRangeSql).toContain('VALUES (1, 1, $1::date, $2::date, now())');
+    expect(dirtyRangeSql).toContain(
+      '"revision" = "statistic_publication_state"."revision" + CASE',
+    );
+    expect(dirtyRangeSql).toContain('IS DISTINCT FROM CASE');
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
+      ['2024-04-28', '1'],
+    );
+    expect(
+      dataSource.query.mock.calls.find(([sql]) =>
+        sql.includes('EXISTS(SELECT 1 FROM published)'),
+      )?.[0],
+    ).toContain('$1::date >= publication_state."historicDirtyThrough"');
   });
 
   it('uses computeStatsDate when it is older than computeMapDate', async () => {
@@ -202,6 +249,190 @@ describe('ZoneAlerteComputedService', () => {
       '2026-03-25',
       '9',
       '10',
+    );
+  });
+
+  it('certifies history through J-1 while aggregating the matching ready J candidate', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-06-01',
+      computeStatsDate: '2026-06-01',
+      computeMapGeneration: '9',
+      computeStatsGeneration: '10',
+    });
+    (service as any).runHistoricWorker.mockResolvedValue({
+      mapCursor: '2026-06-22',
+      statsCursor: '2026-06-22',
+      mapGeneration: '30',
+      statsGeneration: '31',
+    });
+    jest
+      .spyOn(service as any, 'assertHistoricCatchUpComplete')
+      .mockResolvedValue(undefined);
+
+    await service.computeHistoric(true, '2026-06-22', '1');
+
+    expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
+      expect.objectContaining({ _isAMomentObject: true }),
+      undefined,
+      expect.objectContaining({
+        aggregateThrough: expect.objectContaining({ _isAMomentObject: true }),
+        allowedReadySnapshot: {
+          date: '2026-06-23',
+          sourceRevision: '1',
+        },
+      }),
+    );
+    expect(
+      statisticCommuneService.computeByMonth.mock.calls[0][2].aggregateThrough.format(
+        'YYYY-MM-DD',
+      ),
+    ).toBe('2026-06-23');
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
+      ['2026-06-22', '1'],
+    );
+  });
+
+  it('does not compute monthly aggregates after a historic worker failure', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    (service as any).runHistoricWorker.mockRejectedValue(
+      new Error('historic worker failed'),
+    );
+
+    await expect(service.computeHistoric()).resolves.toBeUndefined();
+
+    expect(statisticCommuneService.computeByMonth).not.toHaveBeenCalled();
+  });
+
+  it('rethrows a historic worker failure for persistent catch-up', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    (service as any).runHistoricWorker.mockRejectedValue(
+      new Error('historic worker failed'),
+    );
+
+    await expect(service.computeHistoric(true)).rejects.toThrow(
+      'historic worker failed',
+    );
+    expect(statisticCommuneService.computeByMonth).not.toHaveBeenCalled();
+  });
+
+  it('handles a monthly aggregate failure in background catch-up', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    statisticCommuneService.computeByMonth.mockRejectedValue(
+      new Error('monthly failed'),
+    );
+
+    await expect(service.computeHistoric()).resolves.toBeUndefined();
+  });
+
+  it('rethrows a monthly aggregate failure in persistent catch-up', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    statisticCommuneService.computeByMonth.mockRejectedValue(
+      new Error('monthly failed'),
+    );
+
+    await expect(service.computeHistoric(true)).rejects.toThrow(
+      'monthly failed',
+    );
+  });
+
+  it('does not publish a historic epoch while a snapshot is incomplete', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('EXISTS(SELECT 1 FROM published)')
+        ? [
+            {
+              published: false,
+              incompleteDate: '2026-03-26',
+              currentSourceRevision: '1',
+            },
+          ]
+        : [],
+    );
+
+    await expect(service.computeHistoric(true)).rejects.toThrow(
+      'Historic statistics publication blocked by snapshot 2026-03-26',
+    );
+  });
+
+  it('does not publish a historic epoch after the source revision changes', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('EXISTS(SELECT 1 FROM published)')
+        ? [
+            {
+              published: false,
+              incompleteDate: null,
+              currentSourceRevision: '2',
+            },
+          ]
+        : [],
+    );
+
+    await expect(service.computeHistoric(true)).rejects.toThrow(
+      'Historic statistics source revision changed (1 -> 2)',
+    );
+    const publicationSql = dataSource.query.mock.calls.find(([sql]) =>
+      sql.includes('EXISTS(SELECT 1 FROM published)'),
+    )?.[0];
+    expect(publicationSql).toContain('FOR UPDATE');
+    expect(publicationSql).toContain('source_guard.revision = $2::text');
+  });
+
+  it('locks the dirty range before certifying a historic publication', async () => {
+    await (service as any).publishHistoricStatistics('2026-06-22', '1');
+
+    const [publicationSql, parameters] = dataSource.query.mock.calls.find(
+      ([sql]) => sql.includes('EXISTS(SELECT 1 FROM published)'),
+    );
+    expect(parameters).toEqual(['2026-06-22', '1']);
+    expect(publicationSql).toContain('publication_guard AS MATERIALIZED');
+    expect(publicationSql).toContain('CROSS JOIN source_guard');
+    expect(publicationSql).toContain('FOR UPDATE OF state');
+    expect(publicationSql).toContain(
+      'CROSS JOIN publication_guard publication_state',
+    );
+    expect(publicationSql).toContain(
+      'snapshot."snapshotDate" >= publication_state."historicDirtyFrom"',
+    );
+    expect(publicationSql).toContain(
+      'FROM publication_guard publication_state',
+    );
+    expect(publicationSql).toContain(
+      '$1::date >= publication_state."historicDirtyThrough"',
+    );
+    expect(publicationSql).not.toContain(
+      'snapshot."snapshotDate" >= state."historicDirtyFrom"',
     );
   });
 
@@ -955,7 +1186,89 @@ describe('ZoneAlerteComputedService', () => {
     expect(computeGeoJson).toHaveBeenCalledWith(false, undefined);
   });
 
-  it('captures the global revision only for a national publication compute', async () => {
+  it('does not touch public statistics during a partial versioned compute', async () => {
+    const computeCommuneStatisticsRestrictions = jest.fn();
+    const computeCommuneStatisticsRestrictionsByMonth = jest.fn();
+    const computeDepartementStatisticsRestrictions = jest.fn();
+    const computeDepartementsSituation = jest.fn();
+    (service as any).statisticCommuneService = {
+      computeCommuneStatisticsRestrictions,
+      computeCommuneStatisticsRestrictionsByMonth,
+    };
+    (service as any).statisticDepartementService = {
+      computeDepartementStatisticsRestrictions,
+    };
+    (service as any).statisticService = { computeDepartementsSituation };
+    const computeHistoric = jest.spyOn(service, 'computeHistoric');
+
+    await (service as any).computePublicationStatistics(
+      [],
+      new Date('2026-08-02T08:00:00Z'),
+      true,
+      true,
+      undefined,
+    );
+
+    expect(computeHistoric).not.toHaveBeenCalled();
+    expect(computeCommuneStatisticsRestrictions).not.toHaveBeenCalled();
+    expect(computeCommuneStatisticsRestrictionsByMonth).not.toHaveBeenCalled();
+    expect(computeDepartementStatisticsRestrictions).not.toHaveBeenCalled();
+    expect(computeDepartementsSituation).not.toHaveBeenCalled();
+  });
+
+  it('completes daily J before catching up through J-1 with the same revision', async () => {
+    const events: string[] = [];
+    const computeCommuneStatisticsRestrictions = jest.fn(
+      async (...args: any[]) => {
+        const hooks = args[5];
+        events.push('daily-started');
+        await hooks.beforeCommuneStatistics();
+        await hooks.beforeCertification();
+        events.push('daily-ready');
+      },
+    );
+    (service as any).statisticCommuneService = {
+      computeCommuneStatisticsRestrictions,
+      computeCommuneStatisticsRestrictionsByMonth: jest.fn(async () => {
+        events.push('current-month-computed');
+      }),
+    };
+    (service as any).statisticDepartementService = {
+      computeDepartementStatisticsRestrictions: jest.fn(async () => {
+        events.push('department-computed');
+      }),
+    };
+    (service as any).statisticService = {
+      computeDepartementsSituation: jest.fn(async () => {
+        events.push('situation-computed');
+      }),
+    };
+    const computeHistoric = jest
+      .spyOn(service, 'computeHistoric')
+      .mockImplementation(async () => {
+        events.push('historic-computed');
+      });
+
+    await (service as any).computePublicationStatistics(
+      [],
+      new Date('2026-08-02T23:30:00-04:00'),
+      true,
+      true,
+      '42',
+    );
+
+    expect(events).toEqual([
+      'daily-started',
+      'department-computed',
+      'current-month-computed',
+      'situation-computed',
+      'daily-ready',
+      'historic-computed',
+    ]);
+    expect(computeHistoric).toHaveBeenCalledWith(true, '2026-08-02', '42');
+  });
+
+  it('captures the global revision for a national publication compute', async () => {
     const departments = [
       {
         id: 65,
@@ -1068,6 +1381,33 @@ describe('ZoneAlerteComputedService', () => {
       (service as any).assertHistoricCatchUpComplete('2026-07-31'),
     ).rejects.toThrow('Historic commune coverage incomplete');
     expect(configService.setConfig).toHaveBeenCalledWith(null, '2026-01-01');
+  });
+
+  it('ignores the bootstrap barrier when validating a completed historic catch-up', async () => {
+    const dataSource = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM "config"')) {
+          return [
+            {
+              computeMapDate: '2026-07-31',
+              computeStatsDate: '2026-07-31',
+            },
+          ];
+        }
+        if (sql.includes('FROM "statistic_commune_snapshot"')) {
+          expect(sql).toContain('"scope" <> \'bootstrap\'');
+          // A failed bootstrap row exists in production, but this query excludes it.
+          return [];
+        }
+        return [{ incompleteCommuneCount: 0, expectedDayCount: 212 }];
+      }),
+    };
+    (service as any).dataSource = dataSource;
+
+    await expect(
+      (service as any).assertHistoricCatchUpComplete('2026-07-31'),
+    ).resolves.toBeUndefined();
+    expect(configService.setConfig).not.toHaveBeenCalled();
   });
 
   it('publishes only immutable artifacts for a national versioned compute', async () => {
@@ -1304,7 +1644,10 @@ describe('ZoneAlerteComputedHistoricService', () => {
     computeCommuneStatisticsRestrictions: jest.Mock;
     sortStatCommune: jest.Mock;
   };
-  let statisticService: { computeDepartementsSituation: jest.Mock };
+  let statisticService: {
+    computeDepartementsSituation: jest.Mock;
+    computeDepartementsSituationHistoric: jest.Mock;
+  };
   let configService: {
     setConfig: jest.Mock;
     advanceComputeMapDate: jest.Mock;
@@ -1335,11 +1678,18 @@ describe('ZoneAlerteComputedHistoricService', () => {
     statisticCommuneService = {
       computeCommuneStatisticsRestrictions: jest
         .fn()
-        .mockResolvedValue(undefined),
+        .mockImplementation(async (...args: any[]) => {
+          const hooks = args[5];
+          await hooks?.beforeCommuneStatistics?.();
+          await hooks?.beforeCertification?.();
+        }),
       sortStatCommune: jest.fn().mockResolvedValue(undefined),
     };
     statisticService = {
       computeDepartementsSituation: jest.fn().mockResolvedValue(undefined),
+      computeDepartementsSituationHistoric: jest
+        .fn()
+        .mockResolvedValue(undefined),
     };
     configService = {
       setConfig: jest.fn().mockResolvedValue(undefined),
@@ -1472,6 +1822,55 @@ describe('ZoneAlerteComputedHistoricService', () => {
     );
 
     expect(configService.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('never certifies statistics after their cursor generation changed', async () => {
+    configService.advanceComputeStatsDate.mockResolvedValueOnce(false);
+
+    await expect(
+      service.computeHistoricMapsComputed(
+        moment('2026-06-22', 'YYYY-MM-DD'),
+        moment('2026-06-22', 'YYYY-MM-DD'),
+        '2026-06-22',
+        '2026-06-22',
+        '12',
+        '4',
+      ),
+    ).rejects.toThrow(
+      'Historic statistics cursor changed concurrently while advancing 2026-06-22@4 -> 2026-06-22',
+    );
+
+    expect(configService.setConfig).not.toHaveBeenCalled();
+    expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
+  });
+
+  it('rewinds a cursor advanced before a failed snapshot completion', async () => {
+    statisticCommuneService.computeCommuneStatisticsRestrictions.mockImplementationOnce(
+      async (...args: any[]) => {
+        const hooks = args[5];
+        await hooks?.beforeCommuneStatistics?.();
+        await hooks?.beforeCertification?.();
+        throw new Error('snapshot completion failed');
+      },
+    );
+
+    await expect(
+      service.computeHistoricMapsComputed(
+        moment('2026-06-22', 'YYYY-MM-DD'),
+        moment('2026-06-22', 'YYYY-MM-DD'),
+        '2026-06-22',
+        '2026-06-22',
+        '12',
+        '4',
+      ),
+    ).rejects.toThrow('snapshot completion failed');
+
+    expect(configService.advanceComputeStatsDate).toHaveBeenCalled();
+    expect(configService.setConfig).toHaveBeenCalledWith(
+      '2026-06-22',
+      '2026-06-22',
+    );
+    expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
   });
 
   it('formats legacy zones with one geometry batch and the applicable restriction', async () => {
@@ -1608,6 +2007,15 @@ describe('ZoneAlerteComputedHistoricService', () => {
     expect(dataSource.query).toHaveBeenCalledTimes(1);
     expect(dataSource.query.mock.calls[0][0]).toContain(
       'WHERE zone.id = ANY($1::int[])',
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'ST_IsValid(transformed.geom, 0)',
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      "'method=structure keepcollapsed=false'",
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'ST_IsEmpty(normalized.geom)',
     );
     expect(dataSource.query.mock.calls[0][1]).toEqual([[1, 2]]);
     expect(features[0].geometry.coordinates).toEqual([[1]]);

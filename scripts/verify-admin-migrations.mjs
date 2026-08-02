@@ -141,12 +141,47 @@ async function prepareUpgradeDatabase() {
         false,
         "The base revision still has pending migrations",
       );
+      const statisticActivationBarrierAlreadyPresent =
+        previousDataSource.migrations.some(
+          ({ name }) =>
+            name === "StatisticPublicationActivationBarrier1786129200000",
+        );
+      if (!statisticActivationBarrierAlreadyPresent) {
+        await previousDataSource.query(`
+          ALTER TABLE "zone_publication_state"
+          DROP COLUMN IF EXISTS "automaticPublishingPaused",
+          DROP COLUMN IF EXISTS "automaticPublishingPausedAt"
+        `);
+      }
       await previousDataSource.query(`
         INSERT INTO "config" ("id", "computeMapDate", "computeStatsDate")
         VALUES (1, DATE '2026-07-30', DATE '2026-07-29')
         ON CONFLICT ("id") DO UPDATE SET
           "computeMapDate" = EXCLUDED."computeMapDate",
           "computeStatsDate" = EXCLUDED."computeStatsDate"
+      `);
+      await previousDataSource.query(`
+        INSERT INTO "zone_publication" (
+          "id", "sourceRevision", "materializationVersion", "status",
+          "sourceComputedAt", "zoneCount", "communeLinkCount"
+        )
+        SELECT
+          '00000000-0000-4000-8000-000000000101'::uuid,
+          source_state."revision",
+          2,
+          'active',
+          TIMESTAMPTZ '2026-08-02 08:00:00+00',
+          0,
+          0
+        FROM "zone_publication_source_state" source_state
+        WHERE source_state."id" = 1
+      `);
+      await previousDataSource.query(`
+        UPDATE "zone_publication_state"
+        SET "activePublicationId" =
+          '00000000-0000-4000-8000-000000000101'::uuid,
+            "updatedAt" = now()
+        WHERE "id" = 1
       `);
 
       const [department] = await previousDataSource.query(`
@@ -183,7 +218,11 @@ async function prepareUpgradeDatabase() {
           [commune.id, JSON.stringify(legacyRestrictions[index])],
         );
       }
-      return { baseSha, legacyRestrictions };
+      return {
+        baseSha,
+        legacyRestrictions,
+        simulatedPauseColumnDrift: !statisticActivationBarrierAlreadyPresent,
+      };
     } finally {
       await previousDataSource.destroy();
     }
@@ -544,6 +583,227 @@ try {
     "The historic cursor generations are missing",
   );
 
+  const publicationPauseColumns = await dataSource.query(`
+    SELECT "column_name", "data_type", "is_nullable", "column_default"
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'zone_publication_state'
+      AND "column_name" IN (
+        'automaticPublishingPaused',
+        'automaticPublishingPausedAt'
+      )
+    ORDER BY "column_name"
+  `);
+  assert.deepEqual(
+    publicationPauseColumns.map(
+      ({ column_name, data_type, is_nullable, column_default }) => ({
+        columnName: column_name,
+        dataType: data_type,
+        nullable: is_nullable,
+        hasFalseDefault: column_default === "false",
+      }),
+    ),
+    [
+      {
+        columnName: "automaticPublishingPaused",
+        dataType: "boolean",
+        nullable: "NO",
+        hasFalseDefault: true,
+      },
+      {
+        columnName: "automaticPublishingPausedAt",
+        dataType: "timestamp with time zone",
+        nullable: "YES",
+        hasFalseDefault: false,
+      },
+    ],
+    "The automatic-publication pause columns were not installed or repaired",
+  );
+  const [publicationPauseState] = await dataSource.query(`
+    SELECT "automaticPublishingPaused", "automaticPublishingPausedAt"
+    FROM "zone_publication_state"
+    WHERE "id" = 1
+  `);
+  assert.deepEqual(
+    publicationPauseState,
+    {
+      automaticPublishingPaused: false,
+      automaticPublishingPausedAt: null,
+    },
+    "The automatic-publication pause state was not seeded safely",
+  );
+
+  const statisticBarrierColumns = await dataSource.query(`
+    SELECT "table_name", "column_name", "data_type", "is_nullable"
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND (
+        (
+          table_name = 'statistic_commune_snapshot'
+          AND "column_name" = 'sourceRevision'
+        )
+        OR (
+          table_name = 'statistic_publication_state'
+          AND "column_name" IN (
+            'id',
+            'revision',
+            'currentPublishedDate',
+            'historicPublishedThrough',
+            'historicDirtyFrom',
+            'historicDirtyThrough',
+            'updatedAt'
+          )
+        )
+      )
+    ORDER BY "table_name", "column_name"
+  `);
+  assert.deepEqual(
+    statisticBarrierColumns.map(
+      ({ table_name, column_name, data_type, is_nullable }) => ({
+        tableName: table_name,
+        columnName: column_name,
+        dataType: data_type,
+        nullable: is_nullable,
+      }),
+    ),
+    [
+      {
+        tableName: "statistic_commune_snapshot",
+        columnName: "sourceRevision",
+        dataType: "bigint",
+        nullable: "YES",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "currentPublishedDate",
+        dataType: "date",
+        nullable: "YES",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "historicDirtyFrom",
+        dataType: "date",
+        nullable: "YES",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "historicDirtyThrough",
+        dataType: "date",
+        nullable: "YES",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "historicPublishedThrough",
+        dataType: "date",
+        nullable: "YES",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "id",
+        dataType: "integer",
+        nullable: "NO",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "revision",
+        dataType: "bigint",
+        nullable: "NO",
+      },
+      {
+        tableName: "statistic_publication_state",
+        columnName: "updatedAt",
+        dataType: "timestamp with time zone",
+        nullable: "NO",
+      },
+    ],
+    "The statistic publication barrier columns are incomplete",
+  );
+  const statisticBarrierConstraints = await dataSource.query(`
+    SELECT conname, pg_get_constraintdef(oid) AS definition
+    FROM pg_constraint
+    WHERE conrelid = '"statistic_publication_state"'::regclass
+      AND conname IN (
+        'CHK_statistic_publication_state_singleton',
+        'CHK_statistic_publication_state_dirty_range'
+      )
+    ORDER BY conname
+  `);
+  assert.deepEqual(
+    statisticBarrierConstraints.map(({ conname }) => conname),
+    [
+      "CHK_statistic_publication_state_dirty_range",
+      "CHK_statistic_publication_state_singleton",
+    ],
+    "The statistic publication state constraints are missing",
+  );
+  assert.match(
+    statisticBarrierConstraints[0].definition,
+    /historicDirtyFrom.*historicDirtyThrough/s,
+    "The dirty-range constraint does not bind both limits",
+  );
+  const [statisticSnapshotStatusConstraint] = await dataSource.query(`
+    SELECT pg_get_constraintdef(oid) AS definition
+    FROM pg_constraint
+    WHERE conrelid = '"statistic_commune_snapshot"'::regclass
+      AND conname = 'CHK_statistic_commune_snapshot_status'
+  `);
+  assert.match(
+    statisticSnapshotStatusConstraint?.definition || "",
+    /'ready'/,
+    "The statistic snapshot status constraint does not allow ready candidates",
+  );
+  const [statisticPublicationState] = await dataSource.query(`
+    SELECT
+      statistic_state."id",
+      statistic_state."revision"::text AS "revision",
+      statistic_state."currentPublishedDate"::text AS "currentPublishedDate",
+      statistic_state."historicPublishedThrough"::text AS "historicPublishedThrough",
+      statistic_state."historicDirtyFrom"::text AS "historicDirtyFrom",
+      statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough",
+      (active."sourceComputedAt" AT TIME ZONE 'UTC')::date::text
+        AS "expectedPublishedDate"
+    FROM "statistic_publication_state" statistic_state
+    LEFT JOIN "zone_publication_state" publication_state
+      ON publication_state."id" = statistic_state."id"
+    LEFT JOIN "zone_publication" active
+      ON active."id" = publication_state."activePublicationId"
+      AND active."status" = 'active'
+    WHERE statistic_state."id" = 1
+  `);
+  assert.deepEqual(
+    statisticPublicationState,
+    upgrade?.simulatedPauseColumnDrift
+      ? {
+          id: 1,
+          revision: "0",
+          currentPublishedDate: "2026-08-02",
+          historicPublishedThrough: "2026-07-28",
+          historicDirtyFrom: "2026-07-29",
+          historicDirtyThrough: "2026-08-01",
+          expectedPublishedDate: "2026-08-02",
+        }
+      : upgrade
+        ? {
+            id: 1,
+            revision: "0",
+            currentPublishedDate: null,
+            historicPublishedThrough: null,
+            historicDirtyFrom: null,
+            historicDirtyThrough: null,
+            expectedPublishedDate: "2026-08-02",
+          }
+        : {
+            id: 1,
+            revision: "0",
+            currentPublishedDate: null,
+            historicPublishedThrough: null,
+            historicDirtyFrom: null,
+            historicDirtyThrough: null,
+            expectedPublishedDate: null,
+          },
+    "The statistic publication state seed is inconsistent with the active publication",
+  );
+
   const [invalidReferences] = await dataSource.query(`
     SELECT
       (
@@ -683,6 +943,7 @@ try {
       mode,
       database: databaseName,
       baseSha: upgrade?.baseSha,
+      simulatedPauseColumnDrift: upgrade?.simulatedPauseColumnDrift,
       appliedMigrations: applied.map(({ name }) => name),
     }),
   );

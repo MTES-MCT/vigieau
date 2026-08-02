@@ -2479,6 +2479,15 @@ describe('ZoneAlerteService geometry reads', () => {
     expect(dataSource.query.mock.calls[0][0]).toContain(
       'WHERE zone.id = ANY($1::int[])',
     );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'ST_IsValid(transformed.geom, 0)',
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      "'method=structure keepcollapsed=false'",
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'ST_IsEmpty(normalized.geom)',
+    );
     expect(dataSource.query.mock.calls[0][1]).toEqual([[1, 2]]);
     expect(geometries.get(1)).toContain('[[1]]');
     expect(geometries.get(2)).toContain('[[2]]');

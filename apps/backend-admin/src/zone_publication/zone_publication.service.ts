@@ -977,6 +977,39 @@ export class ZonePublicationService {
         };
       }
 
+      if (rollback) {
+        const [computeLock] = await manager.query(
+          `SELECT pg_try_advisory_xact_lock(
+             hashtext('vigieau'),
+             hashtext('zone-compute-global')
+           ) AS locked`,
+        );
+        if (computeLock?.locked !== true) {
+          return {
+            status: 'busy',
+            publicationId: publication.id,
+            liveInstances,
+            readyInstances,
+            rollback: true,
+          };
+        }
+        const [historicComputeLock] = await manager.query(
+          `SELECT pg_try_advisory_xact_lock(
+             hashtext('vigieau'),
+             hashtext('zone-compute-historic')
+           ) AS locked`,
+        );
+        if (historicComputeLock?.locked !== true) {
+          return {
+            status: 'busy',
+            publicationId: publication.id,
+            liveInstances,
+            readyInstances,
+            rollback: true,
+          };
+        }
+      }
+
       const [promotionLock] = await manager.query(
         'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
         [ZONE_PUBLICATION_STABLE_PROMOTION_LOCK],
@@ -989,6 +1022,419 @@ export class ZonePublicationService {
           readyInstances,
           ...(rollback ? { rollback: true } : {}),
         };
+      }
+
+      if (
+        rollback &&
+        (String(publication.sourceRevision) !== String(sourceState.revision) ||
+          Number(publication.materializationVersion) !==
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION)
+      ) {
+        await manager.query(
+          `
+            UPDATE "zone_publication_state"
+            SET "candidatePublicationId" = NULL,
+                "candidateRequestedAt" = NULL,
+                "updatedAt" = now()
+            WHERE "id" = 1
+              AND "candidatePublicationId" = $1
+          `,
+          [publication.id],
+        );
+        return {
+          status: 'rollback_cancelled',
+          publicationId: publication.id,
+          liveInstances,
+          readyInstances,
+          rollback: true,
+        };
+      }
+
+      if (!rollback) {
+        const readySnapshots = await manager.query(
+          `
+            SELECT snapshot."snapshotDate"::text AS "snapshotDate"
+            FROM "zone_publication" publication
+            JOIN "statistic_commune_snapshot" snapshot
+              ON snapshot."snapshotDate" =
+                  (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date
+              AND snapshot."scope" = 'national'
+              AND snapshot."status" = 'ready'
+              AND snapshot."sourceRevision" = publication."sourceRevision"
+            JOIN "statistic_publication_state" statistic_state
+              ON statistic_state."id" = 1
+            JOIN "config" historic_cursor
+              ON historic_cursor."id" = 1
+            WHERE publication."id" = $1
+              AND statistic_state."historicDirtyFrom" IS NULL
+              AND (
+                statistic_state."currentPublishedDate" IS NULL
+                OR (
+                  statistic_state."historicPublishedThrough" >=
+                    (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
+                  AND historic_cursor."computeMapDate" >=
+                    (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
+                  AND historic_cursor."computeStatsDate" >=
+                    (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM "external_publication_run" running_daily
+                WHERE running_daily."jobKey" = 'compute:national-daily'
+                  AND running_daily."status" = 'running'
+                  AND (
+                    statistic_state."currentPublishedDate" IS NULL
+                    OR running_daily."scheduledFor" =
+                      (publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date
+                  )
+              )
+              AND (
+                NOT EXISTS (
+                  SELECT 1
+                  FROM "external_publication_run" daily_run
+                  WHERE daily_run."jobKey" = 'compute:national-daily'
+                    AND daily_run."status" = 'succeeded'
+                    AND daily_run."metadata" @> jsonb_build_object(
+                      'publicationId', publication."id"::text,
+                      'sourceRevision', publication."sourceRevision"::text,
+                      'materializationVersion', publication."materializationVersion"
+                    )
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM "external_publication_run" daily_run
+                  JOIN "external_publication_run" historic_run
+                    ON historic_run."scheduledFor" = daily_run."scheduledFor"
+                    AND historic_run."jobKey" = 'compute:historic-catchup'
+                    AND historic_run."status" = 'succeeded'
+                    AND historic_run."metadata" @> jsonb_build_object(
+                      'sourceRevision', publication."sourceRevision"::text,
+                      'materializationVersion', publication."materializationVersion"
+                    )
+                  WHERE daily_run."jobKey" = 'compute:national-daily'
+                    AND daily_run."status" = 'succeeded'
+                    AND daily_run."metadata" @> jsonb_build_object(
+                      'publicationId', publication."id"::text,
+                      'sourceRevision', publication."sourceRevision"::text,
+                      'materializationVersion', publication."materializationVersion"
+                    )
+                )
+              )
+            FOR UPDATE OF snapshot, statistic_state, historic_cursor
+          `,
+          [publication.id],
+        );
+        if (readySnapshots.length !== 1) {
+          throw new Error(
+            `Publication ${publication.id} is waiting for certified current statistics or historic catch-up`,
+          );
+        }
+        const snapshotDate = readySnapshots[0].snapshotDate;
+        const completedNationalSnapshot = unwrapTypeOrmDmlReturningRows<{
+          snapshotDate: string;
+        }>(
+          await manager.query(
+            `
+              UPDATE "statistic_commune_snapshot"
+              SET "status" = 'completed',
+                  "processedCommuneCount" = "expectedCommuneCount",
+                  "completedAt" = now(),
+                  "lastError" = NULL,
+                  "updatedAt" = now()
+              WHERE "snapshotDate" = $1::date
+                AND "scope" = 'national'
+                AND "status" = 'ready'
+                AND "sourceRevision" = $2::bigint
+              RETURNING "snapshotDate"::text AS "snapshotDate"
+            `,
+            [snapshotDate, publication.sourceRevision],
+          ),
+        );
+        if (completedNationalSnapshot.length !== 1) {
+          throw new Error(
+            `Unable to complete the national statistic snapshot for publication ${publication.id}`,
+          );
+        }
+        await manager.query(
+          `
+            UPDATE "statistic_commune_snapshot"
+            SET "status" = 'completed',
+                "processedCommuneCount" = "expectedCommuneCount",
+                "completedAt" = now(),
+                "lastError" = NULL,
+                "sourceRevision" = $2::bigint,
+                "updatedAt" = now()
+            WHERE "snapshotDate" = $1::date
+              AND "scope" <> 'national'
+          `,
+          [snapshotDate, publication.sourceRevision],
+        );
+        await manager.query(
+          `DELETE FROM "statistic_commune_snapshot" WHERE "scope" = 'bootstrap'`,
+        );
+        const publicationStates = unwrapTypeOrmDmlReturningRows<{
+          revision: string;
+        }>(
+          await manager.query(
+            `
+              UPDATE "statistic_publication_state"
+              SET "revision" = "revision" + 1,
+                  "currentPublishedDate" = $1::date,
+                  "historicPublishedThrough" = CASE
+                    WHEN "currentPublishedDate" IS NULL THEN $1::date - 1
+                    ELSE "historicPublishedThrough"
+                  END,
+                  "updatedAt" = now()
+              WHERE "id" = 1
+                AND "historicDirtyFrom" IS NULL
+              RETURNING "revision"
+            `,
+            [snapshotDate],
+          ),
+        );
+        if (publicationStates.length !== 1) {
+          throw new Error('Statistic publication state is missing');
+        }
+      } else {
+        const rollbackTargetDate = (
+          publication.sourceComputedAt instanceof Date
+            ? publication.sourceComputedAt.toISOString()
+            : String(publication.sourceComputedAt)
+        ).slice(0, 10);
+        const [statisticPublicationState] = await manager.query(
+          `
+            SELECT
+              "historicDirtyFrom"::text AS "historicDirtyFrom",
+              "historicDirtyThrough"::text AS "historicDirtyThrough"
+            FROM "statistic_publication_state"
+            WHERE "id" = 1
+            FOR UPDATE
+          `,
+        );
+        if (!statisticPublicationState) {
+          throw new Error(
+            'Statistic publication state is missing during rollback',
+          );
+        }
+        if (
+          statisticPublicationState.historicDirtyFrom !== null ||
+          statisticPublicationState.historicDirtyThrough !== null
+        ) {
+          throw new Error(
+            `Rollback publication ${publication.id} is blocked by dirty historic statistics`,
+          );
+        }
+        const rollbackSnapshots = (await manager.query(
+          `
+            SELECT
+              "snapshotDate"::text AS "snapshotDate",
+              "scope",
+              "status",
+              "sourceRevision"::text AS "sourceRevision"
+            FROM "statistic_commune_snapshot"
+            WHERE "scope" <> 'bootstrap'
+              AND "snapshotDate" <= $1::date
+            FOR UPDATE
+          `,
+          [rollbackTargetDate],
+        )) as Array<{
+          snapshotDate: string;
+          scope: string;
+          status: string;
+          sourceRevision: string | null;
+        }>;
+        const certifiedTargetSnapshot = rollbackSnapshots.some(
+          (snapshot) =>
+            snapshot.snapshotDate === rollbackTargetDate &&
+            snapshot.scope === 'national' &&
+            snapshot.status === 'completed' &&
+            String(snapshot.sourceRevision) ===
+              String(publication.sourceRevision),
+        );
+        const incompleteTargetSnapshots = rollbackSnapshots.filter(
+          (snapshot) => snapshot.status !== 'completed',
+        );
+        if (!certifiedTargetSnapshot) {
+          throw new Error(
+            `Rollback publication ${publication.id} has no certified national statistic snapshot`,
+          );
+        }
+        if (incompleteTargetSnapshots.length > 0) {
+          throw new Error(
+            `Rollback publication ${publication.id} is blocked by ${incompleteTargetSnapshots.length} incomplete statistic snapshot(s) on or before ${rollbackTargetDate}`,
+          );
+        }
+
+        const [rollbackMonthlyStatistics] = await manager.query(
+          `
+            WITH target AS MATERIALIZED (
+              SELECT
+                (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date AS "targetDate",
+                date_trunc(
+                  'month',
+                  publication."sourceComputedAt" AT TIME ZONE 'UTC'
+                )::date AS "monthStart",
+                to_char(
+                  publication."sourceComputedAt" AT TIME ZONE 'UTC',
+                  'YYYY-MM'
+                ) AS "targetMonth"
+              FROM "zone_publication" publication
+              WHERE publication."id" = $1
+            ), monthly AS MATERIALIZED (
+              SELECT
+                statistic."id",
+                COALESCE(
+                  SUM(
+                    CASE GREATEST(
+                      CASE daily.value ->> 'AEP'
+                        WHEN 'vigilance' THEN 2
+                        WHEN 'alerte' THEN 3
+                        WHEN 'alerte_renforcee' THEN 4
+                        WHEN 'crise' THEN 5
+                        ELSE 1
+                      END,
+                      CASE daily.value ->> 'SOU'
+                        WHEN 'vigilance' THEN 2
+                        WHEN 'alerte' THEN 3
+                        WHEN 'alerte_renforcee' THEN 4
+                        WHEN 'crise' THEN 5
+                        ELSE 1
+                      END,
+                      CASE daily.value ->> 'SUP'
+                        WHEN 'vigilance' THEN 2
+                        WHEN 'alerte' THEN 3
+                        WHEN 'alerte_renforcee' THEN 4
+                        WHEN 'crise' THEN 5
+                        ELSE 1
+                      END
+                    )
+                      WHEN 2 THEN 0.5
+                      WHEN 3 THEN 2
+                      WHEN 4 THEN 3
+                      WHEN 5 THEN 4
+                      ELSE 0
+                    END
+                  ) FILTER (WHERE daily.value IS NOT NULL),
+                  0
+                ) AS ponderation
+              FROM "statistic_commune" statistic
+              CROSS JOIN target
+              LEFT JOIN LATERAL jsonb_array_elements(
+                COALESCE(statistic."restrictions", '[]'::jsonb)
+              ) AS daily(value)
+                ON daily.value ->> 'date' >= target."monthStart"::text
+                AND daily.value ->> 'date' <= target."targetDate"::text
+              GROUP BY statistic."id"
+            ), updated AS (
+              UPDATE "statistic_commune" statistic
+              SET "restrictionsByMonth" =
+                COALESCE(
+                  (
+                    SELECT jsonb_agg(
+                      CASE
+                        WHEN item.value ->> 'date' = target."targetMonth"
+                          THEN jsonb_build_object(
+                            'date', target."targetMonth",
+                            'ponderation', monthly.ponderation
+                          )
+                        ELSE item.value
+                      END
+                      ORDER BY item.ordinality
+                    )
+                    FROM jsonb_array_elements(
+                      COALESCE(statistic."restrictionsByMonth", '[]'::jsonb)
+                    ) WITH ORDINALITY AS item(value, ordinality)
+                  ),
+                  '[]'::jsonb
+                ) || CASE
+                  WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                      COALESCE(statistic."restrictionsByMonth", '[]'::jsonb)
+                    ) AS existing(value)
+                    WHERE existing.value ->> 'date' = target."targetMonth"
+                  )
+                  THEN jsonb_build_array(
+                    jsonb_build_object(
+                      'date', target."targetMonth",
+                      'ponderation', monthly.ponderation
+                    )
+                  )
+                  ELSE '[]'::jsonb
+                END
+              FROM monthly
+              CROSS JOIN target
+              WHERE statistic."id" = monthly."id"
+              RETURNING statistic."id"
+            )
+            SELECT
+              (SELECT COUNT(*)::integer FROM target) AS "targetCount",
+              (SELECT "targetDate"::text FROM target) AS "targetDate",
+              (SELECT COUNT(*)::integer FROM monthly) AS expected,
+              (SELECT COUNT(*)::integer FROM updated) AS affected
+          `,
+          [publication.id],
+        );
+        const rollbackMonthlyExpected = Number(
+          rollbackMonthlyStatistics?.expected ?? 0,
+        );
+        const rollbackMonthlyAffected = Number(
+          rollbackMonthlyStatistics?.affected ?? 0,
+        );
+        if (
+          Number(rollbackMonthlyStatistics?.targetCount ?? 0) !== 1 ||
+          rollbackMonthlyExpected === 0 ||
+          rollbackMonthlyAffected !== rollbackMonthlyExpected
+        ) {
+          throw new Error(
+            `Rollback monthly statistic rebuild failed for publication ${publication.id}: ` +
+              `${rollbackMonthlyAffected}/${rollbackMonthlyExpected} rows updated`,
+          );
+        }
+        await manager.query(
+          `
+            DELETE FROM "statistic_commune_snapshot"
+            WHERE "scope" <> 'bootstrap'
+              AND "snapshotDate" > $1::date
+              AND "status" <> 'completed'
+          `,
+          [rollbackTargetDate],
+        );
+        const rollbackPublicationStates = unwrapTypeOrmDmlReturningRows<{
+          revision: string;
+        }>(
+          await manager.query(
+            `
+              UPDATE "statistic_publication_state" statistic_state
+              SET "revision" = statistic_state."revision" + 1,
+                  "currentPublishedDate" = (
+                    SELECT
+                      (rollback_publication."sourceComputedAt" AT TIME ZONE 'UTC')::date
+                    FROM "zone_publication" rollback_publication
+                    WHERE rollback_publication."id" = $1
+                  ),
+                  "historicPublishedThrough" = LEAST(
+                    statistic_state."historicPublishedThrough",
+                    (
+                      SELECT
+                        (rollback_publication."sourceComputedAt" AT TIME ZONE 'UTC')::date
+                      FROM "zone_publication" rollback_publication
+                      WHERE rollback_publication."id" = $1
+                    )
+                  ),
+                  "updatedAt" = now()
+              WHERE statistic_state."id" = 1
+              RETURNING statistic_state."revision"
+            `,
+            [publication.id],
+          ),
+        );
+        if (rollbackPublicationStates.length !== 1) {
+          throw new Error(
+            'Statistic publication state is missing during rollback',
+          );
+        }
       }
 
       if (

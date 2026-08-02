@@ -25,6 +25,7 @@ interface PublicationRunRow {
 export interface PublicationRunIdentity {
   sourceRevision: string;
   publicationId?: string;
+  materializationVersion?: number;
 }
 
 export interface ExecuteDailyRunOptions {

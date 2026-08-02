@@ -234,12 +234,39 @@ export class ZoneAlerteService {
     const rows: Array<{ id: number; geom: string | null }> =
       await this.dataSource.query(
         `
+          WITH transformed AS MATERIALIZED (
+            SELECT
+              zone.id,
+              ST_Transform(zone.geom, 4326) AS geom
+            FROM "zone_alerte" zone
+            WHERE zone.id = ANY($1::int[])
+          ), normalized AS MATERIALIZED (
+            SELECT
+              transformed.id,
+              CASE
+                WHEN ST_IsValid(transformed.geom, 0) THEN transformed.geom
+                ELSE ST_CollectionExtract(
+                  ST_MakeValid(
+                    transformed.geom,
+                    'method=structure keepcollapsed=false'
+                  ),
+                  3
+                )
+              END AS geom
+            FROM transformed
+          )
           SELECT
-            zone.id AS "id",
-            ST_AsGeoJSON(ST_Transform(zone.geom, 4326)) AS "geom"
-          FROM "zone_alerte" zone
-          WHERE zone.id = ANY($1::int[])
-          ORDER BY zone.id
+            normalized.id AS "id",
+            CASE
+              WHEN normalized.geom IS NULL
+                OR ST_IsEmpty(normalized.geom)
+                OR ST_GeometryType(normalized.geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')
+                OR NOT ST_IsValid(normalized.geom, 0)
+              THEN NULL
+              ELSE ST_AsGeoJSON(normalized.geom)
+            END AS "geom"
+          FROM normalized
+          ORDER BY normalized.id
         `,
         [uniqueIds],
       );

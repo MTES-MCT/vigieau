@@ -13,7 +13,10 @@ import {
 } from '../core/scheduling/daily-job-schedule';
 import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
 import { RegleauLogger } from '../logger/regleau.logger';
-import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import {
+  isZonePublicationEnabled,
+  ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+} from '../zone_publication/zone_publication.config';
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
 import { ArreteCadreService } from './arrete_cadre.service';
 
@@ -101,10 +104,19 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
         }
         const computedSourceRevision = String(sourceRevision);
         await this.assertSourceRevision(computedSourceRevision);
-        return { publicationId, sourceRevision: computedSourceRevision };
+        return {
+          publicationId,
+          sourceRevision: computedSourceRevision,
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        };
       },
       now,
-      { identity: { sourceRevision: expectedSourceRevision } },
+      {
+        identity: {
+          sourceRevision: expectedSourceRevision,
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        },
+      },
     );
     if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
       return;
@@ -116,17 +128,23 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     );
     const publicationId = currentMetadata?.publicationId;
     const sourceRevision = currentMetadata?.sourceRevision;
+    const materializationVersion = currentMetadata?.materializationVersion;
     if (
       typeof publicationId !== 'string' ||
-      (typeof sourceRevision !== 'string' && typeof sourceRevision !== 'number')
+      (typeof sourceRevision !== 'string' &&
+        typeof sourceRevision !== 'number') ||
+      materializationVersion !== ZONE_PUBLICATION_MATERIALIZATION_VERSION
     ) {
       throw new Error(
-        'National computation metadata is missing its publication revision',
+        'National computation metadata is missing its publication identity',
       );
     }
     const computedSourceRevision = String(sourceRevision);
     await this.assertSourceRevision(computedSourceRevision);
-    const historicIdentity = { sourceRevision: computedSourceRevision };
+    const historicIdentity = {
+      sourceRevision: computedSourceRevision,
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    };
 
     const historicResult = await this.registry.executeDailyRun(
       NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
@@ -134,6 +152,7 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
       async () => {
         await this.arreteCadreService.catchUpHistoricComputations(
           shiftCivilDate(scheduledFor, -1),
+          computedSourceRevision,
         );
         await this.assertSourceRevision(computedSourceRevision);
         return historicIdentity;

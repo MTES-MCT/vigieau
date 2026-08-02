@@ -1169,9 +1169,13 @@ export class ArreteRestrictionService {
     );
   }
 
-  async catchUpHistoricComputations(requiredThrough: string): Promise<void> {
+  async catchUpHistoricComputations(
+    requiredThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
     await this.zoneAlerteComputedService.computeHistoricPersistently(
       requiredThrough,
+      expectedSourceRevision,
     );
   }
 

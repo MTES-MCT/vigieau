@@ -15,6 +15,42 @@ import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
 import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
+const ZONE_TYPES = ['SUP', 'SOU', 'AEP'] as const;
+const GRAVITY_LEVELS = [
+  'vigilance',
+  'alerte',
+  'alerte_renforcee',
+  'crise',
+] as const;
+
+type ZoneType = (typeof ZONE_TYPES)[number];
+type GravityLevel = (typeof GRAVITY_LEVELS)[number];
+type RestrictionArea = number | string | undefined;
+type RestrictionAreas = Record<GravityLevel, RestrictionArea>;
+
+interface DepartementRestriction {
+  date: string;
+  SOU: RestrictionAreas;
+  SUP: RestrictionAreas;
+  AEP: RestrictionAreas;
+}
+
+interface ZoneAreaRequest {
+  id: number;
+  departementCode: string;
+  zoneType: ZoneType;
+  gravityLevel: GravityLevel;
+}
+
+interface ZoneAreaRow {
+  departementCode: string;
+  zoneType: ZoneType;
+  gravityLevel: GravityLevel;
+  area: number | null;
+  requestedZoneCount: number | string;
+  foundZoneCount: number | string;
+}
+
 @Injectable()
 export class StatisticDepartementService {
   private readonly logger = new RegleauLogger('StatisticDepartementService');
@@ -188,137 +224,259 @@ export class StatisticDepartementService {
     this.logger.log(
       `COMPUTING DEPARTEMENT STATISTICS RESTRICTIONS - ${date.toISOString().split('T')[0]}`,
     );
-    const statsDepartement: StatisticDepartement[] =
-      await this.statisticDepartementRepository.find({
-        select: {
-          id: true,
-          departement: {
-            id: true,
-            code: true,
-          },
-        },
-        relations: ['departement'],
-      });
     const dateString = date.toISOString().split('T')[0];
     const departements = await this.departementService.findAllLight();
+    const areaRequests = this.buildZoneAreaRequests(zones);
+    const areaRows = await this.computeZoneAreas(
+      areaRequests,
+      historic,
+      historicNotComputed,
+    );
+    const expectedAreaGroups = new Set(
+      areaRequests.map((request) =>
+        this.getZoneAreaKey(
+          request.departementCode,
+          request.zoneType,
+          request.gravityLevel,
+        ),
+      ),
+    );
+    const areaByGroup = new Map<string, RestrictionArea>();
+    for (const row of areaRows) {
+      const key = this.getZoneAreaKey(
+        row.departementCode,
+        row.zoneType,
+        row.gravityLevel,
+      );
+      if (
+        !expectedAreaGroups.has(key) ||
+        Number(row.requestedZoneCount) < 1 ||
+        Number(row.foundZoneCount) !== Number(row.requestedZoneCount) ||
+        row.area == null
+      ) {
+        throw new Error(`Zones statistiques departementales invalides: ${key}`);
+      }
+      areaByGroup.set(key, Number(row.area).toFixed(2));
+    }
+    if (areaByGroup.size !== expectedAreaGroups.size) {
+      throw new Error(
+        `Groupes statistiques departementaux incomplets: ${areaByGroup.size}/${expectedAreaGroups.size}`,
+      );
+    }
 
-    await Promise.all(
-      departements.map(async (d) => {
-        let statDepartement = statsDepartement.find(
-          (s) => s.departement.code === d.code,
-        );
-        if (!statDepartement) {
-          statDepartement = <StatisticDepartement>{
-            departement: d,
-            visits: [],
-            totalVisits: 0,
-            weekVisits: 0,
-            monthVisits: 0,
-            yearVisits: 0,
-            subscriptions: 0,
-            restrictions: [],
-          };
-          statDepartement =
-            await this.statisticDepartementRepository.save(statDepartement);
-        }
-
-        const restriction = {
-          date: dateString,
-          SOU: {
-            vigilance: 0,
-            alerte: 0,
-            alerte_renforcee: 0,
-            crise: 0,
-          },
-          SUP: {
-            vigilance: 0,
-            alerte: 0,
-            alerte_renforcee: 0,
-            crise: 0,
-          },
-          AEP: {
-            vigilance: 0,
-            alerte: 0,
-            alerte_renforcee: 0,
-            crise: 0,
-          },
-        };
-        const zonesDep = zones.filter((z) => z.departement.code === d.code);
-        const zonesType = ['SUP', 'SOU', 'AEP'];
-        const niveauxGravite = [
-          'vigilance',
-          'alerte',
-          'alerte_renforcee',
-          'crise',
-        ];
-        for (let i = 0; i < zonesType.length; i++) {
-          const type = zonesType[i];
-          const zonesDepType = zonesDep.filter((z) => z.type === type);
-          for (let j = 0; j < niveauxGravite.length; j++) {
-            const niveauGravite = niveauxGravite[j];
-            const zonesDepTypeNiveauGravite = zonesDepType.filter(
-              (z) => z.restriction?.niveauGravite === niveauGravite,
-            );
-            if (!historicNotComputed) {
-              restriction[type][niveauGravite] =
-                zonesDepTypeNiveauGravite.length > 0
-                  ? historic
-                    ? (
-                        await this.zoneAlerteComputedHistoricService.getZonesArea(
-                          zonesDepTypeNiveauGravite,
-                        )
-                      ).area?.toFixed(2)
-                    : (
-                        await this.zoneAlerteComputedService.getZonesArea(
-                          zonesDepTypeNiveauGravite,
-                        )
-                      ).area?.toFixed(2)
-                  : 0;
-            } else {
-              restriction[type][niveauGravite] =
-                zonesDepTypeNiveauGravite.length > 0
-                  ? (
-                      await this.zoneAlerteService.getZonesArea(
-                        zonesDepTypeNiveauGravite,
-                      )
-                    ).area?.toFixed(2)
-                  : 0;
-            }
+    const updates = departements.map((departement) => {
+      const restriction = this.createEmptyRestriction(dateString);
+      for (const zoneType of ZONE_TYPES) {
+        for (const gravityLevel of GRAVITY_LEVELS) {
+          const key = this.getZoneAreaKey(
+            departement.code,
+            zoneType,
+            gravityLevel,
+          );
+          if (areaByGroup.has(key)) {
+            restriction[zoneType][gravityLevel] = areaByGroup.get(key);
           }
         }
+      }
+      return {
+        departementId: departement.id,
+        date: dateString,
+        restriction,
+      };
+    });
+    if (updates.length === 0) {
+      return;
+    }
 
-        const qb = this.statisticDepartementRepository
-          .createQueryBuilder('statistic_departement')
-          .update()
-          .set({
-            restrictions: () => `
-              (
-        SELECT jsonb_agg(
-            CASE
-                -- Si l'élément "date" est égal à la date du jour, on le remplace
-                WHEN r ->> 'date' = '${dateString}' THEN '${JSON.stringify(restriction)}'::jsonb
-                -- Sinon, on conserve l'élément tel quel
-                ELSE r
-            END
-        )
-        FROM jsonb_array_elements(restrictions) as r
-        -- Si aucun élément avec "date": date du jour n'existe, on ajoute le nouvel élément à la fin
-    ) || CASE 
-            WHEN NOT EXISTS (
-                SELECT 1
-                FROM jsonb_array_elements(restrictions) as r
-                WHERE r ->> 'date' = '${dateString}'
+    const [result]: Array<{
+      expected: number | string;
+      affected: number | string;
+    }> = await this.statisticDepartementRepository.query(
+      `
+          WITH updates AS MATERIALIZED (
+            SELECT *
+            FROM jsonb_to_recordset($1::jsonb) AS payload(
+              "departementId" integer,
+              "date" text,
+              "restriction" jsonb
             )
-            THEN '[${JSON.stringify(restriction)}]'::jsonb
-            ELSE '[]'::jsonb
-        END
-              `,
-          })
-          .where('id = :id', { id: statDepartement.id });
-        await qb.execute();
-        return;
-      }),
+          ), inserted AS (
+            INSERT INTO "statistic_departement" (
+              "departementId", "visits", "restrictions", "totalVisits",
+              "weekVisits", "monthVisits", "yearVisits", "subscriptions"
+            )
+            SELECT DISTINCT
+              updates."departementId", '[]'::jsonb,
+              jsonb_build_array(updates."restriction"),
+              0, 0, 0, 0, 0
+            FROM updates
+            ON CONFLICT ("departementId") DO NOTHING
+            RETURNING "id", "departementId"
+          ), current_values AS (
+            SELECT
+              statistic."id",
+              statistic."restrictions",
+              updates."date",
+              updates."restriction"
+            FROM "statistic_departement" statistic
+            JOIN updates
+              ON updates."departementId" = statistic."departementId"
+          ), merged_values AS (
+            SELECT
+              current_values."id",
+              COALESCE(
+                (
+                  SELECT jsonb_agg(
+                    CASE
+                      WHEN item.value ->> 'date' = current_values."date"
+                        THEN current_values."restriction"
+                      ELSE item.value
+                    END
+                  )
+                  FROM jsonb_array_elements(
+                    COALESCE(current_values."restrictions", '[]'::jsonb)
+                  ) AS item(value)
+                ),
+                '[]'::jsonb
+              ) || CASE
+                WHEN NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                    COALESCE(current_values."restrictions", '[]'::jsonb)
+                  ) AS item(value)
+                  WHERE item.value ->> 'date' = current_values."date"
+                )
+                  THEN jsonb_build_array(current_values."restriction")
+                ELSE '[]'::jsonb
+              END AS "restrictions"
+            FROM current_values
+          ), updated AS (
+            UPDATE "statistic_departement" statistic
+            SET "restrictions" = merged_values."restrictions"
+            FROM merged_values
+            WHERE statistic."id" = merged_values."id"
+            RETURNING statistic."id"
+          )
+          SELECT
+            (SELECT COUNT(*)::integer FROM updates) AS expected,
+            (
+              (SELECT COUNT(*)::integer FROM inserted)
+              + (SELECT COUNT(*)::integer FROM updated)
+            ) AS affected
+        `,
+      [JSON.stringify(updates)],
     );
+    if (Number(result?.affected ?? 0) !== Number(result?.expected ?? 0)) {
+      throw new Error(
+        `Statistiques departementales incompletes: ${Number(result?.affected ?? 0)}/${Number(result?.expected ?? 0)} mises a jour`,
+      );
+    }
+  }
+
+  private buildZoneAreaRequests(
+    zones: ZoneAlerteComputed[],
+  ): ZoneAreaRequest[] {
+    const requests = new Map<string, ZoneAreaRequest>();
+    for (const zone of zones) {
+      const zoneType = ZONE_TYPES.find((candidate) => candidate === zone.type);
+      const gravityLevel = GRAVITY_LEVELS.find(
+        (candidate) => candidate === zone.restriction?.niveauGravite,
+      );
+      if (!zoneType || !gravityLevel) {
+        continue;
+      }
+      const request = {
+        id: zone.id,
+        departementCode: zone.departement.code,
+        zoneType,
+        gravityLevel,
+      };
+      requests.set(
+        `${request.id}:${this.getZoneAreaKey(request.departementCode, zoneType, gravityLevel)}`,
+        request,
+      );
+    }
+    return [...requests.values()];
+  }
+
+  private async computeZoneAreas(
+    requests: ZoneAreaRequest[],
+    historic?: boolean,
+    historicNotComputed?: boolean,
+  ): Promise<ZoneAreaRow[]> {
+    const source = historicNotComputed
+      ? {
+          table: 'zone_alerte',
+          area: 'ST_Area(ST_TRANSFORM(zone.geom, 4326)::geography) / 1000000',
+        }
+      : historic
+        ? {
+            table: 'zone_alerte_computed_historic',
+            area: 'ST_Area(zone.geom::geography) / 1000000',
+          }
+        : {
+            table: 'zone_alerte_computed',
+            area: 'ST_Area(zone.geom::geography) / 1000000',
+          };
+
+    return this.statisticDepartementRepository.query(
+      `
+        WITH requested_zones AS (
+          SELECT DISTINCT
+            request."id",
+            request."departementCode",
+            request."zoneType",
+            request."gravityLevel"
+          FROM jsonb_to_recordset($1::jsonb) AS request(
+            "id" integer,
+            "departementCode" text,
+            "zoneType" text,
+            "gravityLevel" text
+          )
+        )
+        SELECT
+          requested."departementCode" AS "departementCode",
+          requested."zoneType" AS "zoneType",
+          requested."gravityLevel" AS "gravityLevel",
+          SUM(${source.area}) AS "area",
+          COUNT(*)::integer AS "requestedZoneCount",
+          COUNT(zone."id")::integer AS "foundZoneCount"
+        FROM requested_zones requested
+        LEFT JOIN "${source.table}" zone ON zone."id" = requested."id"
+        GROUP BY
+          requested."departementCode",
+          requested."zoneType",
+          requested."gravityLevel"
+        ORDER BY
+          requested."departementCode",
+          requested."zoneType",
+          requested."gravityLevel"
+      `,
+      [JSON.stringify(requests)],
+    );
+  }
+
+  private createEmptyRestriction(date: string): DepartementRestriction {
+    const emptyAreas = (): RestrictionAreas => ({
+      vigilance: 0,
+      alerte: 0,
+      alerte_renforcee: 0,
+      crise: 0,
+    });
+    return {
+      date,
+      SOU: emptyAreas(),
+      SUP: emptyAreas(),
+      AEP: emptyAreas(),
+    };
+  }
+
+  private getZoneAreaKey(
+    departementCode: string,
+    zoneType: ZoneType,
+    gravityLevel: GravityLevel,
+  ): string {
+    return `${departementCode}:${zoneType}:${gravityLevel}`;
   }
 
   async sortStatDepartement() {

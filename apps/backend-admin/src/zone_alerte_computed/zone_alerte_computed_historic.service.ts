@@ -168,35 +168,55 @@ export class ZoneAlerteComputedHistoricService {
           computedZone.restriction = zone.restrictions[0];
           return computedZone;
         });
-        await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
-          zonesForStatistics,
-          new Date(m.format('YYYY-MM-DD')),
-          true,
-          true,
-        );
-        await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
-          zonesForStatistics,
-          new Date(m.format('YYYY-MM-DD')),
-          true,
-          true,
-        );
-        await this.statisticService.computeDepartementsSituationHistoric(
-          historicZones.zones,
-          m.format('YYYY-MM-DD'),
-        );
+        const statisticDate = new Date(m.format('YYYY-MM-DD'));
         const completedThrough = m.format('YYYY-MM-DD');
-        const advanced = await this.configService.advanceComputeStatsDate(
-          statsCursor,
-          statsGeneration,
-          completedThrough,
-        );
-        this.assertHistoricCursorAdvanced(
-          'statistics',
-          advanced,
-          statsCursor,
-          statsGeneration,
-          completedThrough,
-        );
+        let statsCursorAdvanced = false;
+        try {
+          await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
+            zonesForStatistics,
+            statisticDate,
+            true,
+            true,
+            undefined,
+            {
+              beforeCommuneStatistics: () =>
+                this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+                  zonesForStatistics,
+                  statisticDate,
+                  true,
+                  true,
+                ),
+              beforeCertification: async () => {
+                await this.statisticService.computeDepartementsSituationHistoric(
+                  historicZones.zones,
+                  completedThrough,
+                );
+                const advanced =
+                  await this.configService.advanceComputeStatsDate(
+                    statsCursor,
+                    statsGeneration,
+                    completedThrough,
+                  );
+                this.assertHistoricCursorAdvanced(
+                  'statistics',
+                  advanced,
+                  statsCursor,
+                  statsGeneration,
+                  completedThrough,
+                );
+                statsCursorAdvanced = true;
+              },
+            },
+          );
+        } catch (error) {
+          if (statsCursorAdvanced) {
+            await this.configService.setConfig(
+              completedThrough,
+              completedThrough,
+            );
+          }
+          throw error;
+        }
         statsCursor = completedThrough;
         statsGeneration = this.nextGeneration(statsGeneration);
       }
@@ -405,33 +425,54 @@ export class ZoneAlerteComputedHistoricService {
 
       const allZonesComputed = await this.computeGeoJson(m);
       if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
-        await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
-          allZonesComputed,
-          new Date(m.format('YYYY-MM-DD')),
-          true,
-        );
-        await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
-          allZonesComputed,
-          new Date(m.format('YYYY-MM-DD')),
-          true,
-        );
-        await this.statisticService.computeDepartementsSituation(
-          allZonesComputed,
-          m.format('YYYY-MM-DD'),
-        );
+        const statisticDate = new Date(m.format('YYYY-MM-DD'));
         const completedThrough = m.format('YYYY-MM-DD');
-        const advanced = await this.configService.advanceComputeStatsDate(
-          statsCursor,
-          statsGeneration,
-          completedThrough,
-        );
-        this.assertHistoricCursorAdvanced(
-          'statistics',
-          advanced,
-          statsCursor,
-          statsGeneration,
-          completedThrough,
-        );
+        let statsCursorAdvanced = false;
+        try {
+          await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
+            allZonesComputed,
+            statisticDate,
+            true,
+            false,
+            undefined,
+            {
+              beforeCommuneStatistics: () =>
+                this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+                  allZonesComputed,
+                  statisticDate,
+                  true,
+                ),
+              beforeCertification: async () => {
+                await this.statisticService.computeDepartementsSituation(
+                  allZonesComputed,
+                  completedThrough,
+                );
+                const advanced =
+                  await this.configService.advanceComputeStatsDate(
+                    statsCursor,
+                    statsGeneration,
+                    completedThrough,
+                  );
+                this.assertHistoricCursorAdvanced(
+                  'statistics',
+                  advanced,
+                  statsCursor,
+                  statsGeneration,
+                  completedThrough,
+                );
+                statsCursorAdvanced = true;
+              },
+            },
+          );
+        } catch (error) {
+          if (statsCursorAdvanced) {
+            await this.configService.setConfig(
+              completedThrough,
+              completedThrough,
+            );
+          }
+          throw error;
+        }
         statsCursor = completedThrough;
         statsGeneration = this.nextGeneration(statsGeneration);
       }
@@ -1412,12 +1453,39 @@ DELETE FROM zone_alerte_computed_historic
     const rows: Array<{ id: number; geom: string | null }> =
       await this.dataSource.query(
         `
+          WITH transformed AS MATERIALIZED (
+            SELECT
+              zone.id,
+              ST_Transform(zone.geom, 4326) AS geom
+            FROM "zone_alerte_computed_historic" zone
+            WHERE zone.id = ANY($1::int[])
+          ), normalized AS MATERIALIZED (
+            SELECT
+              transformed.id,
+              CASE
+                WHEN ST_IsValid(transformed.geom, 0) THEN transformed.geom
+                ELSE ST_CollectionExtract(
+                  ST_MakeValid(
+                    transformed.geom,
+                    'method=structure keepcollapsed=false'
+                  ),
+                  3
+                )
+              END AS geom
+            FROM transformed
+          )
           SELECT
-            zone.id AS "id",
-            ST_AsGeoJSON(ST_Transform(zone.geom, 4326)) AS "geom"
-          FROM "zone_alerte_computed_historic" zone
-          WHERE zone.id = ANY($1::int[])
-          ORDER BY zone.id
+            normalized.id AS "id",
+            CASE
+              WHEN normalized.geom IS NULL
+                OR ST_IsEmpty(normalized.geom)
+                OR ST_GeometryType(normalized.geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')
+                OR NOT ST_IsValid(normalized.geom, 0)
+              THEN NULL
+              ELSE ST_AsGeoJSON(normalized.geom)
+            END AS "geom"
+          FROM normalized
+          ORDER BY normalized.id
         `,
         [uniqueIds],
       );

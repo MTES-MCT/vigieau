@@ -1182,25 +1182,13 @@ DELETE FROM zone_alerte_computed
       .where('1 = 1')
       .execute();
     await this.markLegacyComputationAvailable(new Date(), publicationEnabled);
-    await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+    await this.computePublicationStatistics(
       allZonesComputed,
       date,
+      Boolean(computeHistoric),
+      publicationEnabled,
+      sourceRevision,
     );
-    await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
-      allZonesComputed,
-      date,
-    );
-    await this.statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
-      date,
-    );
-    await this.statisticService.computeDepartementsSituation(allZonesComputed);
-    if (computeHistoric) {
-      if (publicationEnabled && sourceRevision !== undefined) {
-        await this.computeHistoric(true);
-      } else {
-        void this.computeHistoric();
-      }
-    }
     const publicationId = await this.buildVersionedPublicationIfNational({
       sourceRevision,
       sourceComputedAt: date,
@@ -1211,6 +1199,54 @@ DELETE FROM zone_alerte_computed
       pmtilesChecksum,
     });
     return { publicationId, sourceRevision };
+  }
+
+  private async computePublicationStatistics(
+    allZonesComputed: ZoneAlerteComputed[],
+    date: Date,
+    computeHistoric: boolean,
+    publicationEnabled: boolean,
+    sourceRevision?: string,
+  ): Promise<void> {
+    if (publicationEnabled && sourceRevision === undefined) {
+      return;
+    }
+    await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
+      allZonesComputed,
+      date,
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeCommuneStatistics: () =>
+          this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+            allZonesComputed,
+            date,
+          ),
+        beforeCertification: async () => {
+          await this.statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
+            date,
+            undefined,
+            true,
+          );
+          await this.statisticService.computeDepartementsSituation(
+            allZonesComputed,
+          );
+        },
+        deferCertificationUntilPublication: publicationEnabled,
+        sourceRevision,
+      },
+    );
+    if (computeHistoric && publicationEnabled) {
+      const historicThrough = moment
+        .utc(date.toISOString().slice(0, 10), 'YYYY-MM-DD')
+        .subtract(1, 'day')
+        .format('YYYY-MM-DD');
+      await this.computeHistoric(true, historicThrough, sourceRevision);
+    }
+    if (computeHistoric && !publicationEnabled) {
+      void this.computeHistoric();
+    }
   }
 
   private async publishGeneratedZoneArtifacts(input: {
@@ -1401,22 +1437,41 @@ DELETE FROM zone_alerte_computed
     await this.zoneAlerteComputedRepository.save(toSave);
   }
 
-  async computeHistoric(rethrowWorkerError = false, requiredThrough?: string) {
-    const config = await this.configService.getConfig();
-    const dirtyDates = [config.computeMapDate, config.computeStatsDate]
-      .filter(Boolean)
-      .map((date) => moment(date, 'YYYY-MM-DD'));
-    const dirtyDate = dirtyDates.reduce((minDate, date) => {
-      return date.isBefore(minDate, 'day') ? date : minDate;
-    }, dirtyDates[0]);
+  async computeHistoric(
+    rethrowWorkerError = false,
+    requiredThrough?: string,
+    expectedSourceRevision?: string,
+  ) {
+    try {
+      const publicationEnabled = isZonePublicationEnabled();
+      const historicSourceRevision =
+        expectedSourceRevision ??
+        (publicationEnabled
+          ? await this.zonePublicationService.getSourceRevision()
+          : undefined);
+      const config = await this.configService.getConfig();
+      const dirtyDates = [config.computeMapDate, config.computeStatsDate]
+        .filter(Boolean)
+        .map((date) => moment(date, 'YYYY-MM-DD'));
+      const dirtyDate = dirtyDates.reduce((minDate, date) => {
+        return date.isBefore(minDate, 'day') ? date : minDate;
+      }, dirtyDates[0]);
+      let historicPublicationStarted = false;
+      let historicCompletedThrough: string | undefined;
 
-    if (dirtyDate && moment().diff(dirtyDate, 'days') >= 1) {
-      try {
+      if (dirtyDate && moment().diff(dirtyDate, 'days') >= 1) {
         const computedStartDate = moment(
           this.historicComputedStartDate,
           'YYYY-MM-DD',
         );
         const dirtyDateString = dirtyDate.format('YYYY-MM-DD');
+        const dirtyThrough =
+          requiredThrough ?? moment().subtract(1, 'day').format('YYYY-MM-DD');
+        await this.beginHistoricStatisticsPublication(
+          dirtyDateString,
+          dirtyThrough,
+        );
+        historicPublicationStarted = true;
 
         if (dirtyDate.isBefore(computedStartDate, 'day')) {
           const legacyState = await this.runHistoricWorker(
@@ -1428,6 +1483,12 @@ DELETE FROM zone_alerte_computed
             String(config.computeMapGeneration ?? 0),
             String(config.computeStatsGeneration ?? 0),
           );
+          historicCompletedThrough = [
+            legacyState.mapCursor,
+            legacyState.statsCursor,
+          ]
+            .filter((date): date is string => Boolean(date))
+            .sort()[0];
           const resumedConfig = await this.configService.getConfig();
           this.assertHistoricCursorState(legacyState, resumedConfig);
 
@@ -1467,6 +1528,12 @@ DELETE FROM zone_alerte_computed
               String(resumedConfig.computeStatsGeneration ?? 0),
             );
             await this.assertCurrentHistoricCursorState(computedState);
+            historicCompletedThrough = [
+              computedState.mapCursor,
+              computedState.statsCursor,
+            ]
+              .filter((date): date is string => Boolean(date))
+              .sort()[0];
           }
         } else {
           const computedState = await this.runHistoricWorker(
@@ -1479,27 +1546,223 @@ DELETE FROM zone_alerte_computed
             String(config.computeStatsGeneration ?? 0),
           );
           await this.assertCurrentHistoricCursorState(computedState);
-        }
-      } catch (error) {
-        this.logger.error('Error in computeHistoric', error.toString());
-        if (rethrowWorkerError) {
-          throw error;
+          historicCompletedThrough = [
+            computedState.mapCursor,
+            computedState.statsCursor,
+          ]
+            .filter((date): date is string => Boolean(date))
+            .sort()[0];
         }
       }
-    }
-    const statsMonthDate =
-      config.computeStatsDate || dirtyDate?.format('YYYY-MM-DD');
-    if (statsMonthDate) {
-      await this.statisticCommuneService.computeByMonth(
-        moment(statsMonthDate, 'YYYY-MM-DD'),
-      );
-    }
-    if (requiredThrough) {
-      await this.assertHistoricCatchUpComplete(requiredThrough);
+      const statsMonthDate =
+        config.computeStatsDate || dirtyDate?.format('YYYY-MM-DD');
+      const historicComputedThrough =
+        requiredThrough ?? historicCompletedThrough;
+      const candidateSnapshotDate =
+        requiredThrough && expectedSourceRevision !== undefined
+          ? moment
+              .utc(requiredThrough, 'YYYY-MM-DD')
+              .add(1, 'day')
+              .format('YYYY-MM-DD')
+          : undefined;
+      const monthlyAggregateThrough = publicationEnabled
+        ? (candidateSnapshotDate ?? historicComputedThrough)
+        : undefined;
+      if (statsMonthDate) {
+        await this.statisticCommuneService.computeByMonth(
+          moment(statsMonthDate, 'YYYY-MM-DD'),
+          undefined,
+          monthlyAggregateThrough
+            ? {
+                aggregateThrough: moment(monthlyAggregateThrough, 'YYYY-MM-DD'),
+                allowedReadySnapshot:
+                  candidateSnapshotDate && expectedSourceRevision !== undefined
+                    ? {
+                        date: candidateSnapshotDate,
+                        sourceRevision: expectedSourceRevision,
+                      }
+                    : undefined,
+              }
+            : undefined,
+        );
+      }
+      if (requiredThrough) {
+        await this.assertHistoricCatchUpComplete(requiredThrough);
+      }
+      if (historicPublicationStarted) {
+        const publishedThrough = historicComputedThrough;
+        if (!publishedThrough) {
+          throw new Error(
+            'Historic statistics publication has no completed cursor',
+          );
+        }
+        await this.publishHistoricStatistics(
+          publishedThrough,
+          historicSourceRevision,
+        );
+      }
+    } catch (error) {
+      this.logger.error('Error in computeHistoric', error.toString());
+      if (rethrowWorkerError) {
+        throw error;
+      }
     }
   }
 
-  async computeHistoricPersistently(requiredThrough: string): Promise<void> {
+  private async beginHistoricStatisticsPublication(
+    dirtyFrom: string,
+    dirtyThrough: string,
+  ): Promise<void> {
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(dirtyFrom) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dirtyThrough) ||
+      dirtyFrom > dirtyThrough
+    ) {
+      throw new Error(
+        `Invalid historic statistics dirty range: ${dirtyFrom}..${dirtyThrough}`,
+      );
+    }
+    await this.dataSource.query(
+      `
+        INSERT INTO "statistic_publication_state" (
+          "id", "revision", "historicDirtyFrom", "historicDirtyThrough",
+          "updatedAt"
+        ) VALUES (1, 1, $1::date, $2::date, now())
+        ON CONFLICT ("id") DO UPDATE SET
+          "revision" = "statistic_publication_state"."revision" + CASE
+            WHEN "statistic_publication_state"."historicDirtyFrom"
+                  IS DISTINCT FROM CASE
+                    WHEN "statistic_publication_state"."historicDirtyFrom" IS NULL
+                      THEN EXCLUDED."historicDirtyFrom"
+                    ELSE LEAST(
+                      "statistic_publication_state"."historicDirtyFrom",
+                      EXCLUDED."historicDirtyFrom"
+                    )
+                  END
+              OR "statistic_publication_state"."historicDirtyThrough"
+                  IS DISTINCT FROM CASE
+                    WHEN "statistic_publication_state"."historicDirtyThrough" IS NULL
+                      THEN EXCLUDED."historicDirtyThrough"
+                    ELSE GREATEST(
+                      "statistic_publication_state"."historicDirtyThrough",
+                      EXCLUDED."historicDirtyThrough"
+                    )
+                  END
+              THEN 1
+            ELSE 0
+          END,
+          "historicDirtyFrom" = CASE
+            WHEN "statistic_publication_state"."historicDirtyFrom" IS NULL
+              THEN EXCLUDED."historicDirtyFrom"
+            ELSE LEAST(
+              "statistic_publication_state"."historicDirtyFrom",
+              EXCLUDED."historicDirtyFrom"
+            )
+          END,
+          "historicDirtyThrough" = CASE
+            WHEN "statistic_publication_state"."historicDirtyThrough" IS NULL
+              THEN EXCLUDED."historicDirtyThrough"
+            ELSE GREATEST(
+              "statistic_publication_state"."historicDirtyThrough",
+              EXCLUDED."historicDirtyThrough"
+            )
+          END,
+          "updatedAt" = now()
+      `,
+      [dirtyFrom, dirtyThrough],
+    );
+  }
+
+  private async publishHistoricStatistics(
+    publishedThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(publishedThrough)) {
+      throw new Error(
+        `Invalid historic statistics publication date: ${publishedThrough}`,
+      );
+    }
+    const [result] = await this.dataSource.query(
+      `
+        WITH source_guard AS MATERIALIZED (
+          SELECT source_state."revision"::text AS revision
+          FROM "zone_publication_source_state" source_state
+          WHERE source_state."id" = 1
+          FOR UPDATE
+        ), publication_guard AS MATERIALIZED (
+          SELECT
+            state."id",
+            state."historicDirtyFrom",
+            state."historicDirtyThrough"
+          FROM "statistic_publication_state" state
+          CROSS JOIN source_guard
+          WHERE state."id" = 1
+          FOR UPDATE OF state
+        ), incomplete_snapshot AS MATERIALIZED (
+          SELECT snapshot."snapshotDate"
+          FROM "statistic_commune_snapshot" snapshot
+          CROSS JOIN publication_guard publication_state
+          WHERE snapshot."scope" <> 'bootstrap'
+            AND snapshot."status" <> 'completed'
+            AND snapshot."snapshotDate" >= publication_state."historicDirtyFrom"
+            AND snapshot."snapshotDate" <= $1::date
+          ORDER BY snapshot."snapshotDate" ASC
+          LIMIT 1
+        ), published AS (
+          UPDATE "statistic_publication_state" state
+          SET "revision" = state."revision" + 1,
+              "historicPublishedThrough" = CASE
+                WHEN state."historicPublishedThrough" IS NULL THEN $1::date
+                ELSE GREATEST(state."historicPublishedThrough", $1::date)
+              END,
+              "historicDirtyFrom" = NULL,
+              "historicDirtyThrough" = NULL,
+              "updatedAt" = now()
+          FROM publication_guard publication_state
+          WHERE state."id" = publication_state."id"
+            AND publication_state."historicDirtyFrom" IS NOT NULL
+            AND publication_state."historicDirtyThrough" IS NOT NULL
+            AND $1::date >= publication_state."historicDirtyThrough"
+            AND (
+              $2::bigint IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM source_guard
+                WHERE source_guard.revision = $2::text
+              )
+            )
+            AND NOT EXISTS (SELECT 1 FROM incomplete_snapshot)
+          RETURNING state."revision"
+        )
+        SELECT
+          EXISTS(SELECT 1 FROM published) AS published,
+          (SELECT "snapshotDate" FROM incomplete_snapshot) AS "incompleteDate",
+          (SELECT revision FROM source_guard) AS "currentSourceRevision"
+      `,
+      [publishedThrough, expectedSourceRevision ?? null],
+    );
+    if (result?.published !== true) {
+      if (
+        expectedSourceRevision !== undefined &&
+        String(result?.currentSourceRevision) !== expectedSourceRevision
+      ) {
+        throw new Error(
+          `Historic statistics source revision changed (${expectedSourceRevision} -> ${String(result?.currentSourceRevision ?? 'missing')})`,
+        );
+      }
+      const incompleteDate = result?.incompleteDate
+        ? String(result.incompleteDate).slice(0, 10)
+        : 'unknown';
+      throw new Error(
+        `Historic statistics publication blocked by snapshot ${incompleteDate}`,
+      );
+    }
+  }
+
+  async computeHistoricPersistently(
+    requiredThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     let locked = false;
@@ -1520,7 +1783,7 @@ DELETE FROM zone_alerte_computed
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-      await this.computeHistoric(true, requiredThrough);
+      await this.computeHistoric(true, requiredThrough, expectedSourceRevision);
     } finally {
       try {
         if (locked) {
@@ -1572,6 +1835,7 @@ DELETE FROM zone_alerte_computed
         SELECT "snapshotDate"
         FROM "statistic_commune_snapshot"
         WHERE "status" <> 'completed'
+          AND "scope" <> 'bootstrap'
           AND "snapshotDate" <= $1::date
         ORDER BY "snapshotDate" ASC
         LIMIT 1

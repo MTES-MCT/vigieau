@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { isZonePublicationEnabled } from './zone_publication.config';
+import {
+  isZonePublicationEnabled,
+  ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+} from './zone_publication.config';
 import type { ZonePublicationRollbackResult } from './zone_publication.service';
 import { unwrapTypeOrmDmlReturningRows } from './typeorm-query-result';
 
@@ -49,9 +52,26 @@ export class ZonePublicationOperatorService {
           failed."validationError" AS "lastFailure",
           instances."liveInstances" AS "liveInstances",
           instances."activeReadyInstances" AS "activeReadyInstances",
-          instances."candidateReadyInstances" AS "candidateReadyInstances"
+          instances."candidateReadyInstances" AS "candidateReadyInstances",
+          statistic_state."revision" AS "statisticRevision",
+          statistic_state."currentPublishedDate"::text AS "statisticCurrentPublishedDate",
+          statistic_state."historicPublishedThrough"::text AS "statisticHistoricPublishedThrough",
+          statistic_state."historicDirtyFrom"::text AS "statisticHistoricDirtyFrom",
+          statistic_state."historicDirtyThrough"::text AS "statisticHistoricDirtyThrough",
+          statistic_snapshot."snapshotDate" AS "statisticSnapshotDate",
+          statistic_snapshot."scope" AS "statisticSnapshotScope",
+          statistic_snapshot."status" AS "statisticSnapshotStatus",
+          statistic_snapshot."sourceRevision" AS "statisticSnapshotSourceRevision",
+          statistic_snapshot."expectedCommuneCount" AS "statisticSnapshotExpectedCommuneCount",
+          statistic_snapshot."processedCommuneCount" AS "statisticSnapshotProcessedCommuneCount",
+          statistic_snapshot."startedAt" AS "statisticSnapshotStartedAt",
+          statistic_snapshot."completedAt" AS "statisticSnapshotCompletedAt",
+          statistic_snapshot."updatedAt" AS "statisticSnapshotUpdatedAt",
+          incomplete_statistics."count" AS "incompleteStatisticSnapshotCount"
         FROM "zone_publication_source_state" source
         INNER JOIN "zone_publication_state" state ON state."id" = 1
+        LEFT JOIN "statistic_publication_state" statistic_state
+          ON statistic_state."id" = 1
         LEFT JOIN "zone_publication" active
           ON active."id" = state."activePublicationId"
         LEFT JOIN "zone_publication" candidate
@@ -87,6 +107,29 @@ export class ZonePublicationOperatorService {
           FROM "zone_publication_instance" instance
           WHERE instance."heartbeatAt" >= now() - ($1 * interval '1 second')
         ) instances ON true
+        LEFT JOIN LATERAL (
+          SELECT
+            snapshot."snapshotDate"::text AS "snapshotDate",
+            snapshot."scope",
+            snapshot."status",
+            snapshot."sourceRevision",
+            snapshot."expectedCommuneCount",
+            snapshot."processedCommuneCount",
+            snapshot."startedAt",
+            snapshot."completedAt",
+            snapshot."updatedAt"
+          FROM "statistic_commune_snapshot" snapshot
+          ORDER BY snapshot."updatedAt" DESC,
+                   snapshot."snapshotDate" DESC,
+                   snapshot."scope" ASC
+          LIMIT 1
+        ) statistic_snapshot ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::integer AS "count"
+          FROM "statistic_commune_snapshot" snapshot
+          WHERE snapshot."status" NOT IN ('ready', 'completed')
+             OR snapshot."processedCommuneCount" <> snapshot."expectedCommuneCount"
+        ) incomplete_statistics ON true
         WHERE source."id" = 1
       `,
       [leaseSeconds],
@@ -100,6 +143,50 @@ export class ZonePublicationOperatorService {
       automaticPublishing: {
         paused: state?.automaticPublishingPaused === true,
         pausedAt: state?.automaticPublishingPausedAt || null,
+      },
+      statistics: {
+        revision:
+          state?.statisticRevision === null ||
+          state?.statisticRevision === undefined
+            ? null
+            : String(state.statisticRevision),
+        currentPublishedDate: state?.statisticCurrentPublishedDate || null,
+        historicPublishedThrough:
+          state?.statisticHistoricPublishedThrough || null,
+        dirtyRange:
+          state?.statisticHistoricDirtyFrom ||
+          state?.statisticHistoricDirtyThrough
+            ? {
+                from: state?.statisticHistoricDirtyFrom || null,
+                through: state?.statisticHistoricDirtyThrough || null,
+              }
+            : null,
+        currentSnapshot: state?.statisticSnapshotDate
+          ? {
+              date: state.statisticSnapshotDate,
+              scope: state.statisticSnapshotScope,
+              status: state.statisticSnapshotStatus,
+              sourceRevision:
+                state.statisticSnapshotSourceRevision === null ||
+                state.statisticSnapshotSourceRevision === undefined
+                  ? null
+                  : String(state.statisticSnapshotSourceRevision),
+              progress: {
+                expectedCommuneCount: Number(
+                  state.statisticSnapshotExpectedCommuneCount || 0,
+                ),
+                processedCommuneCount: Number(
+                  state.statisticSnapshotProcessedCommuneCount || 0,
+                ),
+              },
+              startedAt: state.statisticSnapshotStartedAt,
+              completedAt: state.statisticSnapshotCompletedAt || null,
+              updatedAt: state.statisticSnapshotUpdatedAt,
+            }
+          : null,
+        incompleteSnapshotCount: Number(
+          state?.incompleteStatisticSnapshotCount || 0,
+        ),
       },
       active: state?.activeId
         ? {
@@ -166,10 +253,22 @@ export class ZonePublicationOperatorService {
 
     return this.dataSource.transaction('SERIALIZABLE', async (manager) => {
       const [state] = await manager.query(`
-        SELECT *
-        FROM "zone_publication_state"
-        WHERE "id" = 1
-        ${input?.apply ? 'FOR UPDATE' : ''}
+        SELECT
+          publication_state.*,
+          source_state."revision" AS "currentSourceRevision",
+          statistic_state."historicDirtyFrom"::text AS "historicDirtyFrom",
+          statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough"
+        FROM "zone_publication_state" publication_state
+        CROSS JOIN "zone_publication_source_state" source_state
+        CROSS JOIN "statistic_publication_state" statistic_state
+        WHERE publication_state."id" = 1
+          AND source_state."id" = 1
+          AND statistic_state."id" = 1
+        ${
+          input?.apply
+            ? 'FOR UPDATE OF publication_state, source_state, statistic_state'
+            : ''
+        }
       `);
       if (!state?.activePublicationId) {
         return { status: 'no_active_publication' };
@@ -188,7 +287,25 @@ export class ZonePublicationOperatorService {
       const [target] = await manager.query(
         `
           SELECT publication.*,
-                 aggregate."publicationId" IS NOT NULL AS "hasAggregate"
+                 aggregate."publicationId" IS NOT NULL AS "hasAggregate",
+                 EXISTS (
+                   SELECT 1
+                   FROM "statistic_commune_snapshot" certified_snapshot
+                   WHERE certified_snapshot."snapshotDate" =
+                       (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date
+                     AND certified_snapshot."scope" = 'national'
+                     AND certified_snapshot."status" = 'completed'
+                     AND certified_snapshot."sourceRevision" =
+                       publication."sourceRevision"
+                 ) AS "hasCertifiedStatisticSnapshot",
+                 (
+                   SELECT COUNT(*)::integer
+                   FROM "statistic_commune_snapshot" incomplete_snapshot
+                   WHERE incomplete_snapshot."scope" <> 'bootstrap'
+                     AND incomplete_snapshot."snapshotDate" <=
+                       (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date
+                     AND incomplete_snapshot."status" <> 'completed'
+                 ) AS "incompleteStatisticSnapshotCount"
           FROM "zone_publication" publication
           LEFT JOIN "zone_publication_aggregate" aggregate
             ON aggregate."publicationId" = publication."id"
@@ -243,6 +360,39 @@ export class ZonePublicationOperatorService {
       }
       if (!target.hasAggregate) {
         blockers.push('target has no versioned department aggregate');
+      }
+      if (
+        String(target.sourceRevision) !== String(state.currentSourceRevision)
+      ) {
+        blockers.push(
+          `target source revision ${target.sourceRevision} does not match current source revision ${state.currentSourceRevision}`,
+        );
+      }
+      if (
+        Number(target.materializationVersion) !==
+        ZONE_PUBLICATION_MATERIALIZATION_VERSION
+      ) {
+        blockers.push(
+          `target materialization version ${target.materializationVersion} does not match current version ${ZONE_PUBLICATION_MATERIALIZATION_VERSION}`,
+        );
+      }
+      if (target.hasCertifiedStatisticSnapshot !== true) {
+        blockers.push(
+          'target has no certified national statistic snapshot for its source revision',
+        );
+      }
+      if (Number(target.incompleteStatisticSnapshotCount || 0) > 0) {
+        blockers.push(
+          `${target.incompleteStatisticSnapshotCount} incomplete statistic snapshot(s) exist on or before the target date`,
+        );
+      }
+      if (
+        state.historicDirtyFrom !== null ||
+        state.historicDirtyThrough !== null
+      ) {
+        blockers.push(
+          `historic statistics are dirty from ${state.historicDirtyFrom || 'unknown'} through ${state.historicDirtyThrough || 'unknown'}`,
+        );
       }
       if (!/^[0-9a-f]{64}$/.test(target.contentFingerprint || '')) {
         blockers.push('target has no valid materialization fingerprint');

@@ -530,6 +530,158 @@ describe('ZonesService', () => {
     );
   });
 
+  it('rebuilds a preloaded candidate department situation before activating it', async () => {
+    const previousId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const activatedId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    const previousSnapshot = makeVersionedSnapshot(previousId);
+    const preloadedCandidate = Object.freeze({
+      ...makeVersionedSnapshot(activatedId, 2, 'candidate'),
+      departmentSituation: Object.freeze([{ date: 'stale' }]),
+    });
+    const certifiedSituation = [
+      {
+        date: '2026-07-31',
+        departementSituation: [{ code: '65', niveauGraviteMax: 'crise' }],
+      },
+    ];
+    let resolveSituation!: (situation: any[]) => void;
+    const situationBuild = new Promise<any[]>((resolve) => {
+      resolveSituation = resolve;
+    });
+    service['activeSnapshot'] = previousSnapshot as any;
+    service['publicationSnapshots'].set(activatedId, preloadedCandidate as any);
+    service['lastZoneComputationCheckAt'] = 0;
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: activatedId,
+      candidatePublicationId: null,
+    });
+    mockZonePublicationRepository.findOne.mockResolvedValue({
+      id: activatedId,
+      status: 'active',
+      activatedAt: version,
+    });
+    mockDepartementsService.buildSituationSnapshot.mockReturnValueOnce(
+      situationBuild,
+    );
+
+    const refresh = service['refreshZonesIfStale'](true);
+    await flushPromises();
+
+    expect(service['activeSnapshot']).toBe(previousSnapshot);
+    expect(service['publicationSnapshots'].get(activatedId)).toBe(
+      preloadedCandidate,
+    );
+    expect(mockDepartementsService.publishSituation).not.toHaveBeenCalled();
+
+    resolveSituation(certifiedSituation);
+    await refresh;
+
+    const activatedSnapshot = service['activeSnapshot'];
+    expect(activatedSnapshot?.publication).toMatchObject({
+      id: activatedId,
+      status: 'active',
+    });
+    expect(activatedSnapshot?.departmentSituation).toEqual(certifiedSituation);
+    expect(Object.isFrozen(activatedSnapshot)).toBe(true);
+    expect(Object.isFrozen(activatedSnapshot?.departmentSituation)).toBe(true);
+    expect(service['publicationSnapshots'].get(activatedId)).toBe(
+      activatedSnapshot,
+    );
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledWith(
+      certifiedSituation,
+    );
+  });
+
+  it('revalidates a candidate preload still in flight before activating it', async () => {
+    const previousId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const activatedId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    const previousSnapshot = makeVersionedSnapshot(previousId);
+    const inFlightCandidate = Object.freeze({
+      ...makeVersionedSnapshot(activatedId, 2, 'candidate'),
+      departmentSituation: Object.freeze([{ date: 'stale' }]),
+    });
+    const certifiedSituation = [
+      {
+        date: '2026-07-31',
+        departementSituation: [{ code: '65', niveauGraviteMax: 'crise' }],
+      },
+    ];
+    let resolvePreload!: (snapshot: any) => void;
+    const preload = new Promise<any>((resolve) => {
+      resolvePreload = resolve;
+    });
+    service['activeSnapshot'] = previousSnapshot as any;
+    service['publicationLoadPromises'].set(activatedId, preload);
+    service['lastZoneComputationCheckAt'] = 0;
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: activatedId,
+      candidatePublicationId: null,
+    });
+    mockZonePublicationRepository.findOne.mockResolvedValue({
+      id: activatedId,
+      status: 'active',
+      activatedAt: version,
+    });
+    mockDepartementsService.buildSituationSnapshot.mockResolvedValueOnce(
+      certifiedSituation,
+    );
+
+    const refresh = service['refreshZonesIfStale'](true);
+    await flushPromises();
+    expect(service['activeSnapshot']).toBe(previousSnapshot);
+
+    resolvePreload(inFlightCandidate);
+    await refresh;
+
+    expect(service['activeSnapshot']?.publication).toMatchObject({
+      id: activatedId,
+      status: 'active',
+    });
+    expect(service['activeSnapshot']?.departmentSituation).toEqual(
+      certifiedSituation,
+    );
+    expect(service['publicationSnapshots'].get(activatedId)).toBe(
+      service['activeSnapshot'],
+    );
+  });
+
+  it('retains the active snapshot when certified department rebuilding fails', async () => {
+    const previousId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const activatedId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    const previousSnapshot = makeVersionedSnapshot(previousId);
+    const preloadedCandidate = makeVersionedSnapshot(
+      activatedId,
+      2,
+      'candidate',
+    );
+    service['activeSnapshot'] = previousSnapshot as any;
+    service['publicationSnapshots'].set(activatedId, preloadedCandidate as any);
+    service['lastZoneComputationCheckAt'] = 0;
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: activatedId,
+      candidatePublicationId: null,
+    });
+    mockZonePublicationRepository.findOne.mockResolvedValue({
+      id: activatedId,
+      status: 'active',
+      activatedAt: version,
+    });
+    mockDepartementsService.buildSituationSnapshot.mockRejectedValueOnce(
+      new Error('statistics unavailable'),
+    );
+
+    await service['refreshZonesIfStale'](true);
+
+    expect(service['activeSnapshot']).toBe(previousSnapshot);
+    expect(service['publicationSnapshots'].get(activatedId)).toBe(
+      preloadedCandidate,
+    );
+    expect(mockDepartementsService.publishSituation).not.toHaveBeenCalled();
+    expect(service['lastCacheError']).toMatchObject({
+      phase: 'version-check',
+    });
+  });
+
   it('rechecks the active pointer before publishing an initial snapshot', async () => {
     const staleId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
     const latestId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
@@ -946,9 +1098,7 @@ describe('ZonesService', () => {
       },
     ];
     let snapshotDuringDepartmentPublish: unknown;
-    mockDepartementsService.buildSituationSnapshot.mockResolvedValueOnce(
-      situation,
-    );
+    mockDepartementsService.buildSituationSnapshot.mockResolvedValue(situation);
     mockDepartementsService.publishSituation.mockImplementationOnce(() => {
       snapshotDuringDepartmentPublish = service['activeSnapshot'];
     });
@@ -965,6 +1115,9 @@ describe('ZonesService', () => {
       expect.arrayContaining([expect.objectContaining({ id: 1 })]),
       aggregate,
     );
+    expect(
+      mockDepartementsService.buildSituationSnapshot,
+    ).toHaveBeenCalledTimes(2);
     expect(mockDepartementsService.publishSituation).toHaveBeenCalledWith(
       situation,
     );
@@ -976,6 +1129,61 @@ describe('ZonesService', () => {
         contentFingerprint: row.contentFingerprint,
       },
     });
+  });
+
+  it('rebuilds department situation before an explicitly pinned active publication is adopted', async () => {
+    const previousId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+    const activatedId = '5a7edfae-f4b8-43f1-9bef-4314d65c8d4c';
+    const previousSnapshot = makeVersionedSnapshot(previousId);
+    const preloadedCandidate = Object.freeze({
+      ...makeVersionedSnapshot(activatedId, 2, 'candidate'),
+      departmentSituation: Object.freeze([{ date: 'stale' }]),
+    });
+    const certifiedSituation = [
+      {
+        date: '2026-07-31',
+        departementSituation: [{ code: '65', niveauGraviteMax: 'alerte' }],
+      },
+    ];
+    service['activeSnapshot'] = previousSnapshot as any;
+    service['availablePublicationState'] = {
+      activePublicationId: activatedId,
+      candidatePublicationId: null,
+    };
+    service['publicationSnapshots'].set(activatedId, preloadedCandidate as any);
+    mockZonePublicationRepository.findOne.mockResolvedValue({
+      id: activatedId,
+      status: 'active',
+      activatedAt: version,
+    });
+    mockZonePublicationStateRepository.findOne.mockResolvedValue({
+      activePublicationId: activatedId,
+      candidatePublicationId: null,
+    });
+    mockDepartementsService.buildSituationSnapshot.mockResolvedValueOnce(
+      certifiedSituation,
+    );
+
+    await expect(
+      service.find(
+        undefined,
+        undefined,
+        '65440',
+        undefined,
+        undefined,
+        activatedId,
+      ),
+    ).resolves.toMatchObject([{ id: 2 }]);
+
+    expect(service['activeSnapshot']?.departmentSituation).toEqual(
+      certifiedSituation,
+    );
+    expect(service['publicationSnapshots'].get(activatedId)).toBe(
+      service['activeSnapshot'],
+    );
+    expect(mockDepartementsService.publishSituation).toHaveBeenCalledWith(
+      certifiedSituation,
+    );
   });
 
   it('loads a legitimate empty versioned publication and serves empty lookups', async () => {

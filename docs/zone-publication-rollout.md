@@ -11,8 +11,9 @@ utilisateur.
   associations commune-zone et artefacts GeoJSON/PMTiles. Les deux URL
   immuables sont relues anonymement avant la mise en candidature.
 - Un recalcul partiel conserve son périmètre historique et ne produit aucune
-  publication versionnée. Le watchdog lance ensuite le recalcul national qui,
-  seul, peut couvrir la révision source globale et produire une candidate.
+  publication versionnée ni statistique publique. Le watchdog lance ensuite le
+  recalcul national qui, seul, peut couvrir la révision source globale, publier
+  les statistiques et produire une candidate.
 - Un verrou advisory PostgreSQL de session couvre tout recalcul, partiel ou
   national. Une demande utilisateur attend la fin du calcul en cours comme
   auparavant. Le watchdog teste ce verrou avant de créer son worker et rend la
@@ -34,6 +35,12 @@ utilisateur.
   désactivés par défaut pour ne pas bloquer une baisse saisonnière légitime.
 - Une candidate n'est activée que lorsque toutes les instances API vivantes l'ont
   préchargée et que leur nombre atteint le minimum configuré.
+- L'activation exige aussi un snapshot communal national `ready` de la même date
+  et de la même révision source. Hors première baseline, le marqueur historique
+  et les deux curseurs legacy doivent couvrir J-1, aucune plage historique ne
+  doit être sale et aucun calcul national du même jour civil Paris ne doit être
+  en cours. Lorsqu'une exécution quotidienne est liée à la candidate, son
+  rattrapage historique de même identité doit avoir réussi.
 - Tant que la publication n'est pas active, seuls ses artefacts immuables nommés
   par checksum sont écrits. Les alias S3 historiques, la date de calcul globale
   et les ressources data.gouv.fr ne sont promus qu'après l'activation.
@@ -46,6 +53,15 @@ utilisateur.
   retentée par l'intervalle suivant sans bloquer les lignes verrouillées.
 - L'API échange son snapshot en mémoire par une seule affectation. En cas d'échec,
   le dernier snapshot valide reste servi.
+- Le passage d'un historique propre à une plage sale incrémente l'epoch
+  statistique. L'API publique sert son dernier cache certifié pendant la
+  reconstruction, puis échange le nouveau cache en une seule affectation après
+  une double lecture stable de l'epoch. Les référentiels ont leur propre cache
+  SWR et restent disponibles si les statistiques sont indisponibles.
+- Une candidate peut être préchargée avant la fin du rattrapage, mais sa
+  situation départementale est toujours reconstruite depuis les statistiques
+  certifiées avant sa publication active. Un échec conserve ensemble l'ancienne
+  carte et l'ancienne situation.
 - Le front épingle la carte et les requêtes de restrictions au même
   `publicationId`, y compris sur l'accueil où seule la carte visible au breakpoint
   DSFR fournit le pin. Un `410` déclenche un seul rechargement du manifeste.
@@ -94,7 +110,17 @@ active le watchdog, la construction et l'activation. La version de l'algorithme
 est portée par `ZONE_PUBLICATION_MATERIALIZATION_VERSION` dans le code et par
 `zone_publication.materializationVersion` en base. Incrémenter la constante
 force un nouveau snapshot même si la révision source n'a pas changé. Ne jamais
-réécrire la version d'une publication existante.
+réécrire la version d'une publication existante. La version 3 introduit la
+barrière d'activation statistique : les exécutions quotidiennes et historiques
+l'incluent dans leur identité persistée, afin qu'un succès enregistré en version
+2 ne puisse pas empêcher le recalcul national en version 3.
+
+Lors d'un upgrade avec une publication déjà active, des curseurs legacy
+`computeMapDate` et `computeStatsDate` tous deux nuls ne prouvent aucune date
+historique : la migration laisse donc `historicPublishedThrough` nul et les
+activations suivantes restent bloquées. Contrôler ce cas avant la bascule et
+réconcilier explicitement les curseurs. Cette règle ne bloque pas la toute
+première baseline d'une base neuve, qui initialise son propre marqueur J-1.
 
 Après activation de la première baseline, `ZONE_PUBLICATION_ENABLED=true` est la
 valeur nominale et doit rester configurée tant que le `clock` tourne. Laisser le
@@ -420,6 +446,23 @@ SELECT "activePublicationId", "candidatePublicationId", "zoneCount",
        "communeLinkCount", "lastError", "heartbeatAt"
 FROM zone_publication_instance
 ORDER BY "heartbeatAt" DESC;
+
+SELECT revision, "currentPublishedDate", "historicPublishedThrough",
+       "historicDirtyFrom", "historicDirtyThrough", "updatedAt"
+FROM statistic_publication_state
+WHERE id = 1;
+
+SELECT "snapshotDate", scope, status, "sourceRevision",
+       "processedCommuneCount", "expectedCommuneCount", "startedAt",
+       "completedAt", "updatedAt"
+FROM statistic_commune_snapshot
+ORDER BY "updatedAt" DESC, "snapshotDate" DESC, scope
+LIMIT 10;
+
+SELECT COUNT(*)::integer AS "incompleteSnapshotCount"
+FROM statistic_commune_snapshot
+WHERE status NOT IN ('ready', 'completed')
+   OR "processedCommuneCount" <> "expectedCommuneCount";
 ```
 
 Une publication `active` avec `legacyPromotedAt IS NULL` continue d'être servie
@@ -429,7 +472,12 @@ jamais mis à jour avant `legacyPromotedAt`; un `dataGouvPromotedAt` nul avec un
 alias promu indique uniquement une reprise data.gouv.fr en attente.
 
 Le endpoint admin `/api/zone-publication/health`, réservé au rôle `mte`, expose
-le pointeur actif, la candidate, le quorum et la pause automatique. Les endpoints
+le pointeur actif, la candidate, le quorum et la pause automatique. Son bloc
+`statistics` donne la révision publiée, les marqueurs courant et historique, la
+plage historique à recalculer, le dernier snapshot mis à jour avec sa progression
+et le nombre de snapshots incomplets. Un snapshot `ready` a fini son calcul mais
+attend encore l'activation atomique; il n'est donc pas compté comme incomplet.
+Les endpoints
 `/api/health/clock`, `/api/health/external-publications`,
 `/api/health/sandre-references`, `/api/health/sandre-synchronization` et
 `/api/health/map-archives` ne renvoient aucune erreur brute ni secret et
@@ -479,10 +527,21 @@ configurée côté hébergeur avant la mise en production.
    `publicationId` explicite. Vérifier la cible et les bloqueurs, puis répéter avec
    exactement le même identifiant et `apply=true`. Une candidate normale encore
    en attente est remplacée atomiquement; une autre candidate de rollback bloque
-   l'opération.
+   l'opération. Le dry-run refuse une publication d'une autre révision source ou
+   d'une ancienne version de matérialisation : les statistiques ne sont pas
+   versionnées par publication, donc un rollback inter-révision ne permettrait
+   pas de prouver leur cohérence. La cible doit aussi avoir un snapshot national
+   `completed` certifié pour son jour et ne laisser aucun snapshot incomplet
+   jusqu'à cette date.
 3. Attendre son préchargement par le quorum et son activation normale. Vérifier
    le manifeste, Tarbes, la carte et `legacyPromotedAt`. Ne jamais modifier le
-   pointeur actif directement en SQL.
+   pointeur actif directement en SQL. Après le préchargement, l'activation
+   revalide les mêmes invariants et prend, dans cet ordre, les verrous de calcul
+   national puis historique; elle reste sans écriture et répond `busy` si l'un
+   des deux calculs est en cours. Une plage historique sale bloque aussi le
+   dry-run, l'apply et l'activation. Elle reconstruit ensuite le mois de la cible,
+   supprime les snapshots futurs incomplets et borne le curseur historique à la
+   date restaurée avant le basculement atomique.
 4. Une fois le rollback logique vérifié, `ZONE_PUBLICATION_ENABLED=false` peut
    être utilisé si l'on veut aussi arrêter les promotions et recalculs. La pause
    reste persistée en base à travers les redémarrages.
@@ -504,3 +563,8 @@ appeler `POST /api/zone-publication/resume` avec un compte `mte`. Cette reprise
 est volontairement explicite; elle annule aussi une candidate de rollback encore
 en attente. `ADMIN_WRITES_DISABLED` doit déjà être à `false` pour que cet endpoint
 soit accessible.
+
+Pendant la marche avant normale, `historicPublishedThrough` peut temporairement
+dépasser `currentPublishedDate` lorsque le catch-up de J-1 se termine avant
+l'activation de J. Cet état transitoire est attendu; seul le rollback recule
+explicitement le curseur historique avec la date restaurée.

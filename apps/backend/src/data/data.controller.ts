@@ -49,7 +49,7 @@ export class DataController {
     summary:
       'Récupérer les données de références pour les filtres (Bassins versants, Régions, Départements)',
   })
-  refData(): any {
+  refData(): Promise<any> {
     return this.dataService.getRefData();
   }
 
@@ -59,7 +59,7 @@ export class DataController {
       'Récupérer les pourcentages de surface couvertes par des restrictions',
   })
   @CommonApiQueries()
-  area(@Query() query: CommonDataQueryDto): any[] {
+  area(@Query() query: CommonDataQueryDto): Promise<any[]> {
     return this.dataService.areaFindByDate(
       query.dateDebut,
       query.dateFin,
@@ -72,7 +72,7 @@ export class DataController {
   @Get('departement')
   @ApiOperation({ summary: 'Récupérer les départements soumis à restriction' })
   @CommonApiQueries()
-  departement(@Query() query: CommonDataQueryDto): any[] {
+  departement(@Query() query: CommonDataQueryDto): Promise<any[]> {
     return this.dataService.departementFindByDate(
       query.dateDebut,
       query.dateFin,
@@ -87,7 +87,7 @@ export class DataController {
     summary:
       'Récupérer la pondération par commune concernée par des restrictions',
   })
-  duree(): any[] {
+  duree(): Promise<any[]> {
     return this.dataService.duree();
   }
 

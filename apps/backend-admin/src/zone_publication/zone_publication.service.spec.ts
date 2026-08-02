@@ -221,7 +221,7 @@ describe('ZonePublicationService', () => {
       query: jest.fn(
         async (_sql: string, [sourceRevision, version, scheduledFor]) =>
           sourceRevision === '42' &&
-          version === 2 &&
+          version === 3 &&
           scheduledFor === '2026-08-02'
             ? [publication]
             : [],
@@ -329,7 +329,7 @@ describe('ZonePublicationService', () => {
           {
             sourceRevision: '10',
             activeRevision: '9',
-            activeMaterializationVersion: 2,
+            activeMaterializationVersion: 3,
             candidateRevision: null,
             candidateMaterializationVersion: null,
             failureCount: 0,
@@ -339,9 +339,9 @@ describe('ZonePublicationService', () => {
           {
             sourceRevision: '10',
             activeRevision: '9',
-            activeMaterializationVersion: 2,
+            activeMaterializationVersion: 3,
             candidateRevision: '10',
-            candidateMaterializationVersion: 2,
+            candidateMaterializationVersion: 3,
             failureCount: 0,
           },
         ]),
@@ -377,7 +377,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 2,
+          activeMaterializationVersion: 3,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           automaticPublishingPaused: true,
@@ -424,7 +424,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 2,
+          activeMaterializationVersion: 3,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '3',
@@ -439,7 +439,7 @@ describe('ZonePublicationService', () => {
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.any(String),
-      [4500, 2],
+      [4500, 3],
     );
     const query = dataSource.query.mock.calls[0][0] as string;
     expect(query).toContain('failed."sourceRevision" = source."revision"');
@@ -452,7 +452,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 2,
+          activeMaterializationVersion: 3,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '3',
@@ -476,7 +476,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 2,
+          activeMaterializationVersion: 3,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '4',
@@ -506,7 +506,7 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 2,
+          activeMaterializationVersion: 3,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: 0,
@@ -519,7 +519,7 @@ describe('ZonePublicationService', () => {
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.any(String),
-      [4500, 2],
+      [4500, 3],
     );
   });
 
@@ -537,7 +537,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'validated',
               sourceRevision: '5',
-              materializationVersion: 2,
+              materializationVersion: 3,
             },
           ];
         }
@@ -604,7 +604,7 @@ describe('ZonePublicationService', () => {
               id: 'new-build',
               status: 'validated',
               sourceRevision: '10',
-              materializationVersion: 2,
+              materializationVersion: 3,
             },
           ];
         }
@@ -652,7 +652,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 2,
+              materializationVersion: 3,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -711,7 +711,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 2,
+              materializationVersion: 3,
               zoneCount: 10,
               communeLinkCount: 20,
               candidateAt: new Date('2020-01-01T00:00:00Z'),
@@ -784,7 +784,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 2,
+              materializationVersion: 3,
               zoneCount: 10,
               communeLinkCount: 20,
               candidateAt: new Date('2020-01-01T00:00:00Z'),
@@ -833,6 +833,21 @@ describe('ZonePublicationService', () => {
         if (sql.includes(`SET "status" = 'active'`)) {
           return [[{ id: 'candidate' }], 1];
         }
+        if (
+          sql.includes('JOIN "statistic_commune_snapshot" snapshot') &&
+          sql.includes('FOR UPDATE OF snapshot')
+        ) {
+          return [{ snapshotDate: '2026-08-02' }];
+        }
+        if (
+          sql.includes('UPDATE "statistic_commune_snapshot"') &&
+          sql.includes('RETURNING "snapshotDate"')
+        ) {
+          return [[{ snapshotDate: '2026-08-02' }], 1];
+        }
+        if (sql.includes('UPDATE "statistic_publication_state"')) {
+          return [[{ revision: '1' }], 1];
+        }
         if (sql.includes('FROM "zone_publication_state"')) {
           return [
             {
@@ -847,7 +862,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 2,
+              materializationVersion: 3,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -888,6 +903,27 @@ describe('ZonePublicationService', () => {
           sql.includes('"candidatePublicationId" = NULL'),
       ),
     ).toBe(true);
+    const readySnapshotIndex = executed.findIndex((sql) =>
+      sql.includes('JOIN "statistic_commune_snapshot" snapshot'),
+    );
+    const snapshotCompletionIndex = executed.findIndex(
+      (sql) =>
+        sql.includes('UPDATE "statistic_commune_snapshot"') &&
+        sql.includes('RETURNING "snapshotDate"'),
+    );
+    const statisticPublicationIndex = executed.findIndex((sql) =>
+      sql.includes('UPDATE "statistic_publication_state"'),
+    );
+    const otherScopesCompletionIndex = executed.findIndex(
+      (sql) =>
+        sql.includes('UPDATE "statistic_commune_snapshot"') &&
+        sql.includes('"scope" <> \'national\''),
+    );
+    const bootstrapDeletionIndex = executed.findIndex(
+      (sql) =>
+        sql.includes('DELETE FROM "statistic_commune_snapshot"') &&
+        sql.includes('"scope" = \'bootstrap\''),
+    );
     const lockStatements = executed.filter((sql) => sql.includes('FOR UPDATE'));
     expect(lockStatements[0]).toContain('zone_publication_source_state');
     expect(lockStatements[1]).toContain('FROM "zone_publication_state"');
@@ -910,12 +946,523 @@ describe('ZonePublicationService', () => {
         sql.includes('"activePublicationId" = $1'),
     );
     expect(promotionLockIndex).toBeGreaterThan(quorumIndex);
+    expect(readySnapshotIndex).toBeGreaterThan(promotionLockIndex);
+    expect(snapshotCompletionIndex).toBeGreaterThan(readySnapshotIndex);
+    expect(otherScopesCompletionIndex).toBeGreaterThan(snapshotCompletionIndex);
+    expect(bootstrapDeletionIndex).toBeGreaterThan(otherScopesCompletionIndex);
+    expect(statisticPublicationIndex).toBeGreaterThan(snapshotCompletionIndex);
+    expect(statisticPublicationIndex).toBeGreaterThan(bootstrapDeletionIndex);
+    expect(statisticPublicationIndex).toBeLessThan(retiredIndex);
     expect(promotionLockIndex).toBeLessThan(retiredIndex);
     expect(promotionLockIndex).toBeLessThan(activeIndex);
     expect(promotionLockIndex).toBeLessThan(stateSwitchIndex);
+    const readySnapshotSql = executed[readySnapshotIndex];
+    expect(readySnapshotSql).toContain("AT TIME ZONE 'UTC'");
+    expect(readySnapshotSql).toContain('snapshot."scope" = \'national\'');
+    expect(readySnapshotSql).toContain('snapshot."status" = \'ready\'');
+    expect(readySnapshotSql).toContain(
+      'snapshot."sourceRevision" = publication."sourceRevision"',
+    );
+    expect(readySnapshotSql).toContain("'compute:national-daily'");
+    expect(readySnapshotSql).toContain("'compute:historic-catchup'");
+    expect(readySnapshotSql).toContain(
+      `'publicationId', publication."id"::text`,
+    );
+    expect(readySnapshotSql).toContain(
+      `'sourceRevision', publication."sourceRevision"::text`,
+    );
+    expect(readySnapshotSql).toContain(
+      `'materializationVersion', publication."materializationVersion"`,
+    );
+    expect(readySnapshotSql).toContain(
+      `historic_run."scheduledFor" = daily_run."scheduledFor"`,
+    );
+    expect(readySnapshotSql).toContain(`running_daily."status" = 'running'`);
+    expect(readySnapshotSql).not.toContain(
+      `daily_run."scheduledFor" =
+                        (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date`,
+    );
+    expect(readySnapshotSql).toContain(
+      'statistic_state."historicDirtyFrom" IS NULL',
+    );
+    expect(readySnapshotSql).toContain(
+      'statistic_state."historicPublishedThrough" >=',
+    );
+    expect(readySnapshotSql).toContain('historic_cursor."computeMapDate" >=');
+    expect(readySnapshotSql).toContain('historic_cursor."computeStatsDate" >=');
+    expect(readySnapshotSql).toContain(
+      'statistic_state."currentPublishedDate" IS NULL',
+    );
+    expect(readySnapshotSql).toContain(
+      'FOR UPDATE OF snapshot, statistic_state, historic_cursor',
+    );
+    const runningDailyGuardStart = readySnapshotSql.indexOf(
+      'FROM "external_publication_run" running_daily',
+    );
+    const runningDailyGuard = readySnapshotSql.slice(
+      runningDailyGuardStart,
+      readySnapshotSql.indexOf(
+        'FROM "external_publication_run" daily_run',
+        runningDailyGuardStart,
+      ),
+    );
+    expect(runningDailyGuard).toContain(`running_daily."status" = 'running'`);
+    expect(runningDailyGuard).toContain(
+      'statistic_state."currentPublishedDate" IS NULL',
+    );
+    expect(runningDailyGuard).toContain(
+      `(publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date`,
+    );
+    expect(runningDailyGuard).not.toContain('sourceRevision');
+    expect(runningDailyGuard).not.toContain('materializationVersion');
+    expect(executed[statisticPublicationIndex]).toContain(
+      '"historicDirtyFrom" IS NULL',
+    );
+    expect(executed[statisticPublicationIndex]).toContain(
+      '"revision" = "revision" + 1',
+    );
+    expect(executed[statisticPublicationIndex]).toContain(
+      '"currentPublishedDate" = $1::date',
+    );
+    expect(executed[statisticPublicationIndex]).toContain(
+      'WHEN "currentPublishedDate" IS NULL THEN $1::date - 1',
+    );
   });
 
-  it('reactivates a retired publication only after every live instance preloads it', async () => {
+  it('refuses activation without the matching ready national snapshot', async () => {
+    const executed: string[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes('pg_try_advisory_xact_lock')) {
+          return [{ locked: true }];
+        }
+        if (sql.includes('JOIN "statistic_commune_snapshot" snapshot')) {
+          return [];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: 'candidate',
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication"')) {
+          return [
+            {
+              id: 'candidate',
+              status: 'candidate',
+              sourceRevision: '7',
+              materializationVersion: 3,
+              zoneCount: 10,
+              communeLinkCount: 20,
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '7' }];
+        }
+        if (sql.includes('FROM "zone_publication_instance"')) {
+          return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(
+      service.activateWhenReady({ minimumReadyInstances: 2 }),
+    ).rejects.toThrow(
+      'Publication candidate is waiting for certified current statistics or historic catch-up',
+    );
+
+    expect(
+      executed.some((sql) => sql.includes(`SET "status" = 'retired'`)),
+    ).toBe(false);
+    expect(
+      executed.some((sql) => sql.includes(`SET "status" = 'active'`)),
+    ).toBe(false);
+    expect(
+      executed.some((sql) =>
+        sql.includes('UPDATE "statistic_publication_state"'),
+      ),
+    ).toBe(false);
+    expect(
+      executed.some(
+        (sql) =>
+          sql.includes('UPDATE "zone_publication_state"') &&
+          sql.includes('"activePublicationId" = $1'),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps rollback activation read-only while the global compute lock is busy', async () => {
+    const executed: string[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes("hashtext('zone-compute-global')")) {
+          return [{ locked: false }];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: 'retired',
+            },
+          ];
+        }
+        if (
+          sql.includes('FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'retired',
+              status: 'retired',
+              sourceRevision: '42',
+              materializationVersion: 3,
+              zoneCount: 10,
+              communeLinkCount: 20,
+              sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '42' }];
+        }
+        if (sql.includes('FROM "zone_publication_instance"')) {
+          return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        return [];
+      }),
+    };
+    const service = new ZonePublicationService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(
+      service.activateWhenReady({ minimumReadyInstances: 2 }),
+    ).resolves.toEqual({
+      status: 'busy',
+      publicationId: 'retired',
+      liveInstances: 2,
+      readyInstances: 2,
+      rollback: true,
+    });
+    expect(
+      executed.some(
+        (sql) =>
+          /^(?:UPDATE|DELETE|INSERT)\b/i.test(sql.trim()) ||
+          sql.includes('WITH target AS MATERIALIZED'),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps rollback activation read-only while the historic compute lock is busy', async () => {
+    const executed: string[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes("hashtext('zone-compute-global')")) {
+          return [{ locked: true }];
+        }
+        if (sql.includes("hashtext('zone-compute-historic')")) {
+          return [{ locked: false }];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: 'retired',
+            },
+          ];
+        }
+        if (
+          sql.includes('FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'retired',
+              status: 'retired',
+              sourceRevision: '42',
+              materializationVersion: 3,
+              zoneCount: 10,
+              communeLinkCount: 20,
+              sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '42' }];
+        }
+        if (sql.includes('FROM "zone_publication_instance"')) {
+          return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        return [];
+      }),
+    };
+    const service = new ZonePublicationService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(
+      service.activateWhenReady({ minimumReadyInstances: 2 }),
+    ).resolves.toEqual({
+      status: 'busy',
+      publicationId: 'retired',
+      liveInstances: 2,
+      readyInstances: 2,
+      rollback: true,
+    });
+    expect(
+      executed.some(
+        (sql) =>
+          /^(?:UPDATE|DELETE|INSERT)\b/i.test(sql.trim()) ||
+          sql.includes('WITH target AS MATERIALIZED'),
+      ),
+    ).toBe(false);
+  });
+
+  it('blocks rollback activation while historic statistics are dirty', async () => {
+    const executed: string[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes('pg_try_advisory_xact_lock')) {
+          return [{ locked: true }];
+        }
+        if (sql.includes('FROM "statistic_publication_state"')) {
+          return [
+            {
+              historicDirtyFrom: '2026-07-31',
+              historicDirtyThrough: '2026-08-01',
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: 'retired',
+            },
+          ];
+        }
+        if (
+          sql.includes('FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'retired',
+              status: 'retired',
+              sourceRevision: '42',
+              materializationVersion: 3,
+              zoneCount: 10,
+              communeLinkCount: 20,
+              sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '42' }];
+        }
+        if (sql.includes('FROM "zone_publication_instance"')) {
+          return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        return [];
+      }),
+    };
+    const service = new ZonePublicationService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(
+      service.activateWhenReady({ minimumReadyInstances: 2 }),
+    ).rejects.toThrow(
+      'Rollback publication retired is blocked by dirty historic statistics',
+    );
+    expect(
+      executed.some((sql) => sql.includes('WITH target AS MATERIALIZED')),
+    ).toBe(false);
+    expect(
+      executed.some((sql) => sql.includes(`SET "status" = 'active'`)),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['source revision', '41', 3],
+    ['materialization version', '42', 2],
+  ])(
+    'cancels a prepared rollback when its %s changed before activation',
+    async (_reason, sourceRevision, materializationVersion) => {
+      const executed: Array<{ sql: string; params?: unknown[] }> = [];
+      const manager = {
+        query: jest.fn(async (sql: string, params?: unknown[]) => {
+          executed.push({ sql, params });
+          if (sql.includes('pg_try_advisory_xact_lock')) {
+            return [{ locked: true }];
+          }
+          if (sql.includes('FROM "zone_publication_state"')) {
+            return [
+              {
+                activePublicationId: 'active',
+                candidatePublicationId: 'retired',
+              },
+            ];
+          }
+          if (
+            sql.includes('FROM "zone_publication"') &&
+            sql.includes('FOR UPDATE')
+          ) {
+            return [
+              {
+                id: 'retired',
+                status: 'retired',
+                sourceRevision,
+                materializationVersion,
+                zoneCount: 10,
+                communeLinkCount: 20,
+                sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
+              },
+            ];
+          }
+          if (sql.includes('FROM "zone_publication_source_state"')) {
+            return [{ revision: '42' }];
+          }
+          if (sql.includes('FROM "zone_publication_instance"')) {
+            return [{ liveInstances: 2, readyInstances: 2 }];
+          }
+          return [];
+        }),
+      };
+      const service = new ZonePublicationService({
+        transaction: jest.fn((_isolation, callback) => callback(manager)),
+      } as any);
+
+      await expect(
+        service.activateWhenReady({ minimumReadyInstances: 2 }),
+      ).resolves.toEqual({
+        status: 'rollback_cancelled',
+        publicationId: 'retired',
+        liveInstances: 2,
+        readyInstances: 2,
+        rollback: true,
+      });
+      expect(
+        executed.some(
+          ({ sql, params }) =>
+            sql.includes('"candidatePublicationId" = NULL') &&
+            sql.includes('"candidateRequestedAt" = NULL') &&
+            params?.[0] === 'retired',
+        ),
+      ).toBe(true);
+      expect(
+        executed.some(({ sql }) =>
+          sql.includes('FROM "statistic_commune_snapshot"'),
+        ),
+      ).toBe(false);
+      expect(
+        executed.some(({ sql }) => sql.includes(`SET "status" = 'active'`)),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    [
+      'has no certified national statistic snapshot',
+      [],
+      'Rollback publication retired has no certified national statistic snapshot',
+    ],
+    [
+      'has an incomplete snapshot on the target timeline',
+      [
+        {
+          snapshotDate: '2026-08-01',
+          scope: 'national',
+          status: 'completed',
+          sourceRevision: '42',
+        },
+        {
+          snapshotDate: '2026-07-31',
+          scope: '65',
+          status: 'failed',
+          sourceRevision: '42',
+        },
+      ],
+      'Rollback publication retired is blocked by 1 incomplete statistic snapshot(s) on or before 2026-08-01',
+    ],
+  ])(
+    'blocks rollback activation when it %s',
+    async (_reason, snapshots, expectedError) => {
+      const executed: string[] = [];
+      const manager = {
+        query: jest.fn(async (sql: string) => {
+          executed.push(sql);
+          if (sql.includes('pg_try_advisory_xact_lock')) {
+            return [{ locked: true }];
+          }
+          if (sql.includes('FROM "zone_publication_state"')) {
+            return [
+              {
+                activePublicationId: 'active',
+                candidatePublicationId: 'retired',
+              },
+            ];
+          }
+          if (
+            sql.includes('FROM "zone_publication"') &&
+            sql.includes('FOR UPDATE')
+          ) {
+            return [
+              {
+                id: 'retired',
+                status: 'retired',
+                sourceRevision: '42',
+                materializationVersion: 3,
+                zoneCount: 10,
+                communeLinkCount: 20,
+                sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
+              },
+            ];
+          }
+          if (sql.includes('FROM "zone_publication_source_state"')) {
+            return [{ revision: '42' }];
+          }
+          if (sql.includes('FROM "zone_publication_instance"')) {
+            return [{ liveInstances: 2, readyInstances: 2 }];
+          }
+          if (sql.includes('FROM "statistic_publication_state"')) {
+            return [{ historicDirtyFrom: null, historicDirtyThrough: null }];
+          }
+          if (sql.includes('FROM "statistic_commune_snapshot"')) {
+            return snapshots;
+          }
+          return [];
+        }),
+      };
+      const service = new ZonePublicationService({
+        transaction: jest.fn((_isolation, callback) => callback(manager)),
+      } as any);
+
+      await expect(
+        service.activateWhenReady({ minimumReadyInstances: 2 }),
+      ).rejects.toThrow(expectedError);
+      expect(
+        executed.some((sql) => sql.includes('WITH target AS MATERIALIZED')),
+      ).toBe(false);
+      expect(
+        executed.some((sql) => sql.includes(`SET "status" = 'active'`)),
+      ).toBe(false);
+    },
+  );
+
+  it('reactivates a retired publication and rebuilds its month without future daily data', async () => {
     const executed: Array<{ sql: string; params?: unknown[] }> = [];
     const manager = {
       query: jest.fn(async (sql: string, params?: unknown[]) => {
@@ -925,6 +1472,22 @@ describe('ZonePublicationService', () => {
         }
         if (sql.includes(`SET "status" = 'active'`)) {
           return [[{ id: 'retired-publication' }], 1];
+        }
+        if (sql.includes('UPDATE "statistic_publication_state"')) {
+          return [[{ revision: '9' }], 1];
+        }
+        if (
+          sql.includes('WITH target AS MATERIALIZED') &&
+          sql.includes('UPDATE "statistic_commune" statistic')
+        ) {
+          return [
+            {
+              targetCount: 1,
+              targetDate: '2026-08-01',
+              expected: 2,
+              affected: 2,
+            },
+          ];
         }
         if (sql.includes('FROM "zone_publication_state"')) {
           return [
@@ -943,19 +1506,36 @@ describe('ZonePublicationService', () => {
             {
               id: 'retired-publication',
               status: 'retired',
-              sourceRevision: 'older-source',
-              materializationVersion: 1,
+              sourceRevision: 'current-source',
+              materializationVersion: 3,
               zoneCount: 10,
               communeLinkCount: 20,
               contentFingerprint: 'a'.repeat(64),
+              sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
             },
           ];
         }
         if (sql.includes('FROM "zone_publication_source_state"')) {
-          return [{ revision: 'newer-source' }];
+          return [{ revision: 'current-source' }];
         }
         if (sql.includes('FROM "zone_publication_instance"')) {
           return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        if (sql.includes('FROM "statistic_publication_state"')) {
+          return [{ historicDirtyFrom: null, historicDirtyThrough: null }];
+        }
+        if (
+          sql.includes('FROM "statistic_commune_snapshot"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              snapshotDate: '2026-08-01',
+              scope: 'national',
+              status: 'completed',
+              sourceRevision: 'current-source',
+            },
+          ];
         }
         return [];
       }),
@@ -1000,6 +1580,165 @@ describe('ZonePublicationService', () => {
           params?.[1] === true,
       ),
     ).toBe(true);
+    expect(
+      executed.some(
+        ({ sql }) =>
+          sql.includes('pg_try_advisory_xact_lock') &&
+          sql.includes("hashtext('zone-compute-global')"),
+      ),
+    ).toBe(true);
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes('DELETE FROM "statistic_commune_snapshot"') &&
+          sql.includes('"snapshotDate" > $1::date') &&
+          params?.[0] === '2026-08-01',
+      ),
+    ).toBe(true);
+    const rollbackMonthlyIndex = executed.findIndex(
+      ({ sql }) =>
+        sql.includes('WITH target AS MATERIALIZED') &&
+        sql.includes('UPDATE "statistic_commune" statistic'),
+    );
+    const globalComputeLockIndex = executed.findIndex(({ sql }) =>
+      sql.includes("hashtext('zone-compute-global')"),
+    );
+    const historicComputeLockIndex = executed.findIndex(({ sql }) =>
+      sql.includes("hashtext('zone-compute-historic')"),
+    );
+    const statisticPublicationIndex = executed.findIndex(({ sql }) =>
+      sql.includes('UPDATE "statistic_publication_state"'),
+    );
+    expect(dataSource.transaction).toHaveBeenCalledWith(
+      'SERIALIZABLE',
+      expect.any(Function),
+    );
+    expect(globalComputeLockIndex).toBeGreaterThan(-1);
+    expect(historicComputeLockIndex).toBeGreaterThan(globalComputeLockIndex);
+    expect(historicComputeLockIndex).toBeLessThan(rollbackMonthlyIndex);
+    expect(rollbackMonthlyIndex).toBeGreaterThan(-1);
+    expect(rollbackMonthlyIndex).toBeLessThan(statisticPublicationIndex);
+    expect(executed[rollbackMonthlyIndex].params).toEqual([
+      'retired-publication',
+    ]);
+    expect(executed[rollbackMonthlyIndex].sql).toContain(
+      `daily.value ->> 'date' >= target."monthStart"::text`,
+    );
+    expect(executed[rollbackMonthlyIndex].sql).toContain(
+      `daily.value ->> 'date' <= target."targetDate"::text`,
+    );
+    expect(executed[rollbackMonthlyIndex].sql).toContain(
+      `'date', target."targetMonth"`,
+    );
+    expect(
+      executed.some(
+        ({ sql, params }) =>
+          sql.includes('UPDATE "statistic_publication_state"') &&
+          sql.includes('"revision" = statistic_state."revision" + 1') &&
+          sql.includes('"currentPublishedDate" = (') &&
+          sql.includes('"historicPublishedThrough" = LEAST(') &&
+          sql.includes("AT TIME ZONE 'UTC'") &&
+          params?.[0] === 'retired-publication',
+      ),
+    ).toBe(true);
+  });
+
+  it('aborts rollback before revision and map switch when the monthly rebuild is incomplete', async () => {
+    const executed: string[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes('pg_try_advisory_xact_lock')) {
+          return [{ locked: true }];
+        }
+        if (
+          sql.includes('WITH target AS MATERIALIZED') &&
+          sql.includes('UPDATE "statistic_commune" statistic')
+        ) {
+          return [
+            {
+              targetCount: 1,
+              targetDate: '2026-08-01',
+              expected: 2,
+              affected: 1,
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'publication-2026-08-02',
+              candidatePublicationId: 'publication-2026-08-01',
+            },
+          ];
+        }
+        if (
+          sql.includes('FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'publication-2026-08-01',
+              status: 'retired',
+              sourceRevision: 'current-source',
+              materializationVersion: 3,
+              zoneCount: 10,
+              communeLinkCount: 20,
+              sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
+            },
+          ];
+        }
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: 'current-source' }];
+        }
+        if (sql.includes('FROM "zone_publication_instance"')) {
+          return [{ liveInstances: 2, readyInstances: 2 }];
+        }
+        if (sql.includes('FROM "statistic_publication_state"')) {
+          return [{ historicDirtyFrom: null, historicDirtyThrough: null }];
+        }
+        if (
+          sql.includes('FROM "statistic_commune_snapshot"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              snapshotDate: '2026-08-01',
+              scope: 'national',
+              status: 'completed',
+              sourceRevision: 'current-source',
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(
+      service.activateWhenReady({ minimumReadyInstances: 2 }),
+    ).rejects.toThrow(
+      'Rollback monthly statistic rebuild failed for publication publication-2026-08-01: 1/2 rows updated',
+    );
+
+    expect(
+      executed.some((sql) =>
+        sql.includes('UPDATE "statistic_publication_state"'),
+      ),
+    ).toBe(false);
+    expect(
+      executed.some((sql) => sql.includes(`SET "status" = 'active'`)),
+    ).toBe(false);
+    expect(
+      executed.some(
+        (sql) =>
+          sql.includes('UPDATE "zone_publication_state"') &&
+          sql.includes('"activePublicationId" = $1'),
+      ),
+    ).toBe(false);
   });
 
   it('retries activation later when stable promotion owns the shared lock', async () => {
@@ -1024,7 +1763,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 2,
+              materializationVersion: 3,
               zoneCount: 10,
               communeLinkCount: 20,
             },

@@ -432,6 +432,7 @@ export class ZonesService implements OnModuleInit {
           publicationState.activePublicationId,
           ['active'],
         );
+        snapshot = await this.rebuildActiveDepartmentSituation(snapshot);
       } else {
         const zoneComputationDate = await this.getZoneComputationDate();
         snapshot = await this.buildCacheSnapshot(zoneComputationDate);
@@ -656,34 +657,22 @@ export class ZonesService implements OnModuleInit {
   ): Promise<ZoneCacheSnapshot> {
     const cached = this.publicationSnapshots.get(publicationId);
     if (cached) {
-      if (
-        cached.publication &&
-        !allowedStatuses.includes(cached.publication.status)
-      ) {
-        const publication = await this.zonePublicationRepository.findOne({
-          select: { id: true, status: true, activatedAt: true },
-          where: { id: publicationId },
-        });
-        if (!publication || !allowedStatuses.includes(publication.status)) {
-          throw this.publicationGone();
-        }
-        const refreshedSnapshot = Object.freeze({
-          ...cached,
-          publication: Object.freeze({
-            ...cached.publication,
-            status: publication.status,
-            activatedAt:
-              publication.activatedAt || cached.publication.activatedAt,
-          }),
-        });
-        this.publicationSnapshots.set(publicationId, refreshedSnapshot);
-        return refreshedSnapshot;
-      }
-      return cached;
+      return this.ensurePublicationSnapshotStatus(
+        cached,
+        publicationId,
+        allowedStatuses,
+      );
     }
 
     const pending = this.publicationLoadPromises.get(publicationId);
-    if (pending) return pending;
+    if (pending) {
+      const snapshot = await pending;
+      return this.ensurePublicationSnapshotStatus(
+        snapshot,
+        publicationId,
+        allowedStatuses,
+      );
+    }
 
     const load = this.buildPublicationSnapshot(
       publicationId,
@@ -698,6 +687,42 @@ export class ZonesService implements OnModuleInit {
     } finally {
       this.publicationLoadPromises.delete(publicationId);
     }
+  }
+
+  private async ensurePublicationSnapshotStatus(
+    snapshot: ZoneCacheSnapshot,
+    publicationId: string,
+    allowedStatuses: ZonePublicationStatus[],
+  ): Promise<ZoneCacheSnapshot> {
+    if (
+      !snapshot.publication ||
+      allowedStatuses.includes(snapshot.publication.status)
+    ) {
+      return snapshot;
+    }
+
+    const publication = await this.zonePublicationRepository.findOne({
+      select: { id: true, status: true, activatedAt: true },
+      where: { id: publicationId },
+    });
+    if (!publication || !allowedStatuses.includes(publication.status)) {
+      throw this.publicationGone();
+    }
+    const refreshedSnapshot = Object.freeze({
+      ...snapshot,
+      publication: Object.freeze({
+        ...snapshot.publication,
+        status: publication.status,
+        activatedAt:
+          publication.activatedAt || snapshot.publication.activatedAt,
+      }),
+    });
+    // A candidate promoted to active is cached only after its department
+    // situation has been rebuilt from the certified statistics.
+    if (publication.status !== 'active') {
+      this.publicationSnapshots.set(publicationId, refreshedSnapshot);
+    }
+    return refreshedSnapshot;
   }
 
   private async preloadCandidateSnapshot(
@@ -985,10 +1010,31 @@ export class ZonesService implements OnModuleInit {
     return Object.freeze(value);
   }
 
+  private async rebuildActiveDepartmentSituation(
+    snapshot: ZoneCacheSnapshot,
+  ): Promise<ZoneCacheSnapshot> {
+    if (!snapshot.publication) return snapshot;
+
+    const departmentSituation = this.deepFreeze([
+      ...(await this.departementsService.buildSituationSnapshot(
+        snapshot.zones,
+        snapshot.aggregate,
+      )),
+    ]);
+
+    return Object.freeze({
+      ...snapshot,
+      departmentSituation,
+    });
+  }
+
   private publishActiveSnapshot(snapshot: ZoneCacheSnapshot): void {
     this.departementsService.publishSituation([
       ...snapshot.departmentSituation,
     ]);
+    if (snapshot.publication) {
+      this.publicationSnapshots.set(snapshot.publication.id, snapshot);
+    }
     this.activeSnapshot = snapshot;
   }
 
@@ -1658,7 +1704,13 @@ export class ZonesService implements OnModuleInit {
       throw this.publicationUnavailable(error);
     }
     if (publicationId === this.availablePublicationState.activePublicationId) {
-      this.publishActiveSnapshot(snapshot);
+      const publishableSnapshot =
+        await this.rebuildActiveDepartmentSituation(snapshot);
+      const confirmedPublicationState = await this.getPublicationState();
+      if (publicationId === confirmedPublicationState.activePublicationId) {
+        snapshot = publishableSnapshot;
+        this.publishActiveSnapshot(snapshot);
+      }
     }
     this.prunePublicationSnapshots();
     return snapshot;

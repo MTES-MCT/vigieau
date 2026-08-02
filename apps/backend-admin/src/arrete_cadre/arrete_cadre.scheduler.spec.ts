@@ -104,6 +104,7 @@ describe('ArreteCadreScheduler', () => {
       getSucceededRunMetadata: jest.fn().mockResolvedValue({
         publicationId: 'publication-1',
         sourceRevision: '42',
+        materializationVersion: 3,
       }),
     };
     const zonePublicationService = {
@@ -222,6 +223,9 @@ describe('ArreteCadreScheduler', () => {
       scheduledFor: '2026-08-01',
       sourceRevision: '42',
     });
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).toHaveBeenCalledWith('2026-07-31', '42');
 
     expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
       1,
@@ -229,7 +233,7 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { sourceRevision: '42' } },
+      { identity: { sourceRevision: '42', materializationVersion: 3 } },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
       2,
@@ -240,6 +244,7 @@ describe('ArreteCadreScheduler', () => {
       {
         identity: {
           sourceRevision: '42',
+          materializationVersion: 3,
         },
       },
     );
@@ -289,7 +294,7 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { sourceRevision: '41' } },
+      { identity: { sourceRevision: '41', materializationVersion: 3 } },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
       2,
@@ -297,7 +302,7 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { sourceRevision: '42' } },
+      { identity: { sourceRevision: '42', materializationVersion: 3 } },
     );
   });
 
