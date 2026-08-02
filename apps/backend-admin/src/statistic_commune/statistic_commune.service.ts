@@ -781,9 +781,12 @@ export class StatisticCommuneService {
       `
         WITH completed_snapshot AS (
           UPDATE "statistic_commune_snapshot"
-          SET "status" = $3,
+          SET "status" = $3::varchar,
               "processedCommuneCount" = $4,
-              "completedAt" = CASE WHEN $3 = 'ready' THEN NULL ELSE now() END,
+              "completedAt" = CASE
+                WHEN $3::varchar = 'ready' THEN NULL
+                ELSE now()
+              END,
               "lastError" = NULL,
               "updatedAt" = now()
           WHERE "snapshotDate" = $1

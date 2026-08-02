@@ -133,6 +133,12 @@ jobs:
         run: node scripts/verify-admin-migrations.mjs
         env:
           MIGRATION_VERIFY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify statistic snapshot finalization against PostgreSQL
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/statistic_commune/statistic_commune.postgres.spec.ts
+        env:
+          STATISTIC_COMMUNE_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Create the upgrade database
         run: >-
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres
