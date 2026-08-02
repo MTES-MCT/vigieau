@@ -126,6 +126,14 @@ interrompt le lot, remet les curseurs à la première date sale et interdit la
 certification de snapshots produits sous une autre révision. Les fichiers
 GeoJSON et PMTiles datés du lot sont supprimés en `finally`, succès ou échec.
 
+Pendant un bootstrap, n'augmenter la taille des chunks qu'après avoir mesuré un
+lot complet sur l'environnement cible. La durée projetée du nouveau lot doit
+conserver une marge d'au moins 30 minutes sous le timeout worker de quatre
+heures. Un chunk plus long réduit les tris globaux de fin de lot, mais
+n'accélère pas le calcul journalier. Comparer de la même façon toute hausse de
+`COMMUNE_STATISTICS_BATCH_SIZE` sur plusieurs journées et revenir à la valeur
+précédente lorsqu'aucun gain net n'est mesuré.
+
 Les trois seuils relatifs suivants sont optionnels et désactivés par défaut. Ils
 ne doivent être définis qu'après analyse métier, car le nombre de zones, de
 liens et leur densité peuvent légitimement baisser avec la saison :
@@ -408,12 +416,14 @@ n'effectue volontairement aucune écriture.
     `pendingApplicationDepartments=0`, `blockedDepartments=0`, `failedBatches=0`
     et `blockedBatches=0`. Aucun front, cache ou dataset public ne doit être promu
     avant que ces compteurs soient tous conformes.
-    Pendant la phase d'observation, lancer le smoke avec
-    `VIGIEAU_EXPECT_SANDRE_MODES=audit`,
+    Pendant la phase d'observation, utiliser directement le health de
+    synchronisation avec le mode attendu `audit`. Le smoke admin complet exige
+    aussi zéro référence SANDRE opérationnelle invalide : il peut donc échouer
+    normalement avant l'application des décisions auditées. Après la bascule,
+    le smoke final doit être lancé avec `VIGIEAU_EXPECT_SANDRE_MODES=safe`,
     `VIGIEAU_EXPECT_DEPARTMENT_COUNT=101` et
-    `VIGIEAU_EXPECT_MAP_ARCHIVES=disabled`. Après la bascule, le smoke final doit
-    être relancé avec `VIGIEAU_EXPECT_SANDRE_MODES=safe`; ne jamais autoriser les
-    deux modes dans ce contrôle de sortie.
+    `VIGIEAU_EXPECT_MAP_ARCHIVES=disabled`; ne jamais autoriser les deux modes
+    dans ce contrôle de sortie.
 
 11. Exécuter seulement maintenant le smoke admin complet avec les URL front et
     API preprod. Comme aucun dataset data.gouv.fr de test n'est configuré,
