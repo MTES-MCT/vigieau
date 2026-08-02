@@ -201,23 +201,62 @@ export class ZoneAlerteService {
       .where('zone_alerte.id = :id', { id })
       .getRawOne();
 
-    za.arreteCadreZoneAlerteCommunes = (
-      await this.zoneAlerteRepository
-        .createQueryBuilder('zone_alerte')
-        .select(['zone_alerte.id'])
-        .addSelect(['aczac.id', 'communes.id'])
-        .leftJoin(
-          'zone_alerte.arreteCadreZoneAlerteCommunes',
-          'aczac',
-          'aczac.arreteCadreId IN(:...acIds)',
-          { acIds: acIds },
-        )
-        .leftJoin('aczac.communes', 'communes')
-        .where('zone_alerte.id = :id', { id })
-        .getOne()
-    ).arreteCadreZoneAlerteCommunes;
+    za.arreteCadreZoneAlerteCommunes = [];
+    if (acIds?.length) {
+      za.arreteCadreZoneAlerteCommunes = (
+        await this.zoneAlerteRepository
+          .createQueryBuilder('zone_alerte')
+          .select(['zone_alerte.id'])
+          .addSelect(['aczac.id', 'communes.id'])
+          .leftJoin(
+            'zone_alerte.arreteCadreZoneAlerteCommunes',
+            'aczac',
+            'aczac.arreteCadreId IN(:...acIds)',
+            { acIds },
+          )
+          .leftJoin('aczac.communes', 'communes')
+          .where('zone_alerte.id = :id', { id })
+          .getOne()
+      ).arreteCadreZoneAlerteCommunes;
+    }
 
     return za;
+  }
+
+  async findGeometriesByIds(
+    ids: readonly number[],
+  ): Promise<ReadonlyMap<number, string>> {
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) {
+      return new Map();
+    }
+
+    const rows: Array<{ id: number; geom: string | null }> =
+      await this.dataSource.query(
+        `
+          SELECT
+            zone.id AS "id",
+            ST_AsGeoJSON(ST_Transform(zone.geom, 4326)) AS "geom"
+          FROM "zone_alerte" zone
+          WHERE zone.id = ANY($1::int[])
+          ORDER BY zone.id
+        `,
+        [uniqueIds],
+      );
+    const geometries = new Map<number, string>();
+    for (const row of rows) {
+      if (row.geom) {
+        geometries.set(Number(row.id), row.geom);
+      }
+    }
+
+    const missingIds = uniqueIds.filter((id) => !geometries.has(id));
+    if (missingIds.length > 0) {
+      throw new Error(
+        `Missing geometry for alert zone(s): ${missingIds.join(', ')}`,
+      );
+    }
+    return geometries;
   }
 
   findByDepartement(departementCode: string): Promise<ZoneAlerte[]> {

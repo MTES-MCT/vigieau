@@ -2,6 +2,8 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService as NestConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Departement } from '@shared/entities/departement.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
+import { Usage } from '@shared/entities/usage.entity';
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { ZoneAlerteComputedHistoric } from '@shared/entities/zone_alerte_computed_historic.entity';
@@ -107,70 +109,13 @@ export class ZoneAlerteComputedHistoricService {
       m.add(1, 'days')
     ) {
       const ars = await this.arreteResrictionService.findByDate(m);
+      const arIds = ars.map((ar) => ar.id);
       const zas: ZoneAlerte[] = <ZoneAlerte[]>(
-        await this.zoneAlerteService.findByArreteRestriction(
-          ars.map((ar) => ar.id),
-        )
+        await this.zoneAlerteService.findByArreteRestriction(arIds)
       );
 
-      const zasFormated = await Promise.all(
-        zas.map(async (z) => {
-          z.geom = JSON.parse(
-            (await this.zoneAlerteService.findOne(z.id)).geom,
-          );
-          return {
-            type: 'Feature',
-            geometry: z.geom,
-            properties: {
-              id: z.id,
-              idSandre: z.idSandre,
-              nom: z.nom,
-              code: z.code,
-              type: z.type,
-              niveauGravite: z.restrictions[0].niveauGravite,
-              departement: z.departement,
-              arreteRestriction: {
-                id: z.restrictions[0].arreteRestriction.id,
-                numero: z.restrictions[0].arreteRestriction.numero,
-                dateDebut: z.restrictions[0].arreteRestriction.dateDebut,
-                dateFin: z.restrictions[0].arreteRestriction.dateFin,
-                dateSignature:
-                  z.restrictions[0].arreteRestriction.dateSignature,
-                fichier: z.restrictions[0].arreteRestriction.fichier?.url,
-              },
-              restrictions: z.restrictions[0].usages.map((u) => {
-                let d;
-                switch (z.restrictions[0].niveauGravite) {
-                  case 'vigilance':
-                    d = u.descriptionVigilance;
-                    break;
-                  case 'alerte':
-                    d = u.descriptionAlerte;
-                    break;
-                  case 'alerte_renforcee':
-                    d = u.descriptionAlerteRenforcee;
-                    break;
-                  case 'crise':
-                    d = u.descriptionCrise;
-                    break;
-                }
-                return {
-                  nom: u.nom,
-                  thematique: u.thematique.nom,
-                  concerneParticulier: u.concerneParticulier,
-                  concerneEntreprise: u.concerneEntreprise,
-                  concerneCollectivite: u.concerneCollectivite,
-                  concerneExploitation: u.concerneExploitation,
-                  concerneEso: u.concerneEso,
-                  concerneEsu: u.concerneEsu,
-                  concerneAep: u.concerneAep,
-                  description: d,
-                };
-              }),
-            },
-          };
-        }),
-      );
+      const historicZones = await this.formatLegacyHistoricZones(zas, arIds, m);
+      const zasFormated = historicZones.features;
 
       const geojson = {
         type: 'FeatureCollection',
@@ -218,7 +163,7 @@ export class ZoneAlerteComputedHistoricService {
         'geojson/',
       );
       if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
-        const zonesForStatistics = zas.map((zone) => {
+        const zonesForStatistics = historicZones.zones.map((zone) => {
           const computedZone = zone as unknown as ZoneAlerteComputed;
           computedZone.restriction = zone.restrictions[0];
           return computedZone;
@@ -236,7 +181,7 @@ export class ZoneAlerteComputedHistoricService {
           true,
         );
         await this.statisticService.computeDepartementsSituationHistoric(
-          zas,
+          historicZones.zones,
           m.format('YYYY-MM-DD'),
         );
         const completedThrough = m.format('YYYY-MM-DD');
@@ -274,6 +219,152 @@ export class ZoneAlerteComputedHistoricService {
       }
     }
     return { mapCursor, statsCursor, mapGeneration, statsGeneration };
+  }
+
+  private async formatLegacyHistoricZones(
+    zones: ZoneAlerte[],
+    activeArIds: number[],
+    date: Moment,
+  ) {
+    const dateString = date.format('YYYY-MM-DD');
+    const activeArIdSet = new Set(activeArIds);
+    const normalizedZones = zones.map((zone) => {
+      const restriction = zone.restrictions?.find((candidate) =>
+        activeArIdSet.has(candidate.arreteRestriction?.id),
+      );
+      if (!restriction) {
+        throw new Error(
+          `Missing applicable restriction for historic zone ${zone.id} on ${dateString}`,
+        );
+      }
+      this.assertHistoricRestrictionLoaded(restriction, zone.id, dateString);
+      return Object.assign(Object.create(Object.getPrototypeOf(zone)), zone, {
+        restrictions: [restriction],
+      }) as ZoneAlerte;
+    });
+    const rawGeometries = await this.zoneAlerteService.findGeometriesByIds(
+      normalizedZones.map((zone) => zone.id),
+    );
+
+    const features = normalizedZones.map((zone) => {
+      const restriction = zone.restrictions[0];
+      const geometry = this.parseHistoricGeometry(
+        rawGeometries.get(zone.id),
+        zone.id,
+        dateString,
+      );
+      zone.geom = geometry;
+      return {
+        type: 'Feature',
+        geometry,
+        properties: {
+          id: zone.id,
+          idSandre: zone.idSandre,
+          nom: zone.nom,
+          code: zone.code,
+          type: zone.type,
+          niveauGravite: restriction.niveauGravite,
+          departement: zone.departement,
+          arreteRestriction: {
+            id: restriction.arreteRestriction.id,
+            numero: restriction.arreteRestriction.numero,
+            dateDebut: restriction.arreteRestriction.dateDebut,
+            dateFin: restriction.arreteRestriction.dateFin,
+            dateSignature: restriction.arreteRestriction.dateSignature,
+            fichier: restriction.arreteRestriction.fichier?.url,
+          },
+          restrictions: this.formatHistoricUsages(
+            restriction,
+            zone.id,
+            dateString,
+          ),
+        },
+      };
+    });
+    return { features, zones: normalizedZones };
+  }
+
+  private assertHistoricRestrictionLoaded(
+    restriction: Restriction,
+    zoneId: number,
+    date: string,
+  ): void {
+    if (!restriction.arreteRestriction) {
+      throw new Error(`Missing decree for historic zone ${zoneId} on ${date}`);
+    }
+    if (!Array.isArray(restriction.usages)) {
+      throw new Error(
+        `Usages were not loaded for historic zone ${zoneId} on ${date}`,
+      );
+    }
+  }
+
+  private formatHistoricUsages(
+    restriction: Restriction,
+    zoneId: number,
+    date: string,
+  ) {
+    return restriction.usages.map((usage) => {
+      if (!usage.thematique?.nom) {
+        throw new Error(
+          `Missing theme for historic zone ${zoneId} usage ${usage.id} on ${date}`,
+        );
+      }
+      return this.formatHistoricUsage(usage, restriction);
+    });
+  }
+
+  private formatHistoricUsage(usage: Usage, restriction: Restriction) {
+    let description;
+    switch (restriction.niveauGravite) {
+      case 'vigilance':
+        description = usage.descriptionVigilance;
+        break;
+      case 'alerte':
+        description = usage.descriptionAlerte;
+        break;
+      case 'alerte_renforcee':
+        description = usage.descriptionAlerteRenforcee;
+        break;
+      case 'crise':
+        description = usage.descriptionCrise;
+        break;
+    }
+    return {
+      nom: usage.nom,
+      thematique: usage.thematique.nom,
+      concerneParticulier: usage.concerneParticulier,
+      concerneEntreprise: usage.concerneEntreprise,
+      concerneCollectivite: usage.concerneCollectivite,
+      concerneExploitation: usage.concerneExploitation,
+      concerneEso: usage.concerneEso,
+      concerneEsu: usage.concerneEsu,
+      concerneAep: usage.concerneAep,
+      description,
+    };
+  }
+
+  private parseHistoricGeometry(
+    rawGeometry: string | undefined,
+    zoneId: number,
+    date: string,
+  ): ZoneAlerte['geom'] {
+    if (!rawGeometry) {
+      throw new Error(
+        `Missing geometry for historic zone ${zoneId} on ${date}`,
+      );
+    }
+    try {
+      const geometry = JSON.parse(rawGeometry);
+      if (!geometry || typeof geometry !== 'object') {
+        throw new Error('GeoJSON geometry is empty');
+      }
+      return geometry;
+    } catch (error) {
+      throw new Error(
+        `Invalid geometry for historic zone ${zoneId} on ${date}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async computeHistoricMapsComputed(
@@ -1222,60 +1313,9 @@ DELETE FROM zone_alerte_computed_historic
         ],
       });
 
-    const allZones = await Promise.all(
-      allZonesComputed.map(async (z) => {
-        z.geom = JSON.parse((await this.findOne(z.id)).geom);
-        return {
-          type: 'Feature',
-          geometry: z.geom,
-          properties: {
-            id: z.id,
-            idSandre: z.idSandre,
-            nom: z.nom,
-            code: z.code,
-            type: z.type,
-            niveauGravite: z.restriction?.niveauGravite,
-            departement: z.departement,
-            arreteRestriction: {
-              id: z.restriction?.arreteRestriction.id,
-              numero: z.restriction?.arreteRestriction.numero,
-              dateDebut: z.restriction?.arreteRestriction.dateDebut,
-              dateFin: z.restriction?.arreteRestriction.dateFin,
-              dateSignature: z.restriction?.arreteRestriction.dateSignature,
-              fichier: z.restriction?.arreteRestriction.fichier?.url,
-            },
-            restrictions: z.restriction?.usages.map((u) => {
-              let d;
-              switch (z.restriction.niveauGravite) {
-                case 'vigilance':
-                  d = u.descriptionVigilance;
-                  break;
-                case 'alerte':
-                  d = u.descriptionAlerte;
-                  break;
-                case 'alerte_renforcee':
-                  d = u.descriptionAlerteRenforcee;
-                  break;
-                case 'crise':
-                  d = u.descriptionCrise;
-                  break;
-              }
-              return {
-                nom: u.nom,
-                thematique: u.thematique.nom,
-                concerneParticulier: u.concerneParticulier,
-                concerneEntreprise: u.concerneEntreprise,
-                concerneCollectivite: u.concerneCollectivite,
-                concerneExploitation: u.concerneExploitation,
-                concerneEso: u.concerneEso,
-                concerneEsu: u.concerneEsu,
-                concerneAep: u.concerneAep,
-                description: d,
-              };
-            }),
-          },
-        };
-      }),
+    const allZones = await this.formatComputedHistoricZones(
+      allZonesComputed,
+      date,
     );
 
     const geojson = {
@@ -1315,6 +1355,110 @@ DELETE FROM zone_alerte_computed_historic
       'pmtiles/',
     );
     return allZonesComputed;
+  }
+
+  private async formatComputedHistoricZones(
+    zones: ZoneAlerteComputedHistoric[],
+    date: Moment,
+  ) {
+    const dateString = date.format('YYYY-MM-DD');
+    const rawGeometries = await this.findComputedHistoricGeometriesByIds(
+      zones.map((zone) => zone.id),
+    );
+
+    return zones.map((zone) => {
+      const geometry = this.parseHistoricGeometry(
+        rawGeometries.get(zone.id),
+        zone.id,
+        dateString,
+      );
+      zone.geom = geometry;
+      const restriction = zone.restriction;
+      const usages = restriction
+        ? this.formatHistoricUsagesForComputed(restriction, zone.id, dateString)
+        : undefined;
+      return {
+        type: 'Feature',
+        geometry,
+        properties: {
+          id: zone.id,
+          idSandre: zone.idSandre,
+          nom: zone.nom,
+          code: zone.code,
+          type: zone.type,
+          niveauGravite: restriction?.niveauGravite,
+          departement: zone.departement,
+          arreteRestriction: {
+            id: restriction?.arreteRestriction?.id,
+            numero: restriction?.arreteRestriction?.numero,
+            dateDebut: restriction?.arreteRestriction?.dateDebut,
+            dateFin: restriction?.arreteRestriction?.dateFin,
+            dateSignature: restriction?.arreteRestriction?.dateSignature,
+            fichier: restriction?.arreteRestriction?.fichier?.url,
+          },
+          restrictions: usages,
+        },
+      };
+    });
+  }
+
+  private async findComputedHistoricGeometriesByIds(
+    ids: readonly number[],
+  ): Promise<ReadonlyMap<number, string>> {
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) {
+      return new Map();
+    }
+    const rows: Array<{ id: number; geom: string | null }> =
+      await this.dataSource.query(
+        `
+          SELECT
+            zone.id AS "id",
+            ST_AsGeoJSON(ST_Transform(zone.geom, 4326)) AS "geom"
+          FROM "zone_alerte_computed_historic" zone
+          WHERE zone.id = ANY($1::int[])
+          ORDER BY zone.id
+        `,
+        [uniqueIds],
+      );
+    const geometries = new Map<number, string>();
+    for (const row of rows) {
+      if (row.geom) {
+        geometries.set(Number(row.id), row.geom);
+      }
+    }
+    const missingIds = uniqueIds.filter((id) => !geometries.has(id));
+    if (missingIds.length > 0) {
+      throw new Error(
+        `Missing geometry for computed historic zone(s): ${missingIds.join(', ')}`,
+      );
+    }
+    return geometries;
+  }
+
+  private formatHistoricUsagesForComputed(
+    restriction: Restriction,
+    zoneId: number,
+    date: string,
+  ) {
+    if (!restriction.arreteRestriction) {
+      throw new Error(
+        `Missing decree for computed historic zone ${zoneId} on ${date}`,
+      );
+    }
+    if (!Array.isArray(restriction.usages)) {
+      throw new Error(
+        `Usages were not loaded for computed historic zone ${zoneId} on ${date}`,
+      );
+    }
+    return restriction.usages.map((usage) => {
+      if (!usage.thematique?.nom) {
+        throw new Error(
+          `Missing theme for computed historic zone ${zoneId} usage ${usage.id} on ${date}`,
+        );
+      }
+      return this.formatHistoricUsage(usage, restriction);
+    });
   }
 
   async getZonesArea(zones: ZoneAlerteComputed[]) {

@@ -2382,3 +2382,126 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
   });
 });
+
+describe('ZoneAlerteService geometry reads', () => {
+  const createService = (
+    zoneRepository: Record<string, jest.Mock>,
+    dataSource: { query: jest.Mock },
+  ) =>
+    new ZoneAlerteService(
+      zoneRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      dataSource as any,
+    );
+
+  const createQueryBuilder = (result: unknown, resultMethod: string) => {
+    const queryBuilder: Record<string, jest.Mock> = {
+      select: jest.fn(),
+      addSelect: jest.fn(),
+      leftJoin: jest.fn(),
+      where: jest.fn(),
+      [resultMethod]: jest.fn().mockResolvedValue(result),
+    };
+    queryBuilder.select.mockReturnValue(queryBuilder);
+    queryBuilder.addSelect.mockReturnValue(queryBuilder);
+    queryBuilder.leftJoin.mockReturnValue(queryBuilder);
+    queryBuilder.where.mockReturnValue(queryBuilder);
+    return queryBuilder;
+  };
+
+  it.each([
+    { label: 'absent', acIds: undefined as number[] | undefined },
+    { label: 'empty', acIds: [] as number[] },
+  ])(
+    'does not query alert-frame communes when IDs are $label',
+    async ({ acIds }) => {
+      const geometryQuery = createQueryBuilder(
+        { id: 12, geom: '{"type":"Polygon","coordinates":[]}' },
+        'getRawOne',
+      );
+      const zoneRepository = {
+        createQueryBuilder: jest.fn().mockReturnValue(geometryQuery),
+      };
+      const service = createService(zoneRepository, { query: jest.fn() });
+
+      const zone = await service.findOne(12, acIds);
+
+      expect(zone.arreteCadreZoneAlerteCommunes).toEqual([]);
+      expect(zoneRepository.createQueryBuilder).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('keeps the alert-frame commune lookup when IDs are provided', async () => {
+    const geometryQuery = createQueryBuilder(
+      { id: 12, geom: '{"type":"Polygon","coordinates":[]}' },
+      'getRawOne',
+    );
+    const relationQuery = createQueryBuilder(
+      { arreteCadreZoneAlerteCommunes: [{ id: 34 }] },
+      'getOne',
+    );
+    const zoneRepository = {
+      createQueryBuilder: jest
+        .fn()
+        .mockReturnValueOnce(geometryQuery)
+        .mockReturnValueOnce(relationQuery),
+    };
+    const service = createService(zoneRepository, { query: jest.fn() });
+
+    const zone = await service.findOne(12, [56]);
+
+    expect(zone.arreteCadreZoneAlerteCommunes).toEqual([{ id: 34 }]);
+    expect(relationQuery.leftJoin).toHaveBeenCalledWith(
+      'zone_alerte.arreteCadreZoneAlerteCommunes',
+      'aczac',
+      'aczac.arreteCadreId IN(:...acIds)',
+      { acIds: [56] },
+    );
+  });
+
+  it('loads geometries in one parameterized query and indexes them by ID', async () => {
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([
+        { id: 2, geom: '{"type":"Polygon","coordinates":[[2]]}' },
+        { id: 1, geom: '{"type":"Polygon","coordinates":[[1]]}' },
+      ]),
+    };
+    const service = createService({} as any, dataSource);
+
+    const geometries = await service.findGeometriesByIds([1, 2, 1]);
+
+    expect(dataSource.query).toHaveBeenCalledTimes(1);
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'WHERE zone.id = ANY($1::int[])',
+    );
+    expect(dataSource.query.mock.calls[0][1]).toEqual([[1, 2]]);
+    expect(geometries.get(1)).toContain('[[1]]');
+    expect(geometries.get(2)).toContain('[[2]]');
+  });
+
+  it('does not query the database for an empty geometry set', async () => {
+    const dataSource = { query: jest.fn() };
+    const service = createService({} as any, dataSource);
+
+    await expect(service.findGeometriesByIds([])).resolves.toEqual(new Map());
+    expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
+  it('fails when a requested geometry is absent', async () => {
+    const dataSource = {
+      query: jest
+        .fn()
+        .mockResolvedValue([{ id: 1, geom: '{"type":"Polygon"}' }]),
+    };
+    const service = createService({} as any, dataSource);
+
+    await expect(service.findGeometriesByIds([1, 2])).rejects.toThrow(
+      'Missing geometry for alert zone(s): 2',
+    );
+  });
+});

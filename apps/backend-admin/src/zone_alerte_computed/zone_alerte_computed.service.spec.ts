@@ -1311,6 +1311,11 @@ describe('ZoneAlerteComputedHistoricService', () => {
     advanceComputeStatsDate: jest.Mock;
   };
   let zoneAlerteComputedHistoricRepository: { createQueryBuilder: jest.Mock };
+  let zoneAlerteService: {
+    findGeometriesByIds: jest.Mock;
+    findOne: jest.Mock;
+  };
+  let dataSource: { query: jest.Mock };
   let updateAllHistoricZonesQuery: {
     update: jest.Mock;
     set: jest.Mock;
@@ -1361,10 +1366,15 @@ describe('ZoneAlerteComputedHistoricService', () => {
         .fn()
         .mockReturnValue(updateAllHistoricZonesQuery),
     };
+    zoneAlerteService = {
+      findGeometriesByIds: jest.fn(),
+      findOne: jest.fn(),
+    };
+    dataSource = { query: jest.fn() };
 
     service = new ZoneAlerteComputedHistoricService(
       {} as any,
-      {} as any,
+      zoneAlerteService as any,
       {} as any,
       {} as any,
       statisticService as any,
@@ -1389,7 +1399,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
       {} as any,
       statisticDepartementService as any,
       statisticCommuneService as any,
-      {} as any,
+      dataSource as any,
       configService as any,
     );
     (service as any).computeRegleAr = jest.fn().mockResolvedValue([]);
@@ -1462,5 +1472,171 @@ describe('ZoneAlerteComputedHistoricService', () => {
     );
 
     expect(configService.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('formats legacy zones with one geometry batch and the applicable restriction', async () => {
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([[12, '{"type":"Polygon","coordinates":[[[0,0],[1,0],[0,0]]]}']]),
+    );
+    const inactiveRestriction = {
+      id: 1,
+      arreteRestriction: { id: 98 },
+      usages: [],
+    };
+    const applicableRestriction = {
+      id: 2,
+      niveauGravite: 'alerte',
+      arreteRestriction: {
+        id: 99,
+        numero: 'AR-99',
+        dateDebut: '2023-06-01',
+        dateFin: '2023-06-30',
+        dateSignature: '2023-05-31',
+        fichier: { url: 'https://files.test/ar-99.pdf' },
+      },
+      usages: [
+        {
+          id: 3,
+          nom: 'Arrosage',
+          thematique: { nom: 'Jardin' },
+          concerneParticulier: true,
+          descriptionAlerte: 'Interdit',
+        },
+      ],
+    };
+    const zone = {
+      id: 12,
+      idSandre: 1200,
+      nom: 'Zone test',
+      code: 'ZA12',
+      type: 'SUP',
+      departement: { code: '12' },
+      restrictions: [inactiveRestriction, applicableRestriction],
+    };
+
+    const result = await (service as any).formatLegacyHistoricZones(
+      [zone],
+      [99],
+      moment('2023-06-01'),
+    );
+
+    expect(zoneAlerteService.findGeometriesByIds).toHaveBeenCalledWith([12]);
+    expect(zoneAlerteService.findOne).not.toHaveBeenCalled();
+    expect(result.zones[0].restrictions).toEqual([applicableRestriction]);
+    expect(result.features[0]).toEqual(
+      expect.objectContaining({
+        geometry: expect.objectContaining({ type: 'Polygon' }),
+        properties: expect.objectContaining({
+          niveauGravite: 'alerte',
+          arreteRestriction: expect.objectContaining({ id: 99 }),
+          restrictions: [
+            expect.objectContaining({
+              nom: 'Arrosage',
+              thematique: 'Jardin',
+              description: 'Interdit',
+            }),
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('accepts a loaded empty usage list in legacy history', async () => {
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
+    );
+    const zone = {
+      id: 12,
+      restrictions: [
+        {
+          id: 2,
+          niveauGravite: 'vigilance',
+          arreteRestriction: { id: 99 },
+          usages: [],
+        },
+      ],
+    };
+
+    const result = await (service as any).formatLegacyHistoricZones(
+      [zone],
+      [99],
+      moment('2023-06-01'),
+    );
+
+    expect(result.features[0].properties.restrictions).toEqual([]);
+  });
+
+  it('fails before loading geometries when legacy relations are incomplete', async () => {
+    const zone = {
+      id: 12,
+      restrictions: [
+        {
+          id: 2,
+          niveauGravite: 'alerte',
+          arreteRestriction: { id: 99 },
+        },
+      ],
+    };
+
+    await expect(
+      (service as any).formatLegacyHistoricZones(
+        [zone],
+        [99],
+        moment('2023-06-01'),
+      ),
+    ).rejects.toThrow(
+      'Usages were not loaded for historic zone 12 on 2023-06-01',
+    );
+    expect(zoneAlerteService.findGeometriesByIds).not.toHaveBeenCalled();
+  });
+
+  it('loads computed historic geometries in one query and joins by ID', async () => {
+    dataSource.query.mockResolvedValue([
+      { id: 2, geom: '{"type":"Polygon","coordinates":[[2]]}' },
+      { id: 1, geom: '{"type":"Polygon","coordinates":[[1]]}' },
+    ]);
+    const zones = [
+      { id: 1, restriction: undefined },
+      { id: 2, restriction: undefined },
+    ];
+
+    const features = await (service as any).formatComputedHistoricZones(
+      zones,
+      moment('2024-04-29'),
+    );
+
+    expect(dataSource.query).toHaveBeenCalledTimes(1);
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'WHERE zone.id = ANY($1::int[])',
+    );
+    expect(dataSource.query.mock.calls[0][1]).toEqual([[1, 2]]);
+    expect(features[0].geometry.coordinates).toEqual([[1]]);
+    expect(features[1].geometry.coordinates).toEqual([[2]]);
+  });
+
+  it('fails closed on an invalid computed historic geometry', async () => {
+    dataSource.query.mockResolvedValue([{ id: 1, geom: 'invalid-json' }]);
+
+    await expect(
+      (service as any).formatComputedHistoricZones(
+        [{ id: 1, restriction: undefined }],
+        moment('2024-04-29'),
+      ),
+    ).rejects.toThrow('Invalid geometry for historic zone 1 on 2024-04-29');
+  });
+
+  it('fails closed when a computed historic restriction has no decree', async () => {
+    dataSource.query.mockResolvedValue([
+      { id: 1, geom: '{"type":"Polygon","coordinates":[]}' },
+    ]);
+
+    await expect(
+      (service as any).formatComputedHistoricZones(
+        [{ id: 1, restriction: { usages: [] } }],
+        moment('2024-04-29'),
+      ),
+    ).rejects.toThrow(
+      'Missing decree for computed historic zone 1 on 2024-04-29',
+    );
   });
 });
