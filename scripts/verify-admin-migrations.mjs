@@ -143,8 +143,9 @@ async function prepareUpgradeDatabase() {
       );
       const statisticActivationBarrierAlreadyPresent =
         previousDataSource.migrations.some(
-          ({ name }) =>
-            name === "StatisticPublicationActivationBarrier1786129200000",
+          ({ constructor }) =>
+            constructor.name ===
+            "StatisticPublicationActivationBarrier1786129200000",
         );
       if (!statisticActivationBarrierAlreadyPresent) {
         await previousDataSource.query(`
