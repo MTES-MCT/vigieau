@@ -31,8 +31,16 @@ cp env.example .env
 - PATH_TO_WRITE_FILE : Dossier pour stocker les fichiers temporaires ou le serveur peut lire / écrire
 - CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS : Durée maximale pendant laquelle un nouveau processus `clock` attend la libération du verrou PostgreSQL lors d'un rolling deploy (90 secondes par défaut)
 - CLOCK_LEADERSHIP_RETRY_SECONDS : Intervalle entre deux tentatives d'acquisition du verrou du `clock` (2 secondes par défaut)
+- COMMUNE_STATISTICS_BATCH_SIZE : Nombre de communes traitées par transaction lors du calcul des statistiques (250 par défaut, entier compris entre 1 et 1000)
+- HISTORIC_COMPUTE_CHUNK_DAYS : Nombre maximal de jours traités par un worker de rattrapage historique (7 par défaut, entier compris entre 1 et 3660)
 
 Le processus `clock` ne publie son heartbeat et ne démarre ses tâches planifiées qu'après avoir acquis son verrou PostgreSQL exclusif. Pendant un rolling deploy, le nouveau processus retente ce verrou dans la fenêtre configurée ; si elle expire, son démarrage échoue au lieu de créer un second ordonnanceur. Lors d'un arrêt gracieux, l'ancien processus attend la fin de ses tâches planifiées avant de libérer le verrou.
+
+Le `clock` est l'unique propriétaire du rattrapage historique. Les workers de
+calcul courant ne le déclenchent jamais. Chaque succès historique est lié aux
+deux curseurs et à leurs générations finales ; une invalidation, même à date
+identique, rend donc automatiquement l'ancien succès inéligible. Les barrières
+de publication et l'export data.gouv.fr exigent cette même identité.
 
 ### Publication des restrictions par commune
 

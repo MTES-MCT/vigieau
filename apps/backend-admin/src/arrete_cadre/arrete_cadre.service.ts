@@ -865,8 +865,8 @@ export class ArreteCadreService {
   async catchUpHistoricComputations(
     requiredThrough: string,
     expectedSourceRevision?: string,
-  ): Promise<void> {
-    await this.arreteRestrictionService.catchUpHistoricComputations(
+  ) {
+    return this.arreteRestrictionService.catchUpHistoricComputations(
       requiredThrough,
       expectedSourceRevision,
     );

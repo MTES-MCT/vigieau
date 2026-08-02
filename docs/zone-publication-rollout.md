@@ -7,9 +7,11 @@ utilisateur.
 ## Invariants
 
 - L'admin continue d'alimenter `zone_alerte_computed` pour permettre un rollback.
-- Une publication n'est candidate qu'après validation de ses zones, géométries,
-  associations commune-zone et artefacts GeoJSON/PMTiles. Les deux URL
-  immuables sont relues anonymement avant la mise en candidature.
+- Une publication reste `validated` après validation de ses zones, géométries,
+  associations commune-zone et artefacts GeoJSON/PMTiles. Elle ne devient
+  candidate qu'après certification du snapshot communal courant et du
+  rattrapage historique persistant de même révision et version. Les deux URL
+  immuables sont relues anonymement avant cette attente.
 - Un recalcul partiel conserve son périmètre historique et ne produit aucune
   publication versionnée ni statistique publique. Le watchdog lance ensuite le
   recalcul national qui, seul, peut couvrir la révision source globale, publier
@@ -21,9 +23,15 @@ utilisateur.
   course entre ce pré-contrôle et son démarrage.
 - La reprise durable du calcul quotidien transporte sa date civile Paris et la
   révision source attendue jusqu'au worker. Après acquisition du verrou global,
-  elle réutilise une candidate ou une active déjà complète uniquement si sa
-  date, sa révision et sa version de matérialisation correspondent exactement.
+  elle réutilise une publication validée, candidate ou active déjà complète
+  uniquement si sa date, sa révision et sa version de matérialisation
+  correspondent exactement.
   Une publication de la veille n'est jamais réutilisée pour le jour courant.
+- Le processus `clock` est l'unique propriétaire du rattrapage historique. Le
+  worker de calcul courant ne peut ni le démarrer ni le mettre en file. Le
+  registre persiste les deux curseurs historiques et leurs générations finales ;
+  une invalidation à date identique rend donc l'ancien succès inéligible au tick
+  suivant.
 - Le bootstrap du schéma exécute `synchronize` uniquement sur une base vierge,
   détectée par l'absence de la table baseline `user`, puis applique les
   migrations sous le même verrou. Dès cette table présente, tous les
@@ -40,7 +48,10 @@ utilisateur.
   et les deux curseurs legacy doivent couvrir J-1, aucune plage historique ne
   doit être sale et aucun calcul national du même jour civil Paris ne doit être
   en cours. Lorsqu'une exécution quotidienne est liée à la candidate, son
-  rattrapage historique de même identité doit avoir réussi.
+  rattrapage historique doit avoir réussi avec exactement les curseurs et
+  générations encore présents dans `config`. Cette comparaison est refaite sous
+  verrou à la mise en candidature puis à l'activation ; un ancien run sans ces
+  métadonnées n'est jamais certifiant.
 - Tant que la publication n'est pas active, seuls ses artefacts immuables nommés
   par checksum sont écrits. Les alias S3 historiques, la date de calcul globale
   et les ressources data.gouv.fr ne sont promus qu'après l'activation.
@@ -58,10 +69,15 @@ utilisateur.
   reconstruction, puis échange le nouveau cache en une seule affectation après
   une double lecture stable de l'epoch. Les référentiels ont leur propre cache
   SWR et restent disponibles si les statistiques sont indisponibles.
-- Une candidate peut être préchargée avant la fin du rattrapage, mais sa
-  situation départementale est toujours reconstruite depuis les statistiques
-  certifiées avant sa publication active. Un échec conserve ensemble l'ancienne
-  carte et l'ancienne situation.
+- Le délai de préchargement d'une candidate ne commence qu'après la fin du
+  rattrapage historique certifié. Pendant ce rattrapage, le watchdog conserve la
+  publication validée réutilisable et ne relance pas un calcul national
+  concurrent. Un échec conserve ensemble l'ancienne carte et l'ancienne
+  situation.
+- L'identifiant de publication échouée enregistré par le dernier calcul
+  quotidien est conservé au-delà de la rétention normale tant qu'aucun calcul
+  quotidien plus récent de la même révision n'existe. Une reconstruction peut
+  ainsi reprendre le calcul déjà certifié sans relancer les statistiques.
 - Le front épingle la carte et les requêtes de restrictions au même
   `publicationId`, y compris sur l'accueil où seule la carte visible au breakpoint
   DSFR fournit le pin. Un `410` déclenche un seul rechargement du manifeste.
@@ -93,7 +109,22 @@ ZONE_PUBLICATION_DATAGOUV_TIMEOUT_MS=15000
 ZONE_PUBLICATION_RETAIN_RETIRED=4
 ZONE_PUBLICATION_RETENTION_HOURS=48
 ZONE_PUBLICATION_INSTANCE_RETENTION_HOURS=24
+COMMUNE_STATISTICS_BATCH_SIZE=250  # entier compris entre 1 et 1000
+HISTORIC_COMPUTE_CHUNK_DAYS=7  # entier compris entre 1 et 3660
 ```
+
+`COMMUNE_STATISTICS_BATCH_SIZE` vaut `250` par défaut. Une valeur plus élevée
+augmente la pression mémoire et PostgreSQL pendant la matérialisation communale ;
+ne la monter jusqu'à `1000` qu'après mesure sur l'environnement cible.
+
+Le rattrapage historique est découpé en workers d'au plus
+`HISTORIC_COMPUTE_CHUNK_DAYS` jours. Le parent ne démarre le lot suivant qu'après
+avoir vérifié les deux curseurs et leurs générations en base. Chaque journée,
+chaque avancement atomique de curseur et chaque snapshot communal restent liés
+à la révision source capturée au début du rattrapage. Un changement de révision
+interrompt le lot, remet les curseurs à la première date sale et interdit la
+certification de snapshots produits sous une autre révision. Les fichiers
+GeoJSON et PMTiles datés du lot sont supprimés en `finally`, succès ou échec.
 
 Les trois seuils relatifs suivants sont optionnels et désactivés par défaut. Ils
 ne doivent être définis qu'après analyse métier, car le nombre de zones, de
@@ -153,8 +184,11 @@ L'export refuse de démarrer tant que le recalcul communal du jour n'a pas attei
 son checkpoint persistant de complétude. Le calcul courant et le rattrapage
 historique sont deux jobs persistants distincts; data.gouv.fr attend leur succès,
 puis une publication active du même jour dont les promotions S3 et data.gouv.fr
-sont terminées. Chaque commune doit contenir exactement un enregistrement par
-jour depuis le 1er janvier jusqu'à la date métier attendue.
+sont terminées. Le gate data.gouv.fr utilise la même identité historique
+(curseurs et générations) avant et après les uploads ; une invalidation force la
+republication du run et de ses ressources. Chaque commune doit contenir
+exactement un enregistrement par jour depuis le 1er janvier jusqu'à la date
+métier attendue.
 
 Une ligne de calcul national restée `running` est reprise immédiatement après
 l'acquisition d'un nouveau verrou de registre. En régime nominal, ce verrou est
@@ -313,7 +347,11 @@ n'effectue volontairement aucune écriture.
 
    Exécuter `smoke-public.mjs` et `smoke-browser.mjs` avec les URL preprod
    explicites. Le second contrôle un contexte WebGL vivant, le contenu des pixels
-   du canvas et plusieurs lectures Range réelles de l'archive PMTiles.
+   du canvas et plusieurs lectures Range réelles de l'archive PMTiles. Son mode
+   Tarbes est `adaptive` par défaut : un 409 doit afficher la modale de précision
+   attendue, tandis qu'un 200 doit naviguer vers `/situation` sans afficher cette
+   modale ni produire d'erreur fatale. Le mode `strict` continue d'exiger le 409;
+   `skip` désactive uniquement ce parcours.
 
 9. Dans un vrai navigateur desktop et mobile, comparer Tarbes (`65440`) par
    sélection de commune, adresse précise et carte. Vérifier le rendu non vide de
@@ -507,9 +545,11 @@ instances vivantes sont prêtes mais que leur nombre est inférieur au minimum
 attendu, elle reste en attente : ce cas signale une capacité manquante et ne
 déclenche pas de recalcul national en boucle. Le watchdog attend son délai de
 reprise avant de relancer un échec de lecture.
-Les constructions abandonnées et les publications validées jamais devenues
-candidates sont rendues purgeables après 75 minutes par défaut. Les heartbeats
-de processus vieux de plus de 24 heures sont supprimés.
+Les constructions abandonnées et les publications validées qui ne sont liées à
+aucune exécution quotidienne persistante sont rendues purgeables après 75 minutes
+par défaut. Une publication validée liée au rattrapage en cours reste réutilisable
+jusqu'à sa certification ou jusqu'à un changement de révision source. Les
+heartbeats de processus vieux de plus de 24 heures sont supprimés.
 
 Les lignes et associations PostgreSQL sont purgées selon cette politique, mais
 les artefacts GeoJSON/PMTiles immuables sur S3 ne le sont pas. Leur suppression

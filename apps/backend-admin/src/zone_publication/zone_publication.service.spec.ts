@@ -251,6 +251,7 @@ describe('ZonePublicationService', () => {
     const sql = dataSource.query.mock.calls[0][0];
     expect(sql).toContain('publication."status" = \'candidate\'');
     expect(sql).toContain('publication."status" = \'active\'');
+    expect(sql).toContain('publication."status" = \'validated\'');
     expect(sql).toContain('publication."materializationVersion" = $2');
     expect(sql).toContain('publication."sourceRevision" = source."revision"');
     expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
@@ -306,9 +307,14 @@ describe('ZonePublicationService', () => {
     const sql = dataSource.query.mock.calls[0][0];
     expect(sql).toContain('publication."status" = \'active\'');
     expect(sql).toContain('publication."sourceRevision" = source."revision"');
+    expect(sql).toContain('publication."materializationVersion" = $2');
     expect(sql).toContain('publication."legacyPromotedAt" IS NOT NULL');
     expect(sql).toContain('publication."dataGouvPromotedAt" IS NOT NULL');
     expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
+    expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
+      '2026-08-01',
+      3,
+    ]);
   });
 
   it('keeps the daily gate closed without a matching publication', async () => {
@@ -521,6 +527,58 @@ describe('ZonePublicationService', () => {
       expect.any(String),
       [4500, 3],
     );
+    const sql = dataSource.query.mock.calls[0][0] as string;
+    expect(sql).toContain(
+      `(in_progress."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date`,
+    );
+    expect(sql).toContain('SELECT MAX(latest_daily."scheduledFor")');
+  });
+
+  it('does not rebuild while the latest historic barrier is pending', async () => {
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([
+        {
+          sourceRevision: '10',
+          activeRevision: '9',
+          activeMaterializationVersion: 3,
+          candidateRevision: null,
+          candidateMaterializationVersion: null,
+          failureCount: 0,
+          recentInProgress: false,
+          statisticsBarrierPending: true,
+        },
+      ]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(service.isRecomputeRequired()).resolves.toBe(false);
+
+    const sql = dataSource.query.mock.calls[0][0] as string;
+    expect(sql).toContain(`historic_run."status" IS DISTINCT FROM 'succeeded'`);
+    expect(sql).toContain('statistic_state."historicDirtyFrom" IS NOT NULL');
+    expect(sql).toContain('\'sourceRevision\', source."revision"::text');
+    expect(sql).toContain("'materializationVersion', $2::integer");
+    expect(sql).toContain('ORDER BY daily_run."scheduledFor" DESC');
+  });
+
+  it('ignores an older failed barrier when the latest daily run is certified', async () => {
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([
+        {
+          sourceRevision: '10',
+          activeRevision: '9',
+          activeMaterializationVersion: 3,
+          candidateRevision: null,
+          candidateMaterializationVersion: null,
+          failureCount: 0,
+          recentInProgress: false,
+          statisticsBarrierPending: false,
+        },
+      ]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(service.isRecomputeRequired()).resolves.toBe(true);
   });
 
   it('supersedes a candidate when its source revision changed', async () => {
@@ -631,6 +689,170 @@ describe('ZonePublicationService', () => {
           params?.[0] === 'rollback-target',
       ),
     ).toBe(false);
+  });
+
+  it('keeps a validated publication private until the exact historic cursor epoch is certified', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '10' }];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: null,
+              automaticPublishingPaused: false,
+            },
+          ];
+        }
+        if (
+          sql.includes('SELECT * FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'validated',
+              status: 'validated',
+              sourceRevision: '10',
+              materializationVersion: 3,
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const service = new ZonePublicationService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(service.markCandidate('validated')).rejects.toThrow(
+      'waiting for certified current statistics or historic catch-up',
+    );
+    expect(
+      manager.query.mock.calls.some(([sql]) =>
+        sql.includes(`SET "status" = 'candidate'`),
+      ),
+    ).toBe(false);
+
+    const certificationSql = manager.query.mock.calls.find(([sql]) =>
+      sql.includes('certified_publication'),
+    )?.[0];
+    expect(certificationSql).toContain('snapshot."status" = \'ready\'');
+    expect(certificationSql).toContain('daily_run."status" = \'succeeded\'');
+    expect(certificationSql).toContain('historic_run."status" = \'succeeded\'');
+    expect(certificationSql).toContain(
+      'statistic_state."historicDirtyFrom" IS NULL',
+    );
+    expect(certificationSql).toContain(
+      `'historicMapCursor', historic_cursor."computeMapDate"::text`,
+    );
+    expect(certificationSql).toContain(
+      `'historicStatsCursor', historic_cursor."computeStatsDate"::text`,
+    );
+    expect(certificationSql).toContain(
+      `'historicMapGeneration', historic_cursor."computeMapGeneration"::text`,
+    );
+    expect(certificationSql).toContain(
+      `'historicStatsGeneration', historic_cursor."computeStatsGeneration"::text`,
+    );
+  });
+
+  it('marks a validated publication candidate atomically after certification', async () => {
+    const executed: string[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [{ revision: '10' }];
+        }
+        if (sql.includes('FROM "zone_publication_state"')) {
+          return [
+            {
+              activePublicationId: 'active',
+              candidatePublicationId: null,
+              automaticPublishingPaused: false,
+            },
+          ];
+        }
+        if (
+          sql.includes('SELECT * FROM "zone_publication"') &&
+          sql.includes('FOR UPDATE')
+        ) {
+          return [
+            {
+              id: 'validated',
+              status: 'validated',
+              sourceRevision: '10',
+              materializationVersion: 3,
+            },
+          ];
+        }
+        if (sql.includes('certified_publication')) {
+          return [{ snapshotDate: '2026-08-01' }];
+        }
+        if (sql.includes(`SET "status" = 'candidate'`)) {
+          return [[{ id: 'validated' }], 1];
+        }
+        return [];
+      }),
+    };
+    const service = new ZonePublicationService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(
+      service.markCandidateAfterStatistics('validated'),
+    ).resolves.toBe(true);
+
+    const certifiedIndex = executed.findIndex((sql) =>
+      sql.includes('certified_publication'),
+    );
+    const candidateIndex = executed.findIndex((sql) =>
+      sql.includes(`SET "status" = 'candidate'`),
+    );
+    const pointerIndex = executed.findIndex((sql) =>
+      sql.includes('SET "candidatePublicationId" = $1'),
+    );
+    expect(certifiedIndex).toBeGreaterThan(-1);
+    expect(candidateIndex).toBeGreaterThan(certifiedIndex);
+    expect(pointerIndex).toBeGreaterThan(candidateIndex);
+  });
+
+  it('recovers a rebuilt validated publication after the persisted candidate failed', async () => {
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([{ id: 'rebuilt-validated' }]),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+    const markCandidate = jest
+      .spyOn(service, 'markCandidateAfterStatistics')
+      .mockResolvedValue(true);
+
+    await expect(
+      service.promoteCertifiedPublicationIfAvailable({
+        scheduledFor: '2026-08-01',
+        sourceRevision: '10',
+        preferredPublicationId: 'dcf24878-0000-4000-8000-000000000000',
+      }),
+    ).resolves.toBe(true);
+    expect(markCandidate).toHaveBeenCalledWith('rebuilt-validated');
+    expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
+      3,
+      '2026-08-01',
+      '10',
+      'dcf24878-0000-4000-8000-000000000000',
+    ]);
+    const sql = dataSource.query.mock.calls[0][0] as string;
+    expect(sql).toContain('daily_run."scheduledFor" =');
+    expect(sql).toContain(
+      `(publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date`,
+    );
+    expect(sql).toContain(`failed_publication."status" = 'failed'`);
+    expect(sql).toContain('failed_publication."sourceRevision"');
+    expect(sql).toContain('failed_publication."materializationVersion"');
+    expect(sql).toContain('failed_publication."sourceComputedAt"');
+    expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
+    expect(sql).toContain(')::date = daily_run."scheduledFor"');
   });
 
   it('keeps the active publication when not every live instance is ready', async () => {
@@ -966,6 +1188,17 @@ describe('ZonePublicationService', () => {
     expect(readySnapshotSql).toContain("'compute:national-daily'");
     expect(readySnapshotSql).toContain("'compute:historic-catchup'");
     expect(readySnapshotSql).toContain(
+      `daily_run."metadata" ->> 'publicationId' =`,
+    );
+    expect(readySnapshotSql).toContain(
+      `failed_publication."status" = 'failed'`,
+    );
+    expect(readySnapshotSql).toContain(`failed_publication."sourceRevision" =`);
+    expect(readySnapshotSql).toContain(
+      `failed_publication."materializationVersion" =`,
+    );
+    expect(readySnapshotSql).toContain(`)::date = daily_run."scheduledFor"`);
+    expect(readySnapshotSql).not.toContain(
       `'publicationId', publication."id"::text`,
     );
     expect(readySnapshotSql).toContain(
@@ -976,6 +1209,18 @@ describe('ZonePublicationService', () => {
     );
     expect(readySnapshotSql).toContain(
       `historic_run."scheduledFor" = daily_run."scheduledFor"`,
+    );
+    expect(readySnapshotSql).toContain(
+      `'historicMapCursor', historic_cursor."computeMapDate"::text`,
+    );
+    expect(readySnapshotSql).toContain(
+      `'historicStatsCursor', historic_cursor."computeStatsDate"::text`,
+    );
+    expect(readySnapshotSql).toContain(
+      `'historicMapGeneration', historic_cursor."computeMapGeneration"::text`,
+    );
+    expect(readySnapshotSql).toContain(
+      `'historicStatsGeneration', historic_cursor."computeStatsGeneration"::text`,
     );
     expect(readySnapshotSql).toContain(`running_daily."status" = 'running'`);
     expect(readySnapshotSql).not.toContain(
@@ -1819,7 +2064,7 @@ describe('ZonePublicationService', () => {
       expect.stringContaining(
         `publication."status" IN ('retired', 'superseded', 'failed')`,
       ),
-      [4, 48],
+      [4, 48, 3],
     );
     const sql = dataSource.query.mock.calls[0][0];
     expect(sql).toContain(
@@ -1829,6 +2074,12 @@ describe('ZonePublicationService', () => {
       `publication."id" IS DISTINCT FROM state."candidatePublicationId"`,
     );
     expect(sql).not.toContain(`'active', 'candidate'`);
+    expect(sql).toContain(
+      `daily_run."metadata" ->> 'publicationId' =\n                    publication."id"::text`,
+    );
+    expect(sql).toContain(`SELECT MAX(latest_daily."scheduledFor")`);
+    expect(sql).toContain(`publication."sourceComputedAt"`);
+    expect(sql).toContain(`AT TIME ZONE 'Europe/Paris'`);
   });
 
   it('uses explicit retention limits when provided', async () => {
@@ -1842,7 +2093,10 @@ describe('ZonePublicationService', () => {
       retentionHours: 72,
     });
 
-    expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [6, 72]);
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.any(String),
+      [6, 72, 3],
+    );
   });
 
   it('makes abandoned building and validated publications purgeable', async () => {
@@ -1866,7 +2120,17 @@ describe('ZonePublicationService', () => {
     expect(dataSource.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining(`SET "status" = 'superseded'`),
-      [600],
+      [600, 3],
+    );
+    const validatedExpirySql = dataSource.query.mock.calls[1][0] as string;
+    expect(validatedExpirySql).toContain(
+      `daily_run."jobKey" = 'compute:national-daily'`,
+    );
+    expect(validatedExpirySql).toContain(
+      `daily_run."metadata" ->> 'publicationId' =`,
+    );
+    expect(validatedExpirySql).toContain(
+      'SELECT MAX(latest_daily."scheduledFor")',
     );
   });
 
@@ -1991,88 +2255,6 @@ describe('ZonePublicationService', () => {
     expect(markCandidate).toHaveBeenCalledTimes(3);
   });
 
-  it('fails a validated snapshot immediately when candidacy cannot be recorded', async () => {
-    const dataSource = { query: jest.fn().mockResolvedValue([]) };
-    const service = new ZonePublicationService(dataSource as any);
-
-    await (service as any).failValidatedPublication(
-      'publication',
-      new Error('deadlock'),
-    );
-
-    expect(dataSource.query).toHaveBeenCalledWith(
-      expect.stringContaining(`"status" = 'failed'`),
-      ['publication', 'deadlock'],
-    );
-    expect(dataSource.query.mock.calls[0][0]).toContain(
-      `"status" = 'validated'`,
-    );
-  });
-
-  it('does not leave a validated snapshot behind after candidacy retries are exhausted', async () => {
-    const manager = {
-      query: jest.fn().mockResolvedValue([{ id: 'publication' }]),
-    };
-    const dataSource = {
-      transaction: jest.fn((_isolation, callback) => callback(manager)),
-    };
-    const service = new ZonePublicationService(dataSource as any);
-    jest
-      .spyOn(service as any, 'verifyPublicArtifacts')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'assertCurrentSourceRevision')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'insertBuildingPublication')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'loadSourceZones')
-      .mockResolvedValue([sourceZone()]);
-    jest.spyOn(service as any, 'loadSourceUsages').mockResolvedValue([]);
-    jest
-      .spyOn(service as any, 'insertSnapshotZones')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'insertComputedCommuneLinks')
-      .mockResolvedValue(undefined);
-    jest.spyOn(service as any, 'validateSnapshot').mockResolvedValue({
-      zoneCount: 1,
-      communeLinkCount: 1,
-    });
-    jest
-      .spyOn(service as any, 'assertPlausibleSnapshot')
-      .mockResolvedValue(undefined);
-    const serializationFailure = Object.assign(
-      new Error('serialization failure'),
-      { driverError: { code: '40001' } },
-    );
-    const markCandidate = jest
-      .spyOn(service, 'markCandidate')
-      .mockRejectedValue(serializationFailure);
-    const failValidated = jest
-      .spyOn(service as any, 'failValidatedPublication')
-      .mockResolvedValue(undefined);
-
-    await expect(
-      service.buildCandidateFromCurrentComputed({
-        sourceRevision: '11',
-        sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
-        artifactZoneCount: 1,
-        geojsonUrl: 'https://example.test/zones-hash.geojson',
-        geojsonChecksum: GEOJSON_CHECKSUM,
-        pmtilesUrl: 'https://example.test/zones-hash.pmtiles',
-        pmtilesChecksum: PMTILES_CHECKSUM,
-      }),
-    ).rejects.toBe(serializationFailure);
-
-    expect(markCandidate).toHaveBeenCalledTimes(3);
-    expect(failValidated).toHaveBeenCalledWith(
-      expect.stringMatching(/^[0-9a-f-]{36}$/),
-      serializationFailure,
-    );
-  });
-
   it('enables raw volume guards only when explicitly configured', async () => {
     const previous = process.env.ZONE_PUBLICATION_MIN_ZONE_COUNT_PERCENT;
     process.env.ZONE_PUBLICATION_MIN_ZONE_COUNT_PERCENT = '50';
@@ -2099,7 +2281,7 @@ describe('ZonePublicationService', () => {
     }
   });
 
-  it('validates a complete snapshot before exposing it as candidate', async () => {
+  it('keeps a complete snapshot validated until statistics are certified', async () => {
     const manager = {
       query: jest.fn(async (sql: string) => {
         if (sql.includes('FROM "zone_publication_source_state"')) {
@@ -2140,9 +2322,7 @@ describe('ZonePublicationService', () => {
       query: jest.fn().mockResolvedValue([]),
     };
     const service = new ZonePublicationService(dataSource as any);
-    const markCandidate = jest
-      .spyOn(service, 'markCandidate')
-      .mockResolvedValue(true);
+    const markCandidate = jest.spyOn(service, 'markCandidate');
 
     const publicationId = await service.buildCandidateFromCurrentComputed({
       sourceRevision: '11',
@@ -2155,7 +2335,7 @@ describe('ZonePublicationService', () => {
     });
 
     expect(publicationId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(markCandidate).toHaveBeenCalledWith(publicationId);
+    expect(markCandidate).not.toHaveBeenCalled();
     expect(
       manager.query.mock.calls.some(([sql]) =>
         sql.includes(`SET "status" = 'validated'`),
@@ -2497,11 +2677,9 @@ describe('ZonePublicationService', () => {
         : EMPTY_GEOJSON_ARTIFACT;
       return new Response(content, { status: 200 });
     });
-    const markCandidate = jest
-      .spyOn(service, 'markCandidate')
-      .mockResolvedValue(true);
+    const markCandidate = jest.spyOn(service, 'markCandidate');
 
-    const publicationId = await service.buildCandidateFromCurrentComputed({
+    await service.buildCandidateFromCurrentComputed({
       sourceRevision: '9',
       sourceComputedAt: new Date('2026-07-31T12:00:00Z'),
       artifactZoneCount: 0,
@@ -2511,7 +2689,7 @@ describe('ZonePublicationService', () => {
       pmtilesChecksum: PMTILES_CHECKSUM,
     });
 
-    expect(markCandidate).toHaveBeenCalledWith(publicationId);
+    expect(markCandidate).not.toHaveBeenCalled();
     expect(manager.query).toHaveBeenCalledWith(
       expect.stringContaining('AS "hasPublishedArrete"'),
     );

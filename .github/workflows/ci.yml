@@ -66,6 +66,7 @@ jobs:
       - run: npm ci --prefix apps/frontend
       - run: npm ci --prefix apps/frontend-admin
       - run: for script in scripts/*.mjs; do node --check "$script"; done
+      - run: node --test --test-isolation=none scripts/*.test.mjs
       - run: npm run lint:changed
       - run: npm test
       - run: npm --prefix apps/frontend run test:unit
@@ -137,6 +138,7 @@ jobs:
         run: >-
           npm --prefix apps/backend-admin test -- --runInBand
           src/statistic_commune/statistic_commune.postgres.spec.ts
+          src/zone_publication/zone_publication.postgres.spec.ts
         env:
           STATISTIC_COMMUNE_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Create the upgrade database

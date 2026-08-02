@@ -11,7 +11,15 @@ import {
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
   shiftCivilDate,
 } from '../core/scheduling/daily-job-schedule';
-import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
+import {
+  buildHistoricRunIdentity,
+  buildHistoricRunIdentityFromConfig,
+} from '../core/scheduling/historic-run-identity';
+import { ConfigService } from '../config/config.service';
+import {
+  ExternalPublicationRegistryService,
+  PublicationRunIdentity,
+} from '../datagouv/external-publication-registry.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import {
   isZonePublicationEnabled,
@@ -32,6 +40,7 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     private readonly arreteCadreService: ArreteCadreService,
     private readonly registry: ExternalPublicationRegistryService,
     private readonly zonePublicationService: ZonePublicationService,
+    private readonly configService: ConfigService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -141,27 +150,44 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     }
     const computedSourceRevision = String(sourceRevision);
     await this.assertSourceRevision(computedSourceRevision);
-    const historicIdentity = {
-      sourceRevision: computedSourceRevision,
-      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
-    };
+    const historicIdentity = await this.getHistoricRunIdentity(
+      computedSourceRevision,
+      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    );
 
     const historicResult = await this.registry.executeDailyRun(
       NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
       scheduledFor,
       async () => {
-        await this.arreteCadreService.catchUpHistoricComputations(
-          shiftCivilDate(scheduledFor, -1),
-          computedSourceRevision,
-        );
+        const completedState =
+          await this.arreteCadreService.catchUpHistoricComputations(
+            shiftCivilDate(scheduledFor, -1),
+            computedSourceRevision,
+          );
         await this.assertSourceRevision(computedSourceRevision);
-        return historicIdentity;
+        return buildHistoricRunIdentity(completedState, {
+          sourceRevision: computedSourceRevision,
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        });
       },
       now,
       { identity: historicIdentity },
     );
     if (['succeeded', 'already_succeeded'].includes(historicResult)) {
       await this.assertSourceRevision(computedSourceRevision);
+      const marked =
+        await this.zonePublicationService.promoteCertifiedPublicationIfAvailable(
+          {
+            scheduledFor,
+            sourceRevision: computedSourceRevision,
+            preferredPublicationId: publicationId,
+          },
+        );
+      if (!marked) {
+        throw new Error(
+          `Zone publication ${publicationId} was superseded before candidacy`,
+        );
+      }
     }
   }
 
@@ -187,14 +213,35 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
       return;
     }
+    const historicIdentity = await this.getHistoricRunIdentity();
     await this.registry.executeDailyRun(
       NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
       scheduledFor,
-      () =>
-        this.arreteCadreService.catchUpHistoricComputations(
-          shiftCivilDate(scheduledFor, -1),
-        ),
+      async () => {
+        const completedState =
+          await this.arreteCadreService.catchUpHistoricComputations(
+            shiftCivilDate(scheduledFor, -1),
+          );
+        return buildHistoricRunIdentity(completedState);
+      },
       now,
+      { identity: historicIdentity },
     );
+  }
+
+  private async getHistoricRunIdentity(
+    sourceRevision?: string,
+    materializationVersion?: number,
+  ): Promise<PublicationRunIdentity> {
+    const config = await this.configService.getConfig();
+    if (!config) {
+      throw new Error('Historic cursor configuration is missing');
+    }
+    return buildHistoricRunIdentityFromConfig(config, {
+      ...(sourceRevision === undefined ? {} : { sourceRevision }),
+      ...(materializationVersion === undefined
+        ? {}
+        : { materializationVersion }),
+    });
   }
 }

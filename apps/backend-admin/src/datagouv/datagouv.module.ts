@@ -10,6 +10,7 @@ import { StatisticCommuneModule } from '../statistic_commune/statistic_commune.m
 import { DatagouvSchedulerService } from './datagouv-scheduler.service';
 import { ExternalPublicationRegistryService } from './external-publication-registry.service';
 import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
+import { ConfigModule } from '../config/config.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { ZonePublicationModule } from '../zone_publication/zone_publication.modu
     DepartementModule,
     StatisticCommuneModule,
     ZonePublicationModule,
+    ConfigModule,
   ],
   controllers: [],
   providers: [

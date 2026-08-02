@@ -5,6 +5,21 @@ import {
 } from '../core/scheduling/business-cron';
 
 describe('DatagouvSchedulerService', () => {
+  const historicConfig = {
+    computeMapDate: new Date('2026-07-31T00:00:00.000Z'),
+    computeStatsDate: '2026-07-31T12:00:00.000Z',
+    computeMapGeneration: 12,
+    computeStatsGeneration: '8',
+  };
+  const historicIdentity = {
+    sourceRevision: '42',
+    materializationVersion: 3,
+    historicMapCursor: '2026-07-31',
+    historicStatsCursor: '2026-07-31',
+    historicMapGeneration: '12',
+    historicStatsGeneration: '8',
+  };
+
   const createService = () => {
     const datagouvService = {
       updateDatagouvData: jest.fn().mockResolvedValue(undefined),
@@ -26,15 +41,20 @@ describe('DatagouvSchedulerService', () => {
         pmtilesChecksum: 'b'.repeat(64),
       }),
     };
+    const configService = {
+      getConfig: jest.fn().mockResolvedValue(historicConfig),
+    };
     return {
       service: new DatagouvSchedulerService(
         datagouvService as any,
         registry as any,
         zonePublicationService as any,
+        configService as any,
       ),
       datagouvService,
       registry,
       zonePublicationService,
+      configService,
     };
   };
 
@@ -51,7 +71,7 @@ describe('DatagouvSchedulerService', () => {
       {
         identity: {
           publicationId: 'publication-1',
-          sourceRevision: '42',
+          ...historicIdentity,
         },
       },
     );
@@ -59,7 +79,7 @@ describe('DatagouvSchedulerService', () => {
       '2026-07-31',
       expect.objectContaining({
         publicationId: 'publication-1',
-        sourceRevision: '42',
+        ...historicIdentity,
         verifyCurrent: expect.any(Function),
       }),
     );
@@ -78,7 +98,7 @@ describe('DatagouvSchedulerService', () => {
       {
         identity: {
           publicationId: 'publication-1',
-          sourceRevision: '42',
+          ...historicIdentity,
         },
       },
     );
@@ -86,7 +106,7 @@ describe('DatagouvSchedulerService', () => {
       '2026-08-01',
       expect.objectContaining({
         publicationId: 'publication-1',
-        sourceRevision: '42',
+        ...historicIdentity,
         verifyCurrent: expect.any(Function),
       }),
     );
@@ -101,12 +121,12 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:national-daily',
       '2026-08-01',
-      { sourceRevision: '42' },
+      { sourceRevision: '42', materializationVersion: 3 },
     );
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:historic-catchup',
       '2026-08-01',
-      { sourceRevision: '42' },
+      historicIdentity,
     );
     expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
     expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
@@ -162,7 +182,7 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:national-daily',
       '2026-08-01',
-      { sourceRevision: '42' },
+      { sourceRevision: '42', materializationVersion: 3 },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
       'datagouv:daily',
@@ -172,9 +192,31 @@ describe('DatagouvSchedulerService', () => {
       {
         identity: {
           publicationId: 'publication-replacement',
-          sourceRevision: '42',
+          ...historicIdentity,
         },
       },
+    );
+  });
+
+  it('fails when an equal-date historic invalidation changes a generation', async () => {
+    const harness = createService();
+    harness.configService.getConfig
+      .mockResolvedValueOnce(historicConfig)
+      .mockResolvedValueOnce(historicConfig)
+      .mockResolvedValueOnce({
+        ...historicConfig,
+        computeMapGeneration: 13,
+      });
+
+    await expect(
+      harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z')),
+    ).rejects.toThrow('Historic computation gate changed during Datagouv run');
+
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
+      'compute:historic-catchup',
+      '2026-08-01',
+      historicIdentity,
     );
   });
 

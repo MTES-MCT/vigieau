@@ -1,6 +1,6 @@
 import { INestApplicationContext } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { DataSource, QueryRunner } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { workerData, parentPort } from 'worker_threads';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { withZoneComputeLock } from './zone-compute-lock';
@@ -8,57 +8,11 @@ import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
 import type { DailyZonePublicationReuseContext } from '../zone_publication/zone_publication.service';
 
 const logger = new RegleauLogger('ComputeMapWorker');
-const COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 
 interface WorkerData {
   depsIds: number[];
-  computeHistoric: boolean;
   skipIfBusy?: boolean;
   dailyPublicationReuse?: DailyZonePublicationReuseContext;
-}
-
-async function withHistoricComputeLock<T>(
-  dataSource: DataSource,
-  task: () => Promise<T>,
-): Promise<T> {
-  const deadline = Date.now() + COMPUTE_LOCK_TIMEOUT_MS;
-  let queryRunner: QueryRunner;
-  while (!queryRunner) {
-    const candidate = dataSource.createQueryRunner();
-    await candidate.connect();
-    try {
-      const [lockResult] = await candidate.query(
-        "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS locked",
-      );
-      if (lockResult?.locked === true) {
-        queryRunner = candidate;
-        break;
-      }
-    } catch (error) {
-      await candidate.release();
-      throw error;
-    }
-    await candidate.release();
-    if (Date.now() >= deadline) {
-      throw new Error('Timed out waiting for the historic zone compute lock');
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-
-  try {
-    return await task();
-  } finally {
-    try {
-      const [unlockResult] = await queryRunner.query(
-        "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
-      );
-      if (unlockResult?.unlocked !== true) {
-        throw new Error('Unable to release the historic zone compute lock');
-      }
-    } finally {
-      await queryRunner.release();
-    }
-  }
 }
 
 async function closeApp(app: INestApplicationContext | undefined) {
@@ -84,12 +38,10 @@ async function run() {
     app = await NestFactory.createApplicationContext(AppModule);
     const zoneAlerteComputedService = app.get(ZoneAlerteComputedService);
     const dataSource = app.get(DataSource);
-    const { depsIds, computeHistoric, skipIfBusy, dailyPublicationReuse } =
+    const { depsIds, skipIfBusy, dailyPublicationReuse } =
       workerData as WorkerData;
 
-    logger.log(
-      `Starting compute with depsIds: ${depsIds} and computeHistoric: ${computeHistoric}`,
-    );
+    logger.log(`Starting compute with depsIds: ${depsIds}`);
     const lockResult = await withZoneComputeLock(
       dataSource,
       depsIds,
@@ -110,11 +62,6 @@ async function run() {
     }
     const response = { success: true, result: lockResult.value };
 
-    if (computeHistoric) {
-      await withHistoricComputeLock(dataSource, () =>
-        zoneAlerteComputedService.computeHistoric(true),
-      );
-    }
     await closeApp(app);
     app = undefined;
     parentPort?.postMessage(response);

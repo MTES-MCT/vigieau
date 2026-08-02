@@ -13,6 +13,8 @@ interface WorkerData {
   expectedStatsCursor?: string | null;
   expectedMapGeneration?: string;
   expectedStatsGeneration?: string;
+  expectedSourceRevision?: string;
+  dateMax?: string;
   type: 'maps' | 'mapsComputed';
 }
 
@@ -42,6 +44,8 @@ async function run() {
       expectedStatsCursor,
       expectedMapGeneration,
       expectedStatsGeneration,
+      expectedSourceRevision,
+      dateMax,
       type,
     } = workerData as WorkerData;
     const dateMinMoment = moment(dateMin);
@@ -60,6 +64,8 @@ async function run() {
         expectedStatsCursor,
         expectedMapGeneration,
         expectedStatsGeneration,
+        expectedSourceRevision,
+        dateMax,
       );
     } else {
       result =
@@ -70,6 +76,8 @@ async function run() {
           expectedStatsCursor,
           expectedMapGeneration,
           expectedStatsGeneration,
+          expectedSourceRevision,
+          dateMax,
         );
     }
 

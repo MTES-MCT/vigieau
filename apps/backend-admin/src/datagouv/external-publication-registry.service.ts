@@ -23,9 +23,13 @@ interface PublicationRunRow {
 }
 
 export interface PublicationRunIdentity {
-  sourceRevision: string;
+  sourceRevision?: string;
   publicationId?: string;
   materializationVersion?: number;
+  historicMapCursor?: string | null;
+  historicStatsCursor?: string | null;
+  historicMapGeneration?: string;
+  historicStatsGeneration?: string;
 }
 
 export interface ExecuteDailyRunOptions {

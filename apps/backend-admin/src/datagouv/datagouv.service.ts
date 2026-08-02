@@ -207,6 +207,7 @@ export class DatagouvService {
         scheduledFor,
         () => this.updateDailyMapArchive(scheduledFor, true),
         failures,
+        publicationContext,
       );
       await this.runDataGouvUpdate(
         'maps-pmtiles',
@@ -214,6 +215,7 @@ export class DatagouvService {
         scheduledFor,
         () => this.updateDailyMapArchive(scheduledFor, false),
         failures,
+        publicationContext,
       );
     }
     await this.runDataGouvUpdate(
@@ -244,6 +246,9 @@ export class DatagouvService {
   ): Promise<void> {
     try {
       this.throwIfDeadlineExceeded();
+      const publicationIdentity = publicationContext
+        ? this.getPublicationRunIdentity(publicationContext)
+        : undefined;
       const result = await this.publicationRegistry.executeDailyRun(
         `datagouv:${key}`,
         scheduledFor,
@@ -251,22 +256,10 @@ export class DatagouvService {
           await publicationContext?.verifyCurrent();
           await update();
           await publicationContext?.verifyCurrent();
-          return publicationContext
-            ? {
-                publicationId: publicationContext.publicationId,
-                sourceRevision: publicationContext.sourceRevision,
-              }
-            : undefined;
+          return publicationIdentity;
         },
         new Date(),
-        publicationContext
-          ? {
-              identity: {
-                publicationId: publicationContext.publicationId,
-                sourceRevision: publicationContext.sourceRevision,
-              },
-            }
-          : undefined,
+        publicationIdentity ? { identity: publicationIdentity } : undefined,
       );
       if (!['succeeded', 'already_succeeded'].includes(result)) {
         throw new Error(`Publication ${name} non terminée (${result})`);
@@ -275,6 +268,14 @@ export class DatagouvService {
       this.logDataGouvError(name, error);
       failures.push({ name, error });
     }
+  }
+
+  private getPublicationRunIdentity(
+    publicationContext: DatagouvPublicationContext,
+  ): PublicationRunIdentity {
+    const { verifyCurrent, ...identity } = publicationContext;
+    void verifyCurrent;
+    return identity;
   }
 
   private logDataGouvError(name: string, error: unknown): void {

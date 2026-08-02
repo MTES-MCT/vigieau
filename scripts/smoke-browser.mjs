@@ -4,12 +4,19 @@ import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
+import {
+  buildTarbesSituationExpectations,
+  parseTarbesCheckMode,
+  resolveTarbesLookupOutcome,
+} from "./smoke-browser-tarbes.mjs";
 
 const frontBase = (
   process.env.VIGIEAU_FRONT_URL || "https://vigieau.gouv.fr"
 ).replace(/\/+$/, "");
 const expectedServiceWorkerUrl = new URL("/sw.js", frontBase).href;
 const tarbesExpectedModalTitle = "Nous avons besoin de plus de pr\u00e9cision";
+const tarbesResourceModalTitle =
+  "Pour consulter les restrictions, veuillez s\u00e9lectionner la ressource dans laquelle vous pr\u00e9levez de l\u2019eau.";
 const tarbesForbiddenMessage =
   /Pas d['\u2019]arr\u00eat\u00e9 en vigueur|Aucune restriction/i;
 const timeoutMs = Number(
@@ -24,8 +31,9 @@ const minZonePalettePixels = Number(
 const minZonePaletteRatio = Number(
   process.env.VIGIEAU_MIN_ZONE_PALETTE_RATIO || 0.001,
 );
-const tarbesCheckMode =
-  process.env.VIGIEAU_BROWSER_TARBES_MODE?.trim() || "strict";
+const tarbesCheckMode = parseTarbesCheckMode(
+  process.env.VIGIEAU_BROWSER_TARBES_MODE,
+);
 
 const zonePalette = [
   { name: "vigilance", rgb: [255, 237, 160] },
@@ -52,11 +60,6 @@ assert.ok(
     minZonePaletteRatio < 1,
   "VIGIEAU_MIN_ZONE_PALETTE_RATIO must be between 0 and 1",
 );
-assert.ok(
-  ["strict", "skip"].includes(tarbesCheckMode),
-  "VIGIEAU_BROWSER_TARBES_MODE must be strict or skip",
-);
-
 async function findChrome() {
   const candidates = [
     process.env.CHROME_PATH,
@@ -588,6 +591,237 @@ async function clickViewportPoint(client, point) {
   });
 }
 
+async function readTarbesLookupPayload(client, lookup) {
+  const response = await waitFor(async () => {
+    const body = await client.send("Network.getResponseBody", {
+      requestId: lookup.requestId,
+    });
+    const text = body.base64Encoded
+      ? Buffer.from(body.body, "base64").toString("utf8")
+      : body.body;
+    return text ? { payload: JSON.parse(text) } : null;
+  }, "The Tarbes municipality response body");
+  return response.payload;
+}
+
+async function selectTarbesWaterType(client, type) {
+  await waitFor(async () => {
+    return client.evaluate(`(() => {
+      const isVisible = (element) => {
+        const style = getComputedStyle(element);
+        const bounds = element.getBoundingClientRect();
+        return (
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          bounds.width > 0 &&
+          bounds.height > 0
+        );
+      };
+      const select = [...document.querySelectorAll('select#type_eau')]
+        .find(isVisible);
+      const type = ${JSON.stringify(type)};
+      if (!select || ![...select.options].some((option) => option.value === type)) {
+        return null;
+      }
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        'value'
+      ).set;
+      valueSetter.call(select, type);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return select.value === type ? true : null;
+    })()`);
+  }, `The Tarbes ${type} water-type selection`);
+}
+
+async function inspectTarbesResourceModal(client) {
+  return client.evaluate(`(() => {
+    const isVisible = (element) => {
+      const style = getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        bounds.width > 0 &&
+        bounds.height > 0
+      );
+    };
+    const expectedTitle = ${JSON.stringify(tarbesResourceModalTitle)};
+    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+    const dialog = [
+      ...document.querySelectorAll('[role="dialog"], dialog, .fr-modal'),
+    ].filter(isVisible).find((candidate) => {
+      const title = candidate.querySelector(
+        '.fr-modal__title, [aria-level], h1, h2, h3'
+      );
+      return normalize(title?.textContent) === expectedTitle;
+    });
+    if (!dialog) return null;
+    const select = [...dialog.querySelectorAll('select')].find(isVisible);
+    return {
+      title: expectedTitle,
+      options: [...(select?.options || [])]
+        .filter((option) => option.value)
+        .map((option) => ({
+          id: String(option.value),
+          text: normalize(option.textContent),
+        })),
+    };
+  })()`);
+}
+
+async function chooseTarbesZone(client, zoneId) {
+  await client.evaluate(`(() => {
+    const isVisible = (element) => {
+      const style = getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        bounds.width > 0 &&
+        bounds.height > 0
+      );
+    };
+    const expectedTitle = ${JSON.stringify(tarbesResourceModalTitle)};
+    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+    const dialog = [
+      ...document.querySelectorAll('[role="dialog"], dialog, .fr-modal'),
+    ].filter(isVisible).find((candidate) => {
+      const title = candidate.querySelector(
+        '.fr-modal__title, [aria-level], h1, h2, h3'
+      );
+      return normalize(title?.textContent) === expectedTitle;
+    });
+    const select = [...(dialog?.querySelectorAll('select') || [])]
+      .find(isVisible);
+    const zoneId = ${JSON.stringify(zoneId)};
+    const option = [...(select?.options || [])]
+      .find((candidate) => String(candidate.value) === zoneId);
+    const button = [...(dialog?.querySelectorAll('button') || [])]
+      .find((candidate) => normalize(candidate.textContent) === 'Valider');
+    if (!select || !option || !button) {
+      throw new Error('Unable to select the expected Tarbes alert zone');
+    }
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value'
+    ).set;
+    valueSetter.call(select, zoneId);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    button.click();
+    return true;
+  })()`);
+}
+
+async function inspectTarbesSituation(client) {
+  return client.evaluate(`(() => {
+    const isVisible = (element) => {
+      const style = getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        bounds.width > 0 &&
+        bounds.height > 0
+      );
+    };
+    const header = document.querySelector('.situation-status-header');
+    const heading = [...(header?.querySelectorAll('h1') || [])].find(isVisible);
+    const waterType = [...document.querySelectorAll('select#type_eau')]
+      .find(isVisible);
+    if (!header || !heading || !waterType || !isVisible(header)) return null;
+    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+    const expectedModalTitle = ${JSON.stringify(tarbesResourceModalTitle)};
+    const resourceModalVisible = [
+      ...document.querySelectorAll('[role="dialog"], dialog, .fr-modal'),
+    ].filter(isVisible).some((candidate) => {
+      const title = candidate.querySelector(
+        '.fr-modal__title, [aria-level], h1, h2, h3'
+      );
+      return normalize(title?.textContent) === expectedModalTitle;
+    });
+    return {
+      heading: normalize(heading.textContent),
+      headerClasses: [...header.classList],
+      selectedType: waterType.value,
+      resourceModalVisible,
+    };
+  })()`);
+}
+
+async function assertTarbesSituationRendering(client, payload) {
+  const expectations = buildTarbesSituationExpectations(payload);
+  const rendered = [];
+
+  for (const expectation of expectations) {
+    await selectTarbesWaterType(client, expectation.type);
+    const selectedZone = expectation.zones[0] || null;
+
+    if (expectation.zones.length > 1) {
+      const expectedIds = expectation.zones.map((zone) => zone.id).sort();
+      const modal = await waitFor(async () => {
+        const candidate = await inspectTarbesResourceModal(client);
+        if (!candidate) return null;
+        const candidateIds = candidate.options
+          .map((option) => option.id)
+          .sort();
+        return JSON.stringify(candidateIds) === JSON.stringify(expectedIds)
+          ? candidate
+          : null;
+      }, `The Tarbes ${expectation.type} resource modal`);
+      assert.deepEqual(
+        modal.options.map((option) => option.id).sort(),
+        expectedIds,
+        `Tarbes did not render every ${expectation.type} zone from the API response`,
+      );
+      for (const zone of expectation.zones) {
+        const option = modal.options.find(
+          (candidate) => candidate.id === zone.id,
+        );
+        assert.ok(option, `Tarbes did not render zone ${zone.id}`);
+        if (zone.name) {
+          assert.equal(
+            option.text,
+            zone.name,
+            `Tarbes rendered the wrong name for zone ${zone.id}`,
+          );
+        }
+      }
+      await chooseTarbesZone(client, selectedZone.id);
+    }
+
+    const situation = await waitFor(async () => {
+      const state = await inspectTarbesSituation(client);
+      if (
+        !state ||
+        state.selectedType !== expectation.type ||
+        state.resourceModalVisible
+      ) {
+        return null;
+      }
+      const expectedClass = `situation-level-${selectedZone?.severityRank ?? 0}`;
+      if (!state.headerClasses.includes(expectedClass)) return null;
+      if (selectedZone && !/\best en\b/i.test(state.heading)) return null;
+      if (
+        !selectedZone &&
+        !/pas concern[\u00e9e]e par des restrictions/i.test(state.heading)
+      ) {
+        return null;
+      }
+      return state;
+    }, `The Tarbes ${expectation.type} situation rendered from the API response`);
+
+    rendered.push({
+      type: expectation.type,
+      zoneCount: expectation.zones.length,
+      selectedZoneId: selectedZone?.id ?? null,
+      heading: situation.heading,
+    });
+  }
+
+  return rendered;
+}
+
 async function runTarbesAddressJourney(client) {
   await client.send("Network.setBypassServiceWorker", { bypass: true });
   resetObservations();
@@ -686,11 +920,81 @@ async function runTarbesAddressJourney(client) {
     () => zoneLookupResponses.at(-1) || null,
     "The Tarbes municipality zone lookup",
   );
-  assert.equal(
+  const lookupOutcome = resolveTarbesLookupOutcome(
+    tarbesCheckMode,
     lookup.status,
-    409,
-    `Tarbes municipality lookup returned ${lookup.status}`,
   );
+
+  if (lookupOutcome === "situation") {
+    const payload = await readTarbesLookupPayload(client, lookup);
+    await waitFor(async () => {
+      const path = await client.evaluate("location.pathname");
+      return path === "/situation" ? path : null;
+    }, "The Tarbes situation navigation");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const situation = await client.evaluate(`(() => {
+      const isVisible = (element) => {
+        const style = getComputedStyle(element);
+        const bounds = element.getBoundingClientRect();
+        return (
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          bounds.width > 0 &&
+          bounds.height > 0
+        );
+      };
+      const precisionTitle = ${JSON.stringify(tarbesExpectedModalTitle)};
+      const precisionModal = [
+        ...document.querySelectorAll('[role="dialog"], dialog, .fr-modal'),
+      ].filter(isVisible).find((dialog) => {
+        const title = dialog.querySelector(
+          '.fr-modal__title, [aria-level], h1, h2, h3'
+        );
+        return (title?.textContent || '').replace(/\\s+/g, ' ').trim() ===
+          precisionTitle;
+      });
+      return {
+        path: location.pathname,
+        precisionModal: precisionModal
+          ? (precisionModal.textContent || '').replace(/\\s+/g, ' ').trim()
+          : null,
+      };
+    })()`);
+    assert.equal(
+      situation.path,
+      "/situation",
+      `Tarbes did not remain on the situation page: ${JSON.stringify(situation)}`,
+    );
+    assert.equal(
+      situation.precisionModal,
+      null,
+      `Tarbes displayed an erroneous precision modal after a successful lookup: ${JSON.stringify(situation)}`,
+    );
+    assert.deepEqual(
+      fatalErrors,
+      [],
+      "Tarbes situation navigation raised an unhandled browser exception",
+    );
+    const renderedSituation = await assertTarbesSituationRendering(
+      client,
+      payload,
+    );
+    assert.deepEqual(
+      fatalErrors,
+      [],
+      "Tarbes rendered situation checks raised an unhandled browser exception",
+    );
+
+    return {
+      selectedOption: tarbesOption.text,
+      inputValue: consultButton.inputValue,
+      lookupStatus: lookup.status,
+      outcome: lookupOutcome,
+      modalTitle: null,
+      path: situation.path,
+      renderedSituation,
+    };
+  }
 
   const modal = await waitFor(async () => {
     return client.evaluate(`(() => {
@@ -744,6 +1048,7 @@ async function runTarbesAddressJourney(client) {
     selectedOption: tarbesOption.text,
     inputValue: consultButton.inputValue,
     lookupStatus: lookup.status,
+    outcome: lookupOutcome,
     modalTitle,
     path: modal.path,
   };
@@ -879,7 +1184,7 @@ async function runScenario(client, scenario) {
     ? await inspectServiceWorkerCaches(client)
     : null;
   const tarbesAddressJourney =
-    scenario.name === "desktop" && tarbesCheckMode === "strict"
+    scenario.name === "desktop" && tarbesCheckMode !== "skip"
       ? await runTarbesAddressJourney(client)
       : null;
   return {
@@ -957,6 +1262,7 @@ try {
           requestUrl.searchParams.get("commune") === "65440"
         ) {
           zoneLookupResponses.push({
+            requestId: event.params.requestId,
             status: event.params.response.status,
             fromServiceWorker: event.params.response.fromServiceWorker,
           });

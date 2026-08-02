@@ -12,7 +12,8 @@ import { Moment } from 'moment';
 
 const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
   'vigieau:statistic-commune:snapshot-computation';
-const COMMUNE_STATISTICS_BATCH_SIZE = 250;
+const DEFAULT_COMMUNE_STATISTICS_BATCH_SIZE = 250;
+const MAX_COMMUNE_STATISTICS_BATCH_SIZE = 1000;
 const STATISTIC_ZONE_TYPES = ['SUP', 'SOU', 'AEP'] as const;
 const STATISTIC_SEVERITIES = [
   'vigilance',
@@ -22,6 +23,34 @@ const STATISTIC_SEVERITIES = [
 ] as const;
 
 type StatisticSeverity = (typeof STATISTIC_SEVERITIES)[number];
+
+export function parseCommuneStatisticsBatchSize(
+  value: string | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_COMMUNE_STATISTICS_BATCH_SIZE;
+  }
+
+  const normalizedValue = value.trim();
+  if (!/^\d+$/.test(normalizedValue)) {
+    throw new Error(
+      `Invalid COMMUNE_STATISTICS_BATCH_SIZE: ${value} (expected an integer between 1 and ${MAX_COMMUNE_STATISTICS_BATCH_SIZE})`,
+    );
+  }
+
+  const batchSize = Number(normalizedValue);
+  if (
+    !Number.isSafeInteger(batchSize) ||
+    batchSize < 1 ||
+    batchSize > MAX_COMMUNE_STATISTICS_BATCH_SIZE
+  ) {
+    throw new Error(
+      `Invalid COMMUNE_STATISTICS_BATCH_SIZE: ${value} (expected an integer between 1 and ${MAX_COMMUNE_STATISTICS_BATCH_SIZE})`,
+    );
+  }
+
+  return batchSize;
+}
 
 interface CommuneStatisticRestriction {
   date: string;
@@ -143,6 +172,9 @@ export class StatisticCommuneService {
     departementCodes?: string[],
     hooks?: StatisticSnapshotHooks,
   ) {
+    const batchSize = parseCommuneStatisticsBatchSize(
+      process.env.COMMUNE_STATISTICS_BATCH_SIZE,
+    );
     const dateString = date.toISOString().split('T')[0];
     this.logger.log(
       `COMPUTING COMMUNE STATISTICS RESTRICTIONS - ${dateString}`,
@@ -176,7 +208,6 @@ export class StatisticCommuneService {
           await this.hasCompletedNationalSnapshot(queryRunner, dateString);
       }
 
-      const batchSize = COMMUNE_STATISTICS_BATCH_SIZE;
       const communeSize = await this.communeService.count(departementCodes);
       await this.markSnapshotRunning(
         queryRunner,
@@ -568,10 +599,37 @@ export class StatisticCommuneService {
       );
       const [updateResult] = await queryRunner.query(
         `
-          WITH input AS (
+          WITH input AS MATERIALIZED (
             SELECT *
             FROM jsonb_to_recordset($1::jsonb)
               AS value("communeId" integer, restriction jsonb)
+          ), matched AS MATERIALIZED (
+            SELECT
+              statistic.id,
+              statistic."restrictions",
+              input.restriction,
+              existing."dateCount",
+              existing."identicalCount",
+              existing."firstDateOrdinality"
+            FROM input
+            JOIN "statistic_commune" statistic
+              ON statistic."communeId" = input."communeId"
+            CROSS JOIN LATERAL (
+              SELECT
+                COUNT(*) FILTER (
+                  WHERE item.value ->> 'date' = $2
+                )::integer AS "dateCount",
+                COUNT(*) FILTER (
+                  WHERE item.value ->> 'date' = $2
+                    AND item.value = input.restriction
+                )::integer AS "identicalCount",
+                MIN(item.ordinality) FILTER (
+                  WHERE item.value ->> 'date' = $2
+                ) AS "firstDateOrdinality"
+              FROM jsonb_array_elements(
+                COALESCE(statistic."restrictions", '[]'::jsonb)
+              ) WITH ORDINALITY AS item(value, ordinality)
+            ) existing
           ), updated AS (
             UPDATE "statistic_commune" statistic
             SET "restrictions" =
@@ -579,38 +637,55 @@ export class StatisticCommuneService {
                 (
                   SELECT jsonb_agg(
                     CASE
-                      WHEN item.value ->> 'date' = $2 THEN input.restriction
+                      WHEN item.ordinality = matched."firstDateOrdinality"
+                        THEN matched.restriction
                       ELSE item.value
                     END
                     ORDER BY item.ordinality
                   )
                   FROM jsonb_array_elements(
-                    COALESCE(statistic."restrictions", '[]'::jsonb)
+                    COALESCE(matched."restrictions", '[]'::jsonb)
                   ) WITH ORDINALITY AS item(value, ordinality)
+                  WHERE item.value ->> 'date' IS DISTINCT FROM $2
+                    OR item.ordinality = matched."firstDateOrdinality"
                 ),
                 '[]'::jsonb
               ) || CASE
-                WHEN NOT EXISTS (
-                  SELECT 1
-                  FROM jsonb_array_elements(
-                    COALESCE(statistic."restrictions", '[]'::jsonb)
-                  ) AS existing(value)
-                  WHERE existing.value ->> 'date' = $2
-                )
-                THEN jsonb_build_array(input.restriction)
+                WHEN matched."dateCount" = 0
+                THEN jsonb_build_array(matched.restriction)
                 ELSE '[]'::jsonb
               END
-            FROM input
-            WHERE statistic."communeId" = input."communeId"
+            FROM matched
+            WHERE statistic.id = matched.id
+              AND NOT (
+                matched."dateCount" = 1
+                AND matched."identicalCount" = 1
+              )
             RETURNING statistic.id
           )
-          SELECT COUNT(*)::integer AS affected FROM updated
+          SELECT
+            (SELECT COUNT(*)::integer FROM matched) AS matched,
+            (SELECT COUNT(*)::integer FROM updated) AS updated,
+            (
+              SELECT COUNT(*)::integer
+              FROM matched
+              WHERE matched."dateCount" = 1
+                AND matched."identicalCount" = 1
+            ) AS unchanged
         `,
         [payload, dateString],
       );
-      if (Number(updateResult?.affected ?? 0) !== restrictions.length) {
+      const matchedCount = Number(updateResult?.matched ?? 0);
+      if (matchedCount !== restrictions.length) {
         throw new Error(
-          `Lot communal incomplet: ${Number(updateResult?.affected ?? 0)}/${restrictions.length} statistiques mises a jour`,
+          `Lot communal incomplet: ${matchedCount}/${restrictions.length} statistiques trouvees`,
+        );
+      }
+      const updatedCount = Number(updateResult?.updated ?? 0);
+      const unchangedCount = Number(updateResult?.unchanged ?? 0);
+      if (updatedCount + unchangedCount !== restrictions.length) {
+        throw new Error(
+          `Lot communal incomplet: ${updatedCount} mises a jour + ${unchangedCount} inchangees / ${restrictions.length} statistiques attendues`,
         );
       }
       await this.markSnapshotProgress(

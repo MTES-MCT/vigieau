@@ -35,3 +35,17 @@ export function getScheduledCivilDate(now: Date, startHour: number): string {
     ? shiftCivilDate(schedule.date, -1)
     : schedule.date;
 }
+
+export function getCivilDateAtUtcNoon(civilDate: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(civilDate)) {
+    throw new Error(`Invalid civil date: ${civilDate}`);
+  }
+  const date = new Date(`${civilDate}T12:00:00.000Z`);
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== civilDate
+  ) {
+    throw new Error(`Invalid civil date: ${civilDate}`);
+  }
+  return date;
+}

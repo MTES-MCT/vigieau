@@ -31,8 +31,9 @@ export class ConfigService {
     expectedCurrent: string | null,
     expectedGeneration: string,
     completedThrough: string,
+    expectedSourceRevision?: string,
   ): Promise<boolean> {
-    const result = await this.configRepository
+    const query = this.configRepository
       .createQueryBuilder()
       .update()
       .set({
@@ -45,8 +46,20 @@ export class ConfigService {
       })
       .andWhere('"computeMapGeneration" = :expectedGeneration', {
         expectedGeneration,
-      })
-      .execute();
+      });
+    if (expectedSourceRevision !== undefined) {
+      query.andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM "zone_publication_source_state" source_state
+          WHERE source_state."id" = 1
+            AND source_state."revision" = :expectedSourceRevision
+          FOR SHARE
+        )`,
+        { expectedSourceRevision },
+      );
+    }
+    const result = await query.execute();
     return result.affected === 1;
   }
 
@@ -54,8 +67,9 @@ export class ConfigService {
     expectedCurrent: string | null,
     expectedGeneration: string,
     completedThrough: string,
+    expectedSourceRevision?: string,
   ): Promise<boolean> {
-    const result = await this.configRepository
+    const query = this.configRepository
       .createQueryBuilder()
       .update()
       .set({
@@ -68,8 +82,20 @@ export class ConfigService {
       })
       .andWhere('"computeStatsGeneration" = :expectedGeneration', {
         expectedGeneration,
-      })
-      .execute();
+      });
+    if (expectedSourceRevision !== undefined) {
+      query.andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM "zone_publication_source_state" source_state
+          WHERE source_state."id" = 1
+            AND source_state."revision" = :expectedSourceRevision
+          FOR SHARE
+        )`,
+        { expectedSourceRevision },
+      );
+    }
+    const result = await query.execute();
     return result.affected === 1;
   }
 

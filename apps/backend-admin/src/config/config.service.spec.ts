@@ -48,12 +48,58 @@ describe('ConfigService historic cursor advancement', () => {
     );
   });
 
+  it('guards map cursor advancement with the expected source revision', async () => {
+    const harness = createHarness(1);
+
+    await harness.service.advanceComputeMapDate(
+      '2026-07-30',
+      '12',
+      '2026-07-31',
+      '42',
+    );
+
+    const sourceRevisionGuard = harness.queryBuilder.andWhere.mock.calls.find(
+      ([condition]) => condition.includes('zone_publication_source_state'),
+    );
+    expect(sourceRevisionGuard).toEqual([
+      expect.stringContaining('EXISTS ('),
+      { expectedSourceRevision: '42' },
+    ]);
+    expect(sourceRevisionGuard?.[0]).toContain(
+      'source_state."revision" = :expectedSourceRevision',
+    );
+    expect(sourceRevisionGuard?.[0]).toContain('FOR SHARE');
+  });
+
   it('reports a concurrent statistics cursor change', async () => {
     const harness = createHarness(0);
 
     await expect(
       harness.service.advanceComputeStatsDate('2026-07-30', '8', '2026-07-31'),
     ).resolves.toBe(false);
+  });
+
+  it('guards statistics cursor advancement with the expected source revision', async () => {
+    const harness = createHarness(1);
+
+    await harness.service.advanceComputeStatsDate(
+      '2026-07-30',
+      '8',
+      '2026-07-31',
+      '43',
+    );
+
+    const sourceRevisionGuard = harness.queryBuilder.andWhere.mock.calls.find(
+      ([condition]) => condition.includes('zone_publication_source_state'),
+    );
+    expect(sourceRevisionGuard).toEqual([
+      expect.stringContaining('EXISTS ('),
+      { expectedSourceRevision: '43' },
+    ]);
+    expect(sourceRevisionGuard?.[0]).toContain(
+      'source_state."revision" = :expectedSourceRevision',
+    );
+    expect(sourceRevisionGuard?.[0]).toContain('FOR SHARE');
   });
 
   it('increments invalidation generations even for an equal dirty date', async () => {

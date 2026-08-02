@@ -76,6 +76,18 @@ describe('ArreteCadreService scheduled status update', () => {
 
 describe('ArreteCadreScheduler', () => {
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
+  const historicCursorState = {
+    mapCursor: '2026-07-31',
+    statsCursor: '2026-07-31',
+    mapGeneration: '12',
+    statsGeneration: '18',
+  };
+  const historicRunIdentity = {
+    historicMapCursor: '2026-07-31',
+    historicStatsCursor: '2026-07-31',
+    historicMapGeneration: '12',
+    historicStatsGeneration: '18',
+  };
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'false';
@@ -90,14 +102,17 @@ describe('ArreteCadreScheduler', () => {
   });
 
   const createScheduler = () => {
+    const completedRunMetadata: unknown[] = [];
     const arreteCadreService = {
       updateArreteCadreStatut: jest.fn().mockResolvedValue(undefined),
-      catchUpHistoricComputations: jest.fn().mockResolvedValue(undefined),
+      catchUpHistoricComputations: jest
+        .fn()
+        .mockResolvedValue(historicCursorState),
     };
     const registry = {
       executeDailyRun: jest.fn(
-        async (_jobKey: string, _date: string, run: () => Promise<void>) => {
-          await run();
+        async (_jobKey: string, _date: string, run: () => Promise<unknown>) => {
+          completedRunMetadata.push(await run());
           return 'succeeded';
         },
       ),
@@ -109,16 +124,28 @@ describe('ArreteCadreScheduler', () => {
     };
     const zonePublicationService = {
       getSourceRevision: jest.fn().mockResolvedValue('42'),
+      promoteCertifiedPublicationIfAvailable: jest.fn().mockResolvedValue(true),
+    };
+    const configService = {
+      getConfig: jest.fn().mockResolvedValue({
+        computeMapDate: historicCursorState.mapCursor,
+        computeStatsDate: historicCursorState.statsCursor,
+        computeMapGeneration: historicCursorState.mapGeneration,
+        computeStatsGeneration: historicCursorState.statsGeneration,
+      }),
     };
     return {
       service: new ArreteCadreScheduler(
         arreteCadreService as never,
         registry as never,
         zonePublicationService as never,
+        configService as never,
       ),
       arreteCadreService,
       registry,
       zonePublicationService,
+      configService,
+      completedRunMetadata,
     };
   };
 
@@ -152,6 +179,22 @@ describe('ArreteCadreScheduler', () => {
       ).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     },
   );
+
+  it('pins the legacy historic run to the persisted cursor epoch', async () => {
+    const harness = createScheduler();
+    const now = new Date('2026-08-01T08:00:00Z');
+
+    await harness.service.updateIfDue(now);
+
+    expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
+      2,
+      NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+      '2026-08-01',
+      expect.any(Function),
+      now,
+      { identity: historicRunIdentity },
+    );
+  });
 
   it('keeps submitting the daily run after a failed attempt', async () => {
     const harness = createScheduler();
@@ -245,9 +288,55 @@ describe('ArreteCadreScheduler', () => {
         identity: {
           sourceRevision: '42',
           materializationVersion: 3,
+          ...historicRunIdentity,
         },
       },
     );
+    expect(
+      harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledWith({
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+      preferredPublicationId: 'publication-1',
+    });
+  });
+
+  it('resumes candidacy from persisted daily and historic successes', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createScheduler();
+    harness.registry.executeDailyRun
+      .mockResolvedValueOnce('already_succeeded')
+      .mockResolvedValueOnce('already_succeeded');
+
+    await harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z'));
+
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledWith({
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+      preferredPublicationId: 'publication-1',
+    });
+  });
+
+  it('does not expose the validated publication while historic catch-up is busy', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createScheduler();
+    harness.registry.executeDailyRun
+      .mockResolvedValueOnce('already_succeeded')
+      .mockResolvedValueOnce('busy');
+
+    await harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z'));
+
+    expect(
+      harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).not.toHaveBeenCalled();
   });
 
   it('does not certify a computation when the source revision changes', async () => {
@@ -302,8 +391,42 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { sourceRevision: '42', materializationVersion: 3 } },
+      {
+        identity: {
+          sourceRevision: '42',
+          materializationVersion: 3,
+          ...historicRunIdentity,
+        },
+      },
     );
+  });
+
+  it('persists the cursor generations reached by the historic catch-up', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createScheduler();
+    harness.arreteCadreService.updateArreteCadreStatut.mockResolvedValue({
+      result: {
+        publicationId: 'publication-1',
+        sourceRevision: '42',
+      },
+    });
+    harness.arreteCadreService.catchUpHistoricComputations.mockResolvedValue({
+      mapCursor: '2026-07-31',
+      statsCursor: '2026-07-31',
+      mapGeneration: '13',
+      statsGeneration: '19',
+    });
+
+    await harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z'));
+
+    expect(harness.completedRunMetadata[1]).toEqual({
+      sourceRevision: '42',
+      materializationVersion: 3,
+      historicMapCursor: '2026-07-31',
+      historicStatsCursor: '2026-07-31',
+      historicMapGeneration: '13',
+      historicStatsGeneration: '19',
+    });
   });
 
   it('revalidates the source after the historic barrier completes', async () => {
@@ -325,6 +448,9 @@ describe('ArreteCadreScheduler', () => {
     await expect(
       harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z')),
     ).rejects.toThrow('Zone source revision changed during computation');
+    expect(
+      harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).not.toHaveBeenCalled();
   });
 
   it('does not schedule startup catch-up during a maintenance freeze', () => {

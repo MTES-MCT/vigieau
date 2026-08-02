@@ -40,11 +40,40 @@ import {
 import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
+import {
+  getCivilDateAtUtcNoon,
+  getScheduledCivilDate,
+} from '../core/scheduling/daily-job-schedule';
 
 export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
 const ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS = 30 * 1000;
+const NATIONAL_COMPUTE_START_HOUR = 2;
 const HISTORIC_COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 export const HISTORIC_COMPUTE_WORKER_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+export const HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT = 7;
+const HISTORIC_COMPUTE_CHUNK_DAYS_MAX = 3660;
+
+export function readHistoricComputeChunkDays(
+  value = process.env.HISTORIC_COMPUTE_CHUNK_DAYS,
+): number {
+  if (value === undefined || value.trim() === '') {
+    return HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT;
+  }
+  const normalized = value.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error('HISTORIC_COMPUTE_CHUNK_DAYS must be a positive integer');
+  }
+  const parsed = Number(normalized);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed > HISTORIC_COMPUTE_CHUNK_DAYS_MAX
+  ) {
+    throw new Error(
+      `HISTORIC_COMPUTE_CHUNK_DAYS must be at most ${HISTORIC_COMPUTE_CHUNK_DAYS_MAX}`,
+    );
+  }
+  return parsed;
+}
 
 interface QueuedComputeWaiter {
   resolve: (result: unknown) => void;
@@ -58,7 +87,6 @@ export class ZoneAlerteComputedService {
   private askForCompute = false;
   private departementsToUpdate: number[] = [];
   private pendingNationalCompute = false;
-  private pendingComputeHistoric = false;
   private pendingNormalCompute = false;
   private pendingDailyPublicationReuse:
     | DailyZonePublicationReuseContext
@@ -116,15 +144,16 @@ export class ZoneAlerteComputedService {
   async askCompute(
     depsIds?: number[],
     force = false,
-    computeHistoric = false,
+    _computeHistoric = false,
     skipIfBusy = false,
     dailyPublicationReuse?: DailyZonePublicationReuseContext,
   ) {
+    // Historic catch-up is exclusively owned by the persistent clock scheduler.
+    void _computeHistoric;
     this.departementsToUpdate = this.departementsToUpdate.concat(depsIds ?? []);
     if (!force && (!depsIds || depsIds.length === 0)) {
       this.pendingNationalCompute = true;
     }
-    this.pendingComputeHistoric ||= computeHistoric;
     this.pendingNormalCompute ||= !skipIfBusy;
     if (!skipIfBusy && !dailyPublicationReuse) {
       this.pendingDailyPublicationReuse = null;
@@ -162,11 +191,9 @@ export class ZoneAlerteComputedService {
         : [...new Set(this.departementsToUpdate)];
       this.departementsToUpdate = [];
       this.pendingNationalCompute = false;
-      const effectiveComputeHistoric = this.pendingComputeHistoric;
       const effectiveSkipIfBusy = !this.pendingNormalCompute;
       const effectiveDailyPublicationReuse =
         this.pendingDailyPublicationReuse ?? undefined;
-      this.pendingComputeHistoric = false;
       this.pendingNormalCompute = false;
       this.pendingDailyPublicationReuse = undefined;
       queuedWaiters = this.queuedComputeWaiters.splice(0);
@@ -188,7 +215,6 @@ export class ZoneAlerteComputedService {
       const worker = new Worker(workerThreadFilePath, {
         workerData: {
           depsIds: uniqueDepsIds,
-          computeHistoric: effectiveComputeHistoric,
           skipIfBusy: effectiveSkipIfBusy,
           ...(effectiveDailyPublicationReuse
             ? { dailyPublicationReuse: effectiveDailyPublicationReuse }
@@ -364,6 +390,11 @@ export class ZoneAlerteComputedService {
     }
     this.publicationWatchdogInProgress = true;
     try {
+      if (
+        await this.zonePublicationService.promoteCertifiedPublicationIfAvailable()
+      ) {
+        return;
+      }
       if (await this.zonePublicationService.isRecomputeRequired()) {
         await this.askCompute([], false, false, true);
       }
@@ -374,12 +405,24 @@ export class ZoneAlerteComputedService {
     }
   }
 
-  async computeAll(depsId?: number[], computeHistoric?: boolean) {
+  async computeAll(
+    depsId?: number[],
+    computeHistoric?: boolean,
+    scheduledFor?: string,
+  ) {
     this.logger.log(`COMPUTING ZONES D'ALERTES - BEGIN`);
-    const sourceRevision =
-      !depsId?.length && isZonePublicationEnabled()
-        ? await this.zonePublicationService.getSourceRevision()
-        : undefined;
+    const isNationalVersionedCompute =
+      !depsId?.length && isZonePublicationEnabled();
+    const publicationScheduledFor = isNationalVersionedCompute
+      ? (scheduledFor ??
+        getScheduledCivilDate(new Date(), NATIONAL_COMPUTE_START_HOUR))
+      : undefined;
+    if (publicationScheduledFor !== undefined) {
+      getCivilDateAtUtcNoon(publicationScheduledFor);
+    }
+    const sourceRevision = isNationalVersionedCompute
+      ? await this.zonePublicationService.getSourceRevision()
+      : undefined;
     this.departementsToUpdate = [];
     let departements = await this.departementService.findAllLight();
     if (depsId && depsId.length > 0) {
@@ -422,7 +465,11 @@ export class ZoneAlerteComputedService {
     }
     // On récupère toutes les restrictions en cours
     this.logger.log(`COMPUTING ZONES D'ALERTES - END`);
-    return this.computeGeoJson(computeHistoric, sourceRevision);
+    return this.computeGeoJson(
+      computeHistoric,
+      sourceRevision,
+      publicationScheduledFor,
+    );
   }
 
   async computeAllOrReuseDailyPublication(
@@ -440,6 +487,11 @@ export class ZoneAlerteComputedService {
         );
         return reusablePublication;
       }
+      return this.computeAll(
+        depsIds,
+        false,
+        dailyPublicationReuse.scheduledFor,
+      );
     }
     return this.computeAll(depsIds, false);
   }
@@ -1022,8 +1074,19 @@ DELETE FROM zone_alerte_computed
     );
   }
 
-  async computeGeoJson(computeHistoric?: boolean, sourceRevision?: string) {
+  async computeGeoJson(
+    computeHistoric?: boolean,
+    sourceRevision?: string,
+    scheduledFor?: string,
+  ) {
     const publicationEnabled = isZonePublicationEnabled();
+    const isNationalVersionedCompute =
+      publicationEnabled && sourceRevision !== undefined;
+    if (isNationalVersionedCompute && scheduledFor === undefined) {
+      throw new Error(
+        'National versioned computation is missing its scheduled civil date',
+      );
+    }
     const allZonesComputed: any = await this.zoneAlerteComputedRepository.find(<
       FindManyOptions
     >{
@@ -1141,7 +1204,9 @@ DELETE FROM zone_alerte_computed
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
-    const date = new Date();
+    const date = isNationalVersionedCompute
+      ? getCivilDateAtUtcNoon(scheduledFor)
+      : new Date();
     await writeFile(
       `${path}/zones_arretes_en_vigueur.geojson`,
       JSON.stringify(geojson),
@@ -1488,14 +1553,20 @@ DELETE FROM zone_alerte_computed
     requiredThrough?: string,
     expectedSourceRevision?: string,
   ) {
+    let historicSourceRevision: string | undefined;
+    let historicDirtyFromForRetry: string | undefined;
     try {
       const publicationEnabled = isZonePublicationEnabled();
-      const historicSourceRevision =
+      historicSourceRevision =
         expectedSourceRevision ??
         (publicationEnabled
           ? await this.zonePublicationService.getSourceRevision()
           : undefined);
       const config = await this.configService.getConfig();
+      if (!config) {
+        throw new Error('Historic cursor configuration is missing');
+      }
+      let certifiedCursorState = this.toHistoricCursorState(config);
       const dirtyDates = [config.computeMapDate, config.computeStatsDate]
         .filter(Boolean)
         .map((date) => moment(date, 'YYYY-MM-DD'));
@@ -1504,15 +1575,21 @@ DELETE FROM zone_alerte_computed
       }, dirtyDates[0]);
       let historicPublicationStarted = false;
       let historicCompletedThrough: string | undefined;
+      const dirtyThrough =
+        requiredThrough ?? moment().subtract(1, 'day').format('YYYY-MM-DD');
+      const dirtyThroughDate = moment(dirtyThrough, 'YYYY-MM-DD', true);
+      if (!dirtyThroughDate.isValid()) {
+        throw new Error(`Invalid historic catch-up date: ${dirtyThrough}`);
+      }
 
-      if (dirtyDate && moment().diff(dirtyDate, 'days') >= 1) {
+      if (dirtyDate && !dirtyDate.isAfter(dirtyThroughDate, 'day')) {
         const computedStartDate = moment(
           this.historicComputedStartDate,
           'YYYY-MM-DD',
         );
         const dirtyDateString = dirtyDate.format('YYYY-MM-DD');
-        const dirtyThrough =
-          requiredThrough ?? moment().subtract(1, 'day').format('YYYY-MM-DD');
+        const statisticsStartDate = config.computeStatsDate ?? dirtyDateString;
+        historicDirtyFromForRetry = dirtyDateString;
         await this.beginHistoricStatisticsPublication(
           dirtyDateString,
           dirtyThrough,
@@ -1520,25 +1597,28 @@ DELETE FROM zone_alerte_computed
         historicPublicationStarted = true;
 
         if (dirtyDate.isBefore(computedStartDate, 'day')) {
-          const legacyState = await this.runHistoricWorker(
+          const naturalLegacyEnd = computedStartDate.clone().subtract(1, 'day');
+          const legacyEnd = dirtyThroughDate.isBefore(naturalLegacyEnd, 'day')
+            ? dirtyThroughDate.clone()
+            : naturalLegacyEnd;
+          const legacyState = await this.runHistoricWorkerInChunks(
             'maps',
             dirtyDateString,
-            config.computeStatsDate,
+            statisticsStartDate,
             config.computeMapDate,
             config.computeStatsDate,
             String(config.computeMapGeneration ?? 0),
             String(config.computeStatsGeneration ?? 0),
+            legacyEnd.format('YYYY-MM-DD'),
+            historicSourceRevision,
           );
-          historicCompletedThrough = [
-            legacyState.mapCursor,
-            legacyState.statsCursor,
-          ]
-            .filter((date): date is string => Boolean(date))
-            .sort()[0];
-          const resumedConfig = await this.configService.getConfig();
-          this.assertHistoricCursorState(legacyState, resumedConfig);
+          historicCompletedThrough =
+            this.getHistoricCompletedThrough(legacyState);
+          certifiedCursorState = legacyState;
 
-          if (moment().diff(computedStartDate, 'days') >= 1) {
+          if (!dirtyThroughDate.isBefore(computedStartDate, 'day')) {
+            const resumedConfig = await this.configService.getConfig();
+            this.assertHistoricCursorState(legacyState, resumedConfig);
             const resumedDirtyDates = [
               resumedConfig.computeMapDate,
               resumedConfig.computeStatsDate,
@@ -1564,7 +1644,7 @@ DELETE FROM zone_alerte_computed
                 `Historic cursor rewound during legacy computation to ${resumedDirtyDate.format('YYYY-MM-DD')}`,
               );
             }
-            const computedState = await this.runHistoricWorker(
+            const computedState = await this.runHistoricWorkerInChunks(
               'mapsComputed',
               this.historicComputedStartDate,
               resumedConfig.computeStatsDate,
@@ -1572,32 +1652,28 @@ DELETE FROM zone_alerte_computed
               resumedConfig.computeStatsDate,
               String(resumedConfig.computeMapGeneration ?? 0),
               String(resumedConfig.computeStatsGeneration ?? 0),
+              dirtyThrough,
+              historicSourceRevision,
             );
-            await this.assertCurrentHistoricCursorState(computedState);
-            historicCompletedThrough = [
-              computedState.mapCursor,
-              computedState.statsCursor,
-            ]
-              .filter((date): date is string => Boolean(date))
-              .sort()[0];
+            historicCompletedThrough =
+              this.getHistoricCompletedThrough(computedState);
+            certifiedCursorState = computedState;
           }
         } else {
-          const computedState = await this.runHistoricWorker(
+          const computedState = await this.runHistoricWorkerInChunks(
             'mapsComputed',
             dirtyDateString,
-            config.computeStatsDate,
+            statisticsStartDate,
             config.computeMapDate,
             config.computeStatsDate,
             String(config.computeMapGeneration ?? 0),
             String(config.computeStatsGeneration ?? 0),
+            dirtyThrough,
+            historicSourceRevision,
           );
-          await this.assertCurrentHistoricCursorState(computedState);
-          historicCompletedThrough = [
-            computedState.mapCursor,
-            computedState.statsCursor,
-          ]
-            .filter((date): date is string => Boolean(date))
-            .sort()[0];
+          historicCompletedThrough =
+            this.getHistoricCompletedThrough(computedState);
+          certifiedCursorState = computedState;
         }
       }
       const statsMonthDate =
@@ -1633,7 +1709,11 @@ DELETE FROM zone_alerte_computed
         );
       }
       if (requiredThrough) {
-        await this.assertHistoricCatchUpComplete(requiredThrough);
+        await this.assertHistoricCatchUpComplete(
+          requiredThrough,
+          historicSourceRevision,
+          historicDirtyFromForRetry,
+        );
       }
       if (historicPublicationStarted) {
         const publishedThrough = historicComputedThrough;
@@ -1647,8 +1727,14 @@ DELETE FROM zone_alerte_computed
           historicSourceRevision,
         );
       }
+      await this.assertCurrentHistoricCursorState(certifiedCursorState);
+      return certifiedCursorState;
     } catch (error) {
       this.logger.error('Error in computeHistoric', error.toString());
+      await this.rewindHistoricAfterSourceRevisionChange(
+        historicDirtyFromForRetry,
+        historicSourceRevision,
+      );
       if (rethrowWorkerError) {
         throw error;
       }
@@ -1749,7 +1835,13 @@ DELETE FROM zone_alerte_computed
           FROM "statistic_commune_snapshot" snapshot
           CROSS JOIN publication_guard publication_state
           WHERE snapshot."scope" <> 'bootstrap'
-            AND snapshot."status" <> 'completed'
+            AND (
+              snapshot."status" <> 'completed'
+              OR (
+                $2::bigint IS NOT NULL
+                AND snapshot."sourceRevision" IS DISTINCT FROM $2::bigint
+              )
+            )
             AND snapshot."snapshotDate" >= publication_state."historicDirtyFrom"
             AND snapshot."snapshotDate" <= $1::date
           ORDER BY snapshot."snapshotDate" ASC
@@ -1808,7 +1900,7 @@ DELETE FROM zone_alerte_computed
   async computeHistoricPersistently(
     requiredThrough: string,
     expectedSourceRevision?: string,
-  ): Promise<void> {
+  ): Promise<HistoricCursorState> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     let locked = false;
@@ -1829,7 +1921,15 @@ DELETE FROM zone_alerte_computed
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-      await this.computeHistoric(true, requiredThrough, expectedSourceRevision);
+      const state = await this.computeHistoric(
+        true,
+        requiredThrough,
+        expectedSourceRevision,
+      );
+      if (!state) {
+        throw new Error('Historic computation returned no cursor state');
+      }
+      return state;
     } finally {
       try {
         if (locked) {
@@ -1845,11 +1945,20 @@ DELETE FROM zone_alerte_computed
 
   private async assertHistoricCatchUpComplete(
     requiredThrough: string,
+    expectedSourceRevision?: string,
+    historicDirtyFrom?: string,
   ): Promise<void> {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(requiredThrough)) {
       throw new Error(`Invalid historic catch-up date: ${requiredThrough}`);
     }
     const startDate = `${requiredThrough.slice(0, 4)}-01-01`;
+    const rewindDate = historicDirtyFrom ?? startDate;
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(rewindDate) ||
+      rewindDate > requiredThrough
+    ) {
+      throw new Error(`Invalid historic dirty date: ${rewindDate}`);
+    }
     const [config] = await this.dataSource.query(
       `SELECT "computeMapDate", "computeStatsDate" FROM "config" WHERE "id" = 1`,
     );
@@ -1870,7 +1979,7 @@ DELETE FROM zone_alerte_computed
       mapDate < requiredThrough ||
       statsDate < requiredThrough
     ) {
-      await this.configService.setConfig(startDate, startDate);
+      await this.configService.setConfig(rewindDate, rewindDate);
       throw new Error(
         `Historic catch-up incomplete through ${requiredThrough}: map=${mapDate || 'null'}, stats=${statsDate || 'null'}`,
       );
@@ -1880,22 +1989,29 @@ DELETE FROM zone_alerte_computed
       `
         SELECT "snapshotDate"
         FROM "statistic_commune_snapshot"
-        WHERE "status" <> 'completed'
-          AND "scope" <> 'bootstrap'
+        WHERE "scope" <> 'bootstrap'
+          AND (
+            "status" <> 'completed'
+            OR (
+              $3::bigint IS NOT NULL
+              AND "sourceRevision" IS DISTINCT FROM $3::bigint
+            )
+          )
+          AND "snapshotDate" >= $2::date
           AND "snapshotDate" <= $1::date
         ORDER BY "snapshotDate" ASC
         LIMIT 1
       `,
-      [requiredThrough],
+      [requiredThrough, rewindDate, expectedSourceRevision ?? null],
     );
     if (incompleteSnapshot) {
       const snapshotDate = toDateString(incompleteSnapshot.snapshotDate);
       if (!snapshotDate) {
         throw new Error('Incomplete commune snapshot has no date');
       }
-      await this.configService.setConfig(snapshotDate, snapshotDate);
+      await this.configService.setConfig(rewindDate, rewindDate);
       throw new Error(
-        `Historic catch-up blocked by incomplete commune snapshot ${snapshotDate}`,
+        `Historic catch-up blocked by incompatible commune snapshot ${snapshotDate}`,
       );
     }
 
@@ -1932,9 +2048,128 @@ DELETE FROM zone_alerte_computed
       throw new Error('Historic commune coverage contains no commune');
     }
     if (Number(coverage.incompleteCommuneCount || 0) > 0) {
-      await this.configService.setConfig(null, startDate);
+      const coverageRewindDate =
+        rewindDate < startDate ? rewindDate : startDate;
+      await this.configService.setConfig(null, coverageRewindDate);
       throw new Error(
         `Historic commune coverage incomplete through ${requiredThrough}: ${Number(coverage.incompleteCommuneCount)} communes do not contain ${Number(coverage.expectedDayCount)} daily entries`,
+      );
+    }
+  }
+
+  private async runHistoricWorkerInChunks(
+    type: 'maps' | 'mapsComputed',
+    dateMin: string,
+    dateStats: string | Date | null | undefined,
+    expectedMapCursor: string | Date | null | undefined,
+    expectedStatsCursor: string | Date | null | undefined,
+    expectedMapGeneration: string,
+    expectedStatsGeneration: string,
+    requiredThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<HistoricCursorState> {
+    const startDate = moment.utc(dateMin, 'YYYY-MM-DD', true);
+    const endDate = moment.utc(requiredThrough, 'YYYY-MM-DD', true);
+    if (
+      !startDate.isValid() ||
+      !endDate.isValid() ||
+      startDate.isAfter(endDate, 'day')
+    ) {
+      throw new Error(
+        `Invalid historic worker range: ${dateMin}..${requiredThrough}`,
+      );
+    }
+    const dateString = (value: string | Date | null | undefined) =>
+      value instanceof Date
+        ? value.toISOString().slice(0, 10)
+        : value
+          ? String(value).slice(0, 10)
+          : null;
+    const chunkDays = readHistoricComputeChunkDays();
+    let chunkStart = startDate;
+    let cursorState: HistoricCursorState = {
+      mapCursor: dateString(expectedMapCursor),
+      statsCursor: dateString(expectedStatsCursor),
+      mapGeneration: expectedMapGeneration,
+      statsGeneration: expectedStatsGeneration,
+    };
+    const initialStatsDate = dateString(dateStats) ?? undefined;
+
+    while (!chunkStart.isAfter(endDate, 'day')) {
+      const naturalChunkEnd = chunkStart.clone().add(chunkDays - 1, 'days');
+      const chunkEnd = naturalChunkEnd.isAfter(endDate, 'day')
+        ? endDate.clone()
+        : naturalChunkEnd;
+      const chunkEndString = chunkEnd.format('YYYY-MM-DD');
+      cursorState = await this.runHistoricWorker(
+        type,
+        chunkStart.format('YYYY-MM-DD'),
+        cursorState.statsCursor ?? initialStatsDate,
+        cursorState.mapCursor,
+        cursorState.statsCursor,
+        cursorState.mapGeneration,
+        cursorState.statsGeneration,
+        expectedSourceRevision,
+        chunkEndString,
+      );
+      await this.assertCurrentHistoricCursorState(cursorState);
+      this.assertHistoricChunkCompleted(cursorState, chunkEndString);
+      chunkStart = chunkEnd.add(1, 'day');
+    }
+
+    return cursorState;
+  }
+
+  private assertHistoricChunkCompleted(
+    state: HistoricCursorState,
+    requiredThrough: string,
+  ): void {
+    if (
+      !state.mapCursor ||
+      !state.statsCursor ||
+      state.mapCursor < requiredThrough ||
+      state.statsCursor < requiredThrough
+    ) {
+      throw new Error(
+        `Historic worker did not complete its chunk through ${requiredThrough}: map=${state.mapCursor || 'null'}, stats=${state.statsCursor || 'null'}`,
+      );
+    }
+  }
+
+  private getHistoricCompletedThrough(state: HistoricCursorState): string {
+    if (!state.mapCursor || !state.statsCursor) {
+      throw new Error(
+        `Historic computation has incomplete cursors: map=${state.mapCursor || 'null'}, stats=${state.statsCursor || 'null'}`,
+      );
+    }
+    return state.mapCursor < state.statsCursor
+      ? state.mapCursor
+      : state.statsCursor;
+  }
+
+  private async rewindHistoricAfterSourceRevisionChange(
+    dirtyFrom?: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (!dirtyFrom || expectedSourceRevision === undefined) {
+      return;
+    }
+    try {
+      const currentSourceRevision =
+        await this.zonePublicationService.getSourceRevision();
+      if (currentSourceRevision === expectedSourceRevision) {
+        return;
+      }
+      await this.configService.setConfig(dirtyFrom, dirtyFrom);
+      this.logger.log(
+        `Historic cursors rewound to ${dirtyFrom} after source revision changed (${expectedSourceRevision} -> ${currentSourceRevision})`,
+      );
+    } catch (rewindError) {
+      this.logger.error(
+        'Unable to verify or rewind historic cursors after a failure',
+        rewindError instanceof Error
+          ? rewindError.toString()
+          : String(rewindError),
       );
     }
   }
@@ -1947,6 +2182,8 @@ DELETE FROM zone_alerte_computed
     expectedStatsCursor?: string | null,
     expectedMapGeneration?: string,
     expectedStatsGeneration?: string,
+    expectedSourceRevision?: string,
+    dateMax?: string,
   ): Promise<HistoricCursorState> {
     const worker = new Worker(historicWorkerThreadFilePath, {
       workerData: {
@@ -1956,6 +2193,8 @@ DELETE FROM zone_alerte_computed
         expectedStatsCursor,
         expectedMapGeneration,
         expectedStatsGeneration,
+        expectedSourceRevision,
+        dateMax,
         type,
       },
     });
@@ -2038,18 +2277,7 @@ DELETE FROM zone_alerte_computed
       computeStatsGeneration?: string | number | null;
     },
   ): void {
-    const dateString = (value: string | Date | null | undefined) =>
-      value instanceof Date
-        ? value.toISOString().slice(0, 10)
-        : value
-          ? String(value).slice(0, 10)
-          : null;
-    const actual: HistoricCursorState = {
-      mapCursor: dateString(persisted.computeMapDate),
-      statsCursor: dateString(persisted.computeStatsDate),
-      mapGeneration: String(persisted.computeMapGeneration ?? 0),
-      statsGeneration: String(persisted.computeStatsGeneration ?? 0),
-    };
+    const actual = this.toHistoricCursorState(persisted);
     if (
       actual.mapCursor !== expected.mapCursor ||
       actual.statsCursor !== expected.statsCursor ||
@@ -2060,6 +2288,26 @@ DELETE FROM zone_alerte_computed
         `Historic cursors changed after worker completion: expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)}`,
       );
     }
+  }
+
+  private toHistoricCursorState(persisted: {
+    computeMapDate?: string | Date | null;
+    computeStatsDate?: string | Date | null;
+    computeMapGeneration?: string | number | null;
+    computeStatsGeneration?: string | number | null;
+  }): HistoricCursorState {
+    const dateString = (value: string | Date | null | undefined) =>
+      value instanceof Date
+        ? value.toISOString().slice(0, 10)
+        : value
+          ? String(value).slice(0, 10)
+          : null;
+    return {
+      mapCursor: dateString(persisted.computeMapDate),
+      statsCursor: dateString(persisted.computeStatsDate),
+      mapGeneration: String(persisted.computeMapGeneration ?? 0),
+      statsGeneration: String(persisted.computeStatsGeneration ?? 0),
+    };
   }
 
   async getZonesAlerteComputedByDepartement(

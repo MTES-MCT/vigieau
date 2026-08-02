@@ -1,12 +1,20 @@
 import { EventEmitter } from 'node:events';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Worker } from 'worker_threads';
 import moment from 'moment';
 import {
+  HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT,
   HISTORIC_COMPUTE_WORKER_TIMEOUT_MS,
   ZONE_COMPUTE_WORKER_TIMEOUT_MS,
+  readHistoricComputeChunkDays,
   ZoneAlerteComputedService,
 } from './zone_alerte_computed.service';
-import { ZoneAlerteComputedHistoricService } from './zone_alerte_computed_historic.service';
+import {
+  withHistoricArtifactCleanup,
+  ZoneAlerteComputedHistoricService,
+} from './zone_alerte_computed_historic.service';
 
 jest.mock('worker_threads', () => ({
   ...jest.requireActual('worker_threads'),
@@ -30,6 +38,7 @@ describe('ZoneAlerteComputedService', () => {
     findReusableDailyPublication: jest.Mock;
     getSourceRevision: jest.Mock;
     isRecomputeRequired: jest.Mock;
+    promoteCertifiedPublicationIfAvailable: jest.Mock;
   };
   let preflightQueryRunner: {
     connect: jest.Mock;
@@ -38,9 +47,11 @@ describe('ZoneAlerteComputedService', () => {
   };
   let dataSource: { createQueryRunner: jest.Mock; query: jest.Mock };
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
+  const previousHistoricChunkDays = process.env.HISTORIC_COMPUTE_CHUNK_DAYS;
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    process.env.HISTORIC_COMPUTE_CHUNK_DAYS = '3000';
     jest.clearAllMocks();
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
@@ -56,6 +67,9 @@ describe('ZoneAlerteComputedService', () => {
       findReusableDailyPublication: jest.fn().mockResolvedValue(null),
       getSourceRevision: jest.fn().mockResolvedValue('1'),
       isRecomputeRequired: jest.fn().mockResolvedValue(false),
+      promoteCertifiedPublicationIfAvailable: jest
+        .fn()
+        .mockResolvedValue(false),
     };
     preflightQueryRunner = {
       connect: jest.fn().mockResolvedValue(undefined),
@@ -99,12 +113,14 @@ describe('ZoneAlerteComputedService', () => {
       configService as any,
       zonePublicationService as any,
     );
-    (service as any).runHistoricWorker = jest.fn().mockResolvedValue({
-      mapCursor: '2024-04-28',
-      statsCursor: '2024-04-28',
-      mapGeneration: '370',
-      statsGeneration: '371',
-    });
+    (service as any).runHistoricWorker = jest
+      .fn()
+      .mockImplementation(async (...args: unknown[]) => ({
+        mapCursor: args[8],
+        statsCursor: args[8],
+        mapGeneration: '370',
+        statsGeneration: '371',
+      }));
     (service as any).assertCurrentHistoricCursorState = jest
       .fn()
       .mockResolvedValue(undefined);
@@ -120,6 +136,128 @@ describe('ZoneAlerteComputedService', () => {
     } else {
       process.env.ZONE_PUBLICATION_ENABLED = previousPublicationEnabled;
     }
+    if (previousHistoricChunkDays === undefined) {
+      delete process.env.HISTORIC_COMPUTE_CHUNK_DAYS;
+    } else {
+      process.env.HISTORIC_COMPUTE_CHUNK_DAYS = previousHistoricChunkDays;
+    }
+  });
+
+  it('uses a conservative historic chunk default and rejects invalid overrides', () => {
+    expect(readHistoricComputeChunkDays('')).toBe(
+      HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT,
+    );
+    expect(readHistoricComputeChunkDays('3')).toBe(3);
+    expect(() => readHistoricComputeChunkDays('0')).toThrow(
+      'must be a positive integer',
+    );
+    expect(() => readHistoricComputeChunkDays('3.5')).toThrow(
+      'must be a positive integer',
+    );
+    expect(() => readHistoricComputeChunkDays('3661')).toThrow(
+      'must be at most 3660',
+    );
+  });
+
+  it('chains bounded historic workers through persisted cursor states', async () => {
+    process.env.HISTORIC_COMPUTE_CHUNK_DAYS = '3';
+    (service as any).runHistoricWorker.mockImplementation(
+      async (...args: unknown[]) => {
+        const chunkStart = moment.utc(String(args[1]), 'YYYY-MM-DD');
+        const chunkEnd = moment.utc(String(args[8]), 'YYYY-MM-DD');
+        const dayCount = chunkEnd.diff(chunkStart, 'days') + 1;
+        return {
+          mapCursor: args[8],
+          statsCursor: args[8],
+          mapGeneration: (
+            BigInt(String(args[5])) + BigInt(dayCount)
+          ).toString(),
+          statsGeneration: (
+            BigInt(String(args[6])) + BigInt(dayCount)
+          ).toString(),
+        };
+      },
+    );
+
+    await expect(
+      (service as any).runHistoricWorkerInChunks(
+        'mapsComputed',
+        '2026-07-01',
+        '2026-07-01',
+        '2026-07-01',
+        '2026-07-01',
+        '4',
+        '9',
+        '2026-07-10',
+        '42',
+      ),
+    ).resolves.toEqual({
+      mapCursor: '2026-07-10',
+      statsCursor: '2026-07-10',
+      mapGeneration: '14',
+      statsGeneration: '19',
+    });
+
+    expect(
+      (service as any).runHistoricWorker.mock.calls.map(
+        ([, dateMin, , , , , , sourceRevision, dateMax]) => ({
+          dateMin,
+          dateMax,
+          sourceRevision,
+        }),
+      ),
+    ).toEqual([
+      {
+        dateMin: '2026-07-01',
+        dateMax: '2026-07-03',
+        sourceRevision: '42',
+      },
+      {
+        dateMin: '2026-07-04',
+        dateMax: '2026-07-06',
+        sourceRevision: '42',
+      },
+      {
+        dateMin: '2026-07-07',
+        dateMax: '2026-07-09',
+        sourceRevision: '42',
+      },
+      {
+        dateMin: '2026-07-10',
+        dateMax: '2026-07-10',
+        sourceRevision: '42',
+      },
+    ]);
+    expect(
+      (service as any).assertCurrentHistoricCursorState,
+    ).toHaveBeenCalledTimes(4);
+  });
+
+  it('stops chunk chaining when a worker does not advance through its end date', async () => {
+    process.env.HISTORIC_COMPUTE_CHUNK_DAYS = '3';
+    (service as any).runHistoricWorker.mockResolvedValue({
+      mapCursor: '2026-07-02',
+      statsCursor: '2026-07-02',
+      mapGeneration: '6',
+      statsGeneration: '11',
+    });
+
+    await expect(
+      (service as any).runHistoricWorkerInChunks(
+        'mapsComputed',
+        '2026-07-01',
+        '2026-07-01',
+        '2026-07-01',
+        '2026-07-01',
+        '4',
+        '9',
+        '2026-07-10',
+        '42',
+      ),
+    ).rejects.toThrow(
+      'Historic worker did not complete its chunk through 2026-07-03',
+    );
+    expect((service as any).runHistoricWorker).toHaveBeenCalledTimes(1);
   });
 
   it('runs legacy then computed historic workers when the dirty date predates computed maps', async () => {
@@ -149,6 +287,8 @@ describe('ZoneAlerteComputedService', () => {
       '2023-04-13',
       '3',
       '5',
+      '1',
+      '2024-04-28',
     );
     expect((service as any).runHistoricWorker).toHaveBeenNthCalledWith(
       2,
@@ -159,6 +299,8 @@ describe('ZoneAlerteComputedService', () => {
       '2024-04-28',
       '370',
       '371',
+      '1',
+      '2026-06-22',
     );
     expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -180,7 +322,7 @@ describe('ZoneAlerteComputedService', () => {
       statisticCommuneService.computeByMonth.mock.calls[0][2].aggregateThrough.format(
         'YYYY-MM-DD',
       ),
-    ).toBe('2024-04-28');
+    ).toBe('2026-06-22');
     expect(
       statisticCommuneService.computeByMonth.mock.calls[0][2]
         .allowedReadySnapshot,
@@ -206,6 +348,8 @@ describe('ZoneAlerteComputedService', () => {
       '2026-03-25',
       '7',
       '8',
+      '1',
+      '2026-06-22',
     );
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('"historicDirtyFrom"'),
@@ -221,7 +365,7 @@ describe('ZoneAlerteComputedService', () => {
     expect(dirtyRangeSql).toContain('IS DISTINCT FROM CASE');
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
-      ['2024-04-28', '1'],
+      ['2026-06-22', '1'],
     );
     expect(
       dataSource.query.mock.calls.find(([sql]) =>
@@ -249,6 +393,36 @@ describe('ZoneAlerteComputedService', () => {
       '2026-03-25',
       '9',
       '10',
+      '1',
+      '2026-06-22',
+    );
+  });
+
+  it('initializes a missing statistics cursor from the existing dirty date', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: null,
+      computeMapGeneration: '9',
+      computeStatsGeneration: '0',
+    });
+
+    await service.computeHistoric();
+
+    expect((service as any).runHistoricWorker).toHaveBeenCalledWith(
+      'mapsComputed',
+      '2026-03-25',
+      '2026-03-25',
+      '2026-03-25',
+      null,
+      '9',
+      '0',
+      '1',
+      '2026-06-22',
+    );
+    expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
+      expect.objectContaining({ _isAMomentObject: true }),
+      undefined,
+      expect.any(Object),
     );
   });
 
@@ -269,7 +443,11 @@ describe('ZoneAlerteComputedService', () => {
       .spyOn(service as any, 'assertHistoricCatchUpComplete')
       .mockResolvedValue(undefined);
 
-    await service.computeHistoric(true, '2026-06-22', '1');
+    const completedState = await service.computeHistoric(
+      true,
+      '2026-06-22',
+      '1',
+    );
 
     expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
       expect.objectContaining({ _isAMomentObject: true }),
@@ -291,6 +469,15 @@ describe('ZoneAlerteComputedService', () => {
       expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
       ['2026-06-22', '1'],
     );
+    expect(completedState).toEqual({
+      mapCursor: '2026-06-22',
+      statsCursor: '2026-06-22',
+      mapGeneration: '30',
+      statsGeneration: '31',
+    });
+    expect(
+      (service as any).assertCurrentHistoricCursorState,
+    ).toHaveBeenLastCalledWith(completedState);
   });
 
   it('does not compute monthly aggregates after a historic worker failure', async () => {
@@ -324,6 +511,30 @@ describe('ZoneAlerteComputedService', () => {
       'historic worker failed',
     );
     expect(statisticCommuneService.computeByMonth).not.toHaveBeenCalled();
+  });
+
+  it('rewinds to the first dirty day when the source revision changes', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-03-25',
+      computeStatsDate: '2026-03-25',
+      computeMapGeneration: '7',
+      computeStatsGeneration: '8',
+    });
+    zonePublicationService.getSourceRevision
+      .mockResolvedValueOnce('41')
+      .mockResolvedValueOnce('42');
+    (service as any).runHistoricWorker.mockRejectedValue(
+      new Error('Historic source revision changed (41 -> 42)'),
+    );
+
+    await expect(service.computeHistoric(true)).rejects.toThrow(
+      'Historic source revision changed (41 -> 42)',
+    );
+
+    expect(configService.setConfig).toHaveBeenCalledWith(
+      '2026-03-25',
+      '2026-03-25',
+    );
   });
 
   it('handles a monthly aggregate failure in background catch-up', async () => {
@@ -426,6 +637,9 @@ describe('ZoneAlerteComputedService', () => {
       'snapshot."snapshotDate" >= publication_state."historicDirtyFrom"',
     );
     expect(publicationSql).toContain(
+      'snapshot."sourceRevision" IS DISTINCT FROM $2::bigint',
+    );
+    expect(publicationSql).toContain(
       'FROM publication_guard publication_state',
     );
     expect(publicationSql).toContain(
@@ -453,6 +667,50 @@ describe('ZoneAlerteComputedService', () => {
         },
       ),
     ).toThrow('Historic cursors changed after worker completion');
+  });
+
+  it('passes the source revision and end date to a historic worker', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+    const runHistoricWorker = (
+      ZoneAlerteComputedService.prototype as any
+    ).runHistoricWorker.bind(service);
+
+    const computation = runHistoricWorker(
+      'mapsComputed',
+      '2026-07-01',
+      '2026-07-01',
+      '2026-07-01',
+      '2026-07-01',
+      '12',
+      '18',
+      '42',
+      '2026-07-03',
+    );
+
+    expect(Worker).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        workerData: expect.objectContaining({
+          expectedSourceRevision: '42',
+          dateMax: '2026-07-03',
+        }),
+      }),
+    );
+    worker.emit('message', {
+      success: true,
+      result: {
+        mapCursor: '2026-07-03',
+        statsCursor: '2026-07-03',
+        mapGeneration: '15',
+        statsGeneration: '21',
+      },
+    });
+    await expect(computation).resolves.toEqual(
+      expect.objectContaining({ mapCursor: '2026-07-03' }),
+    );
   });
 
   it('waits for historic worker termination before rejecting its timeout', async () => {
@@ -583,7 +841,7 @@ describe('ZoneAlerteComputedService', () => {
     expect((service as any).isComputing).toBe(false);
   });
 
-  it('clears the timeout after the worker finishes current and historic work', async () => {
+  it('keeps historic catch-up out of the current compute worker', async () => {
     const worker = Object.assign(new EventEmitter(), {
       terminate: jest.fn().mockResolvedValue(1),
     });
@@ -596,7 +854,6 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         workerData: {
           depsIds: [65],
-          computeHistoric: true,
           skipIfBusy: false,
         },
       }),
@@ -609,6 +866,16 @@ describe('ZoneAlerteComputedService', () => {
     await jest.advanceTimersByTimeAsync(ZONE_COMPUTE_WORKER_TIMEOUT_MS);
 
     expect(worker.terminate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current worker implementation free of historic catch-up calls', async () => {
+    const workerSource = await readFile(
+      join(__dirname, '../worker_threads/computeMap.ts'),
+      'utf8',
+    );
+
+    expect(workerSource).not.toMatch(/\.computeHistoric(?:Persistently)?\s*\(/);
+    expect(workerSource).not.toContain('computeHistoric:');
   });
 
   it('passes the daily publication reuse identity to its worker', async () => {
@@ -628,7 +895,6 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         workerData: {
           depsIds: [],
-          computeHistoric: false,
           skipIfBusy: false,
           dailyPublicationReuse: reuseContext,
         },
@@ -723,7 +989,6 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         workerData: {
           depsIds: [],
-          computeHistoric: false,
           skipIfBusy: false,
           dailyPublicationReuse: reuseContext,
         },
@@ -772,7 +1037,6 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         workerData: {
           depsIds: [],
-          computeHistoric: false,
           skipIfBusy: false,
         },
       }),
@@ -827,7 +1091,7 @@ describe('ZoneAlerteComputedService', () => {
     expect(
       zonePublicationService.findReusableDailyPublication,
     ).toHaveBeenCalledWith(reuseContext);
-    expect(computeAll).toHaveBeenCalledWith([], false);
+    expect(computeAll).toHaveBeenCalledWith([], false, '2026-08-02');
   });
 
   it('does not apply daily reuse to an ordinary scoped compute', async () => {
@@ -912,7 +1176,7 @@ describe('ZoneAlerteComputedService', () => {
     expect((service as any).activeComputeWorker).toBeNull();
   });
 
-  it('aggregates historic and normal requests without letting a watchdog downgrade them', async () => {
+  it('aggregates current requests without sending historic work to the worker', async () => {
     const firstWorker = Object.assign(new EventEmitter(), {
       terminate: jest.fn().mockResolvedValue(1),
     });
@@ -944,7 +1208,6 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         workerData: {
           depsIds: [31, 75],
-          computeHistoric: true,
           skipIfBusy: false,
         },
       }),
@@ -1107,7 +1370,6 @@ describe('ZoneAlerteComputedService', () => {
       expect.objectContaining({
         workerData: {
           depsIds: [31],
-          computeHistoric: false,
           skipIfBusy: false,
         },
       }),
@@ -1124,7 +1386,22 @@ describe('ZoneAlerteComputedService', () => {
 
     await service.ensureFreshZonePublication();
 
+    expect(
+      zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledTimes(1);
     expect(askCompute).toHaveBeenCalledWith([], false, false, true);
+  });
+
+  it('promotes a certified validated publication without rebuilding it', async () => {
+    zonePublicationService.promoteCertifiedPublicationIfAvailable.mockResolvedValue(
+      true,
+    );
+    const askCompute = jest.spyOn(service, 'askCompute');
+
+    await service.ensureFreshZonePublication();
+
+    expect(zonePublicationService.isRecomputeRequired).not.toHaveBeenCalled();
+    expect(askCompute).not.toHaveBeenCalled();
   });
 
   it('does not run the publication watchdog while the feature is disabled', async () => {
@@ -1134,6 +1411,9 @@ describe('ZoneAlerteComputedService', () => {
     await service.ensureFreshZonePublication();
 
     expect(zonePublicationService.isRecomputeRequired).not.toHaveBeenCalled();
+    expect(
+      zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).not.toHaveBeenCalled();
     expect(askCompute).not.toHaveBeenCalled();
   });
 
@@ -1183,7 +1463,7 @@ describe('ZoneAlerteComputedService', () => {
     expect(computeRegleAr).toHaveBeenNthCalledWith(1, departments[0]);
     expect(computeCommunesIntersected).toHaveBeenCalledTimes(1);
     expect(zonePublicationService.getSourceRevision).not.toHaveBeenCalled();
-    expect(computeGeoJson).toHaveBeenCalledWith(false, undefined);
+    expect(computeGeoJson).toHaveBeenCalledWith(false, undefined, undefined);
   });
 
   it('removes collapsed current zones during cleanup', async () => {
@@ -1336,6 +1616,12 @@ describe('ZoneAlerteComputedService', () => {
       .spyOn(service, 'computeHistoric')
       .mockImplementation(async () => {
         events.push('historic-computed');
+        return {
+          mapCursor: '2026-08-02',
+          statsCursor: '2026-08-02',
+          mapGeneration: '1',
+          statsGeneration: '1',
+        };
       });
 
     await (service as any).computePublicationStatistics(
@@ -1389,7 +1675,45 @@ describe('ZoneAlerteComputedService', () => {
 
     expect(computeRegleAr).toHaveBeenCalledTimes(2);
     expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
-    expect(computeGeoJson).toHaveBeenCalledWith(false, '1');
+    expect(computeGeoJson).toHaveBeenCalledWith(false, '1', '2026-06-23');
+  });
+
+  it('keeps the captured business date when a national compute crosses 02:00 in Paris', async () => {
+    jest.setSystemTime(new Date('2026-07-31T23:59:00Z'));
+    zonePublicationService.getSourceRevision.mockImplementationOnce(
+      async () => {
+        jest.setSystemTime(new Date('2026-08-01T00:01:00Z'));
+        return '1';
+      },
+    );
+    (service as any).departementService = {
+      findAllLight: jest.fn().mockResolvedValue([]),
+    };
+    const computeGeoJson = jest
+      .spyOn(service, 'computeGeoJson')
+      .mockResolvedValue(undefined);
+
+    await service.computeAll([], false);
+
+    expect(computeGeoJson).toHaveBeenCalledWith(false, '1', '2026-07-31');
+  });
+
+  it('rejects an invalid daily business date before starting the national compute', async () => {
+    (service as any).departementService = {
+      findAllLight: jest.fn().mockResolvedValue([]),
+    };
+
+    await expect(service.computeAll([], false, '')).rejects.toThrow(
+      'Invalid civil date: ',
+    );
+    await expect(service.computeAll([], false, '2026-02-31')).rejects.toThrow(
+      'Invalid civil date: 2026-02-31',
+    );
+
+    expect(zonePublicationService.getSourceRevision).not.toHaveBeenCalled();
+    expect(
+      (service as any).departementService.findAllLight,
+    ).not.toHaveBeenCalled();
   });
 
   it('does not capture a publication revision while the feature is disabled', async () => {
@@ -1470,6 +1794,109 @@ describe('ZoneAlerteComputedService', () => {
       (service as any).assertHistoricCatchUpComplete('2026-07-31'),
     ).rejects.toThrow('Historic commune coverage incomplete');
     expect(configService.setConfig).toHaveBeenCalledWith(null, '2026-01-01');
+  });
+
+  it('rewinds an annual coverage gap before a later dirty boundary', async () => {
+    const dataSource = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM "config"')) {
+          return [
+            {
+              computeMapDate: '2026-07-31',
+              computeStatsDate: '2026-07-31',
+            },
+          ];
+        }
+        if (sql.includes('FROM "statistic_commune_snapshot"')) {
+          return [];
+        }
+        return [{ incompleteCommuneCount: 1, expectedDayCount: 212 }];
+      }),
+    };
+    (service as any).dataSource = dataSource;
+
+    await expect(
+      (service as any).assertHistoricCatchUpComplete(
+        '2026-07-31',
+        '42',
+        '2026-07-20',
+      ),
+    ).rejects.toThrow('Historic commune coverage incomplete');
+    expect(configService.setConfig).toHaveBeenCalledWith(null, '2026-01-01');
+  });
+
+  it('preserves an older dirty boundary while repairing annual coverage', async () => {
+    const dataSource = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM "config"')) {
+          return [
+            {
+              computeMapDate: '2026-07-31',
+              computeStatsDate: '2026-07-31',
+            },
+          ];
+        }
+        if (sql.includes('FROM "statistic_commune_snapshot"')) {
+          return [];
+        }
+        return [{ incompleteCommuneCount: 1, expectedDayCount: 212 }];
+      }),
+    };
+    (service as any).dataSource = dataSource;
+
+    await expect(
+      (service as any).assertHistoricCatchUpComplete(
+        '2026-07-31',
+        '42',
+        '2025-12-20',
+      ),
+    ).rejects.toThrow('Historic commune coverage incomplete');
+    expect(configService.setConfig).toHaveBeenCalledWith(null, '2025-12-20');
+  });
+
+  it('rejects a completed historic snapshot from another source revision', async () => {
+    const incompatibleDate = '2026-07-22';
+    const dataSource = {
+      query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        void parameters;
+        if (sql.includes('FROM "config"')) {
+          return [
+            {
+              computeMapDate: '2026-07-31',
+              computeStatsDate: '2026-07-31',
+            },
+          ];
+        }
+        if (sql.includes('FROM "statistic_commune_snapshot"')) {
+          return [{ snapshotDate: incompatibleDate }];
+        }
+        return [{ incompleteCommuneCount: 0, expectedDayCount: 12 }];
+      }),
+    };
+    (service as any).dataSource = dataSource;
+
+    await expect(
+      (service as any).assertHistoricCatchUpComplete(
+        '2026-07-31',
+        '42',
+        '2026-07-20',
+      ),
+    ).rejects.toThrow(
+      `Historic catch-up blocked by incompatible commune snapshot ${incompatibleDate}`,
+    );
+
+    const [snapshotSql, parameters] = dataSource.query.mock.calls.find(
+      ([sql]) => sql.includes('FROM "statistic_commune_snapshot"'),
+    );
+    expect(snapshotSql).toContain(
+      '"sourceRevision" IS DISTINCT FROM $3::bigint',
+    );
+    expect(snapshotSql).toContain('"snapshotDate" >= $2::date');
+    expect(parameters).toEqual(['2026-07-31', '2026-07-20', '42']);
+    expect(configService.setConfig).toHaveBeenCalledWith(
+      '2026-07-20',
+      '2026-07-20',
+    );
   });
 
   it('ignores the bootstrap barrier when validating a completed historic catch-up', async () => {
@@ -1723,6 +2150,55 @@ describe('ZoneAlerteComputedService', () => {
   });
 });
 
+describe('withHistoricArtifactCleanup', () => {
+  it('deletes generated artifacts after a successful upload action', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-historic-'));
+    const geojsonPath = join(directory, 'zones.geojson');
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    try {
+      await expect(
+        withHistoricArtifactCleanup([geojsonPath, pmtilesPath], async () => {
+          await writeFile(geojsonPath, '{}');
+          await writeFile(pmtilesPath, 'pmtiles');
+          return 'uploaded';
+        }),
+      ).resolves.toBe('uploaded');
+      await expect(access(geojsonPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(access(pmtilesPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes generated artifacts without masking the original failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-historic-'));
+    const geojsonPath = join(directory, 'zones.geojson');
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    const uploadError = new Error('upload failed');
+    try {
+      await expect(
+        withHistoricArtifactCleanup([geojsonPath, pmtilesPath], async () => {
+          await writeFile(geojsonPath, '{}');
+          await writeFile(pmtilesPath, 'pmtiles');
+          throw uploadError;
+        }),
+      ).rejects.toBe(uploadError);
+      await expect(access(geojsonPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(access(pmtilesPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('ZoneAlerteComputedHistoricService', () => {
   let service: ZoneAlerteComputedHistoricService;
   let statisticDepartementService: {
@@ -1950,15 +2426,77 @@ describe('ZoneAlerteComputedHistoricService', () => {
       '2026-06-22',
       '0',
       '2026-06-22',
+      undefined,
     );
     expect(configService.advanceComputeMapDate.mock.calls).toEqual([
-      ['2026-06-21', '0', '2026-06-21'],
-      ['2026-06-21', '1', '2026-06-22'],
+      ['2026-06-21', '0', '2026-06-21', undefined],
+      ['2026-06-21', '1', '2026-06-22', undefined],
     ]);
     expect(updateAllHistoricZonesQuery.set).toHaveBeenCalledWith({
       enabled: true,
     });
     expect(updateAllHistoricZonesQuery.where).toHaveBeenCalledWith('1 = 1');
+  });
+
+  it('pins every historic day and snapshot to the expected source revision', async () => {
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+
+    await service.computeHistoricMapsComputed(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      '2026-06-22',
+      '2026-06-22',
+      '12',
+      '4',
+      '42',
+      '2026-06-22',
+    );
+
+    expect(
+      statisticCommuneService.computeCommuneStatisticsRestrictions.mock
+        .calls[0][5].sourceRevision,
+    ).toBe('42');
+    expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
+      '2026-06-22',
+      '4',
+      '2026-06-22',
+      '42',
+    );
+    expect(configService.advanceComputeMapDate).toHaveBeenCalledWith(
+      '2026-06-22',
+      '12',
+      '2026-06-22',
+      '42',
+    );
+    expect(
+      dataSource.query.mock.calls.filter(([sql]) =>
+        String(sql).includes('zone_publication_source_state'),
+      ),
+    ).toHaveLength(3);
+  });
+
+  it('stops before recalculating a day whose source revision is stale', async () => {
+    dataSource.query.mockResolvedValue([{ revision: '43' }]);
+
+    await expect(
+      service.computeHistoricMapsComputed(
+        moment('2026-06-22', 'YYYY-MM-DD'),
+        moment('2026-06-22', 'YYYY-MM-DD'),
+        '2026-06-22',
+        '2026-06-22',
+        '12',
+        '4',
+        '42',
+        '2026-06-22',
+      ),
+    ).rejects.toThrow('Historic source revision changed (42 -> 43)');
+
+    expect((service as any).computeRegleAr).not.toHaveBeenCalled();
+    expect((service as any).computeGeoJson).not.toHaveBeenCalled();
+    expect(configService.advanceComputeStatsDate).not.toHaveBeenCalled();
+    expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
   });
 
   it('detects an equal-date invalidation through its generation', async () => {

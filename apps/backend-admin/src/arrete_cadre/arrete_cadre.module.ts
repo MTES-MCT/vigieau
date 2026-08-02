@@ -15,6 +15,7 @@ import { ArreteCadreZoneAlerteCommunesModule } from '../arrete_cadre_zone_alerte
 import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
 import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
 import { ArreteCadreScheduler } from './arrete_cadre.scheduler';
+import { ConfigModule } from '../config/config.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { ArreteCadreScheduler } from './arrete_cadre.scheduler';
     UsageModule,
     ArreteCadreZoneAlerteCommunesModule,
     ZonePublicationModule,
+    ConfigModule,
   ],
   controllers: [ArreteCadreController],
   providers: [

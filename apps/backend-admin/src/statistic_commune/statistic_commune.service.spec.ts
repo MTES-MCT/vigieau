@@ -1,8 +1,44 @@
-import { StatisticCommuneService } from './statistic_commune.service';
+import {
+  parseCommuneStatisticsBatchSize,
+  StatisticCommuneService,
+} from './statistic_commune.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import moment = require('moment');
 
 describe('StatisticCommuneService', () => {
+  const previousBatchSize = process.env.COMMUNE_STATISTICS_BATCH_SIZE;
+
+  beforeEach(() => {
+    delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
+  });
+
+  afterAll(() => {
+    if (previousBatchSize === undefined) {
+      delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
+    } else {
+      process.env.COMMUNE_STATISTICS_BATCH_SIZE = previousBatchSize;
+    }
+  });
+
+  it.each([
+    [undefined, 250],
+    ['1', 1],
+    ['250', 250],
+    ['1000', 1000],
+    [' 1000 ', 1000],
+  ])('parses commune batch size %s as %i', (value, expected) => {
+    expect(parseCommuneStatisticsBatchSize(value)).toBe(expected);
+  });
+
+  it.each(['', ' ', '0', '1001', '-1', '1.5', '1e3', 'invalid'])(
+    'rejects invalid commune batch size %p',
+    (value) => {
+      expect(() => parseCommuneStatisticsBatchSize(value)).toThrow(
+        'Invalid COMMUNE_STATISTICS_BATCH_SIZE',
+      );
+    },
+  );
+
   function createStreamHarness(incompleteSnapshots: unknown[] = []) {
     const stream = {};
     const queryBuilder = {
@@ -125,7 +161,9 @@ describe('StatisticCommuneService', () => {
 
   function createComputationHarness(options?: {
     failBatch?: boolean;
-    affectedRows?: number;
+    updatedRows?: number;
+    unchangedRows?: number;
+    matchedRows?: number;
     nationalAlreadyCompleted?: boolean;
     snapshotAffectedRows?: number;
     monthlyAffectedRows?: number;
@@ -177,7 +215,14 @@ describe('StatisticCommuneService', () => {
       ) {
         events.push('commune-updated');
         const payload = JSON.parse(String(params?.[0] ?? '[]'));
-        return [{ affected: options?.affectedRows ?? payload.length }];
+        const updated = options?.updatedRows ?? payload.length;
+        return [
+          {
+            updated,
+            unchanged: options?.unchangedRows ?? payload.length - updated,
+            matched: options?.matchedRows ?? payload.length,
+          },
+        ];
       }
       if (sql.includes('AS "loadedCount"')) {
         const payloadCall = query.mock.calls.find(([statement]) =>
@@ -339,8 +384,9 @@ describe('StatisticCommuneService', () => {
     expect(harness.communeService.findWithStats).not.toHaveBeenCalled();
   });
 
-  it('processes commune statistics in bounded set-based transactions', async () => {
-    const communes = Array.from({ length: 501 }, (_, index) => ({
+  it('processes commune statistics in configurable bounded set-based transactions', async () => {
+    process.env.COMMUNE_STATISTICS_BATCH_SIZE = '1000';
+    const communes = Array.from({ length: 2001 }, (_, index) => ({
       id: index + 1,
       departement: { code: '18' },
       statisticCommune: {
@@ -356,10 +402,15 @@ describe('StatisticCommuneService', () => {
     );
 
     expect(harness.communeService.findWithStats.mock.calls).toEqual([
-      [250, 0, undefined],
-      [250, 250, undefined],
-      [250, 500, undefined],
+      [1000, 0, undefined],
+      [1000, 1000, undefined],
+      [1000, 2000, undefined],
     ]);
+    expect(
+      harness.query.mock.calls
+        .filter(([sql]) => String(sql).includes('WITH input AS MATERIALIZED'))
+        .map(([, params]) => JSON.parse(String(params?.[0] ?? '[]')).length),
+    ).toEqual([1000, 1000, 1]);
     expect(
       harness.events.filter((event) => event === 'commune-updated'),
     ).toHaveLength(3);
@@ -367,6 +418,50 @@ describe('StatisticCommuneService', () => {
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(3);
     expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an invalid batch size before starting the computation', async () => {
+    process.env.COMMUNE_STATISTICS_BATCH_SIZE = '1001';
+    const harness = createComputationHarness();
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+      ),
+    ).rejects.toThrow('Invalid COMMUNE_STATISTICS_BATCH_SIZE');
+
+    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(harness.communeService.count).not.toHaveBeenCalled();
+  });
+
+  it('skips an identical JSONB write while advancing the snapshot', async () => {
+    const harness = createComputationHarness({ updatedRows: 0 });
+
+    await harness.service.computeCommuneStatisticsRestrictions(
+      [],
+      new Date('2025-07-13T00:00:00.000Z'),
+    );
+
+    const updateCall = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes('WITH input AS MATERIALIZED'),
+    );
+    const updateSql = String(updateCall?.[0]);
+    expect(updateSql).toContain('matched AS MATERIALIZED');
+    expect(updateSql).toContain('matched."dateCount" = 1');
+    expect(updateSql).toContain('matched."identicalCount" = 1');
+    expect(updateSql).toContain(
+      '(SELECT COUNT(*)::integer FROM matched) AS matched',
+    );
+    expect(updateSql).toContain('AS unchanged');
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.query.mock.calls.some(
+        ([sql, params]) =>
+          String(sql).includes('WITH progressed_snapshot AS') &&
+          params?.[2] === 1,
+      ),
+    ).toBe(true);
   });
 
   it('keeps the severity rules while repairing only invalid legacy geometries', async () => {
@@ -890,15 +985,18 @@ describe('StatisticCommuneService', () => {
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
-  it('fails the barrier when a commune update affects no row', async () => {
-    const harness = createComputationHarness({ affectedRows: 0 });
+  it('fails the barrier when an input commune cannot be matched', async () => {
+    const harness = createComputationHarness({
+      updatedRows: 0,
+      matchedRows: 0,
+    });
 
     await expect(
       harness.service.computeCommuneStatisticsRestrictions(
         [],
         new Date('2025-07-13T00:00:00.000Z'),
       ),
-    ).rejects.toThrow('Lot communal incomplet: 0/1 statistiques mises a jour');
+    ).rejects.toThrow('Lot communal incomplet: 0/1 statistiques trouvees');
 
     expect(harness.events).toEqual([
       'lock',
@@ -907,6 +1005,38 @@ describe('StatisticCommuneService', () => {
       'failed',
       'unlock',
     ]);
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('fails the barrier when a matched input is neither updated nor unchanged', async () => {
+    const harness = createComputationHarness({
+      updatedRows: 0,
+      unchangedRows: 0,
+      matchedRows: 1,
+    });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+      ),
+    ).rejects.toThrow(
+      'Lot communal incomplet: 0 mises a jour + 0 inchangees / 1 statistiques attendues',
+    );
+
+    expect(harness.events).toEqual([
+      'lock',
+      'running:national',
+      'commune-updated',
+      'failed',
+      'unlock',
+    ]);
+    expect(
+      harness.query.mock.calls.some(([sql]) =>
+        String(sql).includes('WITH progressed_snapshot AS'),
+      ),
+    ).toBe(false);
     expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
   });

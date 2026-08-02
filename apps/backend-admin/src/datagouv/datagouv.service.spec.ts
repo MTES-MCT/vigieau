@@ -221,6 +221,16 @@ describe('DatagouvService', () => {
     const harness = createHarness('/tmp', {
       DATAGOUV_MAP_ARCHIVES_ENABLED: 'true',
     });
+    const verifyCurrent = jest.fn().mockResolvedValue(undefined);
+    const publicationIdentity = {
+      publicationId: 'publication-1',
+      sourceRevision: '42',
+      materializationVersion: 3,
+      historicMapCursor: '2026-07-31',
+      historicStatsCursor: '2026-07-31',
+      historicMapGeneration: '12',
+      historicStatsGeneration: '8',
+    };
     const updateArretes = jest
       .spyOn(harness.service, 'updateArretes')
       .mockRejectedValue(new Error('arretes failed'));
@@ -248,7 +258,10 @@ describe('DatagouvService', () => {
       });
 
     await expect(
-      harness.service.updateDatagouvData('2026-08-01'),
+      harness.service.updateDatagouvData('2026-08-01', {
+        ...publicationIdentity,
+        verifyCurrent,
+      }),
     ).rejects.toThrow('Échec de 2 publication(s) Datagouv');
 
     expect(updateArretes).toHaveBeenCalledTimes(1);
@@ -277,6 +290,15 @@ describe('DatagouvService', () => {
         ['datagouv:maps-pmtiles', '2026-08-01'],
       ]),
     );
+    const mapRunCalls =
+      harness.publicationRegistry.executeDailyRun.mock.calls.filter(([key]) =>
+        String(key).startsWith('datagouv:maps-'),
+      );
+    expect(mapRunCalls).toHaveLength(2);
+    for (const call of mapRunCalls) {
+      expect(call[4]).toEqual({ identity: publicationIdentity });
+    }
+    expect(verifyCurrent).toHaveBeenCalled();
     expect(harness.logger.error).toHaveBeenCalledTimes(2);
   });
 
@@ -314,6 +336,11 @@ describe('DatagouvService', () => {
       {
         publicationId: 'publication-1',
         sourceRevision: '42',
+        materializationVersion: 3,
+        historicMapCursor: '2026-07-31',
+        historicStatsCursor: '2026-07-31',
+        historicMapGeneration: '12',
+        historicStatsGeneration: '8',
         verifyCurrent,
       },
     );
@@ -330,6 +357,11 @@ describe('DatagouvService', () => {
         identity: {
           publicationId: 'publication-1',
           sourceRevision: '42',
+          materializationVersion: 3,
+          historicMapCursor: '2026-07-31',
+          historicStatsCursor: '2026-07-31',
+          historicMapGeneration: '12',
+          historicStatsGeneration: '8',
         },
       },
     );

@@ -10,7 +10,7 @@ import { ZoneAlerteComputedHistoric } from '@shared/entities/zone_alerte_compute
 import { exec } from 'child_process';
 import fs from 'fs';
 import moment, { Moment } from 'moment';
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, In, IsNull, Repository } from 'typeorm';
 import * as util from 'util';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
@@ -31,6 +31,26 @@ export interface HistoricCursorState {
   statsCursor: string | null;
   mapGeneration: string;
   statsGeneration: string;
+}
+
+export async function withHistoricArtifactCleanup<T>(
+  paths: readonly string[],
+  action: () => Promise<T>,
+  onCleanupError: (path: string, error: unknown) => void = () => undefined,
+): Promise<T> {
+  try {
+    return await action();
+  } finally {
+    await Promise.all(
+      paths.map(async (path) => {
+        try {
+          await rm(path, { force: true });
+        } catch (error) {
+          onCleanupError(path, error);
+        }
+      }),
+    );
+  }
 }
 
 @Injectable()
@@ -89,9 +109,14 @@ export class ZoneAlerteComputedHistoricService {
     expectedStatsCursor?: string | null,
     expectedMapGeneration?: string | number,
     expectedStatsGeneration?: string | number,
+    expectedSourceRevision?: string,
+    dateMax?: string,
   ) {
     const dateDebut = date ? date : moment();
-    const dateFin = moment('2024-04-28');
+    const dateFin = this.getBoundedHistoricEndDate(
+      moment('2024-04-28'),
+      dateMax,
+    );
     let mapCursor =
       expectedMapCursor === undefined
         ? date?.format('YYYY-MM-DD') || null
@@ -108,6 +133,7 @@ export class ZoneAlerteComputedHistoricService {
       m.diff(dateFin, 'days') <= 0;
       m.add(1, 'days')
     ) {
+      await this.assertExpectedSourceRevision(expectedSourceRevision);
       const ars = await this.arreteResrictionService.findByDate(m);
       const arIds = ars.map((ar) => ar.id);
       const zas: ZoneAlerte[] = <ZoneAlerte[]>(
@@ -125,42 +151,49 @@ export class ZoneAlerteComputedHistoricService {
       const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
       const fileNameToSave = `zones_arretes_en_vigueur_${m.format('YYYY-MM-DD')}`;
-      await writeFile(
-        `${path}/${fileNameToSave}.geojson`,
-        JSON.stringify(geojson),
-      );
-      await this.execPromise(
-        `${path}/tippecanoe_program/bin/tippecanoe \
-          -Z4 \
-          -zg \
-          --maximum-tile-byte=1000000 \
-          --force \
-          --read-parallel \
-          --detect-shared-borders \
-          --coalesce-densest-as-needed \
-          --simplification=28 \
-          --layer=zones_arretes_en_vigueur \
-          --output="${path}/${fileNameToSave}.pmtiles" \
-          "${path}/${fileNameToSave}.geojson"
-            `,
-      );
-      const dataPmtiles = fs.readFileSync(`${path}/${fileNameToSave}.pmtiles`);
-      const fileToTransferPmtiles = {
-        originalname: `${fileNameToSave}.pmtiles`,
-        buffer: dataPmtiles,
-      };
-      const dataGeojson = fs.readFileSync(`${path}/${fileNameToSave}.geojson`);
-      const fileToTransferGeojson = {
-        originalname: `${fileNameToSave}.geojson`,
-        buffer: dataGeojson,
-      };
-      await this.s3Service.uploadFile(
-        fileToTransferPmtiles as Express.Multer.File,
-        'pmtiles/',
-      );
-      await this.s3Service.uploadFile(
-        fileToTransferGeojson as Express.Multer.File,
-        'geojson/',
+      const geojsonPath = `${path}/${fileNameToSave}.geojson`;
+      const pmtilesPath = `${path}/${fileNameToSave}.pmtiles`;
+      await withHistoricArtifactCleanup(
+        [geojsonPath, pmtilesPath],
+        async () => {
+          await writeFile(geojsonPath, JSON.stringify(geojson));
+          await this.execPromise(
+            `${path}/tippecanoe_program/bin/tippecanoe \
+              -Z4 \
+              -zg \
+              --maximum-tile-byte=1000000 \
+              --force \
+              --read-parallel \
+              --detect-shared-borders \
+              --coalesce-densest-as-needed \
+              --simplification=28 \
+              --layer=zones_arretes_en_vigueur \
+              --output="${pmtilesPath}" \
+              "${geojsonPath}"
+                `,
+          );
+          const fileToTransferPmtiles = {
+            originalname: `${fileNameToSave}.pmtiles`,
+            buffer: fs.readFileSync(pmtilesPath),
+          };
+          const fileToTransferGeojson = {
+            originalname: `${fileNameToSave}.geojson`,
+            buffer: fs.readFileSync(geojsonPath),
+          };
+          await this.s3Service.uploadFile(
+            fileToTransferPmtiles as Express.Multer.File,
+            'pmtiles/',
+          );
+          await this.s3Service.uploadFile(
+            fileToTransferGeojson as Express.Multer.File,
+            'geojson/',
+          );
+        },
+        (artifactPath, error) =>
+          this.logger.error(
+            `ERROR CLEANING HISTORIC ARTIFACT ${artifactPath}`,
+            error instanceof Error ? error.toString() : String(error),
+          ),
       );
       if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
         const zonesForStatistics = historicZones.zones.map((zone) => {
@@ -191,11 +224,13 @@ export class ZoneAlerteComputedHistoricService {
                   historicZones.zones,
                   completedThrough,
                 );
+                await this.assertExpectedSourceRevision(expectedSourceRevision);
                 const advanced =
                   await this.configService.advanceComputeStatsDate(
                     statsCursor,
                     statsGeneration,
                     completedThrough,
+                    expectedSourceRevision,
                   );
                 this.assertHistoricCursorAdvanced(
                   'statistics',
@@ -206,6 +241,7 @@ export class ZoneAlerteComputedHistoricService {
                 );
                 statsCursorAdvanced = true;
               },
+              sourceRevision: expectedSourceRevision,
             },
           );
         } catch (error) {
@@ -222,10 +258,12 @@ export class ZoneAlerteComputedHistoricService {
       }
       const completedThrough = m.format('YYYY-MM-DD');
       if (!mapCursor || completedThrough >= mapCursor) {
+        await this.assertExpectedSourceRevision(expectedSourceRevision);
         const advanced = await this.configService.advanceComputeMapDate(
           mapCursor,
           mapGeneration,
           completedThrough,
+          expectedSourceRevision,
         );
         this.assertHistoricCursorAdvanced(
           'map',
@@ -394,9 +432,14 @@ export class ZoneAlerteComputedHistoricService {
     expectedStatsCursor?: string | null,
     expectedMapGeneration?: string | number,
     expectedStatsGeneration?: string | number,
+    expectedSourceRevision?: string,
+    dateMax?: string,
   ) {
     const dateDebut = date ? date : moment();
-    const dateFin = moment().subtract(1, 'days');
+    const dateFin = this.getBoundedHistoricEndDate(
+      moment().subtract(1, 'days'),
+      dateMax,
+    );
     let mapCursor =
       expectedMapCursor === undefined
         ? date?.format('YYYY-MM-DD') || null
@@ -414,6 +457,7 @@ export class ZoneAlerteComputedHistoricService {
       m.diff(dateFin, 'days', true) <= 0;
       m.add(1, 'days')
     ) {
+      await this.assertExpectedSourceRevision(expectedSourceRevision);
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - BEGIN`,
       );
@@ -447,11 +491,13 @@ export class ZoneAlerteComputedHistoricService {
                   allZonesComputed,
                   completedThrough,
                 );
+                await this.assertExpectedSourceRevision(expectedSourceRevision);
                 const advanced =
                   await this.configService.advanceComputeStatsDate(
                     statsCursor,
                     statsGeneration,
                     completedThrough,
+                    expectedSourceRevision,
                   );
                 this.assertHistoricCursorAdvanced(
                   'statistics',
@@ -462,6 +508,7 @@ export class ZoneAlerteComputedHistoricService {
                 );
                 statsCursorAdvanced = true;
               },
+              sourceRevision: expectedSourceRevision,
             },
           );
         } catch (error) {
@@ -484,10 +531,12 @@ export class ZoneAlerteComputedHistoricService {
         .execute();
       const completedThrough = m.format('YYYY-MM-DD');
       if (!mapCursor || completedThrough >= mapCursor) {
+        await this.assertExpectedSourceRevision(expectedSourceRevision);
         const advanced = await this.configService.advanceComputeMapDate(
           mapCursor,
           mapGeneration,
           completedThrough,
+          expectedSourceRevision,
         );
         this.assertHistoricCursorAdvanced(
           'map',
@@ -521,6 +570,43 @@ export class ZoneAlerteComputedHistoricService {
 
   private nextGeneration(current: string): string {
     return (BigInt(current) + 1n).toString();
+  }
+
+  private getBoundedHistoricEndDate(
+    naturalEndDate: Moment,
+    dateMax?: string,
+  ): Moment {
+    if (dateMax === undefined) {
+      return naturalEndDate;
+    }
+    const requestedEndDate = moment(dateMax, 'YYYY-MM-DD', true);
+    if (!requestedEndDate.isValid()) {
+      throw new Error(`Invalid historic chunk end date: ${dateMax}`);
+    }
+    return requestedEndDate.isBefore(naturalEndDate, 'day')
+      ? requestedEndDate
+      : naturalEndDate;
+  }
+
+  private async assertExpectedSourceRevision(
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (expectedSourceRevision === undefined) {
+      return;
+    }
+    const [sourceState] = await this.dataSource.query(
+      `SELECT "revision"::text AS "revision"
+       FROM "zone_publication_source_state"
+       WHERE "id" = 1`,
+    );
+    const actualSourceRevision = sourceState
+      ? String(sourceState.revision)
+      : 'missing';
+    if (actualSourceRevision !== expectedSourceRevision) {
+      throw new Error(
+        `Historic source revision changed (${expectedSourceRevision} -> ${actualSourceRevision})`,
+      );
+    }
   }
 
   async computeZonesForDate(date: Moment, departements?: Departement[]) {
@@ -1411,35 +1497,38 @@ DELETE FROM zone_alerte_computed_historic
     };
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
-
-    await writeFile(
-      `${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
-      JSON.stringify(geojson),
-    );
-    const dataGeojson = fs.readFileSync(
-      `${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
-    );
-    const fileToTransferGeojson = {
-      originalname: `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
-      buffer: dataGeojson,
-    };
-    await this.s3Service.uploadFile(
-      fileToTransferGeojson as Express.Multer.File,
-      'geojson/',
-    );
-    await this.execPromise(
-      `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles ${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.geojson`,
-    );
-    const data = fs.readFileSync(
-      `${path}/zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
-    );
-    const fileToTransfer = {
-      originalname: `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}.pmtiles`,
-      buffer: data,
-    };
-    await this.s3Service.uploadFile(
-      fileToTransfer as Express.Multer.File,
-      'pmtiles/',
+    const fileName = `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}`;
+    const geojsonPath = `${path}/${fileName}.geojson`;
+    const pmtilesPath = `${path}/${fileName}.pmtiles`;
+    await withHistoricArtifactCleanup(
+      [geojsonPath, pmtilesPath],
+      async () => {
+        await writeFile(geojsonPath, JSON.stringify(geojson));
+        const fileToTransferGeojson = {
+          originalname: `${fileName}.geojson`,
+          buffer: fs.readFileSync(geojsonPath),
+        };
+        await this.s3Service.uploadFile(
+          fileToTransferGeojson as Express.Multer.File,
+          'geojson/',
+        );
+        await this.execPromise(
+          `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${pmtilesPath} ${geojsonPath}`,
+        );
+        const fileToTransferPmtiles = {
+          originalname: `${fileName}.pmtiles`,
+          buffer: fs.readFileSync(pmtilesPath),
+        };
+        await this.s3Service.uploadFile(
+          fileToTransferPmtiles as Express.Multer.File,
+          'pmtiles/',
+        );
+      },
+      (artifactPath, error) =>
+        this.logger.error(
+          `ERROR CLEANING HISTORIC ARTIFACT ${artifactPath}`,
+          error instanceof Error ? error.toString() : String(error),
+        ),
     );
     return allZonesComputed;
   }

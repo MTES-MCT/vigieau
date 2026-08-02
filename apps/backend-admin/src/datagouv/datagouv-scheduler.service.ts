@@ -11,11 +11,22 @@ import {
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
 } from '../core/scheduling/daily-job-schedule';
+import {
+  buildHistoricRunIdentityFromConfig,
+  type HistoricRunIdentity,
+} from '../core/scheduling/historic-run-identity';
+import { ConfigService } from '../config/config.service';
 import { DatagouvService } from './datagouv.service';
 import { ExternalPublicationRegistryService } from './external-publication-registry.service';
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
+import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zone_publication.config';
 
 const DATAGOUV_JOB_KEY = 'datagouv:daily';
+
+type DatagouvHistoricRunIdentity = HistoricRunIdentity & {
+  sourceRevision: string;
+  materializationVersion: number;
+};
 
 @Injectable()
 export class DatagouvSchedulerService implements OnApplicationBootstrap {
@@ -26,6 +37,7 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
     private readonly datagouvService: DatagouvService,
     private readonly registry: ExternalPublicationRegistryService,
     private readonly zonePublicationService: ZonePublicationService,
+    private readonly configService: ConfigService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -52,25 +64,33 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
     if (!publicationGate) {
       return;
     }
+    const historicIdentity = await this.getHistoricRunIdentity(
+      publicationGate.sourceRevision,
+    );
     const identity = {
       publicationId: publicationGate.publicationId,
-      sourceRevision: publicationGate.sourceRevision,
+      ...historicIdentity,
     };
     const [currentComputed, historicCaughtUp] = await Promise.all([
       this.registry.hasSucceeded(NATIONAL_DAILY_COMPUTE_JOB_KEY, scheduledFor, {
         sourceRevision: identity.sourceRevision,
+        materializationVersion: identity.materializationVersion,
       }),
       this.registry.hasSucceeded(
         NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
         scheduledFor,
-        { sourceRevision: identity.sourceRevision },
+        historicIdentity,
       ),
     ]);
     if (!currentComputed || !historicCaughtUp) {
       return;
     }
     const verifyCurrent = () =>
-      this.assertPublicationGate(scheduledFor, publicationGate);
+      this.assertPublicationGate(
+        scheduledFor,
+        publicationGate,
+        historicIdentity,
+      );
     await this.registry.executeDailyRun(
       DATAGOUV_JOB_KEY,
       scheduledFor,
@@ -100,9 +120,12 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
       geojsonChecksum: string;
       pmtilesChecksum: string;
     },
+    expectedHistoricIdentity: DatagouvHistoricRunIdentity,
   ): Promise<void> {
-    const current =
-      await this.zonePublicationService.getActivePublicationGate(scheduledFor);
+    const [current, currentHistoricIdentity] = await Promise.all([
+      this.zonePublicationService.getActivePublicationGate(scheduledFor),
+      this.getHistoricRunIdentity(expectedHistoricIdentity.sourceRevision),
+    ]);
     if (
       !current ||
       current.publicationId !== expected.publicationId ||
@@ -114,5 +137,35 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
         `Zone publication gate changed during Datagouv run for ${scheduledFor}`,
       );
     }
+    if (
+      currentHistoricIdentity.materializationVersion !==
+        expectedHistoricIdentity.materializationVersion ||
+      currentHistoricIdentity.historicMapCursor !==
+        expectedHistoricIdentity.historicMapCursor ||
+      currentHistoricIdentity.historicStatsCursor !==
+        expectedHistoricIdentity.historicStatsCursor ||
+      currentHistoricIdentity.historicMapGeneration !==
+        expectedHistoricIdentity.historicMapGeneration ||
+      currentHistoricIdentity.historicStatsGeneration !==
+        expectedHistoricIdentity.historicStatsGeneration
+    ) {
+      throw new Error(
+        `Historic computation gate changed during Datagouv run for ${scheduledFor}`,
+      );
+    }
+  }
+
+  private async getHistoricRunIdentity(
+    sourceRevision: string,
+  ): Promise<DatagouvHistoricRunIdentity> {
+    const config = await this.configService.getConfig();
+    if (!config) {
+      throw new Error('Historic cursor configuration is missing');
+    }
+    return {
+      ...buildHistoricRunIdentityFromConfig(config),
+      sourceRevision,
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    };
   }
 }
