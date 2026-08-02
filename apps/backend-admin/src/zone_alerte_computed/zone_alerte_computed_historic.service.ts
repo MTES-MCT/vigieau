@@ -1067,6 +1067,51 @@ export class ZoneAlerteComputedHistoricService {
       .set({ geom: () => 'ST_CollectionExtract(geom, 3)' })
       .where('"departementId" = :id', { id: departement.id })
       .execute();
+    await this.dataSource.query(
+      `
+        UPDATE zone_alerte_computed_historic
+        SET geom = ST_CollectionExtract(
+          ST_MakeValid(geom, 'method=structure keepcollapsed=false'),
+          3
+        )
+        WHERE "departementId" = $1
+          AND geom IS NOT NULL
+          AND NOT ST_IsEmpty(geom)
+          AND NOT ST_IsValid(geom, 0)
+      `,
+      [departement.id],
+    );
+    await this.dataSource.query(
+      `
+        DELETE FROM zone_alerte_computed_historic
+        WHERE "departementId" = $1
+          AND (
+            geom IS NULL
+            OR ST_IsEmpty(geom)
+            OR ST_GeometryType(geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')
+          )
+      `,
+      [departement.id],
+    );
+    const [validation] = await this.dataSource.query(
+      `
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::integer[])
+          AS "invalidIds"
+        FROM zone_alerte_computed_historic
+        WHERE "departementId" = $1
+          AND geom IS NOT NULL
+          AND NOT ST_IsEmpty(geom)
+          AND ST_GeometryType(geom) IN ('ST_Polygon', 'ST_MultiPolygon')
+          AND NOT ST_IsValid(geom, 0)
+      `,
+      [departement.id],
+    );
+    const invalidIds = (validation?.invalidIds ?? []).map(Number);
+    if (invalidIds.length > 0) {
+      throw new Error(
+        `Geometries de zones historiques calculees invalides apres nettoyage: ${invalidIds.join(',')}`,
+      );
+    }
     // Clean des résidus de moins de 100m²
     await this.dataSource.query(
       `
@@ -1079,6 +1124,7 @@ WITH cleaned_geometries AS (
               id,
               (ST_Dump(geom)).geom AS geom
           FROM zone_alerte_computed_historic
+          WHERE "departementId" = $1
       ) AS dumped
       WHERE ST_GeometryType(geom) = 'ST_Polygon' AND ST_Area(ST_Transform(geom, 2154)) > 100
       GROUP BY id

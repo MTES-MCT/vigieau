@@ -1186,6 +1186,95 @@ describe('ZoneAlerteComputedService', () => {
     expect(computeGeoJson).toHaveBeenCalledWith(false, undefined);
   });
 
+  it('removes collapsed current zones during cleanup', async () => {
+    const updateQuery = {
+      update: jest.fn(),
+      set: jest.fn(),
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    updateQuery.update.mockReturnValue(updateQuery);
+    updateQuery.set.mockReturnValue(updateQuery);
+    updateQuery.where.mockReturnValue(updateQuery);
+    updateQuery.andWhere.mockReturnValue(updateQuery);
+    (service as any).zoneAlerteComputedRepository = {
+      createQueryBuilder: jest.fn().mockReturnValue(updateQuery),
+    };
+
+    await service.cleanZones({ id: 65 } as any);
+
+    const deleteCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('DELETE FROM zone_alerte_computed'),
+    );
+    const secondRepairCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('UPDATE zone_alerte_computed'),
+    );
+    const validationCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('AS "invalidIds"'),
+    );
+    expect(secondRepairCall).toBeDefined();
+    expect(secondRepairCall![0]).toContain(
+      `ST_CollectionExtract(\n          ST_MakeValid(geom, 'method=structure keepcollapsed=false')`,
+    );
+    expect(deleteCall).toBeDefined();
+    expect(deleteCall![0]).toContain('ST_IsEmpty(geom)');
+    expect(deleteCall![0]).toContain(
+      `ST_GeometryType(geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')`,
+    );
+    expect(deleteCall![0]).not.toContain('OR NOT ST_IsValid(geom, 0)');
+    expect(deleteCall![1]).toEqual([65]);
+    expect(validationCall).toBeDefined();
+    expect(validationCall![0]).toContain('NOT ST_IsValid(geom, 0)');
+
+    const secondRepairIndex = dataSource.query.mock.calls.indexOf(
+      secondRepairCall!,
+    );
+    const deleteIndex = dataSource.query.mock.calls.indexOf(deleteCall!);
+    const validationIndex = dataSource.query.mock.calls.indexOf(
+      validationCall!,
+    );
+    expect(secondRepairIndex).toBeLessThan(deleteIndex);
+    expect(deleteIndex).toBeLessThan(validationIndex);
+
+    const residueCleanupCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('WITH cleaned_geometries AS'),
+    );
+    expect(validationIndex).toBeLessThan(
+      dataSource.query.mock.calls.indexOf(residueCleanupCall!),
+    );
+    expect(residueCleanupCall![0]).toContain('WHERE "departementId" = $1');
+  });
+
+  it('fails closed when a non-empty computed polygon remains invalid', async () => {
+    const updateQuery = {
+      update: jest.fn(),
+      set: jest.fn(),
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    updateQuery.update.mockReturnValue(updateQuery);
+    updateQuery.set.mockReturnValue(updateQuery);
+    updateQuery.where.mockReturnValue(updateQuery);
+    updateQuery.andWhere.mockReturnValue(updateQuery);
+    (service as any).zoneAlerteComputedRepository = {
+      createQueryBuilder: jest.fn().mockReturnValue(updateQuery),
+    };
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('AS "invalidIds"') ? [{ invalidIds: [3416566] }] : [],
+    );
+
+    await expect(service.cleanZones({ id: 65 } as any)).rejects.toThrow(
+      'Geometries de zones calculees invalides apres nettoyage: 3416566',
+    );
+    expect(
+      dataSource.query.mock.calls.some(([sql]) =>
+        String(sql).includes('WITH cleaned_geometries AS'),
+      ),
+    ).toBe(false);
+  });
+
   it('does not touch public statistics during a partial versioned compute', async () => {
     const computeCommuneStatisticsRestrictions = jest.fn();
     const computeCommuneStatisticsRestrictionsByMonth = jest.fn();
@@ -1663,6 +1752,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
     update: jest.Mock;
     set: jest.Mock;
     where: jest.Mock;
+    andWhere: jest.Mock;
     execute: jest.Mock;
   };
 
@@ -1700,6 +1790,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
       update: jest.fn(),
       set: jest.fn(),
       where: jest.fn(),
+      andWhere: jest.fn(),
       execute: jest.fn().mockResolvedValue(undefined),
     };
     updateAllHistoricZonesQuery.update.mockReturnValue(
@@ -1711,6 +1802,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
     updateAllHistoricZonesQuery.where.mockReturnValue(
       updateAllHistoricZonesQuery,
     );
+    updateAllHistoricZonesQuery.andWhere.mockReturnValue(
+      updateAllHistoricZonesQuery,
+    );
     zoneAlerteComputedHistoricRepository = {
       createQueryBuilder: jest
         .fn()
@@ -1720,7 +1814,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
       findGeometriesByIds: jest.fn(),
       findOne: jest.fn(),
     };
-    dataSource = { query: jest.fn() };
+    dataSource = { query: jest.fn().mockResolvedValue([]) };
 
     service = new ZoneAlerteComputedHistoricService(
       {} as any,
@@ -1767,6 +1861,68 @@ describe('ZoneAlerteComputedHistoricService', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('removes collapsed zones from computed history before statistics', async () => {
+    await service.cleanZones({ id: 65 } as any);
+
+    const deleteCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('DELETE FROM zone_alerte_computed_historic'),
+    );
+    const secondRepairCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('UPDATE zone_alerte_computed_historic'),
+    );
+    const validationCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('AS "invalidIds"'),
+    );
+    expect(secondRepairCall).toBeDefined();
+    expect(secondRepairCall![0]).toContain(
+      `ST_CollectionExtract(\n          ST_MakeValid(geom, 'method=structure keepcollapsed=false')`,
+    );
+    expect(deleteCall).toBeDefined();
+    expect(deleteCall![0]).toContain('ST_IsEmpty(geom)');
+    expect(deleteCall![0]).toContain(
+      `ST_GeometryType(geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')`,
+    );
+    expect(deleteCall![0]).not.toContain('OR NOT ST_IsValid(geom, 0)');
+    expect(deleteCall![1]).toEqual([65]);
+    expect(validationCall).toBeDefined();
+    expect(validationCall![0]).toContain('NOT ST_IsValid(geom, 0)');
+
+    const secondRepairIndex = dataSource.query.mock.calls.indexOf(
+      secondRepairCall!,
+    );
+    const deleteIndex = dataSource.query.mock.calls.indexOf(deleteCall!);
+    const validationIndex = dataSource.query.mock.calls.indexOf(
+      validationCall!,
+    );
+    expect(secondRepairIndex).toBeLessThan(deleteIndex);
+    expect(deleteIndex).toBeLessThan(validationIndex);
+
+    const residueCleanupCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('WITH cleaned_geometries AS'),
+    );
+    expect(validationIndex).toBeLessThan(
+      dataSource.query.mock.calls.indexOf(residueCleanupCall!),
+    );
+    expect(residueCleanupCall![0]).toContain('WHERE "departementId" = $1');
+  });
+
+  it('fails closed when a non-empty historic polygon remains invalid', async () => {
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('AS "invalidIds"')
+        ? [{ invalidIds: [3418660, 3418661] }]
+        : [],
+    );
+
+    await expect(service.cleanZones({ id: 65 } as any)).rejects.toThrow(
+      'Geometries de zones historiques calculees invalides apres nettoyage: 3418660,3418661',
+    );
+    expect(
+      dataSource.query.mock.calls.some(([sql]) =>
+        String(sql).includes('WITH cleaned_geometries AS'),
+      ),
+    ).toBe(false);
   });
 
   it('computes statistics from dateStats onward in computed historic maps', async () => {
