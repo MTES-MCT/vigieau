@@ -134,6 +134,41 @@ describe('ArreteCadreScheduler', () => {
     expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(3);
   });
 
+  it('does not overlap startup catch-up and cron execution', async () => {
+    const harness = createScheduler();
+    let releaseCurrent: () => void;
+    const currentPending = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    harness.arreteCadreService.updateArreteCadreStatut.mockReturnValue(
+      currentPending,
+    );
+
+    const startupCatchUp = harness.service.updateIfDue(
+      new Date('2026-08-01T08:00:00Z'),
+    );
+    await Promise.resolve();
+    const cronRun = harness.service.updateIfDue(
+      new Date('2026-08-01T08:05:00Z'),
+    );
+
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(1);
+    releaseCurrent!();
+    await Promise.all([startupCatchUp, cronRun]);
+
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(2);
+    expect(
+      harness.registry.executeDailyRun.mock.calls.filter(
+        ([jobKey]) => jobKey === NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      ),
+    ).toHaveLength(1);
+    expect(
+      harness.registry.executeDailyRun.mock.calls.filter(
+        ([jobKey]) => jobKey === NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+      ),
+    ).toHaveLength(1);
+  });
+
   it('binds current and historic successes to the computed publication', async () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
     const harness = createScheduler();

@@ -10,6 +10,21 @@ import { firstValueFrom } from 'rxjs';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { ConfigService } from '@nestjs/config';
 import { User } from '@shared/entities/user.entity';
+import { isDeepStrictEqual } from 'node:util';
+
+const MIN_COMMUNE_REFERENCE_COMPLETENESS_RATIO = 0.9;
+
+interface CommuneReferencePayload {
+  code: string;
+  codeDepartement: string;
+  nom: string;
+  population: number | null;
+  siren: string | null;
+  contour: {
+    type: 'Polygon' | 'MultiPolygon';
+    coordinates: unknown[];
+  };
+}
 
 @Injectable()
 export class CommuneService {
@@ -373,30 +388,73 @@ export class CommuneService {
     this.logger.log('MISE A JOUR DES COMMUNES');
     let communesUpdated = 0;
     let communesAdded = 0;
+    let communesUnchanged = 0;
     const departements = await this.departementService.findAllLight();
     for (const d of departements) {
-      const url = `${this.configService.get('API_GEO')}/departements/${d.code}/communes?fields=code,nom,contour,population,siren`;
+      const url = `${this.configService.get('API_GEO')}/departements/${d.code}/communes?fields=code,codeDepartement,nom,contour,population,siren`;
       const { data } = await firstValueFrom(this.httpService.get(url));
+      const knownCommuneCount = await this.communeRepository.count({
+        where: { departement: { id: d.id } },
+      });
+      this.assertCompleteCommuneResponse(data, d.code, knownCommuneCount);
+      if (knownCommuneCount === 0) {
+        await this.assertBootstrapCommuneResponse(data, d.code);
+      }
       await Promise.all(
         data.map(async (c) => {
           const communeExisting = await this.communeRepository.findOne({
+            select: {
+              id: true,
+              code: true,
+              nom: true,
+              population: true,
+              siren: true,
+              geom: true,
+              departement: {
+                id: true,
+              },
+            },
+            relations: ['departement'],
             where: { code: c.code },
           });
           if (communeExisting) {
+            const population = c.population;
+            const siren = c.siren;
+            const geom = c.contour as Commune['geom'];
+            const geometryMatches = await this.geometryMatches(
+              communeExisting.id,
+              c.code,
+              communeExisting.geom ?? null,
+              geom,
+            );
+            const hasChanged =
+              communeExisting.nom !== c.nom ||
+              communeExisting.departement?.id !== d.id ||
+              communeExisting.population !== population ||
+              communeExisting.siren !== siren ||
+              !geometryMatches;
+
+            if (!hasChanged) {
+              communesUnchanged++;
+              return;
+            }
+
             communeExisting.nom = c.nom;
             communeExisting.departement = d;
-            communeExisting.population = c.population;
-            communeExisting.siren = c.siren;
-            communeExisting.geom = c.contour;
+            communeExisting.population = population;
+            communeExisting.siren = siren;
+            communeExisting.geom = geom;
             await this.communeRepository.save(communeExisting);
             communesUpdated++;
           } else {
+            const geom = c.contour as Commune['geom'];
+            await this.assertValidGeometry(c.code, geom);
             await this.communeRepository.save({
               code: c.code,
               nom: c.nom,
-              population: c.population,
-              siren: c.siren,
-              geom: c.contour,
+              population: c.population ?? null,
+              siren: c.siren ?? null,
+              geom,
               departement: d,
             });
             communesAdded++;
@@ -407,5 +465,170 @@ export class CommuneService {
     this.clearFindCache();
     this.logger.log(`${communesUpdated} COMMUNES MIS A JOUR`);
     this.logger.log(`${communesAdded} COMMUNES AJOUTEES`);
+    this.logger.log(`${communesUnchanged} COMMUNES INCHANGEES`);
+  }
+
+  private assertCompleteCommuneReference(
+    commune: Record<string, unknown>,
+    departementCode: string,
+  ): void {
+    const hasOwn = (key: string) =>
+      Object.prototype.hasOwnProperty.call(commune, key);
+    const contour = commune.contour as
+      | { type?: unknown; coordinates?: unknown }
+      | undefined;
+    const isComplete =
+      typeof commune.code === 'string' &&
+      commune.code.length > 0 &&
+      commune.codeDepartement === departementCode &&
+      typeof commune.nom === 'string' &&
+      commune.nom.length > 0 &&
+      hasOwn('population') &&
+      (commune.population === null ||
+        (typeof commune.population === 'number' &&
+          Number.isFinite(commune.population) &&
+          commune.population >= 0)) &&
+      hasOwn('siren') &&
+      (commune.siren === null ||
+        (typeof commune.siren === 'string' && commune.siren.length > 0)) &&
+      hasOwn('contour') &&
+      contour !== null &&
+      typeof contour === 'object' &&
+      (contour.type === 'Polygon' || contour.type === 'MultiPolygon') &&
+      Array.isArray(contour.coordinates) &&
+      contour.coordinates.length > 0;
+
+    if (!isComplete) {
+      throw new Error(
+        `Incomplete commune reference payload for department ${departementCode}`,
+      );
+    }
+  }
+
+  private assertCompleteCommuneResponse(
+    communes: unknown,
+    departementCode: string,
+    knownCommuneCount: number,
+  ): asserts communes is CommuneReferencePayload[] {
+    if (!Array.isArray(communes) || communes.length === 0) {
+      throw new Error(
+        `Incomplete commune reference payload for department ${departementCode}`,
+      );
+    }
+    communes.forEach((commune) =>
+      this.assertCompleteCommuneReference(commune, departementCode),
+    );
+    const uniqueCodes = new Set(communes.map(({ code }) => code));
+    const minimumExpectedCount = Math.ceil(
+      knownCommuneCount * MIN_COMMUNE_REFERENCE_COMPLETENESS_RATIO,
+    );
+    if (
+      uniqueCodes.size !== communes.length ||
+      (knownCommuneCount > 0 && communes.length < minimumExpectedCount)
+    ) {
+      throw new Error(
+        `Incomplete commune reference payload for department ${departementCode}`,
+      );
+    }
+  }
+
+  private async geometryMatches(
+    communeId: number,
+    communeCode: string,
+    currentGeom: unknown,
+    incomingGeom: unknown,
+  ): Promise<boolean> {
+    if (isDeepStrictEqual(currentGeom, incomingGeom)) {
+      return true;
+    }
+    if (incomingGeom === null) {
+      return false;
+    }
+    if (currentGeom === null) {
+      await this.assertValidGeometry(communeCode, incomingGeom);
+      return false;
+    }
+
+    const [result] = await this.communeRepository.query(
+      `
+        WITH "incoming" AS (
+          SELECT ST_SetSRID(
+            ST_GeomFromGeoJSON($2::text),
+            ST_SRID("geom")
+          ) AS "geom"
+          FROM "commune"
+          WHERE "id" = $1
+        )
+        SELECT
+          ST_IsValid("incoming"."geom")
+            AND NOT ST_IsEmpty("incoming"."geom") AS "valid",
+          ST_Equals("commune"."geom", "incoming"."geom") AS "matches"
+        FROM "commune"
+        CROSS JOIN "incoming"
+        WHERE "commune"."id" = $1
+      `,
+      [communeId, JSON.stringify(incomingGeom)],
+    );
+    if (result?.valid !== true) {
+      throw new Error(`Invalid commune geometry for ${communeCode}`);
+    }
+    return result?.matches === true;
+  }
+
+  private async assertBootstrapCommuneResponse(
+    communes: CommuneReferencePayload[],
+    departementCode: string,
+  ): Promise<void> {
+    const url = `${this.configService.get('API_GEO')}/communes?codeDepartement=${encodeURIComponent(departementCode)}&fields=code,codeDepartement`;
+    const { data } = await firstValueFrom(this.httpService.get(url));
+    const indexIsComplete =
+      Array.isArray(data) &&
+      data.length > 0 &&
+      data.every(
+        (commune) =>
+          commune !== null &&
+          typeof commune === 'object' &&
+          typeof commune.code === 'string' &&
+          commune.code.length > 0 &&
+          commune.codeDepartement === departementCode,
+      );
+    if (!indexIsComplete) {
+      throw new Error(
+        `Incomplete commune reference payload for department ${departementCode}`,
+      );
+    }
+
+    const detailedCodes = new Set(communes.map(({ code }) => code));
+    const indexedCodes = new Set(
+      (data as Array<{ code: string }>).map(({ code }) => code),
+    );
+    if (
+      indexedCodes.size !== data.length ||
+      detailedCodes.size !== indexedCodes.size ||
+      ![...indexedCodes].every((code) => detailedCodes.has(code))
+    ) {
+      throw new Error(
+        `Incomplete commune reference payload for department ${departementCode}`,
+      );
+    }
+  }
+
+  private async assertValidGeometry(
+    communeCode: string,
+    geom: unknown,
+  ): Promise<void> {
+    const [result] = await this.communeRepository.query(
+      `
+        WITH "incoming" AS (
+          SELECT ST_SetSRID(ST_GeomFromGeoJSON($1::text), 4326) AS "geom"
+        )
+        SELECT ST_IsValid("geom") AND NOT ST_IsEmpty("geom") AS "valid"
+        FROM "incoming"
+      `,
+      [JSON.stringify(geom)],
+    );
+    if (result?.valid !== true) {
+      throw new Error(`Invalid commune geometry for ${communeCode}`);
+    }
   }
 }

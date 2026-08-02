@@ -23,6 +23,7 @@ const NATIONAL_COMPUTE_START_HOUR = 2;
 export class ArreteCadreScheduler implements OnModuleInit {
   private readonly logger = new RegleauLogger('ArreteCadreScheduler');
   private catchUpScheduled = false;
+  private updateInFlight: Promise<void> | null = null;
 
   constructor(
     private readonly arreteCadreService: ArreteCadreService,
@@ -48,6 +49,21 @@ export class ArreteCadreScheduler implements OnModuleInit {
 
   @BusinessCron(CronExpression.EVERY_5_MINUTES)
   async updateIfDue(now = new Date()): Promise<void> {
+    if (this.updateInFlight) {
+      return this.updateInFlight;
+    }
+    const update = this.runUpdateIfDue(now);
+    this.updateInFlight = update;
+    try {
+      await update;
+    } finally {
+      if (this.updateInFlight === update) {
+        this.updateInFlight = null;
+      }
+    }
+  }
+
+  private async runUpdateIfDue(now: Date): Promise<void> {
     const scheduledFor = getScheduledCivilDate(
       now,
       NATIONAL_COMPUTE_START_HOUR,

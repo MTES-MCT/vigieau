@@ -67,6 +67,155 @@ describe('ExternalPublicationRegistryService', () => {
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
+  it('immediately resumes an orphaned running publication after acquiring the lock', async () => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) {
+        return [
+          {
+            status: 'running',
+            attempt: 1,
+            startedAt: '2026-08-01T02:00:00.000Z',
+            retryAfter: null,
+            metadata: {},
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const harness = createHarness(query);
+    const run = jest.fn().mockResolvedValue(undefined);
+
+    await expect(
+      harness.service.executeDailyRun(
+        'compute:national-daily',
+        '2026-08-01',
+        run,
+        new Date('2026-08-01T02:01:00.000Z'),
+      ),
+    ).resolves.toBe('succeeded');
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(
+      query.mock.calls.find(([sql]) =>
+        sql.includes('INSERT INTO "external_publication_run"'),
+      )?.[1]?.[2],
+    ).toBe(2);
+    expect(
+      query.mock.calls.some(([sql]) => sql.includes('pg_advisory_unlock')),
+    ).toBe(true);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a grace period for a recent external publication', async () => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) {
+        return [
+          {
+            status: 'running',
+            attempt: 1,
+            startedAt: '2026-08-01T02:00:00.000Z',
+            retryAfter: null,
+            metadata: {},
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const harness = createHarness(query);
+    const run = jest.fn();
+
+    await expect(
+      harness.service.executeDailyRun(
+        'datagouv:daily',
+        '2026-08-01',
+        run,
+        new Date('2026-08-01T02:01:00.000Z'),
+      ),
+    ).resolves.toBe('busy');
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('keeps the external grace period when the publication identity changed', async () => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) {
+        return [
+          {
+            status: 'running',
+            attempt: 1,
+            startedAt: '2026-08-01T02:00:00.000Z',
+            retryAfter: null,
+            metadata: {
+              publicationId: 'publication-old',
+              sourceRevision: '41',
+            },
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const harness = createHarness(query);
+    const run = jest.fn();
+
+    await expect(
+      harness.service.executeDailyRun(
+        'datagouv:daily',
+        '2026-08-01',
+        run,
+        new Date('2026-08-01T02:01:00.000Z'),
+        {
+          identity: {
+            publicationId: 'publication-new',
+            sourceRevision: '42',
+          },
+        },
+      ),
+    ).resolves.toBe('busy');
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('waits until the retry date of a failed publication', async () => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) {
+        return [
+          {
+            status: 'failed',
+            attempt: 1,
+            retryAfter: '2026-08-01T02:10:00.000Z',
+            metadata: {},
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const harness = createHarness(query);
+    const run = jest.fn();
+
+    await expect(
+      harness.service.executeDailyRun(
+        'datagouv:daily',
+        '2026-08-01',
+        run,
+        new Date('2026-08-01T02:05:00.000Z'),
+      ),
+    ).resolves.toBe('not_due');
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('does not execute an already successful daily run twice', async () => {
     const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       void _params;

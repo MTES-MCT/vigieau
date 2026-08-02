@@ -56,7 +56,7 @@ utilisateur.
 Ces variables sont portées par l'API admin, qui décide de l'activation :
 
 ```text
-ZONE_PUBLICATION_ENABLED=false
+ZONE_PUBLICATION_ENABLED=false  # uniquement pendant bootstrap ou gel; true en exploitation
 ZONE_PUBLICATION_MIN_READY_INSTANCES=1  # preprod
 ZONE_PUBLICATION_MIN_READY_INSTANCES=2  # prod
 ZONE_PUBLICATION_INSTANCE_LEASE_SECONDS=30
@@ -90,6 +90,13 @@ est portée par `ZONE_PUBLICATION_MATERIALIZATION_VERSION` dans le code et par
 force un nouveau snapshot même si la révision source n'a pas changé. Ne jamais
 réécrire la version d'une publication existante.
 
+Après activation de la première baseline, `ZONE_PUBLICATION_ENABLED=true` est la
+valeur nominale et doit rester configurée tant que le `clock` tourne. Laisser le
+`clock` actif avec la valeur `false` réactive le calcul legacy : ses checkpoints
+ne portent pas la révision de la publication active et la chaîne quotidienne
+data.gouv.fr finit par être bloquée. La valeur `false` est donc réservée à un gel
+avec `clock=0` ou à un rollback applicatif supervisé.
+
 Après un échec, le watchdog attend
 `ZONE_PUBLICATION_RETRY_BACKOFF_SECONDS * 2^(n-1)`, dans la limite de
 `ZONE_PUBLICATION_RETRY_MAX_BACKOFF_SECONDS`. Le nombre `n` provient des
@@ -117,6 +124,16 @@ puis une publication active du même jour dont les promotions S3 et data.gouv.fr
 sont terminées. Chaque commune doit contenir exactement un enregistrement par
 jour depuis le 1er janvier jusqu'à la date métier attendue.
 
+Une ligne de calcul national restée `running` est reprise immédiatement après
+l'acquisition d'un nouveau verrou de registre. En régime nominal, ce verrou est
+conservé pendant tout le traitement; la phase de matérialisation possède en plus
+son propre verrou PostgreSQL. Si la session du registre tombe avant l'arrêt du
+processus, seuls les prétraitements idempotents peuvent brièvement se recroiser :
+le second verrou empêche le chevauchement de deux matérialisations tant que sa
+session PostgreSQL reste valide. Les publications HTTP externes ne bénéficient
+pas de cette reprise accélérée et conservent une grâce de deux heures, afin qu'une
+perte isolée de connexion PostgreSQL ne lance pas deux uploads concurrents.
+
 Les archives cartographiques annuelles restent désactivées par défaut avec
 `DATAGOUV_MAP_ARCHIVES_ENABLED=false`. Les anciennes ressources configurées ont
 disparu et la reconstruction historique actuelle charge plusieurs gigaoctets en
@@ -141,6 +158,16 @@ La variable globale `RUN_BUSINESS_SCHEDULED_JOBS` reste à `false` : la commande
 du `Procfile` la force à `true` uniquement pour `clock`. La variable
 `DISABLE_SCHEDULED_JOBS` doit rester à `false`; sa valeur `true` coupe aussi le
 heartbeat et rend le processus volontairement non sain.
+
+Le rafraîchissement communal charge explicitement les géométries existantes et
+n'écrit que les communes réellement modifiées. Une égalité GeoJSON incertaine est
+confirmée avec `ST_Equals`; les géométries nouvelles ou différentes sont refusées
+si PostGIS les considère vides ou invalides. Une réponse API GEO vide, dupliquée,
+dépourvue d'un champ demandé ou inférieure à 90 % de la cardinalité départementale
+connue est refusée avant toute écriture du département. Sur une base vide, la
+réponse détaillée est comparée à un second index léger de l'API GEO avant le
+bootstrap. Une exécution sans changement ne doit donc ni réécrire les communes ni
+faire progresser la révision source.
 
 `SANDRE_ZONE_SYNC_MODE=paused` ne contacte pas le référentiel,
 `SANDRE_ZONE_SYNC_MODE=audit` enregistre les décisions sans modifier les zones,

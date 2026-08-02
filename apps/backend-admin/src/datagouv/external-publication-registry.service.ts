@@ -1,10 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import {
+  NATIONAL_DAILY_COMPUTE_JOB_KEY,
+  NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+} from '../core/scheduling/daily-job-schedule';
 
 const STALE_RUN_MS = 2 * 60 * 60 * 1000;
 const BASE_RETRY_MS = 5 * 60 * 1000;
 const MAX_RETRY_MS = 60 * 60 * 1000;
+const IMMEDIATE_ORPHAN_RECOVERY_JOB_KEYS = new Set([
+  NATIONAL_DAILY_COMPUTE_JOB_KEY,
+  NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
+]);
 
 interface PublicationRunRow {
   status: 'running' | 'succeeded' | 'failed';
@@ -161,6 +169,7 @@ export class ExternalPublicationRegistryService {
       const eligibility = this.getRunEligibility(
         existing,
         now,
+        jobKey,
         options.identity,
       );
       if (eligibility !== 'succeeded') {
@@ -367,23 +376,28 @@ export class ExternalPublicationRegistryService {
   private getRunEligibility(
     run: PublicationRunRow | undefined,
     now: Date,
+    jobKey: string,
     identity?: PublicationRunIdentity,
   ): PublicationRunResult {
     if (!run) {
       return 'succeeded';
+    }
+    if (run.status === 'running') {
+      if (IMMEDIATE_ORPHAN_RECOVERY_JOB_KEYS.has(jobKey)) {
+        return 'succeeded';
+      }
+      if (
+        run.startedAt &&
+        now.getTime() - new Date(run.startedAt).getTime() < STALE_RUN_MS
+      ) {
+        return 'busy';
+      }
     }
     if (identity && !this.metadataContains(run.metadata, identity)) {
       return 'succeeded';
     }
     if (run.status === 'succeeded') {
       return 'already_succeeded';
-    }
-    if (
-      run.status === 'running' &&
-      run.startedAt &&
-      now.getTime() - new Date(run.startedAt).getTime() < STALE_RUN_MS
-    ) {
-      return 'busy';
     }
     if (run.retryAfter && new Date(run.retryAfter).getTime() > now.getTime()) {
       return 'not_due';
