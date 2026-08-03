@@ -2,6 +2,7 @@ import { DataSource, QueryRunner } from 'typeorm';
 import { Config } from '@shared/entities/config.entity';
 import { ConfigService } from '../config/config.service';
 import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
+import { ReconcileTerminalPublicationSnapshots1786219300000 } from '../migrations/1786219300000-ReconcileTerminalPublicationSnapshots';
 import { ZonePublicationService } from './zone_publication.service';
 
 const postgresUrl = process.env.STATISTIC_COMMUNE_POSTGRES_URL;
@@ -571,5 +572,137 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
     await expect(
       service.purgeExpiredPublications({ retentionHours: 48 }),
     ).resolves.toEqual([failedPublicationId]);
+  });
+
+  it('atomically invalidates every orphaned terminal publication snapshot', async () => {
+    const schemaName = `terminal_snapshot_${process.pid}_${Date.now()}`;
+    const runner = dataSource.createQueryRunner();
+    await runner.connect();
+
+    try {
+      await runner.query(`CREATE SCHEMA "${schemaName}"`);
+      await runner.query(`SET search_path TO "${schemaName}", public`);
+      await runner.query(`
+        CREATE TABLE "zone_publication" (
+          "id" uuid PRIMARY KEY,
+          "status" varchar NOT NULL,
+          "sourceRevision" bigint NOT NULL,
+          "sourceComputedAt" timestamptz NOT NULL
+        );
+        CREATE TABLE "statistic_commune_snapshot" (
+          "snapshotDate" date NOT NULL,
+          "scope" varchar NOT NULL,
+          "status" varchar NOT NULL,
+          "sourceRevision" bigint,
+          "completedAt" timestamptz,
+          "lastError" text,
+          "updatedAt" timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY ("snapshotDate", "scope")
+        )
+      `);
+      await runner.query(`
+        INSERT INTO "statistic_commune_snapshot" (
+          "snapshotDate", "scope", "status", "sourceRevision"
+        ) VALUES
+          ('9998-01-01', 'national', 'ready', 1),
+          ('9998-01-02', 'national', 'ready', 2),
+          ('9998-01-03', 'bootstrap', 'ready', 3),
+          ('9998-01-04', 'national', 'ready', NULL);
+        INSERT INTO "zone_publication" (
+          "id", "status", "sourceRevision", "sourceComputedAt"
+        ) VALUES
+          ('00000000-0000-4000-8000-000000000001', 'failed', 1, '9998-01-01 08:00+00'),
+          ('00000000-0000-4000-8000-000000000002', 'failed', 2, '9998-01-02 08:00+00'),
+          ('00000000-0000-4000-8000-000000000003', 'validated', 2, '9998-01-02 09:00+00'),
+          ('00000000-0000-4000-8000-000000000004', 'superseded', 3, '9998-01-03 08:00+00'),
+          ('00000000-0000-4000-8000-000000000005', 'failed', 4, '9998-01-04 08:00+00')
+      `);
+
+      const migration =
+        new ReconcileTerminalPublicationSnapshots1786219300000();
+      await migration.up(runner);
+
+      const afterReconciliation = await runner.query(`
+        SELECT "snapshotDate"::text AS "snapshotDate", "scope", "status"
+        FROM "statistic_commune_snapshot"
+        ORDER BY "snapshotDate", "scope"
+      `);
+      expect(afterReconciliation).toEqual([
+        { snapshotDate: '9998-01-01', scope: 'national', status: 'failed' },
+        { snapshotDate: '9998-01-02', scope: 'national', status: 'ready' },
+        { snapshotDate: '9998-01-03', scope: 'bootstrap', status: 'ready' },
+        { snapshotDate: '9998-01-04', scope: 'national', status: 'ready' },
+      ]);
+
+      await runner.query(`
+        INSERT INTO "statistic_commune_snapshot" (
+          "snapshotDate", "scope", "status", "sourceRevision"
+        ) VALUES
+          ('9998-01-05', 'national', 'ready', 5),
+          ('9998-01-06', 'national', 'ready', 6),
+          ('9998-01-07', 'national', 'ready', 7);
+        INSERT INTO "zone_publication" (
+          "id", "status", "sourceRevision", "sourceComputedAt"
+        ) VALUES
+          ('00000000-0000-4000-8000-000000000006', 'building', 5, '9998-01-05 08:00+00'),
+          ('00000000-0000-4000-8000-000000000007', 'building', 6, '9998-01-06 08:00+00'),
+          ('00000000-0000-4000-8000-000000000008', 'validated', 6, '9998-01-06 09:00+00');
+        UPDATE "zone_publication"
+        SET "status" = 'failed'
+        WHERE "id" = '00000000-0000-4000-8000-000000000006';
+        UPDATE "zone_publication"
+        SET "status" = 'superseded'
+        WHERE "id" = '00000000-0000-4000-8000-000000000007';
+        INSERT INTO "zone_publication" (
+          "id", "status", "sourceRevision", "sourceComputedAt"
+        ) VALUES (
+          '00000000-0000-4000-8000-000000000009',
+          'failed', 7, '9998-01-07 08:00+00'
+        )
+      `);
+
+      const afterRuntimeTransitions = await runner.query(`
+        SELECT "snapshotDate"::text AS "snapshotDate", "status"
+        FROM "statistic_commune_snapshot"
+        WHERE "snapshotDate" >= '9998-01-05'
+        ORDER BY "snapshotDate"
+      `);
+      expect(afterRuntimeTransitions).toEqual([
+        { snapshotDate: '9998-01-05', status: 'failed' },
+        { snapshotDate: '9998-01-06', status: 'ready' },
+        { snapshotDate: '9998-01-07', status: 'failed' },
+      ]);
+
+      await migration.down(runner);
+      const restored = await runner.query(`
+        SELECT COUNT(*)::integer AS "failedCount"
+        FROM "statistic_commune_snapshot"
+        WHERE "status" = 'failed'
+      `);
+      expect(restored).toEqual([{ failedCount: 0 }]);
+
+      await runner.query(`
+        INSERT INTO "statistic_commune_snapshot" (
+          "snapshotDate", "scope", "status", "sourceRevision"
+        ) VALUES ('9998-01-08', 'national', 'ready', 8);
+        INSERT INTO "zone_publication" (
+          "id", "status", "sourceRevision", "sourceComputedAt"
+        ) VALUES (
+          '00000000-0000-4000-8000-000000000010',
+          'failed', 8, '9998-01-08 08:00+00'
+        )
+      `);
+      const [afterRollback] = await runner.query(`
+        SELECT "status"
+        FROM "statistic_commune_snapshot"
+        WHERE "snapshotDate" = '9998-01-08'
+          AND "scope" = 'national'
+      `);
+      expect(afterRollback.status).toBe('ready');
+    } finally {
+      await runner.query('SET search_path TO public');
+      await runner.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+      await runner.release();
+    }
   });
 });

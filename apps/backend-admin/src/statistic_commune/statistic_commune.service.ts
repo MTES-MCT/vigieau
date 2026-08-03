@@ -1034,6 +1034,18 @@ export class StatisticCommuneService {
             WHERE snapshot."status" <> 'completed'
               AND (
                 snapshot."scope" = 'bootstrap'
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM "statistic_commune_snapshot" failed_national_snapshot
+                  WHERE failed_national_snapshot."snapshotDate" =
+                        snapshot."snapshotDate"
+                    AND failed_national_snapshot."scope" = 'national'
+                    AND failed_national_snapshot."status" = 'failed'
+                    AND failed_national_snapshot."sourceRevision" IS NOT NULL
+                )
+              )
+              AND (
+                snapshot."scope" = 'bootstrap'
                 OR (
                 snapshot."snapshotDate" >= $3::date
                 AND snapshot."snapshotDate" < $4::date
@@ -1127,6 +1139,15 @@ export class StatisticCommuneService {
               COALESCE(statistic."restrictions", '[]'::jsonb)
             ) AS daily(value)
               ON daily.value ->> 'date' LIKE $2 || '-%'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM "statistic_commune_snapshot" failed_national_snapshot
+               WHERE failed_national_snapshot."snapshotDate" =
+                     (daily.value ->> 'date')::date
+                 AND failed_national_snapshot."scope" = 'national'
+                 AND failed_national_snapshot."status" = 'failed'
+                 AND failed_national_snapshot."sourceRevision" IS NOT NULL
+             )
              AND (
                $8::date IS NULL
                OR (daily.value ->> 'date')::date <= $8::date

@@ -906,6 +906,9 @@ describe('ZonePublicationService', () => {
     expect(
       executed.some((sql) => sql.includes(`SET "status" = 'active'`)),
     ).toBe(false);
+    expect(
+      executed.some((sql) => sql.includes(`SET "status" = 'retired'`)),
+    ).toBe(false);
   });
 
   it('expires an unreadable candidate without changing the active publication', async () => {
@@ -980,7 +983,7 @@ describe('ZonePublicationService', () => {
       ),
     ).toBe(true);
     expect(
-      executed.some((sql) => sql.includes(`SET "status" = 'retired'`)),
+      executed.some((sql) => sql.includes(`SET "status" = 'active'`)),
     ).toBe(false);
   });
 

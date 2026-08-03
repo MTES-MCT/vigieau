@@ -692,6 +692,17 @@ describe('StatisticCommuneService', () => {
     expect(sql).toContain('snapshot."status" = \'ready\'');
     expect(sql).toContain('snapshot."sourceRevision" = $9::bigint');
     expect(sql).toContain('snapshot."scope" = \'bootstrap\'');
+    expect(sql).toContain(
+      'snapshot."scope" = \'bootstrap\'\n                OR NOT EXISTS',
+    );
+    expect(sql).toContain('failed_national_snapshot."scope" = \'national\'');
+    expect(sql).toContain('failed_national_snapshot."status" = \'failed\'');
+    expect(sql).toContain(
+      'failed_national_snapshot."sourceRevision" IS NOT NULL',
+    );
+    expect(sql).toContain(
+      'failed_national_snapshot."snapshotDate" =\n                     (daily.value ->> \'date\')::date',
+    );
     expect(sql).toContain('allowed_ready_snapshot AS MATERIALIZED');
     expect(sql).toContain(
       'AND NOT EXISTS (SELECT 1 FROM allowed_ready_snapshot)',

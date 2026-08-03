@@ -288,4 +288,116 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       ),
     ).toHaveLength(1);
   });
+
+  it('excludes only versioned failed days from monthly barriers and weighting', async () => {
+    const schemaName = `failed_month_${process.pid}_${Date.now()}`;
+    await queryRunner.query(`CREATE SCHEMA "${schemaName}"`);
+    await queryRunner.query(`SET LOCAL search_path TO "${schemaName}", public`);
+    await queryRunner.query(`
+      CREATE TABLE "departement" (
+        "id" integer PRIMARY KEY,
+        "code" varchar NOT NULL
+      );
+      CREATE TABLE "commune" (
+        "id" integer PRIMARY KEY,
+        "departementId" integer NOT NULL
+      );
+      CREATE TABLE "statistic_commune" (
+        "id" integer PRIMARY KEY,
+        "communeId" integer NOT NULL,
+        "restrictions" jsonb NOT NULL DEFAULT '[]'::jsonb,
+        "restrictionsByMonth" jsonb NOT NULL DEFAULT '[]'::jsonb
+      );
+      CREATE TABLE "statistic_commune_snapshot" (
+        "snapshotDate" date NOT NULL,
+        "scope" varchar NOT NULL,
+        "status" varchar NOT NULL,
+        "sourceRevision" bigint,
+        "expectedCommuneCount" integer NOT NULL DEFAULT 1,
+        "processedCommuneCount" integer NOT NULL DEFAULT 1,
+        PRIMARY KEY ("snapshotDate", "scope")
+      );
+      INSERT INTO "departement" VALUES (1, '65');
+      INSERT INTO "commune" VALUES (1, 1);
+      INSERT INTO "statistic_commune" (
+        "id", "communeId", "restrictions"
+      ) VALUES (
+        1,
+        1,
+        '[
+          {"date":"9998-02-01","SOU":"vigilance","SUP":null,"AEP":null},
+          {"date":"9998-02-02","SOU":"crise","SUP":null,"AEP":null},
+          {"date":"9998-02-03","SOU":"alerte","SUP":null,"AEP":null}
+        ]'::jsonb
+      );
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "sourceRevision"
+      ) VALUES
+        ('9998-02-01', 'national', 'completed', 1),
+        ('9998-02-02', 'national', 'failed', 1),
+        ('9998-02-03', 'national', 'completed', 1)
+    `);
+    const monthlyService = new StatisticCommuneService(
+      {} as never,
+      {} as never,
+      {
+        query: (sql: string, parameters?: unknown[]) =>
+          queryRunner.query(sql, parameters),
+      } as never,
+    );
+    const computeMonth = () =>
+      monthlyService.computeCommuneStatisticsRestrictionsByMonth(
+        new Date('9998-02-01T00:00:00.000Z'),
+      );
+    const readWeight = async () => {
+      const [row] = await queryRunner.query(`
+        SELECT item.value ->> 'ponderation' AS "weight"
+        FROM "statistic_commune" statistic
+        CROSS JOIN LATERAL jsonb_array_elements(
+          statistic."restrictionsByMonth"
+        ) item(value)
+        WHERE item.value ->> 'date' = '9998-02'
+      `);
+      return row?.weight ?? null;
+    };
+
+    await expect(computeMonth()).resolves.toBeUndefined();
+    await expect(readWeight()).resolves.toBe('2.5');
+
+    await queryRunner.query(`
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "sourceRevision"
+      ) VALUES ('9998-02-02', 'bootstrap', 'running', NULL)
+    `);
+    await expect(computeMonth()).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+
+    await queryRunner.query(`
+      DELETE FROM "statistic_commune_snapshot" WHERE "scope" = 'bootstrap';
+      UPDATE "statistic_commune_snapshot"
+      SET "sourceRevision" = NULL
+      WHERE "snapshotDate" = '9998-02-02' AND "scope" = 'national'
+    `);
+    await expect(computeMonth()).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "status" = 'running', "sourceRevision" = 1
+      WHERE "snapshotDate" = '9998-02-02' AND "scope" = 'national'
+    `);
+    await expect(computeMonth()).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "status" = 'completed'
+      WHERE "snapshotDate" = '9998-02-02' AND "scope" = 'national'
+    `);
+    await expect(computeMonth()).resolves.toBeUndefined();
+    await expect(readWeight()).resolves.toBe('6.5');
+  });
 });

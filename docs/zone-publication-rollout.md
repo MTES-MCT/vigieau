@@ -74,6 +74,14 @@ utilisateur.
   publication validée réutilisable et ne relance pas un calcul national
   concurrent. Un échec conserve ensemble l'ancienne carte et l'ancienne
   situation.
+- Si une publication devient `failed` ou `superseded` avant activation, son
+  changement d'état invalide dans la même transaction le snapshot communal
+  national `ready` correspondant, sauf si une autre publication utilisable
+  porte la même date et la même révision. Les agrégats mensuels ignorent cette
+  journée versionnée jusqu'à son recalcul, mais les barrières d'activation et
+  d'export restent fermées. Le rattrapage remet la journée dans les agrégats
+  avant toute publication ; un snapshot bootstrap ou sans révision source
+  continue toujours de bloquer.
 - L'identifiant de publication échouée enregistré par le dernier calcul
   quotidien est conservé au-delà de la rétention normale tant qu'aucun calcul
   quotidien plus récent de la même révision n'existe. Une reconstruction peut
