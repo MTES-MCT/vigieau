@@ -33,6 +33,9 @@ cp env.example .env
 - CLOCK_LEADERSHIP_RETRY_SECONDS : Intervalle entre deux tentatives d'acquisition du verrou du `clock` (2 secondes par défaut)
 - COMMUNE_STATISTICS_BATCH_SIZE : Nombre de communes traitées par transaction lors du calcul des statistiques (250 par défaut, entier compris entre 1 et 1000)
 - HISTORIC_COMPUTE_CHUNK_DAYS : Nombre maximal de jours traités par un worker de rattrapage historique (7 par défaut, entier compris entre 1 et 3660)
+- HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED : Réutilise les départements inchangés entre deux journées historiques consécutives lorsque la révision source est certifiée (`false` par défaut)
+- HISTORIC_SKIP_COMMUNE_INTERSECTIONS : Ne matérialise pas les liens zone-commune historiques, inutiles aux GeoJSON, PMTiles et statistiques (`false` par défaut)
+- HISTORIC_DEPARTMENT_CONCURRENCY : Nombre maximal de départements historiques calculés simultanément (1 par défaut, entier compris entre 1 et 4)
 - ZONE_PUBLICATION_HEALTH_PROGRESS_STALE_AFTER_SECONDS : Délai maximal sans progression métier récente pendant lequel le health de publication peut encore répondre `updating` avec une ancienne active servie (1800 secondes par défaut)
 
 Le processus `clock` ne publie son heartbeat et ne démarre ses tâches planifiées qu'après avoir acquis son verrou PostgreSQL exclusif. Pendant un rolling deploy, le nouveau processus retente ce verrou dans la fenêtre configurée ; si elle expire, son démarrage échoue au lieu de créer un second ordonnanceur. Lors d'un arrêt gracieux, l'ancien processus attend la fin de ses tâches planifiées avant de libérer le verrou.

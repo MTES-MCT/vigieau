@@ -12,6 +12,10 @@ import {
   ZoneAlerteComputedService,
 } from './zone_alerte_computed.service';
 import {
+  HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT,
+  HISTORIC_DEPARTMENT_CONCURRENCY_MAX,
+  readHistoricDepartmentConcurrency,
+  readHistoricSkipCommuneIntersections,
   withHistoricArtifactCleanup,
   ZoneAlerteComputedHistoricService,
 } from './zone_alerte_computed_historic.service';
@@ -267,12 +271,14 @@ describe('ZoneAlerteComputedService', () => {
         computeStatsDate: '2023-04-13',
         computeMapGeneration: '3',
         computeStatsGeneration: '5',
+        historicComputeEpoch: '23',
       })
       .mockResolvedValueOnce({
         computeMapDate: '2024-04-28',
         computeStatsDate: '2024-04-28',
         computeMapGeneration: '370',
         computeStatsGeneration: '371',
+        historicComputeEpoch: '23',
       });
 
     await service.computeHistoric();
@@ -289,6 +295,7 @@ describe('ZoneAlerteComputedService', () => {
       '5',
       '1',
       '2024-04-28',
+      '23',
     );
     expect((service as any).runHistoricWorker).toHaveBeenNthCalledWith(
       2,
@@ -301,6 +308,7 @@ describe('ZoneAlerteComputedService', () => {
       '371',
       '1',
       '2026-06-22',
+      '23',
     );
     expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -335,6 +343,7 @@ describe('ZoneAlerteComputedService', () => {
       computeStatsDate: '2026-03-25',
       computeMapGeneration: '7',
       computeStatsGeneration: '8',
+      historicComputeEpoch: '24',
     });
 
     await service.computeHistoric();
@@ -350,6 +359,7 @@ describe('ZoneAlerteComputedService', () => {
       '8',
       '1',
       '2026-06-22',
+      '24',
     );
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('"historicDirtyFrom"'),
@@ -395,6 +405,7 @@ describe('ZoneAlerteComputedService', () => {
       '10',
       '1',
       '2026-06-22',
+      '0',
     );
   });
 
@@ -418,6 +429,7 @@ describe('ZoneAlerteComputedService', () => {
       '0',
       '1',
       '2026-06-22',
+      '0',
     );
     expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
       expect.objectContaining({ _isAMomentObject: true }),
@@ -477,7 +489,7 @@ describe('ZoneAlerteComputedService', () => {
     });
     expect(
       (service as any).assertCurrentHistoricCursorState,
-    ).toHaveBeenLastCalledWith(completedState);
+    ).toHaveBeenLastCalledWith(completedState, '0');
   });
 
   it('does not compute monthly aggregates after a historic worker failure', async () => {
@@ -669,6 +681,27 @@ describe('ZoneAlerteComputedService', () => {
     ).toThrow('Historic cursors changed after worker completion');
   });
 
+  it('rejects a completed worker after its checkpoint epoch was invalidated', () => {
+    expect(() =>
+      (service as any).assertHistoricCursorState(
+        {
+          mapCursor: '2026-07-31',
+          statsCursor: '2026-07-31',
+          mapGeneration: '12',
+          statsGeneration: '18',
+        },
+        {
+          computeMapDate: '2026-07-31',
+          computeStatsDate: '2026-07-31',
+          computeMapGeneration: '12',
+          computeStatsGeneration: '18',
+          historicComputeEpoch: '8',
+        },
+        '7',
+      ),
+    ).toThrow('Historic cursors changed after worker completion');
+  });
+
   it('passes the source revision and end date to a historic worker', async () => {
     const worker = Object.assign(new EventEmitter(), {
       terminate: jest.fn().mockResolvedValue(1),
@@ -688,6 +721,7 @@ describe('ZoneAlerteComputedService', () => {
       '18',
       '42',
       '2026-07-03',
+      '17',
     );
 
     expect(Worker).toHaveBeenCalledWith(
@@ -696,6 +730,7 @@ describe('ZoneAlerteComputedService', () => {
         workerData: expect.objectContaining({
           expectedSourceRevision: '42',
           dateMax: '2026-07-03',
+          expectedHistoricComputeEpoch: '17',
         }),
       }),
     );
@@ -2218,12 +2253,21 @@ describe('ZoneAlerteComputedHistoricService', () => {
     advanceComputeMapDate: jest.Mock;
     advanceComputeStatsDate: jest.Mock;
   };
-  let zoneAlerteComputedHistoricRepository: { createQueryBuilder: jest.Mock };
+  let zoneAlerteComputedHistoricRepository: {
+    createQueryBuilder: jest.Mock;
+    delete: jest.Mock;
+  };
   let zoneAlerteService: {
     findGeometriesByIds: jest.Mock;
     findOne: jest.Mock;
   };
   let dataSource: { query: jest.Mock };
+  let historicDepartmentCheckpointService: {
+    purgeStaleCheckpoints: jest.Mock;
+    hasAnyCheckpointForDate: jest.Mock;
+    prepare: jest.Mock;
+    complete: jest.Mock;
+  };
   let updateAllHistoricZonesQuery: {
     update: jest.Mock;
     set: jest.Mock;
@@ -2231,8 +2275,17 @@ describe('ZoneAlerteComputedHistoricService', () => {
     andWhere: jest.Mock;
     execute: jest.Mock;
   };
+  const previousHistoricDepartmentConcurrency =
+    process.env.HISTORIC_DEPARTMENT_CONCURRENCY;
+  const previousHistoricSkipCommuneIntersections =
+    process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS;
+  const previousHistoricDepartmentCheckpoint =
+    process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED;
 
   beforeEach(() => {
+    delete process.env.HISTORIC_DEPARTMENT_CONCURRENCY;
+    delete process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS;
+    delete process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED;
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
     statisticDepartementService = {
@@ -2285,12 +2338,23 @@ describe('ZoneAlerteComputedHistoricService', () => {
       createQueryBuilder: jest
         .fn()
         .mockReturnValue(updateAllHistoricZonesQuery),
+      delete: jest.fn().mockResolvedValue(undefined),
     };
     zoneAlerteService = {
       findGeometriesByIds: jest.fn(),
       findOne: jest.fn(),
     };
     dataSource = { query: jest.fn().mockResolvedValue([]) };
+    historicDepartmentCheckpointService = {
+      purgeStaleCheckpoints: jest.fn().mockResolvedValue(0),
+      hasAnyCheckpointForDate: jest.fn().mockResolvedValue(false),
+      prepare: jest.fn().mockResolvedValue({
+        enabled: false,
+        shouldCompute: true,
+        reason: 'disabled',
+      }),
+      complete: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new ZoneAlerteComputedHistoricService(
       {} as any,
@@ -2321,6 +2385,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
       statisticCommuneService as any,
       dataSource as any,
       configService as any,
+      historicDepartmentCheckpointService as any,
     );
     (service as any).computeRegleAr = jest.fn().mockResolvedValue([]);
     (service as any).computeCommunesIntersected = jest
@@ -2337,6 +2402,249 @@ describe('ZoneAlerteComputedHistoricService', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  afterAll(() => {
+    if (previousHistoricDepartmentConcurrency === undefined) {
+      delete process.env.HISTORIC_DEPARTMENT_CONCURRENCY;
+    } else {
+      process.env.HISTORIC_DEPARTMENT_CONCURRENCY =
+        previousHistoricDepartmentConcurrency;
+    }
+    if (previousHistoricSkipCommuneIntersections === undefined) {
+      delete process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS;
+    } else {
+      process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS =
+        previousHistoricSkipCommuneIntersections;
+    }
+    if (previousHistoricDepartmentCheckpoint === undefined) {
+      delete process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED;
+    } else {
+      process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED =
+        previousHistoricDepartmentCheckpoint;
+    }
+  });
+
+  it('uses conservative historic acceleration defaults and validates overrides', () => {
+    expect(readHistoricDepartmentConcurrency()).toBe(
+      HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT,
+    );
+    expect(readHistoricDepartmentConcurrency(' 4 ')).toBe(
+      HISTORIC_DEPARTMENT_CONCURRENCY_MAX,
+    );
+    expect(() => readHistoricDepartmentConcurrency('0')).toThrow(
+      'must be a positive integer',
+    );
+    expect(() => readHistoricDepartmentConcurrency('5')).toThrow(
+      `must be at most ${HISTORIC_DEPARTMENT_CONCURRENCY_MAX}`,
+    );
+    expect(readHistoricSkipCommuneIntersections()).toBe(false);
+    expect(readHistoricSkipCommuneIntersections(' TRUE ')).toBe(true);
+    expect(readHistoricSkipCommuneIntersections('false')).toBe(false);
+    expect(() => readHistoricSkipCommuneIntersections('1')).toThrow(
+      'must be true or false',
+    );
+  });
+
+  it('cleans global historic residues once before computing departments', async () => {
+    const events: string[] = [];
+    const departments = [
+      {
+        id: 65,
+        code: '65',
+        nom: 'Hautes-Pyrenees',
+        parametres: [],
+      },
+      {
+        id: 31,
+        code: '31',
+        nom: 'Haute-Garonne',
+        parametres: [],
+      },
+    ] as any;
+    zoneAlerteComputedHistoricRepository.delete.mockImplementation(async () => {
+      events.push('global-cleanup');
+    });
+    (service.computeRegleAr as jest.Mock).mockImplementation(
+      async (departement) => {
+        events.push(`compute-${departement.code}`);
+        return [];
+      },
+    );
+
+    await service.computeZonesForDate(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      departments,
+    );
+
+    expect(events).toEqual(['global-cleanup', 'compute-65', 'compute-31']);
+    expect(zoneAlerteComputedHistoricRepository.delete).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(
+      zoneAlerteComputedHistoricRepository.delete.mock.calls[0][0].departement,
+    ).toMatchObject({ _type: 'isNull' });
+    expect(service.computeCommunesIntersected).toHaveBeenCalledTimes(2);
+  });
+
+  it('omits historic commune intersections only when explicitly enabled', async () => {
+    process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS = 'true';
+    const departments = [
+      { id: 65, code: '65', nom: 'Hautes-Pyrenees', parametres: [] },
+      { id: 31, code: '31', nom: 'Haute-Garonne', parametres: [] },
+    ] as any;
+
+    await service.computeZonesForDate(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      departments,
+    );
+
+    expect(service.computeRegleAr).toHaveBeenCalledTimes(2);
+    expect(service.computeCommunesIntersected).not.toHaveBeenCalled();
+  });
+
+  it('preserves a department when its durable checkpoint is reusable', async () => {
+    historicDepartmentCheckpointService.prepare.mockResolvedValue({
+      enabled: true,
+      shouldCompute: false,
+      reason: 'resume',
+    });
+    const department = {
+      id: 65,
+      code: '65',
+      nom: 'Hautes-Pyrenees',
+      parametres: [],
+    } as any;
+
+    await service.computeZonesForDate(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      [department],
+      {
+        previousDate: '2026-06-21',
+        historicComputeEpoch: '43',
+        expectedSourceRevision: '12',
+      },
+    );
+
+    expect(historicDepartmentCheckpointService.prepare).toHaveBeenCalledWith(
+      department,
+      expect.objectContaining({
+        previousDate: '2026-06-21',
+        historicComputeEpoch: '43',
+        expectedSourceRevision: '12',
+      }),
+    );
+    expect(service.computeRegleAr).not.toHaveBeenCalled();
+    expect(historicDepartmentCheckpointService.complete).not.toHaveBeenCalled();
+  });
+
+  it('certifies a department only after its full computation', async () => {
+    const events: string[] = [];
+    historicDepartmentCheckpointService.complete.mockImplementation(
+      async () => {
+        events.push('checkpoint');
+      },
+    );
+    (service.computeRegleAr as jest.Mock).mockImplementation(async () => {
+      events.push('zones');
+      return [];
+    });
+    (service.computeCommunesIntersected as jest.Mock).mockImplementation(
+      async () => {
+        events.push('communes');
+      },
+    );
+
+    await service.computeZonesForDate(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      [
+        {
+          id: 65,
+          code: '65',
+          nom: 'Hautes-Pyrenees',
+          parametres: [],
+        },
+      ] as any,
+      {
+        previousDate: '2026-06-21',
+        historicComputeEpoch: '43',
+        expectedSourceRevision: '12',
+      },
+    );
+
+    expect(events).toEqual(['zones', 'communes', 'checkpoint']);
+  });
+
+  it('bounds parallel historic department computations to the configured value', async () => {
+    jest.useRealTimers();
+    process.env.HISTORIC_DEPARTMENT_CONCURRENCY = '2';
+    const departments = [1, 2, 3, 4, 5].map((id) => ({
+      id,
+      code: String(id).padStart(2, '0'),
+      nom: `Departement ${id}`,
+      parametres: [],
+    })) as any;
+    let activeComputations = 0;
+    let maximumActiveComputations = 0;
+    (service.computeRegleAr as jest.Mock).mockImplementation(async () => {
+      activeComputations += 1;
+      maximumActiveComputations = Math.max(
+        maximumActiveComputations,
+        activeComputations,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      activeComputations -= 1;
+      return [];
+    });
+
+    await service.computeZonesForDate(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      departments,
+    );
+
+    expect(service.computeRegleAr).toHaveBeenCalledTimes(5);
+    expect(maximumActiveComputations).toBe(2);
+  });
+
+  it('waits for in-flight departments and stops scheduling after a parallel failure', async () => {
+    jest.useRealTimers();
+    process.env.HISTORIC_DEPARTMENT_CONCURRENCY = '2';
+    const departments = [1, 2, 3].map((id) => ({
+      id,
+      code: String(id).padStart(2, '0'),
+      nom: `Departement ${id}`,
+      parametres: [],
+    })) as any;
+    const computationError = new Error('department failed');
+    let releaseInFlight: () => void = () => undefined;
+    (service.computeRegleAr as jest.Mock).mockImplementation(
+      async (departement) => {
+        if (departement.id === 1) {
+          throw computationError;
+        }
+        await new Promise<void>((resolve) => {
+          releaseInFlight = resolve;
+        });
+        return [];
+      },
+    );
+
+    const computation = service.computeZonesForDate(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      departments,
+    );
+    let rejected = false;
+    void computation.catch(() => {
+      rejected = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(rejected).toBe(false);
+    expect(service.computeRegleAr).toHaveBeenCalledTimes(2);
+
+    releaseInFlight();
+    await expect(computation).rejects.toBe(computationError);
+    expect(service.computeRegleAr).toHaveBeenCalledTimes(2);
   });
 
   it('removes collapsed zones from computed history before statistics', async () => {
@@ -2452,6 +2760,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
       '4',
       '42',
       '2026-06-22',
+      '13',
     );
 
     expect(
@@ -2470,11 +2779,211 @@ describe('ZoneAlerteComputedHistoricService', () => {
       '2026-06-22',
       '42',
     );
+    expect(historicDepartmentCheckpointService.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ code: '01' }),
+      expect.objectContaining({
+        previousDate: '2026-06-22',
+        historicComputeEpoch: '13',
+        expectedSourceRevision: '42',
+      }),
+    );
     expect(
       dataSource.query.mock.calls.filter(([sql]) =>
         String(sql).includes('zone_publication_source_state'),
       ),
     ).toHaveLength(3);
+  });
+
+  it('resumes a partially checkpointed D+1 after D was fully certified', async () => {
+    process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED = 'true';
+    const log = jest.spyOn((service as any).logger, 'log');
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    historicDepartmentCheckpointService.hasAnyCheckpointForDate.mockResolvedValueOnce(
+      true,
+    );
+    historicDepartmentCheckpointService.prepare.mockResolvedValue({
+      enabled: true,
+      shouldCompute: true,
+      reason: 'recompute',
+      inputSignature: 'changed-input',
+      materializationVersion: 'current-mode',
+    });
+    const computedDates: string[] = [];
+    (service.computeRegleAr as jest.Mock).mockImplementation(
+      async (_departement, computedFor) => {
+        computedDates.push(computedFor.format('YYYY-MM-DD'));
+        return [];
+      },
+    );
+
+    await service.computeHistoricMapsComputed(
+      moment('2026-06-21', 'YYYY-MM-DD'),
+      moment('2026-06-21', 'YYYY-MM-DD'),
+      '2026-06-21',
+      '2026-06-21',
+      '12',
+      '4',
+      '42',
+      '2026-06-22',
+      '13',
+    );
+
+    expect(
+      historicDepartmentCheckpointService.purgeStaleCheckpoints,
+    ).toHaveBeenCalledWith({
+      historicComputeEpoch: '13',
+      expectedSourceRevision: '42',
+    });
+    expect(
+      historicDepartmentCheckpointService.hasAnyCheckpointForDate,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ _isAMomentObject: true }),
+      expect.objectContaining({ _isAMomentObject: true }),
+      {
+        historicComputeEpoch: '13',
+        expectedSourceRevision: '42',
+      },
+    );
+    const [partialDate, completedSnapshotDate] =
+      historicDepartmentCheckpointService.hasAnyCheckpointForDate.mock.calls[0];
+    expect(partialDate.format('YYYY-MM-DD')).toBe('2026-06-22');
+    expect(completedSnapshotDate.format('YYYY-MM-DD')).toBe('2026-06-21');
+    expect(computedDates).toEqual(['2026-06-22']);
+    expect(log).toHaveBeenCalledWith(
+      'RESUMING PARTIAL HISTORIC DAY 2026-06-22 AFTER CERTIFIED 2026-06-21 (epoch=13, sourceRevision=42)',
+    );
+    expect(historicDepartmentCheckpointService.complete).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
+      '2026-06-21',
+      '4',
+      '2026-06-22',
+      '42',
+    );
+    expect(configService.advanceComputeMapDate).toHaveBeenCalledWith(
+      '2026-06-21',
+      '12',
+      '2026-06-22',
+      '42',
+    );
+  });
+
+  it('keeps inclusive replay when statistics lag behind the map cursor', async () => {
+    process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED = 'true';
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    historicDepartmentCheckpointService.hasAnyCheckpointForDate.mockResolvedValue(
+      true,
+    );
+    const computedDates: string[] = [];
+    (service.computeRegleAr as jest.Mock).mockImplementation(
+      async (_departement, computedFor) => {
+        computedDates.push(computedFor.format('YYYY-MM-DD'));
+        return [];
+      },
+    );
+
+    await service.computeHistoricMapsComputed(
+      moment('2026-06-21', 'YYYY-MM-DD'),
+      moment('2026-06-20', 'YYYY-MM-DD'),
+      '2026-06-21',
+      '2026-06-20',
+      '12',
+      '4',
+      '42',
+      '2026-06-22',
+      '13',
+    );
+
+    expect(
+      historicDepartmentCheckpointService.hasAnyCheckpointForDate,
+    ).not.toHaveBeenCalled();
+    expect(computedDates).toEqual(['2026-06-21', '2026-06-22']);
+  });
+
+  it('does not skip the requested day when D+1 is outside the worker chunk', async () => {
+    process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED = 'true';
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    historicDepartmentCheckpointService.hasAnyCheckpointForDate.mockResolvedValue(
+      true,
+    );
+    const computedDates: string[] = [];
+    (service.computeRegleAr as jest.Mock).mockImplementation(
+      async (_departement, computedFor) => {
+        computedDates.push(computedFor.format('YYYY-MM-DD'));
+        return [];
+      },
+    );
+
+    await service.computeHistoricMapsComputed(
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      moment('2026-06-22', 'YYYY-MM-DD'),
+      '2026-06-22',
+      '2026-06-22',
+      '12',
+      '4',
+      '42',
+      '2026-06-22',
+      '13',
+    );
+
+    expect(
+      historicDepartmentCheckpointService.hasAnyCheckpointForDate,
+    ).not.toHaveBeenCalled();
+    expect(computedDates).toEqual(['2026-06-22']);
+  });
+
+  it('tracks the actual materialized previous day when statistics lag behind maps', async () => {
+    const checkpointContexts: Array<{
+      date: string;
+      previousDate: string | null;
+      historicComputeEpoch?: string;
+    }> = [];
+    historicDepartmentCheckpointService.prepare.mockImplementation(
+      async (_departement, options) => {
+        checkpointContexts.push({
+          date: options.date.format('YYYY-MM-DD'),
+          previousDate: options.previousDate,
+          historicComputeEpoch: options.historicComputeEpoch,
+        });
+        return {
+          enabled: false,
+          shouldCompute: true,
+          reason: 'disabled',
+        };
+      },
+    );
+
+    await service.computeHistoricMapsComputed(
+      moment('2026-06-21', 'YYYY-MM-DD'),
+      undefined,
+      '2026-06-22',
+      '2026-06-20',
+      '12',
+      '4',
+      undefined,
+      '2026-06-22',
+      '13',
+    );
+
+    expect(checkpointContexts).toEqual([
+      {
+        date: '2026-06-21',
+        previousDate: null,
+        historicComputeEpoch: '13',
+      },
+      {
+        date: '2026-06-22',
+        previousDate: '2026-06-21',
+        historicComputeEpoch: '13',
+      },
+    ]);
   });
 
   it('stops before recalculating a day whose source revision is stale', async () => {

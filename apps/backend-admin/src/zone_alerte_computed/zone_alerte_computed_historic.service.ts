@@ -25,12 +25,59 @@ import { StatisticService } from '../statistic/statistic.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
+import {
+  HistoricDepartmentCheckpointOptions,
+  HistoricDepartmentCheckpointService,
+} from './historic-department-checkpoint.service';
 
 export interface HistoricCursorState {
   mapCursor: string | null;
   statsCursor: string | null;
   mapGeneration: string;
   statsGeneration: string;
+}
+
+export const HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT = 1;
+export const HISTORIC_DEPARTMENT_CONCURRENCY_MAX = 4;
+
+export function readHistoricDepartmentConcurrency(
+  value = process.env.HISTORIC_DEPARTMENT_CONCURRENCY,
+): number {
+  if (value === undefined || value.trim() === '') {
+    return HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT;
+  }
+  const normalized = value.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error(
+      'HISTORIC_DEPARTMENT_CONCURRENCY must be a positive integer',
+    );
+  }
+  const parsed = Number(normalized);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed > HISTORIC_DEPARTMENT_CONCURRENCY_MAX
+  ) {
+    throw new Error(
+      `HISTORIC_DEPARTMENT_CONCURRENCY must be at most ${HISTORIC_DEPARTMENT_CONCURRENCY_MAX}`,
+    );
+  }
+  return parsed;
+}
+
+export function readHistoricSkipCommuneIntersections(
+  value = process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS,
+): boolean {
+  if (value === undefined || value.trim() === '') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  throw new Error('HISTORIC_SKIP_COMMUNE_INTERSECTIONS must be true or false');
 }
 
 export async function withHistoricArtifactCleanup<T>(
@@ -80,6 +127,7 @@ export class ZoneAlerteComputedHistoricService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
+    private readonly historicDepartmentCheckpointService: HistoricDepartmentCheckpointService,
   ) {
     setTimeout(() => {
       // this.computeHistoricMapsComputed(moment('2024-04-29'));
@@ -434,8 +482,9 @@ export class ZoneAlerteComputedHistoricService {
     expectedStatsGeneration?: string | number,
     expectedSourceRevision?: string,
     dateMax?: string,
+    expectedHistoricComputeEpoch?: string | number,
   ) {
-    const dateDebut = date ? date : moment();
+    const requestedStartDate = date ? moment(date) : moment();
     const dateFin = this.getBoundedHistoricEndDate(
       moment().subtract(1, 'days'),
       dateMax,
@@ -450,6 +499,28 @@ export class ZoneAlerteComputedHistoricService {
         : expectedStatsCursor;
     let mapGeneration = String(expectedMapGeneration ?? 0);
     let statsGeneration = String(expectedStatsGeneration ?? 0);
+    const checkpointContext = {
+      historicComputeEpoch:
+        expectedHistoricComputeEpoch === undefined
+          ? undefined
+          : String(expectedHistoricComputeEpoch),
+      expectedSourceRevision,
+    };
+    await this.historicDepartmentCheckpointService.purgeStaleCheckpoints(
+      checkpointContext,
+    );
+    const dateDebut = await this.resolveComputedHistoricStartDate(
+      requestedStartDate,
+      dateFin,
+      mapCursor,
+      statsCursor,
+      checkpointContext,
+    );
+    let previousMaterializedDate =
+      mapCursor &&
+      !moment(mapCursor, 'YYYY-MM-DD', true).isAfter(dateDebut, 'day')
+        ? mapCursor
+        : null;
     // const dateFin = moment('23/06/2024', 'DD/MM/YYYY');
 
     for (
@@ -461,7 +532,12 @@ export class ZoneAlerteComputedHistoricService {
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - BEGIN`,
       );
-      await this.computeZonesForDate(m);
+      await this.computeZonesForDate(m, undefined, {
+        previousDate: previousMaterializedDate,
+        historicComputeEpoch: checkpointContext.historicComputeEpoch,
+        expectedSourceRevision,
+      });
+      previousMaterializedDate = m.format('YYYY-MM-DD');
       // On récupère toutes les restrictions en cours
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - END`,
@@ -572,6 +648,42 @@ export class ZoneAlerteComputedHistoricService {
     return (BigInt(current) + 1n).toString();
   }
 
+  private async resolveComputedHistoricStartDate(
+    requestedStartDate: Moment,
+    dateFin: Moment,
+    mapCursor: string | null,
+    statsCursor: string | null,
+    checkpointContext: {
+      historicComputeEpoch?: string;
+      expectedSourceRevision?: string;
+    },
+  ): Promise<Moment> {
+    const requestedStart = requestedStartDate.format('YYYY-MM-DD');
+    if (mapCursor !== requestedStart || statsCursor !== requestedStart) {
+      return requestedStartDate;
+    }
+
+    const interruptedDate = moment(requestedStartDate).add(1, 'day');
+    if (interruptedDate.isAfter(dateFin, 'day')) {
+      return requestedStartDate;
+    }
+
+    const resumesInterruptedDate =
+      await this.historicDepartmentCheckpointService.hasAnyCheckpointForDate(
+        interruptedDate,
+        requestedStartDate,
+        checkpointContext,
+      );
+    if (!resumesInterruptedDate) {
+      return requestedStartDate;
+    }
+
+    this.logger.log(
+      `RESUMING PARTIAL HISTORIC DAY ${interruptedDate.format('YYYY-MM-DD')} AFTER CERTIFIED ${requestedStart} (epoch=${checkpointContext.historicComputeEpoch}, sourceRevision=${checkpointContext.expectedSourceRevision})`,
+    );
+    return interruptedDate;
+  }
+
   private getBoundedHistoricEndDate(
     naturalEndDate: Moment,
     dateMax?: string,
@@ -609,43 +721,134 @@ export class ZoneAlerteComputedHistoricService {
     }
   }
 
-  async computeZonesForDate(date: Moment, departements?: Departement[]) {
+  async computeZonesForDate(
+    date: Moment,
+    departements?: Departement[],
+    checkpointOptions?: Omit<HistoricDepartmentCheckpointOptions, 'date'>,
+  ) {
     const departementsToCompute =
       departements ?? (await this.departementService.findAllLight());
 
-    for (const departement of departementsToCompute) {
-      const param = departement.parametres.find(
-        (p) =>
-          date.isSameOrAfter(moment(p.dateDebut)) &&
-          (!p.dateFin || date.isSameOrBefore(moment(p.dateFin))),
-      )?.superpositionCommune;
-      const zonesSaved = await this.computeRegleAr(departement, date);
-      if (zonesSaved.length > 0) {
-        switch (param) {
-          case 'no':
-          case 'no_all':
-            break;
-          case 'yes_all':
-            await this.computeYesDistinct(departement, false);
-            await this.computeYesAll(departement, false);
-            break;
-          case 'yes_only_aep':
-            await this.computeYesDistinct(departement, true);
-            break;
-          case 'yes_except_aep':
-            await this.computeYesDistinct(departement, false);
-            await this.computeYesAll(departement, true);
-            break;
-          case 'yes_distinct':
-            await this.computeYesDistinct(departement, false);
-            break;
-          default:
-            this.logger.error(
-              `COMPUTING ${departement.code} - ${departement.nom} - ${param} not implemented`,
-              '',
-            );
+    if (departementsToCompute.length === 0) {
+      return;
+    }
+
+    const concurrency = Math.min(
+      readHistoricDepartmentConcurrency(),
+      departementsToCompute.length,
+    );
+    const skipCommuneIntersections = readHistoricSkipCommuneIntersections();
+
+    await this.zoneAlerteComputedHistoricRepository.delete({
+      departement: IsNull(),
+    });
+
+    let nextDepartementIndex = 0;
+    let firstError: unknown;
+    let hasFailed = false;
+    const computeNextDepartement = async (): Promise<void> => {
+      while (
+        !hasFailed &&
+        nextDepartementIndex < departementsToCompute.length
+      ) {
+        const departement = departementsToCompute[nextDepartementIndex++];
+        try {
+          await this.computeCheckpointedDepartementForDate(
+            departement,
+            date,
+            skipCommuneIntersections,
+            checkpointOptions,
+          );
+        } catch (error) {
+          if (!hasFailed) {
+            hasFailed = true;
+            firstError = error;
+          }
         }
       }
+    };
+
+    await Promise.all(
+      Array.from({ length: concurrency }, () => computeNextDepartement()),
+    );
+    if (hasFailed) {
+      throw firstError;
+    }
+  }
+
+  private async computeCheckpointedDepartementForDate(
+    departement: Departement,
+    date: Moment,
+    skipCommuneIntersections: boolean,
+    checkpointOptions?: Omit<HistoricDepartmentCheckpointOptions, 'date'>,
+  ): Promise<void> {
+    const options: HistoricDepartmentCheckpointOptions = {
+      date,
+      previousDate: checkpointOptions?.previousDate ?? null,
+      historicComputeEpoch: checkpointOptions?.historicComputeEpoch,
+      expectedSourceRevision: checkpointOptions?.expectedSourceRevision,
+    };
+    const plan = await this.historicDepartmentCheckpointService.prepare(
+      departement,
+      options,
+    );
+    if (!plan.shouldCompute) {
+      this.logger.log(
+        `COMPUTING ${departement.code} - ${departement.nom} - checkpoint ${plan.reason}`,
+      );
+      return;
+    }
+
+    await this.computeDepartementForDate(
+      departement,
+      date,
+      skipCommuneIntersections,
+    );
+    await this.historicDepartmentCheckpointService.complete(
+      departement,
+      options,
+      plan,
+    );
+  }
+
+  private async computeDepartementForDate(
+    departement: Departement,
+    date: Moment,
+    skipCommuneIntersections: boolean,
+  ): Promise<void> {
+    const param = departement.parametres.find(
+      (p) =>
+        date.isSameOrAfter(moment(p.dateDebut)) &&
+        (!p.dateFin || date.isSameOrBefore(moment(p.dateFin))),
+    )?.superpositionCommune;
+    const zonesSaved = await this.computeRegleAr(departement, date);
+    if (zonesSaved.length > 0) {
+      switch (param) {
+        case 'no':
+        case 'no_all':
+          break;
+        case 'yes_all':
+          await this.computeYesDistinct(departement, false);
+          await this.computeYesAll(departement, false);
+          break;
+        case 'yes_only_aep':
+          await this.computeYesDistinct(departement, true);
+          break;
+        case 'yes_except_aep':
+          await this.computeYesDistinct(departement, false);
+          await this.computeYesAll(departement, true);
+          break;
+        case 'yes_distinct':
+          await this.computeYesDistinct(departement, false);
+          break;
+        default:
+          this.logger.error(
+            `COMPUTING ${departement.code} - ${departement.nom} - ${param} not implemented`,
+            '',
+          );
+      }
+    }
+    if (!skipCommuneIntersections) {
       await this.computeCommunesIntersected(departement);
     }
   }
@@ -746,14 +949,9 @@ export class ZoneAlerteComputedHistoricService {
         return z;
       })
       .filter((z) => z.geom.coordinates.length > 0);
-    await Promise.all([
-      this.zoneAlerteComputedHistoricRepository.delete({
-        departement: IsNull(),
-      }),
-      this.zoneAlerteComputedHistoricRepository.delete({
-        departement: departement,
-      }),
-    ]);
+    await this.zoneAlerteComputedHistoricRepository.delete({
+      departement: departement,
+    });
     const toReturn =
       await this.zoneAlerteComputedHistoricRepository.save(zonesToSave);
     if (toReturn.length > 0) {

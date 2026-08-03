@@ -40,6 +40,9 @@ describe('ConfigService historic cursor advancement', () => {
       computeMapUpdatedAt: expect.any(Function),
     });
     expect(
+      harness.queryBuilder.set.mock.calls[0][0].historicComputeEpoch,
+    ).toBeUndefined();
+    expect(
       harness.queryBuilder.set.mock.calls[0][0].computeMapUpdatedAt(),
     ).toBe('now()');
     expect(harness.queryBuilder.andWhere).toHaveBeenCalledWith(
@@ -109,21 +112,65 @@ describe('ConfigService historic cursor advancement', () => {
     expect(sourceRevisionGuard?.[0]).toContain('FOR SHARE');
   });
 
-  it('increments invalidation generations even for an equal dirty date', async () => {
+  it('increments both cursor generations and the historic epoch once for one invalidation', async () => {
     const harness = createHarness(1);
 
     await harness.service.setConfig('2026-07-30', '2026-07-30');
 
-    const [mapSet, statsSet] = harness.queryBuilder.set.mock.calls.map(
-      ([value]) => value,
+    const invalidation = harness.queryBuilder.set.mock.calls[0][0];
+    expect(invalidation.computeMapDate()).toContain('LEAST');
+    expect(invalidation.computeMapGeneration()).toBe(
+      '"computeMapGeneration" + 1',
     );
-    expect(mapSet.computeMapDate()).toContain('LEAST');
-    expect(mapSet.computeMapGeneration()).toBe('"computeMapGeneration" + 1');
-    expect(statsSet.computeStatsDate()).toContain('LEAST');
-    expect(statsSet.computeStatsGeneration()).toBe(
+    expect(invalidation.computeStatsDate()).toContain('LEAST');
+    expect(invalidation.computeStatsGeneration()).toBe(
       '"computeStatsGeneration" + 1',
     );
-    expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(2);
+    expect(invalidation.historicComputeEpoch()).toBe(
+      '"historicComputeEpoch" + 1',
+    );
+    expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['map', '2026-07-30', undefined],
+    ['statistics', undefined, '2026-07-30'],
+  ])(
+    'increments the historic epoch once for a %s-only invalidation',
+    async (_label, computeMapDate, computeStatsDate) => {
+      const harness = createHarness(1);
+
+      await harness.service.setConfig(computeMapDate, computeStatsDate);
+
+      const invalidation = harness.queryBuilder.set.mock.calls[0][0];
+      expect(invalidation.historicComputeEpoch()).toBe(
+        '"historicComputeEpoch" + 1',
+      );
+      expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not invalidate historic checkpoints for a current-map-only update', async () => {
+    const harness = createHarness(1);
+
+    await harness.service.setConfig(undefined, undefined, new Date());
+
+    expect(harness.queryBuilder.set).toHaveBeenCalledWith({
+      computeZoneAlerteComputedDate: expect.any(Date),
+    });
+    expect(
+      harness.queryBuilder.set.mock.calls[0][0].historicComputeEpoch,
+    ).toBeUndefined();
+  });
+
+  it('invalidates historic checkpoints once when all cursors are reset', async () => {
+    const harness = createHarness(1);
+
+    await harness.service.resetConfig();
+
+    const reset = harness.queryBuilder.set.mock.calls[0][0];
+    expect(reset.historicComputeEpoch()).toBe('"historicComputeEpoch" + 1');
+    expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -112,6 +112,9 @@ ZONE_PUBLICATION_RETENTION_HOURS=48
 ZONE_PUBLICATION_INSTANCE_RETENTION_HOURS=24
 COMMUNE_STATISTICS_BATCH_SIZE=250  # entier compris entre 1 et 1000
 HISTORIC_COMPUTE_CHUNK_DAYS=7  # entier compris entre 1 et 3660
+HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED=false
+HISTORIC_SKIP_COMMUNE_INTERSECTIONS=false
+HISTORIC_DEPARTMENT_CONCURRENCY=1  # entier compris entre 1 et 4
 ```
 
 `COMMUNE_STATISTICS_BATCH_SIZE` vaut `250` par défaut. Une valeur plus élevée
@@ -134,6 +137,37 @@ heures. Un chunk plus long réduit les tris globaux de fin de lot, mais
 n'accélère pas le calcul journalier. Comparer de la même façon toute hausse de
 `COMMUNE_STATISTICS_BATCH_SIZE` sur plusieurs journées et revenir à la valeur
 précédente lorsqu'aucun gain net n'est mesuré.
+
+Les accélérations historiques sont strictement désactivées par défaut. Avec
+`HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED=true`, un département n'est conservé
+que pour une reprise du même jour ou depuis la veille exacte, avec la même
+révision source, la même signature métier, la même version de matérialisation
+et une empreinte identique des zones encore présentes en base. Un changement,
+un gap ou un rewind force son recalcul. L'époque de calcul reste stable pendant
+les avancées quotidiennes, mais change à chaque invalidation explicite des
+curseurs. Sans époque et révision source certifiées, aucun checkpoint n'est
+réutilisé.
+
+Au démarrage de chaque worker computed, au plus 5 000 checkpoints appartenant
+à une ancienne époque ou révision source sont supprimés. Les checkpoints d'un
+autre mode de matérialisation mais du contexte courant sont conservés et
+simplement ignorés. Une journée `D+1` interrompue ne reprend directement que
+si les deux curseurs certifient `D`, que le snapshot communal national de `D`
+est `completed` sous la révision attendue et qu'au moins un checkpoint de
+`D+1` correspond exactement à l'époque, à la révision et au mode courants. `D+1`
+doit aussi appartenir au chunk ; sinon le replay inclusif de `D` est conservé.
+
+`HISTORIC_SKIP_COMMUNE_INTERSECTIONS=true` omet uniquement la table de liaison
+historique entre zones et communes. Les GeoJSON, PMTiles et statistiques
+communales utilisent les géométries et leurs propres intersections. Le mode est
+inclus dans la signature des checkpoints, de sorte qu'un retour à `false`
+recalcule les départements concernés.
+
+Augmenter `HISTORIC_DEPARTMENT_CONCURRENCY` progressivement, d'abord de `1` à
+`2`, puis seulement après plusieurs journées stables. Les dates, les fichiers,
+les statistiques et les curseurs restent séquentiels. Ne jamais lancer un
+second `clock` ni répartir manuellement des plages de dates : la table de
+travail historique et les curseurs sont nationaux.
 
 Les trois seuils relatifs suivants sont optionnels et désactivés par défaut. Ils
 ne doivent être définis qu'après analyse métier, car le nombre de zones, de

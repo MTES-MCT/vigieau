@@ -15,6 +15,7 @@ interface WorkerData {
   expectedStatsGeneration?: string;
   expectedSourceRevision?: string;
   dateMax?: string;
+  expectedHistoricComputeEpoch?: string;
   type: 'maps' | 'mapsComputed';
 }
 
@@ -46,6 +47,7 @@ async function run() {
       expectedStatsGeneration,
       expectedSourceRevision,
       dateMax,
+      expectedHistoricComputeEpoch,
       type,
     } = workerData as WorkerData;
     const dateMinMoment = moment(dateMin);
@@ -78,6 +80,7 @@ async function run() {
           expectedStatsGeneration,
           expectedSourceRevision,
           dateMax,
+          expectedHistoricComputeEpoch,
         );
     }
 

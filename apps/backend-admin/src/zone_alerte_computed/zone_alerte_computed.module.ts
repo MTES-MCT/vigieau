@@ -17,6 +17,7 @@ import { StatisticCommuneModule } from '../statistic_commune/statistic_commune.m
 import { ConfigModule } from '../config/config.module';
 import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
 import { ZonePublicationPromotionService } from '../zone_publication/zone_publication_promotion.service';
+import { HistoricDepartmentCheckpointService } from './historic-department-checkpoint.service';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { ZonePublicationPromotionService } from '../zone_publication/zone_public
   providers: [
     ZoneAlerteComputedService,
     ZoneAlerteComputedHistoricService,
+    HistoricDepartmentCheckpointService,
     ZonePublicationPromotionService,
   ],
   exports: [ZoneAlerteComputedService, ZoneAlerteComputedHistoricService],

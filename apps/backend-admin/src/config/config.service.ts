@@ -107,39 +107,42 @@ export class ConfigService {
     computeZoneAlerteComputedDate?: Date,
     force?: boolean,
   ) {
-    if (computeMapDate) {
-      // The generation records invalidations even when the dirty date is equal.
+    if (computeMapDate || computeStatsDate) {
+      // Cursor generations protect daily CAS updates. This separate epoch only
+      // changes when the historic input range is invalidated.
+      const invalidation = {
+        ...(computeMapDate
+          ? {
+              computeMapDate: force
+                ? computeMapDate
+                : () =>
+                    'LEAST(COALESCE("computeMapDate", CAST(:computeMapDate AS date)), CAST(:computeMapDate AS date))',
+              computeMapGeneration: () => '"computeMapGeneration" + 1',
+            }
+          : {}),
+        ...(computeStatsDate
+          ? {
+              computeStatsDate: force
+                ? computeStatsDate
+                : () =>
+                    'LEAST(COALESCE("computeStatsDate", CAST(:computeStatsDate AS date)), CAST(:computeStatsDate AS date))',
+              computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+            }
+          : {}),
+        historicComputeEpoch: () => '"historicComputeEpoch" + 1',
+      };
       const qb = this.configRepository
         .createQueryBuilder()
         .update()
-        .set({
-          computeMapDate: force
-            ? computeMapDate
-            : () =>
-                'LEAST(COALESCE("computeMapDate", CAST(:computeMapDate AS date)), CAST(:computeMapDate AS date))',
-          computeMapGeneration: () => '"computeMapGeneration" + 1',
-        })
+        .set(invalidation)
         .where('id = 1');
       if (!force) {
-        qb.setParameter('computeMapDate', computeMapDate);
-      }
-      await qb.execute();
-    }
-
-    if (computeStatsDate) {
-      const qb = this.configRepository
-        .createQueryBuilder()
-        .update()
-        .set({
-          computeStatsDate: force
-            ? computeStatsDate
-            : () =>
-                'LEAST(COALESCE("computeStatsDate", CAST(:computeStatsDate AS date)), CAST(:computeStatsDate AS date))',
-          computeStatsGeneration: () => '"computeStatsGeneration" + 1',
-        })
-        .where('id = 1');
-      if (!force) {
-        qb.setParameter('computeStatsDate', computeStatsDate);
+        if (computeMapDate) {
+          qb.setParameter('computeMapDate', computeMapDate);
+        }
+        if (computeStatsDate) {
+          qb.setParameter('computeStatsDate', computeStatsDate);
+        }
       }
       await qb.execute();
     }
@@ -173,6 +176,7 @@ export class ConfigService {
         computeStatsDate: null,
         computeMapGeneration: () => '"computeMapGeneration" + 1',
         computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+        historicComputeEpoch: () => '"historicComputeEpoch" + 1',
       })
       .where('id = 1')
       .execute();

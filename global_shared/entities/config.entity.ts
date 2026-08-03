@@ -21,6 +21,9 @@ export class Config extends BaseEntity {
   @Column({ type: "bigint", default: 0 })
   computeStatsGeneration: string;
 
+  @Column({ type: "bigint", default: 0 })
+  historicComputeEpoch: string;
+
   @Column({ type: "timestamptz", nullable: true })
   computeStatsUpdatedAt: Date;
 

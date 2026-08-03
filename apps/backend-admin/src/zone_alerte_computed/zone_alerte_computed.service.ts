@@ -1566,6 +1566,7 @@ DELETE FROM zone_alerte_computed
       if (!config) {
         throw new Error('Historic cursor configuration is missing');
       }
+      const historicComputeEpoch = String(config.historicComputeEpoch ?? 0);
       let certifiedCursorState = this.toHistoricCursorState(config);
       const dirtyDates = [config.computeMapDate, config.computeStatsDate]
         .filter(Boolean)
@@ -1611,6 +1612,7 @@ DELETE FROM zone_alerte_computed
             String(config.computeStatsGeneration ?? 0),
             legacyEnd.format('YYYY-MM-DD'),
             historicSourceRevision,
+            historicComputeEpoch,
           );
           historicCompletedThrough =
             this.getHistoricCompletedThrough(legacyState);
@@ -1618,7 +1620,11 @@ DELETE FROM zone_alerte_computed
 
           if (!dirtyThroughDate.isBefore(computedStartDate, 'day')) {
             const resumedConfig = await this.configService.getConfig();
-            this.assertHistoricCursorState(legacyState, resumedConfig);
+            this.assertHistoricCursorState(
+              legacyState,
+              resumedConfig,
+              historicComputeEpoch,
+            );
             const resumedDirtyDates = [
               resumedConfig.computeMapDate,
               resumedConfig.computeStatsDate,
@@ -1654,6 +1660,7 @@ DELETE FROM zone_alerte_computed
               String(resumedConfig.computeStatsGeneration ?? 0),
               dirtyThrough,
               historicSourceRevision,
+              historicComputeEpoch,
             );
             historicCompletedThrough =
               this.getHistoricCompletedThrough(computedState);
@@ -1670,6 +1677,7 @@ DELETE FROM zone_alerte_computed
             String(config.computeStatsGeneration ?? 0),
             dirtyThrough,
             historicSourceRevision,
+            historicComputeEpoch,
           );
           historicCompletedThrough =
             this.getHistoricCompletedThrough(computedState);
@@ -1727,7 +1735,10 @@ DELETE FROM zone_alerte_computed
           historicSourceRevision,
         );
       }
-      await this.assertCurrentHistoricCursorState(certifiedCursorState);
+      await this.assertCurrentHistoricCursorState(
+        certifiedCursorState,
+        historicComputeEpoch,
+      );
       return certifiedCursorState;
     } catch (error) {
       this.logger.error('Error in computeHistoric', error.toString());
@@ -2067,6 +2078,7 @@ DELETE FROM zone_alerte_computed
     expectedStatsGeneration: string,
     requiredThrough: string,
     expectedSourceRevision?: string,
+    expectedHistoricComputeEpoch?: string,
   ): Promise<HistoricCursorState> {
     const startDate = moment.utc(dateMin, 'YYYY-MM-DD', true);
     const endDate = moment.utc(requiredThrough, 'YYYY-MM-DD', true);
@@ -2111,8 +2123,12 @@ DELETE FROM zone_alerte_computed
         cursorState.statsGeneration,
         expectedSourceRevision,
         chunkEndString,
+        expectedHistoricComputeEpoch,
       );
-      await this.assertCurrentHistoricCursorState(cursorState);
+      await this.assertCurrentHistoricCursorState(
+        cursorState,
+        expectedHistoricComputeEpoch,
+      );
       this.assertHistoricChunkCompleted(cursorState, chunkEndString);
       chunkStart = chunkEnd.add(1, 'day');
     }
@@ -2184,6 +2200,7 @@ DELETE FROM zone_alerte_computed
     expectedStatsGeneration?: string,
     expectedSourceRevision?: string,
     dateMax?: string,
+    expectedHistoricComputeEpoch?: string,
   ): Promise<HistoricCursorState> {
     const worker = new Worker(historicWorkerThreadFilePath, {
       workerData: {
@@ -2195,6 +2212,7 @@ DELETE FROM zone_alerte_computed
         expectedStatsGeneration,
         expectedSourceRevision,
         dateMax,
+        expectedHistoricComputeEpoch,
         type,
       },
     });
@@ -2261,10 +2279,12 @@ DELETE FROM zone_alerte_computed
 
   private async assertCurrentHistoricCursorState(
     expected: HistoricCursorState,
+    expectedHistoricComputeEpoch?: string,
   ): Promise<void> {
     this.assertHistoricCursorState(
       expected,
       await this.configService.getConfig(),
+      expectedHistoricComputeEpoch,
     );
   }
 
@@ -2275,14 +2295,19 @@ DELETE FROM zone_alerte_computed
       computeStatsDate?: string | Date | null;
       computeMapGeneration?: string | number | null;
       computeStatsGeneration?: string | number | null;
+      historicComputeEpoch?: string | number | null;
     },
+    expectedHistoricComputeEpoch?: string,
   ): void {
     const actual = this.toHistoricCursorState(persisted);
     if (
       actual.mapCursor !== expected.mapCursor ||
       actual.statsCursor !== expected.statsCursor ||
       actual.mapGeneration !== expected.mapGeneration ||
-      actual.statsGeneration !== expected.statsGeneration
+      actual.statsGeneration !== expected.statsGeneration ||
+      (expectedHistoricComputeEpoch !== undefined &&
+        String(persisted.historicComputeEpoch ?? 0) !==
+          expectedHistoricComputeEpoch)
     ) {
       throw new Error(
         `Historic cursors changed after worker completion: expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)}`,
