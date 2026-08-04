@@ -3157,6 +3157,132 @@ describe('ZoneAlerteComputedHistoricService', () => {
     );
   });
 
+  it('selects the newest active restriction regardless of input order or severity', async () => {
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([
+        [12, '{"type":"Polygon","coordinates":[]}'],
+        [13, '{"type":"Polygon","coordinates":[]}'],
+      ]),
+    );
+    const olderRestriction = {
+      id: 1,
+      niveauGravite: 'crise',
+      arreteRestriction: {
+        id: 98,
+        dateDebut: '2023-06-01',
+        dateSignature: '2023-05-31',
+      },
+      usages: [],
+    };
+    const newerRestriction = {
+      id: 2,
+      niveauGravite: 'vigilance',
+      arreteRestriction: {
+        id: 99,
+        dateDebut: '2023-06-02',
+        dateSignature: '2023-06-01',
+      },
+      usages: [],
+    };
+
+    const result = await (service as any).formatLegacyHistoricZones(
+      [
+        { id: 12, restrictions: [olderRestriction, newerRestriction] },
+        { id: 13, restrictions: [newerRestriction, olderRestriction] },
+      ],
+      [98, 99],
+      moment('2023-06-02'),
+    );
+
+    expect(
+      result.features.map((feature) => ({
+        arreteId: feature.properties.arreteRestriction.id,
+        niveauGravite: feature.properties.niveauGravite,
+      })),
+    ).toEqual([
+      { arreteId: 99, niveauGravite: 'vigilance' },
+      { arreteId: 99, niveauGravite: 'vigilance' },
+    ]);
+  });
+
+  it('uses the signature date to choose between restrictions with the same start date', async () => {
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
+    );
+    const result = await (service as any).formatLegacyHistoricZones(
+      [
+        {
+          id: 12,
+          restrictions: [
+            {
+              id: 1,
+              niveauGravite: 'crise',
+              arreteRestriction: {
+                id: 100,
+                dateDebut: '2023-06-01',
+                dateSignature: '2023-05-30',
+              },
+              usages: [],
+            },
+            {
+              id: 2,
+              niveauGravite: 'alerte',
+              arreteRestriction: {
+                id: 99,
+                dateDebut: '2023-06-01',
+                dateSignature: '2023-05-31',
+              },
+              usages: [],
+            },
+          ],
+        },
+      ],
+      [99, 100],
+      moment('2023-06-01'),
+    );
+
+    expect(result.features[0].properties.arreteRestriction.id).toBe(99);
+  });
+
+  it('uses the decree ID to break equal start and signature dates', async () => {
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
+    );
+    const result = await (service as any).formatLegacyHistoricZones(
+      [
+        {
+          id: 12,
+          restrictions: [
+            {
+              id: 1,
+              niveauGravite: 'crise',
+              arreteRestriction: {
+                id: 99,
+                dateDebut: '2023-06-01',
+                dateSignature: '2023-05-31',
+              },
+              usages: [],
+            },
+            {
+              id: 2,
+              niveauGravite: 'alerte',
+              arreteRestriction: {
+                id: 100,
+                dateDebut: '2023-06-01',
+                dateSignature: '2023-05-31',
+              },
+              usages: [],
+            },
+          ],
+        },
+      ],
+      [99, 100],
+      moment('2023-06-01'),
+    );
+
+    expect(result.features[0].properties.arreteRestriction.id).toBe(100);
+  });
+
   it('accepts a loaded empty usage list in legacy history', async () => {
     zoneAlerteService.findGeometriesByIds.mockResolvedValue(
       new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
@@ -3182,7 +3308,10 @@ describe('ZoneAlerteComputedHistoricService', () => {
     expect(result.features[0].properties.restrictions).toEqual([]);
   });
 
-  it('fails before loading geometries when legacy relations are incomplete', async () => {
+  it('treats an omitted legacy usage relation as an empty list', async () => {
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
+    );
     const zone = {
       id: 12,
       restrictions: [
@@ -3194,16 +3323,13 @@ describe('ZoneAlerteComputedHistoricService', () => {
       ],
     };
 
-    await expect(
-      (service as any).formatLegacyHistoricZones(
-        [zone],
-        [99],
-        moment('2023-06-01'),
-      ),
-    ).rejects.toThrow(
-      'Usages were not loaded for historic zone 12 on 2023-06-01',
+    const result = await (service as any).formatLegacyHistoricZones(
+      [zone],
+      [99],
+      moment('2023-06-01'),
     );
-    expect(zoneAlerteService.findGeometriesByIds).not.toHaveBeenCalled();
+
+    expect(result.features[0].properties.restrictions).toEqual([]);
   });
 
   it('loads computed historic geometries in one query and joins by ID', async () => {
@@ -3263,5 +3389,26 @@ describe('ZoneAlerteComputedHistoricService', () => {
     ).rejects.toThrow(
       'Missing decree for computed historic zone 1 on 2024-04-29',
     );
+  });
+
+  it('treats an omitted computed historic usage relation as an empty list', async () => {
+    dataSource.query.mockResolvedValue([
+      { id: 1, geom: '{"type":"Polygon","coordinates":[]}' },
+    ]);
+
+    const features = await (service as any).formatComputedHistoricZones(
+      [
+        {
+          id: 1,
+          restriction: {
+            niveauGravite: 'vigilance',
+            arreteRestriction: { id: 99 },
+          },
+        },
+      ],
+      moment('2024-04-29'),
+    );
+
+    expect(features[0].properties.restrictions).toEqual([]);
   });
 });

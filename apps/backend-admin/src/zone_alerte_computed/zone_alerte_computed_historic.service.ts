@@ -335,9 +335,13 @@ export class ZoneAlerteComputedHistoricService {
     const dateString = date.format('YYYY-MM-DD');
     const activeArIdSet = new Set(activeArIds);
     const normalizedZones = zones.map((zone) => {
-      const restriction = zone.restrictions?.find((candidate) =>
-        activeArIdSet.has(candidate.arreteRestriction?.id),
-      );
+      const restriction = zone.restrictions
+        ?.filter((candidate) =>
+          activeArIdSet.has(candidate.arreteRestriction?.id),
+        )
+        .sort((left, right) =>
+          this.compareHistoricRestrictionsNewestFirst(left, right),
+        )[0];
       if (!restriction) {
         throw new Error(
           `Missing applicable restriction for historic zone ${zone.id} on ${dateString}`,
@@ -390,6 +394,27 @@ export class ZoneAlerteComputedHistoricService {
     return { features, zones: normalizedZones };
   }
 
+  private compareHistoricRestrictionsNewestFirst(
+    left: Restriction,
+    right: Restriction,
+  ): number {
+    const leftArrete = left.arreteRestriction;
+    const rightArrete = right.arreteRestriction;
+    const dateDebutComparison = String(
+      rightArrete?.dateDebut ?? '',
+    ).localeCompare(String(leftArrete?.dateDebut ?? ''));
+    if (dateDebutComparison !== 0) {
+      return dateDebutComparison;
+    }
+    const dateSignatureComparison = String(
+      rightArrete?.dateSignature ?? '',
+    ).localeCompare(String(leftArrete?.dateSignature ?? ''));
+    if (dateSignatureComparison !== 0) {
+      return dateSignatureComparison;
+    }
+    return (rightArrete?.id ?? 0) - (leftArrete?.id ?? 0);
+  }
+
   private assertHistoricRestrictionLoaded(
     restriction: Restriction,
     zoneId: number,
@@ -398,7 +423,10 @@ export class ZoneAlerteComputedHistoricService {
     if (!restriction.arreteRestriction) {
       throw new Error(`Missing decree for historic zone ${zoneId} on ${date}`);
     }
-    if (!Array.isArray(restriction.usages)) {
+    if (
+      restriction.usages !== undefined &&
+      !Array.isArray(restriction.usages)
+    ) {
       throw new Error(
         `Usages were not loaded for historic zone ${zoneId} on ${date}`,
       );
@@ -410,7 +438,7 @@ export class ZoneAlerteComputedHistoricService {
     zoneId: number,
     date: string,
   ) {
-    return restriction.usages.map((usage) => {
+    return (restriction.usages ?? []).map((usage) => {
       if (!usage.thematique?.nom) {
         throw new Error(
           `Missing theme for historic zone ${zoneId} usage ${usage.id} on ${date}`,
@@ -1847,12 +1875,15 @@ DELETE FROM zone_alerte_computed_historic
         `Missing decree for computed historic zone ${zoneId} on ${date}`,
       );
     }
-    if (!Array.isArray(restriction.usages)) {
+    if (
+      restriction.usages !== undefined &&
+      !Array.isArray(restriction.usages)
+    ) {
       throw new Error(
         `Usages were not loaded for computed historic zone ${zoneId} on ${date}`,
       );
     }
-    return restriction.usages.map((usage) => {
+    return (restriction.usages ?? []).map((usage) => {
       if (!usage.thematique?.nom) {
         throw new Error(
           `Missing theme for computed historic zone ${zoneId} usage ${usage.id} on ${date}`,
