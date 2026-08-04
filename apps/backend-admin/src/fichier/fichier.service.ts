@@ -5,6 +5,7 @@ import { Fichier } from '@shared/entities/fichier.entity';
 import { S3Service } from '../shared/services/s3.service';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'node:crypto';
 
 @Injectable()
 export class FichierService {
@@ -34,6 +35,13 @@ export class FichierService {
       url: s3Response.Location,
     };
     return this.fichierRepository.save(toSave);
+  }
+
+  async createImmutable(
+    fichier: Express.Multer.File,
+    prefix: string,
+  ): Promise<Fichier> {
+    return this.create(fichier, `${prefix}${randomUUID()}/`);
   }
 
   async deleteById(id: number): Promise<DeleteResult> {
@@ -68,7 +76,7 @@ export class FichierService {
           buffer: Buffer.from(response.data, 'binary'),
         };
         const s3Response = await this.s3Service.uploadFile(
-          // @ts-ignore
+          // @ts-expect-error legacy transfer payload only exposes used fields
           fileToTransfer,
           file.arreteCadre
             ? `arrete-cadre/${file.arreteCadre.id}/`

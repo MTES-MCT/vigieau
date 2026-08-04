@@ -20,9 +20,48 @@ const createDeferred = () => {
 };
 
 const createService = (askCompute: jest.Mock) => {
+  let queuedDepartementIds: number[] = [];
+  const lockQuery = {
+    select: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    setLock: jest.fn().mockReturnThis(),
+    getMany: jest.fn().mockResolvedValue([]),
+  };
+  const transactionRepository = {
+    query: jest.fn().mockResolvedValue([]),
+    find: jest.fn().mockResolvedValue([]),
+    createQueryBuilder: jest.fn(() => lockQuery),
+    findOneOrFail: jest.fn(),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
+  };
+  const manager = {
+    getRepository: jest.fn(() => transactionRepository),
+    query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('SELECT id FROM departement')) {
+        return [{ id: 65 }];
+      }
+      if (sql.includes('current_zone_recompute_request')) {
+        queuedDepartementIds = [
+          ...((parameters?.[0] as number[] | undefined) ?? []),
+        ];
+        return [];
+      }
+      if (sql.includes('information_schema.columns')) {
+        return [{ exists: true }];
+      }
+      if (sql.includes('UPDATE config')) {
+        return [{ id: 1 }];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    }),
+  };
   const repository = {
     find: jest.fn().mockResolvedValue([]),
     update: jest.fn().mockResolvedValue({ affected: 0 }),
+    manager: {
+      transaction: jest.fn(async (_isolation, callback) => callback(manager)),
+    },
   };
   const statisticDepartementService = {
     computeDepartementStatistics: jest.fn().mockResolvedValue(undefined),
@@ -41,7 +80,21 @@ const createService = (askCompute: jest.Mock) => {
     { setConfig: jest.fn() } as never,
     undefined as never,
   );
-  return { service, repository, statisticDepartementService };
+  const processPendingCurrentZoneRecomputes = jest
+    .spyOn(service, 'processPendingCurrentZoneRecomputes')
+    .mockImplementation(async () => {
+      await askCompute(queuedDepartementIds, false, false);
+      await statisticDepartementService.computeDepartementStatistics();
+    });
+  return {
+    lockQuery,
+    manager,
+    repository,
+    service,
+    processPendingCurrentZoneRecomputes,
+    statisticDepartementService,
+    transactionRepository,
+  };
 };
 
 describe('ArreteRestrictionService scheduled status update', () => {
@@ -58,7 +111,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
       });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(askCompute).toHaveBeenCalledWith([65], false, true);
+    expect(askCompute).toHaveBeenCalledWith([65], false, false);
     expect(completed).toBe(false);
 
     computation.resolve();
@@ -78,16 +131,36 @@ describe('ArreteRestrictionService scheduled status update', () => {
 
   it('does not issue status updates when no restriction changes status', async () => {
     const askCompute = jest.fn().mockResolvedValue({ success: true });
-    const { service, repository } = createService(askCompute);
+    const { service, repository, transactionRepository } =
+      createService(askCompute);
 
     await service.updateArreteRestrictionStatut();
 
     expect(repository.update).not.toHaveBeenCalled();
+    expect(transactionRepository.update).not.toHaveBeenCalled();
+  });
+
+  it('persists the legacy recompute request before consuming it', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const { manager, processPendingCurrentZoneRecomputes, service } =
+      createService(askCompute);
+
+    await service.updateArreteRestrictionStatut([{ id: 65 }] as never, false);
+
+    const enqueueCall = manager.query.mock.calls.find(([sql]) =>
+      sql.includes('current_zone_recompute_request'),
+    );
+    expect(enqueueCall?.[1]).toEqual([[65]]);
+    expect(processPendingCurrentZoneRecomputes).toHaveBeenCalledTimes(1);
+    expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+      processPendingCurrentZoneRecomputes.mock.invocationCallOrder[0],
+    );
   });
 
   it('passes the daily publication reuse context only to the scheduled compute', async () => {
     const askCompute = jest.fn().mockResolvedValue({ success: true });
-    const { service } = createService(askCompute);
+    const { manager, processPendingCurrentZoneRecomputes, service } =
+      createService(askCompute);
     const reuseContext = {
       scheduledFor: '2026-08-01',
       sourceRevision: '42',
@@ -102,5 +175,212 @@ describe('ArreteRestrictionService scheduled status update', () => {
       false,
       reuseContext,
     );
+    expect(processPendingCurrentZoneRecomputes).not.toHaveBeenCalled();
+    expect(
+      manager.query.mock.calls.some(([sql]) =>
+        sql.includes('current_zone_recompute_request'),
+      ),
+    ).toBe(false);
+  });
+
+  it('reconciles an order constrained by an expired framework without moving its start', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const harness = createService(askCompute);
+    const expiring = {
+      id: 37577,
+      dateDebut: '2026-08-10',
+      dateFin: null,
+      arretesCadre: [{ id: 30697, statut: 'abroge', dateFin: '2026-08-04' }],
+    };
+    harness.transactionRepository.query.mockResolvedValue([expiring]);
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      ...expiring,
+      dateFinSaisie: null,
+      dateFinCalculee: false,
+      dateFinSaisieConnue: true,
+      statut: 'a_venir',
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [],
+    });
+    const reuseContext = {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    };
+
+    await harness.service.updateArreteRestrictionStatut(
+      undefined,
+      false,
+      reuseContext,
+    );
+
+    expect(harness.repository.manager.transaction).toHaveBeenCalledWith(
+      'SERIALIZABLE',
+      expect.any(Function),
+    );
+    expect(harness.lockQuery.setLock).toHaveBeenCalledWith('pessimistic_write');
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({
+        dateFin: '2026-08-04',
+        dateFinSaisie: null,
+        dateFinCalculee: true,
+        statut: 'abroge',
+      }),
+    );
+    expect(
+      harness.transactionRepository.update.mock.calls[0][1],
+    ).not.toHaveProperty('dateDebut');
+    expect(harness.manager.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidates history when a stale published order becomes expired', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const harness = createService(askCompute);
+    const stale = {
+      id: 37577,
+      dateDebut: '2026-07-01',
+      dateFin: '2026-08-03',
+      statut: 'publie',
+    };
+    harness.transactionRepository.query.mockResolvedValue([stale]);
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      ...stale,
+      dateFinSaisie: null,
+      dateFinCalculee: false,
+      dateFinSaisieConnue: true,
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [],
+      arretesCadre: [{ id: 30697, statut: 'publie', dateFin: null }],
+    });
+
+    await harness.service.updateArreteRestrictionStatut(undefined, false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({
+        dateFin: '2026-08-03',
+        statut: 'abroge',
+      }),
+    );
+    expect(harness.manager.query).toHaveBeenLastCalledWith(
+      expect.stringContaining('UPDATE config'),
+      ['2026-07-01'],
+    );
+  });
+
+  it('reconciles a stale status without extending an unknown legacy end', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const harness = createService(askCompute);
+    const stale = {
+      id: 37577,
+      dateDebut: '2026-07-01',
+      dateFin: '2026-08-03',
+      statut: 'publie',
+    };
+    harness.transactionRepository.query.mockResolvedValue([stale]);
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      ...stale,
+      dateFinSaisie: '2026-08-03',
+      dateFinCalculee: true,
+      dateFinSaisieConnue: false,
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [
+        { id: 37578, dateDebut: '2026-08-10', statut: 'a_venir' },
+      ],
+      arretesCadre: [{ id: 30697, statut: 'publie', dateFin: null }],
+    });
+
+    await harness.service.updateArreteRestrictionStatut(undefined, false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({
+        dateFin: '2026-08-03',
+        dateFinSaisie: '2026-08-03',
+        dateFinCalculee: true,
+        dateFinSaisieConnue: false,
+        statut: 'abroge',
+      }),
+    );
+  });
+
+  it('does not invalidate history for a normal start-of-day publication', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const harness = createService(askCompute);
+    const starting = {
+      id: 37577,
+      dateDebut: '2026-08-05',
+      dateFin: null,
+      statut: 'a_venir',
+    };
+    harness.transactionRepository.query.mockResolvedValue([starting]);
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      ...starting,
+      dateFinSaisie: null,
+      dateFinCalculee: false,
+      dateFinSaisieConnue: true,
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [],
+      arretesCadre: [{ id: 30697, statut: 'publie', dateFin: null }],
+    });
+
+    await harness.service.updateArreteRestrictionStatut(undefined, false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({ statut: 'publie' }),
+    );
+    expect(harness.manager.query).not.toHaveBeenCalled();
+  });
+
+  it('does not invalidate history for a normal end-of-day expiration', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const harness = createService(askCompute);
+    const expiring = {
+      id: 37577,
+      dateDebut: '2026-07-01',
+      dateFin: '2026-08-04',
+      statut: 'publie',
+    };
+    harness.transactionRepository.query.mockResolvedValue([expiring]);
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      ...expiring,
+      dateFinSaisie: null,
+      dateFinCalculee: false,
+      dateFinSaisieConnue: true,
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [],
+      arretesCadre: [{ id: 30697, statut: 'publie', dateFin: null }],
+    });
+
+    await harness.service.updateArreteRestrictionStatut(undefined, false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({ statut: 'abroge' }),
+    );
+    expect(harness.manager.query).not.toHaveBeenCalled();
   });
 });

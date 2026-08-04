@@ -21,6 +21,7 @@
     "datagouv:publish-historique-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-historique-communes.js",
     "recompute:commune-statistics": "node dist/apps/backend-admin/src/scripts/recompute-commune-statistics.js",
     "zones:sandre:reconcile": "node dist/apps/backend-admin/src/scripts/reconcile-sandre-zones.js",
+    "arretes:confirm-open-ended-predecessor": "node dist/apps/backend-admin/src/scripts/confirm-open-ended-predecessor.js",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "lint:check": "eslint \"{src,apps,libs,test}/**/*.ts\"",
     "test": "jest",
