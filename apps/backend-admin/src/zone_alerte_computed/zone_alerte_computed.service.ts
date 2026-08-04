@@ -4,12 +4,10 @@ import { ConfigService as NestConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Departement } from '@shared/entities/departement.entity';
 import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
-import { exec } from 'child_process';
 import * as fs from 'fs';
 import moment from 'moment';
 import { writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
-import * as util from 'util';
 import { Worker } from 'worker_threads';
 import { createHash } from 'node:crypto';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
@@ -36,6 +34,10 @@ import {
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
 import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
+import {
+  collectPmtilesFeatureIds,
+  generatePmtiles,
+} from './pmtiles-generation';
 import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
 
 export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
@@ -61,9 +63,6 @@ export class ZoneAlerteComputedService {
   private queuedComputeWaiters: QueuedComputeWaiter[] = [];
   private publicationWatchdogInProgress = false;
   private readonly historicComputedStartDate = '2024-04-29';
-  // Promisifier exec
-  private execPromise = util.promisify(exec);
-
   constructor(
     @InjectRepository(ZoneAlerteComputed)
     private readonly zoneAlerteComputedRepository: Repository<ZoneAlerteComputed>,
@@ -887,6 +886,19 @@ WITH cleaned_geometries AS (
   `,
       [departement.id],
     );
+    await this.dataSource.query(
+      `
+        DELETE FROM zone_alerte_computed zone
+        WHERE zone."departementId" = $1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM ST_Dump(zone.geom) dumped
+            WHERE ST_GeometryType(dumped.geom) = 'ST_Polygon'
+              AND ST_Area(ST_Transform(dumped.geom, 2154)) > 100
+          )
+      `,
+      [departement.id],
+    );
     return;
   }
 
@@ -1047,6 +1059,7 @@ DELETE FROM zone_alerte_computed
       type: 'FeatureCollection',
       features: allZones,
     };
+    const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(allZones);
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
@@ -1084,21 +1097,12 @@ DELETE FROM zone_alerte_computed
           outputPath: `${path}/zones_arretes_en_vigueur.pmtiles`,
         });
       } else {
-        await this.execPromise(
-          `${path}/tippecanoe_program/bin/tippecanoe \
-          -Z4 \
-          -zg \
-          --maximum-tile-byte=1000000 \
-          --force \
-          --read-parallel \
-          --detect-shared-borders \
-          --coalesce-densest-as-needed \
-          --simplification=28 \
-          --layer=zones_arretes_en_vigueur \
-          --output="${path}/zones_arretes_en_vigueur.pmtiles" \
-          "${path}/zones_arretes_en_vigueur.geojson"
-          `,
-        );
+        await generatePmtiles({
+          workingDirectory: path,
+          inputPath: `${path}/zones_arretes_en_vigueur.geojson`,
+          outputPath: `${path}/zones_arretes_en_vigueur.pmtiles`,
+          expectedFeatureIds: expectedPmtilesFeatureIds,
+        });
       }
       const data = fs.readFileSync(`${path}/zones_arretes_en_vigueur.pmtiles`);
       pmtilesChecksum = createHash('sha256').update(data).digest('hex');
