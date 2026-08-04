@@ -1234,14 +1234,6 @@ DELETE FROM zone_alerte_computed
     const geojsonChecksum = createHash('sha256')
       .update(dataGeojson)
       .digest('hex');
-    if (!publicationEnabled) {
-      await this.publishLegacyArtifact(
-        fileToTransferGeojson,
-        date,
-        'geojson',
-        'Carte des zones et arrêtés en vigueur - GeoJSON',
-      );
-    }
     let pmtilesChecksum: string | undefined;
     let fileToTransferPmtiles:
       | { originalname: string; buffer: Buffer }
@@ -1268,9 +1260,7 @@ DELETE FROM zone_alerte_computed
       };
     } catch (e) {
       this.logger.error('ERROR GENERATING PMTILES', e);
-      if (publicationEnabled && sourceRevision !== undefined) {
-        throw e;
-      }
+      throw e;
     }
 
     let immutableArtifacts: { geojsonUrl?: string; pmtilesUrl?: string } = {};
@@ -1282,13 +1272,12 @@ DELETE FROM zone_alerte_computed
         pmtilesFile: fileToTransferPmtiles,
         pmtilesChecksum,
       });
-    } else if (fileToTransferPmtiles) {
-      await this.publishLegacyArtifact(
-        fileToTransferPmtiles,
+    } else {
+      await this.publishLegacyZoneArtifacts({
+        geojsonFile: fileToTransferGeojson,
+        pmtilesFile: fileToTransferPmtiles,
         date,
-        'pmtiles',
-        'Carte des zones et arrêtés en vigueur - PMTILES',
-      );
+      });
     }
     await this.zoneAlerteComputedRepository
       .createQueryBuilder()
@@ -1400,24 +1389,46 @@ DELETE FROM zone_alerte_computed
     }
   }
 
+  private async publishLegacyZoneArtifacts(input: {
+    geojsonFile: { originalname: string; buffer: Buffer };
+    pmtilesFile?: { originalname: string; buffer: Buffer };
+    date: Date;
+  }): Promise<void> {
+    if (!input.pmtilesFile) {
+      throw new Error('Legacy publication requires a PMTiles artifact');
+    }
+    await this.publishLegacyArtifact(
+      input.pmtilesFile,
+      input.date,
+      'pmtiles',
+      'Carte des zones et arrêtés en vigueur - PMTILES',
+    );
+    await this.publishLegacyArtifact(
+      input.geojsonFile,
+      input.date,
+      'geojson',
+      'Carte des zones et arrêtés en vigueur - GeoJSON',
+    );
+  }
+
   private async publishLegacyArtifact(
     file: { originalname: string; buffer: Buffer },
     date: Date,
     kind: 'geojson' | 'pmtiles',
     dataGouvTitle: string,
   ): Promise<void> {
-    let stableUrl: string | undefined;
+    const stableResponse = await this.s3Service.uploadFile(
+      file as Express.Multer.File,
+      `${kind}/`,
+      { cacheControl: 'public, max-age=0, must-revalidate' },
+    );
+    const stableUrl = stableResponse?.Location;
+    if (!stableUrl) {
+      throw new Error(`Stable ${kind} upload returned no URL`);
+    }
+
     let datedCopySucceeded = false;
     try {
-      const stableResponse = await this.s3Service.uploadFile(
-        file as Express.Multer.File,
-        `${kind}/`,
-        { cacheControl: 'public, max-age=0, must-revalidate' },
-      );
-      stableUrl = stableResponse?.Location;
-      if (!stableUrl) {
-        throw new Error(`Stable ${kind} upload returned no URL`);
-      }
       const datedFileName = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.${kind}`;
       await this.s3Service.copyFile(
         file.originalname,
