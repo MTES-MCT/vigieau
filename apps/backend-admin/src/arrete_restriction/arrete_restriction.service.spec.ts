@@ -43,6 +43,7 @@ function createHarness(
   options: {
     unknownPredecessor?: boolean;
     withoutPredecessor?: boolean;
+    predecessorFrameworkEnd?: string;
     initialOverrides?: Record<string, unknown>;
     currentOverrides?: Record<string, unknown>;
   } = {},
@@ -66,6 +67,13 @@ function createHarness(
     dateFinCalculee: true,
     dateFinSaisieConnue: !options.unknownPredecessor,
     statut: 'abroge',
+    arretesCadre: [
+      {
+        id: 30697,
+        dateFin: options.predecessorFrameworkEnd ?? null,
+        statut: options.predecessorFrameworkEnd ? 'abroge' : 'publie',
+      },
+    ],
     arreteRestrictionAbroge: null,
     arretesRestriction: [
       { id: 37577, dateDebut: '2026-08-05', statut: 'a_venir' },
@@ -252,6 +260,29 @@ describe('ArreteRestrictionService.publish', () => {
 
     expect(harness.manager.query).not.toHaveBeenCalled();
     expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
+  it('ignores an AC end that predates the predecessor AR', async () => {
+    const harness = createHarness({
+      predecessorFrameworkEnd: '2026-07-01',
+    });
+
+    await harness.service.publish(
+      37577,
+      null,
+      { dateDebut: '2026-08-05', dateFin: null, dateSignature: null },
+      currentUser,
+    );
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37487 },
+      expect.objectContaining({
+        dateFin: '2026-08-04',
+        dateFinSaisie: null,
+        dateFinCalculee: true,
+        dateFinSaisieConnue: true,
+      }),
+    );
   });
 
   it('keeps the old PDF when the database transaction fails', async () => {

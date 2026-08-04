@@ -53,6 +53,48 @@ describe('ArreteCadreService scheduled status update', () => {
       arreteRestrictionService.updateArreteRestrictionStatut,
     ).toHaveBeenCalledWith(null, true);
   });
+
+  it('does not select unknown legacy boundaries for date reconciliation', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const transactionRepository = {
+      query: jest.fn().mockResolvedValue([]),
+    };
+    const repository = {
+      manager: {
+        transaction: jest.fn(
+          async (_isolation: string, callback: (manager: any) => unknown) =>
+            callback({
+              getRepository: jest.fn(() => transactionRepository),
+            }),
+        ),
+      },
+    };
+    const arreteRestrictionService = {
+      updateArreteRestrictionStatut: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new ArreteCadreService(
+      repository as never,
+      arreteRestrictionService as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+    );
+
+    await service.updateArreteCadreStatut();
+
+    const candidateQuery = transactionRepository.query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => sql.includes('expected_end.resolved_end'));
+    expect(candidateQuery).toContain(
+      'framework_order."dateFinSaisieConnue" = true',
+    );
+  });
 });
 
 describe('ArreteCadreScheduler', () => {

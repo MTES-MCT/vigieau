@@ -35,7 +35,7 @@ export interface ArreteMutationVersion {
 export class UnknownArreteEndDateProvenanceError extends Error {
   constructor() {
     super(
-      "La date de fin d'origine de l'arrêté remplacé n'est pas connue. La publication a été interrompue pour éviter de prolonger cet arrêté sans base juridique.",
+      "La date de fin d'origine de l'arrêté remplacé n'est pas connue. La publication a été interrompue pour éviter de modifier cet arrêté sans base juridique.",
     );
   }
 }
@@ -180,32 +180,29 @@ export function resolveArreteEndDate(
   const sourceKnown = state.dateFinCalculee
     ? state.dateFinSaisieConnue !== false
     : true;
-  // For legacy calculated boundaries, dateFinSaisie is the last conservative
-  // ceiling known at migration time. It may be restored after a later
-  // shortening, but it must never be exceeded without a verified legal end.
-  const sourceEnd = sourceKnown
-    ? trackedSourceEnd
-    : (trackedSourceEnd ?? currentEnd);
+  const sourceEnd = sourceKnown ? trackedSourceEnd : currentEnd;
   const constraintEnd = constraintEndDates
     .filter((date): date is string => !!date)
     .map(normalizeCivilDate)
     .reduce<string | null>(earliestDate, null);
   const resolvedEnd = earliestDate(sourceEnd, constraintEnd);
 
-  if (
-    options.rejectUnknownExtension !== false &&
-    !sourceKnown &&
-    sourceEnd &&
-    constraintEnd &&
-    constraintEnd > sourceEnd
-  ) {
-    throw new UnknownArreteEndDateProvenanceError();
-  }
-
   if (!sourceKnown) {
+    // A migrated legacy boundary is only a classification, not evidence of
+    // the originally entered legal end. Scheduled reconciliation must leave
+    // it byte-for-byte unchanged; interactive mutations must be blocked when
+    // their constraints would move it, until an operator confirms provenance.
+    if (
+      options.rejectUnknownExtension !== false &&
+      !areCivilDatesEqual(currentEnd, constraintEnd)
+    ) {
+      throw new UnknownArreteEndDateProvenanceError();
+    }
     return {
-      dateFin: resolvedEnd,
-      dateFinSaisie: sourceEnd,
+      dateFin: currentEnd,
+      dateFinSaisie: state.dateFinSaisie
+        ? normalizeCivilDate(state.dateFinSaisie)
+        : null,
       dateFinCalculee: true,
       dateFinSaisieConnue: false,
     };

@@ -28,7 +28,7 @@ describe('ArreteEndDateProvenance1786305600000', () => {
     }
   });
 
-  it('adds both tables before classifying only non-draft constraints', async () => {
+  it('adds provenance without reclassifying historical business data', async () => {
     const statements: string[] = [];
     const queryRunner = {
       query: jest.fn(async (sql: string) => statements.push(sql)),
@@ -36,7 +36,7 @@ describe('ArreteEndDateProvenance1786305600000', () => {
 
     await new ArreteEndDateProvenance1786305600000().up(queryRunner as any);
 
-    expect(statements).toHaveLength(6);
+    expect(statements).toHaveLength(4);
     for (const table of ['arrete_restriction', 'arrete_cadre']) {
       const alterIndex = statements.findIndex(
         (sql) =>
@@ -50,13 +50,6 @@ describe('ArreteEndDateProvenance1786305600000', () => {
           ),
       );
       expect(alterIndex).toBeGreaterThanOrEqual(0);
-      expect(
-        statements.some(
-          (sql) =>
-            sql.includes(`UPDATE "${table}"`) &&
-            sql.includes('SET "dateFinSaisie" = "dateFin"'),
-        ),
-      ).toBe(false);
     }
     expect(
       statements.some(
@@ -75,59 +68,7 @@ describe('ArreteEndDateProvenance1786305600000', () => {
       ),
     ).toBe(true);
 
-    const restrictionClassification = statements.find(
-      (sql) =>
-        sql.includes('UPDATE "arrete_restriction" restriction_order') &&
-        sql.includes('potentially_computed') &&
-        sql.includes('framework_limited'),
-    );
-    expect(restrictionClassification).toContain(
-      'successor."arreteRestrictionAbrogeId"',
-    );
-    expect(restrictionClassification).toContain(
-      'JOIN "arrete_cadre_arrete_restriction" link',
-    );
-    expect(restrictionClassification).toContain(
-      'link."arreteRestrictionId" = restriction_order.id',
-    );
-    expect(restrictionClassification).toContain(
-      'framework_order.id = link."arreteCadreId"',
-    );
-    expect(restrictionClassification).toContain(
-      'successor."statut" <> \'a_valider\'',
-    );
-    expect(restrictionClassification).toContain(
-      'framework_order."statut" <> \'a_valider\'',
-    );
-    expect(restrictionClassification).toContain(
-      'restriction_order."statut" <> \'a_valider\'',
-    );
-    expect(restrictionClassification).toContain(
-      'predecessor."dateFin" = successor.successor_start - 1',
-    );
-    expect(restrictionClassification).toContain(
-      'HAVING restriction_order."dateFin" = MIN(framework_order."dateFin")',
-    );
-    expect(restrictionClassification).toContain(
-      '"dateFinSaisieConnue" = false',
-    );
-    expect(restrictionClassification).toContain(
-      '"dateFinSaisie" = restriction_order."dateFin"',
-    );
-
-    const frameworkClassification = statements.find((sql) =>
-      sql.includes('UPDATE "arrete_cadre" predecessor'),
-    );
-    expect(frameworkClassification).toContain(
-      'successor."arreteCadreAbrogeId"',
-    );
-    expect(frameworkClassification).toContain(
-      'successor."statut" <> \'a_valider\'',
-    );
-    expect(frameworkClassification).toContain(
-      'predecessor."dateFin" = successor.successor_start - 1',
-    );
-    expect(frameworkClassification).toContain('"dateFinSaisieConnue" = false');
+    expect(statements.join('\n')).not.toMatch(/\bUPDATE\b/);
   });
 
   it('drops only the provenance columns and replacement indexes on rollback', async () => {

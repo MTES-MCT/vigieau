@@ -1615,10 +1615,7 @@ export class ArreteCadreService {
                   WHEN framework_order."dateFinCalculee" = false
                     THEN framework_order."dateFin"
                   WHEN framework_order."dateFinSaisieConnue" = false
-                    THEN COALESCE(
-                      framework_order."dateFinSaisie",
-                      framework_order."dateFin"
-                    )
+                    THEN framework_order."dateFin"
                   ELSE framework_order."dateFinSaisie"
                 END AS end_date
                 UNION ALL
@@ -1643,6 +1640,7 @@ export class ArreteCadreService {
                 )
                 OR (
                   framework_order."dateFinCalculee" = true
+                  AND framework_order."dateFinSaisieConnue" = true
                   AND framework_order."dateFin" IS DISTINCT FROM expected_end.resolved_end
                 )
               )

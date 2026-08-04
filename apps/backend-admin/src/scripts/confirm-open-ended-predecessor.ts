@@ -17,6 +17,7 @@ interface ChainRow {
   successorStatus: string;
   successorDepartmentId: number;
   predecessorId: number;
+  predecessorStart: string;
   predecessorEnd: string;
   predecessorStatus: string;
   predecessorDepartmentId: number;
@@ -92,6 +93,7 @@ export async function confirmOpenEndedPredecessor(
           successor.statut::text AS "successorStatus",
           successor."departementId" AS "successorDepartmentId",
           predecessor.id AS "predecessorId",
+          predecessor."dateDebut"::text AS "predecessorStart",
           predecessor."dateFin"::text AS "predecessorEnd",
           predecessor.statut::text AS "predecessorStatus",
           predecessor."departementId" AS "predecessorDepartmentId",
@@ -122,10 +124,30 @@ export async function confirmOpenEndedPredecessor(
     if (successorCount?.count !== 1) {
       throw new Error('The predecessor does not have exactly one active chain');
     }
+    const [frameworkBounds] = await queryRunner.query(
+      `
+        SELECT MIN(framework_order."dateFin")::text AS "frameworkEnd"
+        FROM arrete_cadre_arrete_restriction link
+        JOIN arrete_cadre framework_order
+          ON framework_order.id = link."arreteCadreId"
+        WHERE link."arreteRestrictionId" = $1
+          AND framework_order.statut <> 'a_valider'
+          AND framework_order."dateFin" IS NOT NULL
+          AND framework_order."dateFin" >= $2::date
+      `,
+      [row.predecessorId, normalizeCivilDate(row.predecessorStart)],
+    );
+    const frameworkEnd = frameworkBounds?.frameworkEnd
+      ? normalizeCivilDate(frameworkBounds.frameworkEnd)
+      : null;
     if (
       normalizeCivilDate(row.successorStart) !== options.expectedStart ||
+      normalizeCivilDate(row.predecessorStart) >
+        options.expectedPredecessorEnd ||
       normalizeCivilDate(row.predecessorEnd) !==
         options.expectedPredecessorEnd ||
+      (frameworkEnd !== null &&
+        frameworkEnd < options.expectedPredecessorEnd) ||
       row.successorDepartmentId !== row.predecessorDepartmentId ||
       row.successorStatus === 'a_valider' ||
       row.predecessorStatus === 'a_valider'
@@ -143,9 +165,13 @@ export async function confirmOpenEndedPredecessor(
         options.expectedPredecessorEnd &&
       row.dateFinCalculee === true &&
       row.dateFinSaisieConnue === false;
-    if (!alreadyApplied && !isExactMigrationState) {
+    const isExactLegacyState =
+      row.dateFinSaisie === null &&
+      row.dateFinCalculee === false &&
+      row.dateFinSaisieConnue === true;
+    if (!alreadyApplied && !isExactMigrationState && !isExactLegacyState) {
       throw new Error(
-        'The predecessor provenance no longer matches the migration state',
+        'The predecessor provenance no longer matches an approved legacy state',
       );
     }
     if (options.apply && !alreadyApplied) {
@@ -158,9 +184,18 @@ export async function confirmOpenEndedPredecessor(
             "dateFinSaisieConnue" = true
           WHERE id = $1
             AND "dateFin" = $2::date
-            AND "dateFinSaisie" = $2::date
-            AND "dateFinCalculee" IS TRUE
-            AND "dateFinSaisieConnue" IS FALSE
+            AND (
+              (
+                "dateFinSaisie" = $2::date
+                AND "dateFinCalculee" IS TRUE
+                AND "dateFinSaisieConnue" IS FALSE
+              )
+              OR (
+                "dateFinSaisie" IS NULL
+                AND "dateFinCalculee" IS FALSE
+                AND "dateFinSaisieConnue" IS TRUE
+              )
+            )
           RETURNING id
         `,
         [row.predecessorId, options.expectedPredecessorEnd],

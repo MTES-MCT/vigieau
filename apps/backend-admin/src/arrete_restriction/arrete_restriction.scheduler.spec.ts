@@ -118,6 +118,23 @@ describe('ArreteRestrictionService scheduled status update', () => {
     expect(completed).toBe(true);
   });
 
+  it('does not select unknown legacy boundaries for date reconciliation', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const { service, transactionManager } = createService(
+      jest.fn().mockResolvedValue(undefined),
+    );
+
+    await service.updateArreteRestrictionStatut();
+
+    const candidateQuery = transactionManager
+      .getRepository()
+      .query.mock.calls.map(([sql]) => sql)
+      .find((sql) => sql.includes('expected_end.resolved_end'));
+    expect(candidateQuery).toContain(
+      'restriction_order."dateFinSaisieConnue" = true',
+    );
+  });
+
   it('propagates a legacy computation failure so the daily run can retry', async () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'false';
     const expectedError = new Error('zone computation failed');
