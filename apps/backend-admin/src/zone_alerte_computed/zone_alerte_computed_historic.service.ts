@@ -2,6 +2,7 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService as NestConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Departement } from '@shared/entities/departement.entity';
+import { Restriction } from '@shared/entities/restriction.entity';
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { ZoneAlerteComputedHistoric } from '@shared/entities/zone_alerte_computed_historic.entity';
@@ -29,6 +30,10 @@ export interface HistoricCursorState {
   statsCursor: string | null;
   mapGeneration: string;
   statsGeneration: string;
+}
+
+export function getHistoricUsages(restriction: Restriction) {
+  return restriction.usages ?? [];
 }
 
 @Injectable()
@@ -138,7 +143,7 @@ export class ZoneAlerteComputedHistoricService {
                   z.restrictions[0].arreteRestriction.dateSignature,
                 fichier: z.restrictions[0].arreteRestriction.fichier?.url,
               },
-              restrictions: z.restrictions[0].usages.map((u) => {
+              restrictions: getHistoricUsages(z.restrictions[0]).map((u) => {
                 let d;
                 switch (z.restrictions[0].niveauGravite) {
                   case 'vigilance':
@@ -1244,35 +1249,37 @@ DELETE FROM zone_alerte_computed_historic
               dateSignature: z.restriction?.arreteRestriction.dateSignature,
               fichier: z.restriction?.arreteRestriction.fichier?.url,
             },
-            restrictions: z.restriction?.usages.map((u) => {
-              let d;
-              switch (z.restriction.niveauGravite) {
-                case 'vigilance':
-                  d = u.descriptionVigilance;
-                  break;
-                case 'alerte':
-                  d = u.descriptionAlerte;
-                  break;
-                case 'alerte_renforcee':
-                  d = u.descriptionAlerteRenforcee;
-                  break;
-                case 'crise':
-                  d = u.descriptionCrise;
-                  break;
-              }
-              return {
-                nom: u.nom,
-                thematique: u.thematique.nom,
-                concerneParticulier: u.concerneParticulier,
-                concerneEntreprise: u.concerneEntreprise,
-                concerneCollectivite: u.concerneCollectivite,
-                concerneExploitation: u.concerneExploitation,
-                concerneEso: u.concerneEso,
-                concerneEsu: u.concerneEsu,
-                concerneAep: u.concerneAep,
-                description: d,
-              };
-            }),
+            restrictions: z.restriction
+              ? getHistoricUsages(z.restriction).map((u) => {
+                  let d;
+                  switch (z.restriction.niveauGravite) {
+                    case 'vigilance':
+                      d = u.descriptionVigilance;
+                      break;
+                    case 'alerte':
+                      d = u.descriptionAlerte;
+                      break;
+                    case 'alerte_renforcee':
+                      d = u.descriptionAlerteRenforcee;
+                      break;
+                    case 'crise':
+                      d = u.descriptionCrise;
+                      break;
+                  }
+                  return {
+                    nom: u.nom,
+                    thematique: u.thematique.nom,
+                    concerneParticulier: u.concerneParticulier,
+                    concerneEntreprise: u.concerneEntreprise,
+                    concerneCollectivite: u.concerneCollectivite,
+                    concerneExploitation: u.concerneExploitation,
+                    concerneEso: u.concerneEso,
+                    concerneEsu: u.concerneEsu,
+                    concerneAep: u.concerneAep,
+                    description: d,
+                  };
+                })
+              : undefined,
           },
         };
       }),
