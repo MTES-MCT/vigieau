@@ -8,7 +8,7 @@
   "scripts": {
     "build": "nest build",
     "build:mail-templates": "cp -r src/mail_templates/*.hbs dist/apps/backend-admin/src/mail_templates/ && mkdir -p dist/apps/backend-admin/src/mail_templates/partials && cp -r src/mail_templates/partials/*.hbs dist/apps/backend-admin/src/mail_templates/partials/",
-    "build:tippecanoe": "rm -rf tippecanoe && mkdir tippecanoe && git -C tippecanoe init && git -C tippecanoe remote add origin https://github.com/felt/tippecanoe.git && git -C tippecanoe fetch --depth 1 origin 7c80fccdc17e4f8d9f4a52d518b4845290224366 && git -C tippecanoe checkout --detach FETCH_HEAD && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && node scripts/validate-tippecanoe-install.mjs tippecanoe_program/bin/tile-join && rm -rf tippecanoe/",
+    "build:tippecanoe": "rm -rf tippecanoe && mkdir tippecanoe && git -C tippecanoe init && git -C tippecanoe remote add origin https://github.com/felt/tippecanoe.git && git -C tippecanoe fetch --depth 1 origin 7c80fccdc17e4f8d9f4a52d518b4845290224366 && git -C tippecanoe checkout --detach FETCH_HEAD && make -j --directory=tippecanoe/ && make install --directory=tippecanoe/ PREFIX=../tippecanoe_program && node scripts/validate-tippecanoe-install.mjs tippecanoe_program/bin && rm -rf tippecanoe/",
     "scalingo-postbuild": "npm run build && npm run build:mail-templates && npm run build:tippecanoe",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",

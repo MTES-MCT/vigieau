@@ -1559,6 +1559,20 @@ describe('ZoneAlerteComputedService', () => {
       dataSource.query.mock.calls.indexOf(residueCleanupCall!),
     );
     expect(residueCleanupCall![0]).toContain('WHERE "departementId" = $1');
+    const residualZoneDeleteCall = dataSource.query.mock.calls.find(([sql]) =>
+      String(sql).includes('DELETE FROM zone_alerte_computed zone'),
+    );
+    expect(residualZoneDeleteCall).toBeDefined();
+    expect(residualZoneDeleteCall![0]).toContain('NOT EXISTS');
+    expect(residualZoneDeleteCall![0]).toContain(
+      'ST_Area(ST_Transform(dumped.geom, 2154)) > 100',
+    );
+    expect(residualZoneDeleteCall![1]).toEqual([65]);
+    expect(
+      dataSource.query.mock.calls.indexOf(residueCleanupCall!),
+    ).toBeLessThan(
+      dataSource.query.mock.calls.indexOf(residualZoneDeleteCall!),
+    );
   });
 
   it('fails closed when a non-empty computed polygon remains invalid', async () => {

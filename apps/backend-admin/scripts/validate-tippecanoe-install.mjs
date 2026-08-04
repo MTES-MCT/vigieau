@@ -3,7 +3,9 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const tileJoinPath = resolve(process.argv[2] || '');
+const binDirectory = resolve(process.argv[2] || '');
+const tileJoinPath = join(binDirectory, 'tile-join');
+const decoderPath = join(binDirectory, 'tippecanoe-decode');
 const workingDirectory = await mkdtemp(
   join(tmpdir(), 'vigieau-tippecanoe-check-'),
 );
@@ -21,7 +23,7 @@ const run = (command, args) =>
       }
       rejectRun(
         new Error(
-          `tile-join validation failed (${signal ? `signal ${signal}` : `exit ${code}`})`,
+          `Tippecanoe tool validation failed (${signal ? `signal ${signal}` : `exit ${code}`})`,
         ),
       );
     });
@@ -88,6 +90,7 @@ try {
   ) {
     throw new Error('tile-join produced tiles for an empty publication');
   }
+  await run(decoderPath, ['--stats', outputPath]);
 } finally {
   await rm(workingDirectory, { force: true, recursive: true });
 }

@@ -1,0 +1,137 @@
+import { mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  assertPmtilesFeatureIntegrity,
+  buildTippecanoeArguments,
+  collectPmtilesFeatureIds,
+  generatePmtiles,
+} from './pmtiles-generation';
+
+function validPmtilesHeader(maxZoom = 12): Buffer {
+  const header = Buffer.alloc(127);
+  header.write('PMTiles', 0, 'ascii');
+  header[7] = 3;
+  header[101] = maxZoom;
+  return header;
+}
+
+describe('PMTiles generation integrity', () => {
+  it('uses retention-first Tippecanoe options', () => {
+    const args = buildTippecanoeArguments('zones.geojson', 'zones.pmtiles');
+
+    expect(args).toEqual(
+      expect.arrayContaining([
+        '--no-tile-size-limit',
+        '--no-feature-limit',
+        '--no-tiny-polygon-reduction-at-maximum-zoom',
+        '--simplification-at-maximum-zoom=1',
+      ]),
+    );
+    expect(args.join(' ')).not.toMatch(/drop|coalesce/);
+  });
+
+  it('rejects duplicate ids and empty source geometries', () => {
+    expect(() =>
+      collectPmtilesFeatureIds([
+        {
+          geometry: { coordinates: [[[1, 2]]] },
+          properties: { id: 7 },
+        },
+        {
+          geometry: { coordinates: [[[3, 4]]] },
+          properties: { id: 7 },
+        },
+      ]),
+    ).toThrow('duplicate feature ids');
+    expect(() =>
+      collectPmtilesFeatureIds([
+        { geometry: { coordinates: [] }, properties: { id: 9 } },
+      ]),
+    ).toThrow('empty feature geometries (1): 9');
+  });
+
+  it('accepts every expected id at the archive maximum zoom', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    await writeFile(pmtilesPath, validPmtilesHeader());
+    const decodeRunner = jest.fn(
+      async (_executable, args: readonly string[], onLine) => {
+        expect(args).toContain('-Z12');
+        expect(args).toContain('-z12');
+        onLine(JSON.stringify({ properties: { id: 10 } }));
+        onLine(JSON.stringify({ properties: { id: 10 } }));
+        onLine(JSON.stringify({ properties: { id: 20 } }));
+      },
+    );
+
+    await assertPmtilesFeatureIntegrity({
+      decoderPath: '/tippecanoe-decode',
+      pmtilesPath,
+      expectedFeatureIds: ['10', '20'],
+      decodeRunner,
+    });
+
+    expect(decodeRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects missing, unexpected, or invalid decoded ids', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    await writeFile(pmtilesPath, validPmtilesHeader());
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10', '20'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          onLine(JSON.stringify({ properties: { id: 10 } }));
+          onLine(JSON.stringify({ properties: { id: 30 } }));
+        },
+      }),
+    ).rejects.toThrow('missing=1 [20], unexpected=1 [30]');
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        decodeRunner: async (_executable, _args, onLine) => onLine('{broken'),
+      }),
+    ).rejects.toThrow('invalid JSON');
+  });
+
+  it('removes an output that fails validation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const outputPath = join(directory, 'zones.pmtiles');
+
+    await expect(
+      generatePmtiles({
+        workingDirectory: directory,
+        inputPath: join(directory, 'zones.geojson'),
+        outputPath,
+        expectedFeatureIds: ['10'],
+        commandRunner: async () => {
+          await writeFile(outputPath, validPmtilesHeader());
+        },
+        decodeRunner: async () => undefined,
+      }),
+    ).rejects.toThrow('missing=1 [10]');
+    await expect(stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects invalid PMTiles headers before decoding', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    await writeFile(pmtilesPath, Buffer.from('invalid'));
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+      }),
+    ).rejects.toThrow('valid PMTiles v3');
+  });
+});
