@@ -166,7 +166,7 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
     query: jest.fn(async (sql: string) =>
       sql.includes('information_schema.columns')
         ? [{ exists: true }]
-        : [{ id: 1 }],
+        : [[{ id: 1 }], 1],
     ),
   };
   const repository = {
