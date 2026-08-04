@@ -156,8 +156,8 @@ describe('arrete date continuity', () => {
       ).toThrow(UnknownArreteEndDateProvenanceError);
     });
 
-    it('allows an unknown legacy boundary to be shortened', () => {
-      expect(
+    it('rejects shortening an unknown legacy boundary', () => {
+      expect(() =>
         resolveArreteEndDate(
           {
             dateFin: '2026-08-04',
@@ -167,16 +167,11 @@ describe('arrete date continuity', () => {
           },
           ['2026-08-03'],
         ),
-      ).toEqual({
-        dateFin: '2026-08-03',
-        dateFinSaisie: '2026-08-04',
-        dateFinCalculee: true,
-        dateFinSaisieConnue: false,
-      });
+      ).toThrow(UnknownArreteEndDateProvenanceError);
     });
 
-    it('restores a tightened legacy boundary up to its conservative ceiling', () => {
-      expect(
+    it('rejects restoring an unknown legacy boundary', () => {
+      expect(() =>
         resolveArreteEndDate(
           {
             dateFin: '2026-08-03',
@@ -186,12 +181,7 @@ describe('arrete date continuity', () => {
           },
           ['2026-08-04'],
         ),
-      ).toEqual({
-        dateFin: '2026-08-04',
-        dateFinSaisie: '2026-08-04',
-        dateFinCalculee: true,
-        dateFinSaisieConnue: false,
-      });
+      ).toThrow(UnknownArreteEndDateProvenanceError);
     });
 
     it('keeps a conservative legacy end during scheduled reconciliation', () => {
@@ -208,7 +198,27 @@ describe('arrete date continuity', () => {
         ),
       ).toEqual({
         dateFin: '2026-08-03',
-        dateFinSaisie: '2026-08-03',
+        dateFinSaisie: null,
+        dateFinCalculee: true,
+        dateFinSaisieConnue: false,
+      });
+    });
+
+    it('does not shorten an unknown legacy boundary during scheduled reconciliation', () => {
+      expect(
+        resolveArreteEndDate(
+          {
+            dateFin: '2026-08-04',
+            dateFinSaisie: '2026-08-04',
+            dateFinCalculee: true,
+            dateFinSaisieConnue: false,
+          },
+          ['2026-08-03'],
+          { rejectUnknownExtension: false },
+        ),
+      ).toEqual({
+        dateFin: '2026-08-04',
+        dateFinSaisie: '2026-08-04',
         dateFinCalculee: true,
         dateFinSaisieConnue: false,
       });

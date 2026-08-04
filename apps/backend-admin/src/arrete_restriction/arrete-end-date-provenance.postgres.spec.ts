@@ -310,9 +310,9 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
       expect(restrictionOrders).toEqual([
         {
           id: 100,
-          dateFinSaisie: '2026-08-03',
-          dateFinCalculee: true,
-          dateFinSaisieConnue: false,
+          dateFinSaisie: null,
+          dateFinCalculee: false,
+          dateFinSaisieConnue: true,
         },
         {
           id: 110,
@@ -328,9 +328,9 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
         },
         {
           id: 130,
-          dateFinSaisie: '2026-08-05',
-          dateFinCalculee: true,
-          dateFinSaisieConnue: false,
+          dateFinSaisie: null,
+          dateFinCalculee: false,
+          dateFinSaisieConnue: true,
         },
         {
           id: 140,
@@ -365,9 +365,9 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
       expect(frameworkOrders).toEqual([
         {
           id: 210,
-          dateFinSaisie: '2026-08-03',
-          dateFinCalculee: true,
-          dateFinSaisieConnue: false,
+          dateFinSaisie: null,
+          dateFinCalculee: false,
+          dateFinSaisieConnue: true,
         },
         {
           id: 220,
@@ -484,7 +484,10 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
           (470, date '2026-07-01', date '2026-08-09', 'publie', NULL),
           (471, date '2026-08-10', NULL, 'a_venir', 470),
           (472, date '2026-08-08', NULL, 'a_venir', 470),
-          (900, date '2026-07-01', NULL, 'publie', NULL);
+          (480, date '2026-07-01', date '2026-08-20', 'publie', NULL),
+          (481, date '2026-08-10', NULL, 'a_venir', 480),
+          (900, date '2026-07-01', NULL, 'publie', NULL),
+          (901, date '2026-06-01', date '2026-06-30', 'abroge', NULL);
 
         INSERT INTO "arrete_restriction" (
           "id", "dateDebut", "dateFin", "statut", "departementId",
@@ -505,7 +508,11 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
           (360, date '2026-07-01', NULL, 'publie', 53, 360),
           (370, date '2026-07-01', date '2026-08-09', 'publie', 53, NULL),
           (371, date '2026-08-10', NULL, 'a_venir', 53, 370),
-          (372, date '2026-08-08', NULL, 'a_venir', 53, 370);
+          (372, date '2026-08-08', NULL, 'a_venir', 53, 370),
+          (380, date '2026-07-01', date '2026-08-20', 'publie', 53, NULL),
+          (381, date '2026-08-10', NULL, 'a_venir', 53, 380),
+          (390, date '2026-07-01', date '2026-08-09', 'abroge', 53, NULL),
+          (391, date '2026-08-10', NULL, 'a_venir', 53, 390);
 
         INSERT INTO "arrete_cadre_arrete_restriction" (
           "arreteCadreId", "arreteRestrictionId"
@@ -513,19 +520,23 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
         SELECT 900, "id" FROM "arrete_restriction"
         ;
 
+        INSERT INTO "arrete_cadre_arrete_restriction" (
+          "arreteCadreId", "arreteRestrictionId"
+        ) VALUES (901, 390);
+
         UPDATE "arrete_restriction"
         SET
           "dateFinCalculee" = true,
           "dateFinSaisie" = NULL,
           "dateFinSaisieConnue" = true
-        WHERE "id" IN (330, 350, 360, 370);
+        WHERE "id" IN (330, 350, 360, 370, 390);
 
         UPDATE "arrete_restriction"
         SET
           "dateFinCalculee" = true,
           "dateFinSaisie" = date '2026-08-03',
           "dateFinSaisieConnue" = false
-        WHERE "id" = 340;
+        WHERE "id" IN (340, 380);
 
         UPDATE "arrete_cadre"
         SET
@@ -539,7 +550,7 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
           "dateFinCalculee" = true,
           "dateFinSaisie" = date '2026-08-03',
           "dateFinSaisieConnue" = false
-        WHERE "id" = 440
+        WHERE "id" IN (440, 480)
       `);
 
       const restrictionQuery = await captureRestrictionSchedulerQuery();
@@ -565,7 +576,7 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
       ]);
       expect(
         restrictionCandidates.some(({ id }) =>
-          [300, 310, 320, 340, 350, 360].includes(id),
+          [300, 310, 320, 340, 350, 360, 380, 390].includes(id),
         ),
       ).toBe(false);
 
@@ -589,7 +600,7 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
       ]);
       expect(
         frameworkCandidates.some(({ id }) =>
-          [400, 410, 420, 440, 450, 460].includes(id),
+          [400, 410, 420, 440, 450, 460, 480].includes(id),
         ),
       ).toBe(false);
 

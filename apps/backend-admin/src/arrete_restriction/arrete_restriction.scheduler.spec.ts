@@ -119,6 +119,22 @@ describe('ArreteRestrictionService scheduled status update', () => {
     expect(completed).toBe(true);
   });
 
+  it('does not select unknown legacy boundaries for date reconciliation', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const { service, transactionRepository } = createService(
+      jest.fn().mockResolvedValue(undefined),
+    );
+
+    await service.updateArreteRestrictionStatut();
+
+    const candidateQuery = transactionRepository.query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => sql.includes('expected_end.resolved_end'));
+    expect(candidateQuery).toContain(
+      'restriction_order."dateFinSaisieConnue" = true',
+    );
+  });
+
   it('propagates a zone computation failure to the scheduled caller', async () => {
     const expectedError = new Error('zone computation failed');
     const askCompute = jest.fn().mockRejectedValue(expectedError);
@@ -183,7 +199,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     ).toBe(false);
   });
 
-  it('reconciles an order constrained by an expired framework without moving its start', async () => {
+  it('ignores a framework end before the order start without moving its start', async () => {
     const askCompute = jest.fn().mockResolvedValue({ success: true });
     const harness = createService(askCompute);
     const expiring = {
@@ -223,16 +239,17 @@ describe('ArreteRestrictionService scheduled status update', () => {
     expect(harness.transactionRepository.update).toHaveBeenCalledWith(
       { id: 37577 },
       expect.objectContaining({
-        dateFin: '2026-08-04',
+        dateFin: null,
         dateFinSaisie: null,
-        dateFinCalculee: true,
+        dateFinCalculee: false,
+        dateFinSaisieConnue: true,
         statut: 'abroge',
       }),
     );
     expect(
       harness.transactionRepository.update.mock.calls[0][1],
     ).not.toHaveProperty('dateDebut');
-    expect(harness.manager.query).toHaveBeenCalledTimes(2);
+    expect(harness.manager.query).not.toHaveBeenCalled();
   });
 
   it('invalidates history when a stale published order becomes expired', async () => {

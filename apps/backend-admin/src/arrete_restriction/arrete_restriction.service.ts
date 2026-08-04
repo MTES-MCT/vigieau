@@ -1370,12 +1370,30 @@ export class ArreteRestrictionService {
     const successorConstraint = getPredecessorEndDateConstraint(
       validSuccessors.map(({ dateDebut }) => dateDebut),
     );
+    const invalidFrameworkEnds = arrete.arretesCadre.filter(
+      (arreteCadre) =>
+        arreteCadre.statut !== 'a_valider' &&
+        !!arreteCadre.dateFin &&
+        !!arrete.dateDebut &&
+        normalizeCivilDate(arreteCadre.dateFin) <
+          normalizeCivilDate(arrete.dateDebut),
+    );
+    if (invalidFrameworkEnds.length > 0) {
+      this.logger.error(
+        `BORNES AC ANTERIEURES AU DEBUT AR IGNOREES POUR ${arrete.id}`,
+        '',
+      );
+    }
     const resolved = resolveArreteEndDate(
       arrete,
       [
         successorConstraint,
         ...arrete.arretesCadre
-          .filter((arreteCadre) => arreteCadre.statut !== 'a_valider')
+          .filter(
+            (arreteCadre) =>
+              arreteCadre.statut !== 'a_valider' &&
+              !invalidFrameworkEnds.includes(arreteCadre),
+          )
           .map((arreteCadre) => arreteCadre.dateFin),
       ],
       { rejectUnknownExtension },
@@ -2199,10 +2217,7 @@ export class ArreteRestrictionService {
                   WHEN restriction_order."dateFinCalculee" = false
                     THEN restriction_order."dateFin"
                   WHEN restriction_order."dateFinSaisieConnue" = false
-                    THEN COALESCE(
-                      restriction_order."dateFinSaisie",
-                      restriction_order."dateFin"
-                    )
+                    THEN restriction_order."dateFin"
                   ELSE restriction_order."dateFinSaisie"
                 END AS end_date
                 UNION ALL
@@ -2221,6 +2236,7 @@ export class ArreteRestrictionService {
                 WHERE link."arreteRestrictionId" = restriction_order.id
                   AND framework_order.statut <> 'a_valider'
                   AND framework_order."dateFin" IS NOT NULL
+                  AND framework_order."dateFin" >= restriction_order."dateDebut"
               ) bounds
             ) expected_end ON true
             WHERE restriction_order.statut <> 'a_valider'
@@ -2252,6 +2268,7 @@ export class ArreteRestrictionService {
                 )
                 OR (
                   restriction_order."dateFinCalculee" = true
+                  AND restriction_order."dateFinSaisieConnue" = true
                   AND restriction_order."dateFin" IS DISTINCT FROM expected_end.resolved_end
                 )
               )

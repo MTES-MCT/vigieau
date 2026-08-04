@@ -27,9 +27,16 @@ const migrationState: ProvenanceState = {
   dateFinSaisieConnue: false,
 };
 
+const legacyState: ProvenanceState = {
+  dateFinSaisie: null,
+  dateFinCalculee: false,
+  dateFinSaisieConnue: true,
+};
+
 function createQueryRunner(
   provenance: ProvenanceState = migrationState,
   updateResult: Array<{ id: number }> = [{ id: 37487 }],
+  facts: { predecessorStart?: string; frameworkEnd?: string | null } = {},
 ): QueryRunner & {
   query: jest.Mock;
   startTransaction: jest.Mock;
@@ -50,6 +57,7 @@ function createQueryRunner(
             successorStatus: 'a_venir',
             successorDepartmentId: 53,
             predecessorId: 37487,
+            predecessorStart: facts.predecessorStart ?? '2026-07-28',
             predecessorEnd: '2026-08-04',
             predecessorStatus: 'publie',
             predecessorDepartmentId: 53,
@@ -59,6 +67,9 @@ function createQueryRunner(
       }
       if (sql.includes('SELECT count(*)::integer AS count')) {
         return [{ count: 1 }];
+      }
+      if (sql.includes('MIN(framework_order."dateFin")')) {
+        return [{ frameworkEnd: facts.frameworkEnd ?? null }];
       }
       if (sql.includes('UPDATE arrete_restriction')) {
         return updateResult;
@@ -161,9 +172,27 @@ describe('confirm-open-ended-predecessor', () => {
     expect(updateSql).toContain('"dateFinSaisie" = $2::date');
     expect(updateSql).toContain('"dateFinCalculee" IS TRUE');
     expect(updateSql).toContain('"dateFinSaisieConnue" IS FALSE');
+    expect(updateSql).toContain('"dateFinSaisie" IS NULL');
+    expect(updateSql).toContain('"dateFinCalculee" IS FALSE');
+    expect(updateSql).toContain('"dateFinSaisieConnue" IS TRUE');
     expect(updateParameters).toEqual([37487, '2026-08-04']);
+    const [frameworkSql, frameworkParameters] =
+      queryRunner.query.mock.calls.find(([sql]) =>
+        sql.includes('MIN(framework_order."dateFin")'),
+      );
+    expect(frameworkSql).toContain('framework_order."dateFin" >= $2::date');
+    expect(frameworkParameters).toEqual([37487, '2026-07-28']);
     expect(queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
     expect(queryRunner.rollbackTransaction).not.toHaveBeenCalled();
+  });
+
+  it('confirms the exact conservative legacy state created by the migration', async () => {
+    const queryRunner = createQueryRunner(legacyState);
+
+    await expect(
+      confirmOpenEndedPredecessor(queryRunner, options({ apply: true })),
+    ).resolves.toEqual(expect.objectContaining({ status: 'APPLIED' }));
+    expect(queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('is idempotent only for the exact confirmed state', async () => {
@@ -193,9 +222,31 @@ describe('confirm-open-ended-predecessor', () => {
 
     await expect(
       confirmOpenEndedPredecessor(queryRunner, options()),
-    ).rejects.toThrow('provenance no longer matches the migration state');
+    ).rejects.toThrow('provenance no longer matches an approved legacy state');
     expect(queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(queryRunner.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects confirmation when the predecessor range would be inverted', async () => {
+    const queryRunner = createQueryRunner(legacyState, [{ id: 37487 }], {
+      predecessorStart: '2026-08-05',
+    });
+
+    await expect(
+      confirmOpenEndedPredecessor(queryRunner, options()),
+    ).rejects.toThrow('chain no longer matches the approved facts');
+    expect(queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects confirmation when a linked AC imposes an earlier end', async () => {
+    const queryRunner = createQueryRunner(legacyState, [{ id: 37487 }], {
+      frameworkEnd: '2026-08-03',
+    });
+
+    await expect(
+      confirmOpenEndedPredecessor(queryRunner, options()),
+    ).rejects.toThrow('chain no longer matches the approved facts');
+    expect(queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('rolls back if the guarded update loses its provenance precondition', async () => {
