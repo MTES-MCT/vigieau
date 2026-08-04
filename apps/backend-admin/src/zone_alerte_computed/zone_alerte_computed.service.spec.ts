@@ -891,6 +891,76 @@ describe('ZoneAlerteComputedService', () => {
     expect(datagouvService.uploadToDatagouv).toHaveBeenCalledTimes(2);
   });
 
+  it('publishes a validated legacy PMTiles before its matching GeoJSON', async () => {
+    const publishLegacyArtifact = jest
+      .spyOn(service as any, 'publishLegacyArtifact')
+      .mockResolvedValue(undefined);
+    const computedAt = new Date('2026-07-31T12:00:00Z');
+
+    await (service as any).publishLegacyZoneArtifacts({
+      geojsonFile: {
+        originalname: 'zones_arretes_en_vigueur.geojson',
+        buffer: Buffer.from('{}'),
+      },
+      pmtilesFile: {
+        originalname: 'zones_arretes_en_vigueur.pmtiles',
+        buffer: Buffer.from('PMTiles-test'),
+      },
+      date: computedAt,
+    });
+
+    expect(publishLegacyArtifact.mock.calls.map(([, , kind]) => kind)).toEqual([
+      'pmtiles',
+      'geojson',
+    ]);
+  });
+
+  it('keeps the legacy GeoJSON unchanged when PMTiles publication fails', async () => {
+    const publishLegacyArtifact = jest
+      .spyOn(service as any, 'publishLegacyArtifact')
+      .mockRejectedValueOnce(new Error('PMTiles upload failed'));
+
+    await expect(
+      (service as any).publishLegacyZoneArtifacts({
+        geojsonFile: {
+          originalname: 'zones_arretes_en_vigueur.geojson',
+          buffer: Buffer.from('{}'),
+        },
+        pmtilesFile: {
+          originalname: 'zones_arretes_en_vigueur.pmtiles',
+          buffer: Buffer.from('PMTiles-test'),
+        },
+        date: new Date('2026-07-31T12:00:00Z'),
+      }),
+    ).rejects.toThrow('PMTiles upload failed');
+    expect(publishLegacyArtifact).toHaveBeenCalledTimes(1);
+    expect(publishLegacyArtifact.mock.calls[0][2]).toBe('pmtiles');
+  });
+
+  it('fails the legacy publication when the stable upload fails', async () => {
+    const s3Service = {
+      uploadFile: jest.fn().mockRejectedValue(new Error('S3 unavailable')),
+      copyFile: jest.fn(),
+    };
+    const datagouvService = { uploadToDatagouv: jest.fn() };
+    (service as any).s3Service = s3Service;
+    (service as any).datagouvService = datagouvService;
+
+    await expect(
+      (service as any).publishLegacyArtifact(
+        {
+          originalname: 'zones_arretes_en_vigueur.pmtiles',
+          buffer: Buffer.from('PMTiles-test'),
+        },
+        new Date('2026-07-31T12:00:00Z'),
+        'pmtiles',
+        'Carte des zones et arrêtés en vigueur - PMTILES',
+      ),
+    ).rejects.toThrow('S3 unavailable');
+    expect(s3Service.copyFile).not.toHaveBeenCalled();
+    expect(datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
+  });
+
   it('preserves legacy data.gouv sequencing when a dated copy fails', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const s3Service = {
