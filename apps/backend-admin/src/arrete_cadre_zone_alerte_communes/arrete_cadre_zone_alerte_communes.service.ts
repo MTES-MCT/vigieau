@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { ArreteCadreZoneAlerteCommunes } from '@shared/entities/arrete_cadre_zone_alerte_communes.entity';
 import { CreateUpdateArreteCadreDto } from '../arrete_cadre/dto/create_update_arrete_cadre.dto';
 import { FindOptionsWhere } from 'typeorm/find-options/FindOptionsWhere';
@@ -15,32 +15,61 @@ export class ArreteCadreZoneAlerteCommunesService {
   async updateAllByArreteCadre(
     acId: number,
     arreteCadre: CreateUpdateArreteCadreDto,
+    manager?: EntityManager,
   ) {
-    const zonesWithCommunes = arreteCadre.zonesAlerte.filter(
-      (z) => z.communes && z.communes.length > 0,
+    const repository = manager
+      ? manager.getRepository(ArreteCadreZoneAlerteCommunes)
+      : this.arreteCadreZoneAlerteCommunesRepository;
+    const zonesWithCommunesById = new Map(
+      arreteCadre.zonesAlerte
+        .filter((zone) => zone.communes && zone.communes.length > 0)
+        .map((zone) => [zone.id, zone]),
+    );
+    const existingAssociations = await repository.find({
+      relations: {
+        zoneAlerte: true,
+      },
+      where: {
+        arreteCadre: {
+          id: acId,
+        },
+      },
+    });
+    const existingAssociationsByZoneId = new Map(
+      existingAssociations.map((association) => [
+        association.zoneAlerte.id,
+        association,
+      ]),
     );
 
     // SUPPRESSION DES ANCIENNES ZONES / COMMUNES
-    await this.arreteCadreZoneAlerteCommunesRepository.delete(<
-      FindOptionsWhere<ArreteCadreZoneAlerteCommunes>
-    >{
-      arreteCadre: {
-        id: acId,
-      },
-      id: Not(In(zonesWithCommunes.map((z) => z.id))),
-    });
-
-    const arreteCadreZoneAlerteCommunes: ArreteCadreZoneAlerteCommunes[] = [];
-    zonesWithCommunes.forEach((z) => {
-      arreteCadreZoneAlerteCommunes.push(<ArreteCadreZoneAlerteCommunes>{
-        arreteCadre: { id: acId },
-        zoneAlerte: { id: z.id },
-        communes: z.communes,
+    const associationIdsToDelete = existingAssociations
+      .filter(
+        (association) => !zonesWithCommunesById.has(association.zoneAlerte.id),
+      )
+      .map((association) => association.id);
+    if (associationIdsToDelete.length > 0) {
+      await repository.delete(<FindOptionsWhere<ArreteCadreZoneAlerteCommunes>>{
+        id: In(associationIdsToDelete),
       });
-    });
+    }
 
-    return this.arreteCadreZoneAlerteCommunesRepository.save(
-      arreteCadreZoneAlerteCommunes,
+    const arreteCadreZoneAlerteCommunes = Array.from(
+      zonesWithCommunesById.values(),
+      (zone) => {
+        const existingAssociation = existingAssociationsByZoneId.get(zone.id);
+        return <ArreteCadreZoneAlerteCommunes>{
+          ...(existingAssociation ? { id: existingAssociation.id } : {}),
+          arreteCadre: { id: acId },
+          zoneAlerte: { id: zone.id },
+          communes: zone.communes,
+        };
+      },
     );
+
+    if (arreteCadreZoneAlerteCommunes.length === 0) {
+      return [];
+    }
+    return repository.save(arreteCadreZoneAlerteCommunes);
   }
 }

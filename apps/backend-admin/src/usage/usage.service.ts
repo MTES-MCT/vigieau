@@ -4,7 +4,7 @@ import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
 import { Restriction } from '@shared/entities/restriction.entity';
 import { Usage } from '@shared/entities/usage.entity';
 import { User } from '@shared/entities/user.entity';
-import { FindManyOptions, In, Not, Repository } from 'typeorm';
+import { EntityManager, FindManyOptions, In, Not, Repository } from 'typeorm';
 import { FindOptionsWhere } from 'typeorm/find-options/FindOptionsWhere';
 import { CreateUpdateUsageDto } from './dto/create_usage.dto';
 
@@ -68,21 +68,27 @@ export class UsageService {
     return this.findOne(usage.nom);
   }
 
-  async updateAllByRestriction(restriction: Restriction): Promise<Usage[]> {
+  async updateAllByRestriction(
+    restriction: Restriction,
+    manager?: EntityManager,
+  ): Promise<Usage[]> {
+    const repository = manager
+      ? manager.getRepository(Usage)
+      : this.usageRepository;
     const usagesId = restriction.usages
       .filter((u) => u.id)
       .map((u) => u.id)
       .flat();
     // SUPPRESSION DES ANCIENS USAGES
     if (usagesId.length > 0) {
-      await this.usageRepository.delete(<FindOptionsWhere<Usage>>{
+      await repository.delete(<FindOptionsWhere<Usage>>{
         restriction: {
           id: restriction.id,
         },
         id: Not(In(usagesId)),
       });
     } else {
-      await this.usageRepository.delete(<FindOptionsWhere<Usage>>{
+      await repository.delete(<FindOptionsWhere<Usage>>{
         restriction: {
           id: restriction.id,
         },
@@ -93,28 +99,47 @@ export class UsageService {
       u.restriction = { id: restriction.id };
       return u;
     });
-    return this.usageRepository.save(usages);
+    return repository.save(usages);
   }
 
-  async updateAllByArreteCadre(arreteCadre: ArreteCadre): Promise<Usage[]> {
-    const usagesId = arreteCadre.usages.map((u) => u.id).flat();
+  async updateAllByArreteCadre(
+    arreteCadre: ArreteCadre,
+    manager?: EntityManager,
+  ): Promise<Usage[]> {
+    const repository = manager
+      ? manager.getRepository(Usage)
+      : this.usageRepository;
+    const usagesId = arreteCadre.usages
+      .filter((usage) => usage.id)
+      .map((usage) => usage.id);
     // SUPPRESSION DES ANCIENS USAGES
-    await this.usageRepository.delete(<FindOptionsWhere<Usage>>{
-      arreteCadre: {
-        id: arreteCadre.id,
-      },
-      id: Not(In(usagesId)),
-    });
+    if (usagesId.length > 0) {
+      await repository.delete(<FindOptionsWhere<Usage>>{
+        arreteCadre: {
+          id: arreteCadre.id,
+        },
+        id: Not(In(usagesId)),
+      });
+    } else {
+      await repository.delete(<FindOptionsWhere<Usage>>{
+        arreteCadre: {
+          id: arreteCadre.id,
+        },
+      });
+    }
     const usages: Usage[] = arreteCadre.usages.map((u) => {
       // @ts-expect-error on ajoute seulement l'id
       u.arreteCadre = { id: arreteCadre.id };
       return u;
     });
-    return this.usageRepository.save(usages);
+    return repository.save(usages);
   }
 
-  findByArreteCadre(arreteCadreId: number) {
-    return this.usageRepository.find(<FindManyOptions>{
+  findByArreteCadre(arreteCadreId: number, manager?: EntityManager) {
+    const repository = manager
+      ? manager.getRepository(Usage)
+      : this.usageRepository;
+    return repository.find(<FindManyOptions>{
       select: {
         id: true,
         nom: true,
@@ -150,11 +175,15 @@ export class UsageService {
     oldUsagesAc: Usage[],
     usagesAc: Usage[],
     acId: number,
+    manager?: EntityManager,
   ) {
+    const repository = manager
+      ? manager.getRepository(Usage)
+      : this.usageRepository;
     const updates = [];
     for (const u of usagesAc) {
       const oldUsage = oldUsagesAc.find((ou) => ou.id === u.id);
-      const tmp = await this.usageRepository.find(<FindManyOptions>{
+      const tmp = await repository.find(<FindManyOptions>{
         where: {
           restriction: {
             arreteRestriction: {
@@ -182,19 +211,24 @@ export class UsageService {
         descriptionCrise: u.descriptionCrise,
       };
       tmp.forEach((usageToUpdate) => {
-        updates.push(
-          this.usageRepository.update(usageToUpdate.id, usageUpdated),
-        );
+        updates.push(repository.update(usageToUpdate.id, usageUpdated));
       });
     }
     await Promise.all(updates);
   }
 
-  async deleteUsagesArByArreteCadreId(usagesNom: string[], acId: number) {
+  async deleteUsagesArByArreteCadreId(
+    usagesNom: string[],
+    acId: number,
+    manager?: EntityManager,
+  ) {
     if (usagesNom.length < 1) {
       return;
     }
-    const usagesArreteRestrictionsId = await this.usageRepository
+    const repository = manager
+      ? manager.getRepository(Usage)
+      : this.usageRepository;
+    const usagesArreteRestrictionsId = await repository
       .createQueryBuilder('usage')
       .select('usage.id')
       .leftJoin('usage.restriction', 'restriction')
@@ -204,7 +238,7 @@ export class UsageService {
       .andWhere('arreteRestriction.statut != :statut', { statut: 'abroge' })
       .andWhere('usage.nom IN (:...usagesNom)', { usagesNom: usagesNom })
       .getMany();
-    return this.usageRepository.delete({
+    return repository.delete({
       id: In(usagesArreteRestrictionsId.map((u) => u.id)),
     });
   }

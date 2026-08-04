@@ -11,9 +11,24 @@ import {
 
 describe('ArreteCadreService scheduled status update', () => {
   it('waits for and propagates a restriction status update failure', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const transactionRepository = {
+      query: jest.fn().mockResolvedValue([]),
+    };
     const repository = {
-      find: jest.fn().mockResolvedValue([]),
-      update: jest.fn().mockResolvedValue({ affected: 0 }),
+      manager: {
+        transaction: jest.fn(
+          async (
+            _isolation: string,
+            callback: (manager: {
+              getRepository: jest.Mock;
+            }) => Promise<unknown>,
+          ) =>
+            callback({
+              getRepository: jest.fn(() => transactionRepository),
+            }),
+        ),
+      },
     };
     const expectedError = new Error('restriction status update failed');
     const arreteRestrictionService = {
