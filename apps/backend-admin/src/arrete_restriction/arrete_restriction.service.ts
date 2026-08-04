@@ -53,6 +53,7 @@ import { UserService } from '../user/user.service';
 import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
 import type { DailyZonePublicationReuseContext } from '../zone_publication/zone_publication.service';
 import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import { arreteRestrictionPaginateConfig } from './dto/arrete_restriction.dto';
 import { CreateUpdateArreteRestrictionDto } from './dto/create_update_arrete_restriction.dto';
 import { PublishArreteRestrictionDto } from './dto/publish_arrete_restriction.dto';
@@ -1519,8 +1520,9 @@ export class ArreteRestrictionService {
     const [historicEpochColumn] = await manager.query(
       `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'config' AND column_name = 'historicComputeEpoch'`,
     );
-    const updated = await manager.query(
-      `
+    const updated = unwrapTypeOrmDmlReturningRows<{ id: number }>(
+      await manager.query(
+        `
         UPDATE config
         SET
           "computeMapDate" = LEAST(COALESCE("computeMapDate", $1::date), $1::date),
@@ -1530,8 +1532,9 @@ export class ArreteRestrictionService {
           ${historicEpochColumn ? ', "historicComputeEpoch" = "historicComputeEpoch" + 1' : ''}
         WHERE id = 1
         RETURNING id
-      `,
-      [date],
+        `,
+        [date],
+      ),
     );
     if (updated.length !== 1) {
       throw new Error('Unable to invalidate zone computations');

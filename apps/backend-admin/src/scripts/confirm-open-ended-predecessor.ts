@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { DataSource, QueryRunner } from 'typeorm';
 import { shiftCivilDate } from '../core/scheduling/daily-job-schedule';
 import { normalizeCivilDate } from '../shared/arrete-date-continuity';
+import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 
 export interface ConfirmPredecessorOptions {
   apply: boolean;
@@ -175,8 +176,9 @@ export async function confirmOpenEndedPredecessor(
       );
     }
     if (options.apply && !alreadyApplied) {
-      const updated = await queryRunner.query(
-        `
+      const updated = unwrapTypeOrmDmlReturningRows<{ id: number }>(
+        await queryRunner.query(
+          `
           UPDATE arrete_restriction
           SET
             "dateFinSaisie" = NULL,
@@ -197,10 +199,11 @@ export async function confirmOpenEndedPredecessor(
               )
             )
           RETURNING id
-        `,
-        [row.predecessorId, options.expectedPredecessorEnd],
+          `,
+          [row.predecessorId, options.expectedPredecessorEnd],
+        ),
       );
-      if (updated.length !== 1) {
+      if (updated.length !== 1 || updated[0].id !== row.predecessorId) {
         throw new Error('The guarded provenance update did not affect one row');
       }
     }

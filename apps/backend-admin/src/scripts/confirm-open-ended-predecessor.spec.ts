@@ -35,7 +35,7 @@ const legacyState: ProvenanceState = {
 
 function createQueryRunner(
   provenance: ProvenanceState = migrationState,
-  updateResult: Array<{ id: number }> = [{ id: 37487 }],
+  updateResult: unknown = [[{ id: 37487 }], 1],
   facts: { predecessorStart?: string; frameworkEnd?: string | null } = {},
 ): QueryRunner & {
   query: jest.Mock;
@@ -228,7 +228,7 @@ describe('confirm-open-ended-predecessor', () => {
   });
 
   it('rejects confirmation when the predecessor range would be inverted', async () => {
-    const queryRunner = createQueryRunner(legacyState, [{ id: 37487 }], {
+    const queryRunner = createQueryRunner(legacyState, undefined, {
       predecessorStart: '2026-08-05',
     });
 
@@ -239,7 +239,7 @@ describe('confirm-open-ended-predecessor', () => {
   });
 
   it('rejects confirmation when a linked AC imposes an earlier end', async () => {
-    const queryRunner = createQueryRunner(legacyState, [{ id: 37487 }], {
+    const queryRunner = createQueryRunner(legacyState, undefined, {
       frameworkEnd: '2026-08-03',
     });
 
@@ -250,7 +250,7 @@ describe('confirm-open-ended-predecessor', () => {
   });
 
   it('rolls back if the guarded update loses its provenance precondition', async () => {
-    const queryRunner = createQueryRunner(migrationState, []);
+    const queryRunner = createQueryRunner(migrationState, [[], 0]);
 
     await expect(
       confirmOpenEndedPredecessor(queryRunner, options({ apply: true })),

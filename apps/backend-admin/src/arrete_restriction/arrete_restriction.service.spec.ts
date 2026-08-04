@@ -143,7 +143,7 @@ function createHarness(
     query: jest
       .fn()
       .mockResolvedValueOnce([{ exists: true }])
-      .mockResolvedValueOnce([{ id: 1 }]),
+      .mockResolvedValueOnce([[{ id: 1 }], 1]),
   };
   const repository = {
     manager: {
@@ -244,6 +244,23 @@ describe('ArreteRestrictionService.publish', () => {
       [harness.initial.departement],
       'PUBLICATION AR',
     );
+  });
+
+  it('rejects the publication when historic invalidation updates no config row', async () => {
+    const harness = createHarness();
+    harness.manager.query
+      .mockReset()
+      .mockResolvedValueOnce([{ exists: true }])
+      .mockResolvedValueOnce([[], 0]);
+
+    await expect(
+      harness.service.publish(
+        37577,
+        null,
+        { dateDebut: '2026-08-05', dateFin: null, dateSignature: null },
+        currentUser,
+      ),
+    ).rejects.toThrow('Unable to invalidate zone computations');
   });
 
   it('rejects a legacy extension whose original end is unknown', async () => {
