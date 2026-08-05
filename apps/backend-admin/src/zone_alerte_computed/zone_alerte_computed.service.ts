@@ -1596,9 +1596,7 @@ DELETE FROM zone_alerte_computed
       const publicationEnabled = isZonePublicationEnabled();
       historicSourceRevision =
         expectedSourceRevision ??
-        (publicationEnabled
-          ? await this.zonePublicationService.getSourceRevision()
-          : undefined);
+        (await this.zonePublicationService.getSourceRevision());
       const config = await this.configService.getConfig();
       if (!config) {
         throw new Error('Historic cursor configuration is missing');

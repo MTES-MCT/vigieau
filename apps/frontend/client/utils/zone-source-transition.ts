@@ -20,6 +20,15 @@ export const getPmtilesRequestKind = (
   requestType?: string,
 ): PmtilesRequestKind => (requestType === 'json' ? 'tilejson' : 'tile');
 
+export const isEmptyPmtilesArchive = (header: {
+  numAddressedTiles: number;
+  numTileEntries: number;
+  numTileContents: number;
+}): boolean =>
+  header.numAddressedTiles === 0 &&
+  header.numTileEntries === 0 &&
+  header.numTileContents === 0;
+
 export const getZoneSourceLoadAction = ({
   failed,
   requestKind,

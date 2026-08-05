@@ -138,8 +138,8 @@ export class StatisticCommuneService {
           (
             SELECT jsonb_agg(restriction.value ORDER BY restriction.value ->> 'date')
             FROM jsonb_array_elements(COALESCE(sc.restrictions, '[]'::jsonb)) AS restriction(value)
-            WHERE restriction.value ->> 'date' >= :startDate
-              AND restriction.value ->> 'date' < :endDate
+            WHERE restriction.value ->> 'date' >= :startDate::text
+              AND restriction.value ->> 'date' < :endDate::text
           ),
           '[]'::jsonb
         )`,
@@ -154,8 +154,8 @@ export class StatisticCommuneService {
             AND (
               snapshot.scope = 'bootstrap'
               OR (
-                snapshot."snapshotDate" >= :startDate
-                AND snapshot."snapshotDate" < :endDate
+                snapshot."snapshotDate" >= :startDate::date
+                AND snapshot."snapshotDate" < :endDate::date
               )
             )
         )`,
@@ -720,7 +720,7 @@ export class StatisticCommuneService {
       startDate && endDate
         ? `AND (
             "scope" = 'bootstrap'
-            OR ("snapshotDate" >= $1 AND "snapshotDate" < $2)
+            OR ("snapshotDate" >= $1::date AND "snapshotDate" < $2::date)
           )`
         : '';
     if (startDate && endDate) {

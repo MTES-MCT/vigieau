@@ -6,6 +6,7 @@ import {
   getPmtilesRequestKind,
   getZoneSourceKey,
   getZoneSourceLoadAction,
+  isEmptyPmtilesArchive,
   selectResponsivePublicationPin,
   shouldResetZoneSourceRetryCycle,
 } from '../client/utils/zone-source-transition.ts';
@@ -26,6 +27,25 @@ test('distinguishes TileJSON metadata from actual tile requests', () => {
   assert.equal(getPmtilesRequestKind('arrayBuffer'), 'tile');
   assert.equal(getAction(), 'ignore');
   assert.equal(getAction({ requestKind: 'tile' }), 'validate');
+});
+
+test('recognizes a PMTiles archive that has no tile data to validate', () => {
+  assert.equal(
+    isEmptyPmtilesArchive({
+      numAddressedTiles: 0,
+      numTileEntries: 0,
+      numTileContents: 0,
+    }),
+    true,
+  );
+  assert.equal(
+    isEmptyPmtilesArchive({
+      numAddressedTiles: 1,
+      numTileEntries: 1,
+      numTileContents: 1,
+    }),
+    false,
+  );
 });
 
 test('restores an unvalidated candidate and retries within the bound', () => {

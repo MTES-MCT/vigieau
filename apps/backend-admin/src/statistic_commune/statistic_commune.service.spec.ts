@@ -92,7 +92,9 @@ describe('StatisticCommuneService', () => {
     ).resolves.toBe(harness.stream);
 
     expect(harness.dataSource.query).toHaveBeenCalledWith(
-      expect.stringContaining('"snapshotDate" >= $1'),
+      expect.stringContaining(
+        '"snapshotDate" >= $1::date AND "snapshotDate" < $2::date',
+      ),
       ['2026-01-01', '2027-01-01'],
     );
     expect(harness.queryBuilder.setParameters).toHaveBeenCalledWith({
@@ -106,10 +108,13 @@ describe('StatisticCommuneService', () => {
       (call) => call[1] === 'sc_restrictions',
     )[0];
     expect(restrictionSelection).toContain(
-      "restriction.value ->> 'date' >= :startDate",
+      "restriction.value ->> 'date' >= :startDate::text",
     );
     expect(restrictionSelection).toContain(
-      "restriction.value ->> 'date' < :endDate",
+      "restriction.value ->> 'date' < :endDate::text",
+    );
+    expect(harness.queryBuilder.where).toHaveBeenCalledWith(
+      expect.stringContaining('snapshot."snapshotDate" >= :startDate::date'),
     );
   });
 

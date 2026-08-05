@@ -23,6 +23,7 @@ interface PublicationRunRow {
 }
 
 export interface PublicationRunIdentity {
+  publicationMode?: 'legacy' | 'versioned';
   sourceRevision?: string;
   publicationId?: string;
   materializationVersion?: number;

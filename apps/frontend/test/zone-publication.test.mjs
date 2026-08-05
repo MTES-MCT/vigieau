@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildLegacyPmtilesUrl,
   buildPublishedZonePath,
   classifyManifestFailure,
   createLocalDateRollover,
+  fetchLegacyPmtilesEtag,
   formatLocalCivilDate,
   getDepartmentsApiDate,
   getHttpErrorStatus,
@@ -12,8 +14,10 @@ import {
   getNextSuccessfulRefreshVersion,
   isCurrentMapDate,
   isZonePublication,
+  selectLegacyPmtilesEtag,
   shouldRefreshZonePublication,
   shouldReplaceZoneLayers,
+  ZONE_PUBLICATION_LEGACY_HEAD_TIMEOUT_MS,
 } from '../client/utils/zone-publication.ts';
 
 const validPublication = {
@@ -53,11 +57,27 @@ test('allows the legacy fallback for old API route responses', () => {
   assert.equal(classifyManifestFailure(new Error('network')), 'error');
 });
 
-test('keeps the last valid publication when a refresh fails', () => {
-  assert.equal(
-    classifyManifestFailure({ response: { status: 404 } }, true),
-    'keep',
+test('switches a cached versioned publication to legacy on an old API response', () => {
+  const failure = classifyManifestFailure(
+    { response: { status: 404 } },
+    true,
   );
+  assert.equal(failure, 'legacy');
+  assert.equal(
+    getManifestFailureAction(failure, true),
+    'legacy',
+  );
+  const legacyEtag = selectLegacyPmtilesEtag(null, '"legacy-etag"');
+  assert.equal(
+    buildLegacyPmtilesUrl(
+      'https://example.test/zones/current.pmtiles',
+      legacyEtag,
+    ),
+    'https://example.test/zones/current.pmtiles?etag=%22legacy-etag%22',
+  );
+});
+
+test('keeps the last valid publication when a transient refresh fails', () => {
   assert.equal(classifyManifestFailure({ statusCode: 503 }, true), 'keep');
   assert.equal(classifyManifestFailure(new Error('network'), true), 'keep');
 });
@@ -72,6 +92,69 @@ test('rejects a failed forced refresh while non-forced reads may use cache', () 
 test('signals only successful forced manifest refreshes', () => {
   assert.equal(getNextSuccessfulRefreshVersion(4, false), 4);
   assert.equal(getNextSuccessfulRefreshVersion(4, true), 5);
+});
+
+test('versions the legacy PMTiles URL only when an ETag is available', () => {
+  const currentUrl = 'https://example.test/zones/current.pmtiles?source=legacy';
+
+  assert.equal(buildLegacyPmtilesUrl(currentUrl, null), currentUrl);
+  assert.equal(
+    buildLegacyPmtilesUrl(currentUrl, '"etag-42"'),
+    'https://example.test/zones/current.pmtiles?source=legacy&etag=%22etag-42%22',
+  );
+});
+
+test('keeps the previous legacy PMTiles ETag when HEAD returns none', () => {
+  assert.equal(selectLegacyPmtilesEtag(null, ' "etag-42" '), '"etag-42"');
+  assert.equal(
+    selectLegacyPmtilesEtag('"etag-42"', null),
+    '"etag-42"',
+  );
+  assert.equal(
+    selectLegacyPmtilesEtag('"etag-42"', '   '),
+    '"etag-42"',
+  );
+  assert.equal(
+    selectLegacyPmtilesEtag('"etag-42"', '"etag-43"'),
+    '"etag-43"',
+  );
+});
+
+test('reads the legacy PMTiles ETag with an uncached HEAD request', async () => {
+  const calls = [];
+  const etag = await fetchLegacyPmtilesEtag(
+    'https://example.test/zones/current.pmtiles',
+    async (url, options) => {
+      calls.push({ url, options });
+      return {
+        headers: new Headers({ etag: ' "etag-42" ' }),
+      };
+    },
+  );
+
+  assert.equal(etag, '"etag-42"');
+  assert.deepEqual(calls, [
+    {
+      url: 'https://example.test/zones/current.pmtiles',
+      options: {
+        method: 'HEAD',
+        cache: 'no-store',
+        retry: 0,
+        timeout: ZONE_PUBLICATION_LEGACY_HEAD_TIMEOUT_MS,
+      },
+    },
+  ]);
+});
+
+test('ignores a failed legacy PMTiles HEAD request', async () => {
+  const etag = await fetchLegacyPmtilesEtag(
+    'https://example.test/zones/current.pmtiles',
+    async () => {
+      throw new Error('network unavailable');
+    },
+  );
+
+  assert.equal(etag, null);
 });
 
 test('treats a missing date as the current map view', () => {

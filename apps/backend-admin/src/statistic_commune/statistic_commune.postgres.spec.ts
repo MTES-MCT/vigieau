@@ -1,4 +1,5 @@
 import { DataSource, QueryRunner } from 'typeorm';
+import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
 import { StatisticCommuneService } from './statistic_commune.service';
 
 const postgresUrl = process.env.STATISTIC_COMMUNE_POSTGRES_URL;
@@ -37,6 +38,13 @@ type StatisticCommunePersister = {
 
 type StatisticCommuneInternals = SnapshotFinalizer & StatisticCommunePersister;
 
+type StatisticCommuneExportGuard = {
+  assertNoIncompleteSnapshots(
+    startDate?: string,
+    endDate?: string,
+  ): Promise<void>;
+};
+
 describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
   let dataSource: DataSource;
   let queryRunner: QueryRunner;
@@ -46,7 +54,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     dataSource = await new DataSource({
       type: 'postgres',
       url: postgresUrl,
-      entities: [],
+      entities: [`${__dirname}/../../../../global_shared/**/*.entity{.ts,.js}`],
       synchronize: false,
       logging: false,
     }).initialize();
@@ -99,6 +107,19 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       expectedStatus,
       completedAtIsNull,
     }) => {
+      await queryRunner.query(`
+        CREATE TEMP TABLE "statistic_commune_snapshot" (
+          "snapshotDate" date NOT NULL,
+          "scope" varchar NOT NULL,
+          "status" varchar NOT NULL,
+          "processedCommuneCount" integer NOT NULL DEFAULT 0,
+          "expectedCommuneCount" integer NOT NULL DEFAULT 0,
+          "completedAt" timestamptz,
+          "lastError" text,
+          "updatedAt" timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY ("snapshotDate", "scope")
+        ) ON COMMIT DROP
+      `);
       await queryRunner.query(
         `
           INSERT INTO "statistic_commune_snapshot" (
@@ -138,6 +159,107 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       });
     },
   );
+
+  it('compares export bounds as PostgreSQL dates', async () => {
+    await queryRunner.query(`
+      CREATE TEMP TABLE "statistic_commune_snapshot" (
+        "snapshotDate" date NOT NULL,
+        "scope" varchar NOT NULL,
+        "status" varchar NOT NULL,
+        "processedCommuneCount" integer NOT NULL DEFAULT 0,
+        "expectedCommuneCount" integer NOT NULL DEFAULT 0
+      ) ON COMMIT DROP
+    `);
+    await queryRunner.query(`
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate",
+        "scope",
+        "status"
+      ) VALUES
+        ('2025-12-31', 'national', 'failed'),
+        ('2026-01-01', 'national', 'completed')
+    `);
+    const exportGuard = new StatisticCommuneService(
+      {} as never,
+      {} as never,
+      {
+        query: (sql: string, parameters: unknown[]) =>
+          queryRunner.query(sql, parameters),
+      } as DataSource,
+    ) as unknown as StatisticCommuneExportGuard;
+
+    await expect(
+      exportGuard.assertNoIncompleteSnapshots('2026-01-01', '2027-01-01'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('streams a bounded year without ambiguous PostgreSQL date parameters', async () => {
+    await queryRunner.query(`
+      CREATE TEMP TABLE "commune" (
+        "id" integer PRIMARY KEY,
+        "code" varchar NOT NULL,
+        "nom" varchar NOT NULL
+      ) ON COMMIT DROP
+    `);
+    await queryRunner.query(`
+      CREATE TEMP TABLE "statistic_commune" (
+        "id" integer PRIMARY KEY,
+        "communeId" integer NOT NULL,
+        "restrictions" jsonb
+      ) ON COMMIT DROP
+    `);
+    await queryRunner.query(`
+      CREATE TEMP TABLE "statistic_commune_snapshot" (
+        "snapshotDate" date NOT NULL,
+        "scope" varchar NOT NULL,
+        "status" varchar NOT NULL,
+        "processedCommuneCount" integer NOT NULL DEFAULT 0,
+        "expectedCommuneCount" integer NOT NULL DEFAULT 0
+      ) ON COMMIT DROP
+    `);
+    await queryRunner.query(`
+      INSERT INTO "commune" ("id", "code", "nom")
+      VALUES (1, '01001', 'Commune test')
+    `);
+    await queryRunner.query(
+      `
+        INSERT INTO "statistic_commune" (
+          "id", "communeId", "restrictions"
+        ) VALUES (1, 1, $1::jsonb)
+      `,
+      [
+        JSON.stringify([
+          { date: '2025-12-31', SUP: 'vigilance' },
+          { date: '2026-01-01', SUP: 'alerte' },
+          { date: 'not-a-date', SUP: 'crise' },
+        ]),
+      ],
+    );
+    await queryRunner.query(`
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status"
+      ) VALUES ('2026-01-01', 'national', 'completed')
+    `);
+    const streamService = new StatisticCommuneService(
+      queryRunner.manager.getRepository(StatisticCommune),
+      {} as never,
+      {
+        query: (sql: string, parameters: unknown[]) =>
+          queryRunner.query(sql, parameters),
+      } as DataSource,
+    );
+
+    const stream = await streamService.getStatisticCommuneStreamForYear(2026);
+    const rows: Array<{ sc_restrictions: unknown[] }> = [];
+    for await (const row of stream) {
+      rows.push(row as { sc_restrictions: unknown[] });
+    }
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sc_restrictions).toEqual([
+      { date: '2026-01-01', SUP: 'alerte' },
+    ]);
+  });
 
   it('persists commune JSONB idempotently and normalizes duplicate dates', async () => {
     await queryRunner.query(`

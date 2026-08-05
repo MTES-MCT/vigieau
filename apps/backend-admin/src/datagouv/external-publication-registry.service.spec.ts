@@ -295,6 +295,50 @@ describe('ExternalPublicationRegistryService', () => {
     });
   });
 
+  it('reruns a versioned success when legacy publication resumes the same day', async () => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) {
+        return [
+          {
+            status: 'succeeded',
+            attempt: 1,
+            startedAt: '2026-08-01T06:00:00Z',
+            retryAfter: null,
+            metadata: {
+              publicationId: 'publication-versioned',
+              sourceRevision: '42',
+              materializationVersion: 3,
+            },
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const harness = createHarness(query);
+    const run = jest.fn().mockResolvedValue(undefined);
+
+    await expect(
+      harness.service.executeDailyRun(
+        'datagouv:daily',
+        '2026-08-01',
+        run,
+        new Date('2026-08-01T07:00:00Z'),
+        { identity: { publicationMode: 'legacy' } },
+      ),
+    ).resolves.toBe('succeeded');
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const successUpdate = query.mock.calls.find(([sql]) =>
+      sql.includes('SET "status" = \'succeeded\''),
+    );
+    expect(JSON.parse(successUpdate?.[1]?.[3] as string)).toEqual({
+      publicationMode: 'legacy',
+    });
+  });
+
   it('reruns a historic success after an equal-date generation invalidation', async () => {
     const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       void _params;

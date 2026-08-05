@@ -56,14 +56,13 @@ export const classifyManifestFailure = (
   error: unknown,
   hasValidPublication = false,
 ): 'legacy' | 'keep' | 'error' => {
-  if (hasValidPublication) {
-    return 'keep';
-  }
-
   const status = getHttpErrorStatus(error);
   // The previous API routes /zones/publication through /zones/:id and returns
   // 400 from its integer parser. Both statuses therefore mean "legacy API".
-  return status === 400 || status === 404 ? 'legacy' : 'error';
+  if (status === 400 || status === 404) {
+    return 'legacy';
+  }
+  return hasValidPublication ? 'keep' : 'error';
 };
 
 export type ManifestFailureAction = 'legacy' | 'serve-cache' | 'throw';
@@ -85,6 +84,58 @@ export const getNextSuccessfulRefreshVersion = (
   currentVersion: number,
   force: boolean,
 ): number => (force ? currentVersion + 1 : currentVersion);
+
+export const ZONE_PUBLICATION_LEGACY_HEAD_TIMEOUT_MS = 3_000;
+
+interface LegacyPmtilesHeadResponse {
+  headers: {
+    get: (name: string) => string | null;
+  };
+}
+
+export type LegacyPmtilesHeadFetcher = (
+  url: string,
+  options: {
+    method: 'HEAD';
+    cache: 'no-store';
+    retry: 0;
+    timeout: number;
+  },
+) => Promise<LegacyPmtilesHeadResponse>;
+
+export async function fetchLegacyPmtilesEtag(
+  url: string,
+  fetchHead: LegacyPmtilesHeadFetcher,
+): Promise<string | null> {
+  try {
+    const response = await fetchHead(url, {
+      method: 'HEAD',
+      cache: 'no-store',
+      retry: 0,
+      timeout: ZONE_PUBLICATION_LEGACY_HEAD_TIMEOUT_MS,
+    });
+    return response.headers.get('etag')?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export const selectLegacyPmtilesEtag = (
+  currentEtag: string | null,
+  candidateEtag: string | null | undefined,
+): string | null => candidateEtag?.trim() || currentEtag;
+
+export const buildLegacyPmtilesUrl = (
+  configuredUrl: string,
+  etag: string | null,
+): string => {
+  if (!etag) {
+    return configuredUrl;
+  }
+  const url = new URL(configuredUrl);
+  url.searchParams.set('etag', etag);
+  return url.toString();
+};
 
 export const isZonePublication = (value: unknown): value is ZonePublication => {
   const publication = value as Partial<ZonePublication> | null;

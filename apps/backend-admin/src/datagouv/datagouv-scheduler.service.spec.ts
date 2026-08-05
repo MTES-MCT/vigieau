@@ -6,6 +6,7 @@ import {
 import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zone_publication.config';
 
 describe('DatagouvSchedulerService', () => {
+  const previousZonePublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
   const historicConfig = {
     computeMapDate: new Date('2026-07-31T00:00:00.000Z'),
     computeStatsDate: '2026-07-31T12:00:00.000Z',
@@ -20,6 +21,18 @@ describe('DatagouvSchedulerService', () => {
     historicMapGeneration: '12',
     historicStatsGeneration: '8',
   };
+
+  beforeEach(() => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+  });
+
+  afterAll(() => {
+    if (previousZonePublicationEnabled === undefined) {
+      delete process.env.ZONE_PUBLICATION_ENABLED;
+    } else {
+      process.env.ZONE_PUBLICATION_ENABLED = previousZonePublicationEnabled;
+    }
+  });
 
   const createService = () => {
     const datagouvService = {
@@ -111,6 +124,73 @@ describe('DatagouvSchedulerService', () => {
         verifyCurrent: expect.any(Function),
       }),
     );
+  });
+
+  it('publishes legacy data after the national computation succeeds', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const harness = createService();
+    const now = new Date('2026-08-01T04:01:00Z');
+
+    await harness.service.publishIfDue(now);
+
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledTimes(1);
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
+      'compute:national-daily',
+      '2026-08-01',
+    );
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
+      'datagouv:daily',
+      '2026-08-01',
+      expect.any(Function),
+      now,
+      { identity: { publicationMode: 'legacy' } },
+    );
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
+      '2026-08-01',
+      { publicationMode: 'legacy' },
+    );
+    expect(
+      harness.zonePublicationService.getActivePublicationGate,
+    ).not.toHaveBeenCalled();
+    expect(harness.configService.getConfig).not.toHaveBeenCalled();
+  });
+
+  it('waits for the national computation in legacy mode', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const harness = createService();
+    harness.registry.hasSucceeded.mockResolvedValue(false);
+
+    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
+
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
+      'compute:national-daily',
+      '2026-08-01',
+    );
+    expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
+    expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy retries idempotent through the daily registry', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const harness = createService();
+    let completed = false;
+    harness.registry.executeDailyRun.mockImplementation(
+      async (_key: string, _date: string, run: () => Promise<void>) => {
+        if (completed) {
+          return 'already_succeeded';
+        }
+        await run();
+        completed = true;
+        return 'succeeded';
+      },
+    );
+    const now = new Date('2026-08-01T04:01:00Z');
+
+    await harness.service.publishIfDue(now);
+    await harness.service.publishIfDue(now);
+
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(2);
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
   });
 
   it('waits for the national computation of the same civil day', async () => {

@@ -782,6 +782,7 @@ const restoreZoneSource = (source: ZoneSourceState | null): void => {
 const replaceZoneLayers = (
   requestedSource: RequestedZoneSource,
   candidate: PMTiles,
+  validated = false,
 ): void => {
   const previous = canRetainDisplayedZoneSource(
     displayedZoneSource?.viewKey,
@@ -792,7 +793,7 @@ const replaceZoneLayers = (
   const candidateState: ZoneSourceState = {
     ...requestedSource,
     pmtiles: candidate,
-    validated: false,
+    validated,
   };
 
   resetZoneSelected();
@@ -808,10 +809,12 @@ const replaceZoneLayers = (
   }
 
   displayedZoneSource = candidateState;
-  pendingZoneSourceTransition = {
-    candidate: candidateState,
-    previous,
-  };
+  pendingZoneSourceTransition = validated
+    ? null
+    : {
+        candidate: candidateState,
+        previous,
+      };
   showRestrictionsBtn.value = candidateState.restrictionsAvailable;
   publishDisplayedPublicationPin(candidateState);
   showError.value = false;
@@ -902,7 +905,11 @@ const displayZoneLayers = async (
         ) {
           throw createAbortError();
         }
-        replaceZoneLayers(requestedSource, candidate);
+        replaceZoneLayers(
+          requestedSource,
+          candidate.archive,
+          candidate.empty,
+        );
       },
     );
   } catch (error) {

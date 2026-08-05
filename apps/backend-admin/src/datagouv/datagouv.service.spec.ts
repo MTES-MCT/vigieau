@@ -367,6 +367,70 @@ describe('DatagouvService', () => {
     );
   });
 
+  it('resumes a mixed same-day publication with the explicit legacy identity', async () => {
+    const harness = createHarness('/tmp');
+    const existingIdentities = new Map<string, Record<string, unknown>>([
+      [
+        'datagouv:arretes',
+        {
+          publicationId: 'publication-versioned',
+          sourceRevision: '42',
+          materializationVersion: 3,
+        },
+      ],
+      ['datagouv:historique-arretes', { publicationMode: 'legacy' }],
+    ]);
+    harness.publicationRegistry.executeDailyRun.mockImplementation(
+      async (
+        key: string,
+        _date: string,
+        run: () => Promise<void>,
+        _now: Date,
+        options?: { identity?: Record<string, unknown> },
+      ) => {
+        const existingIdentity = existingIdentities.get(key);
+        const requestedIdentity = options?.identity;
+        if (
+          existingIdentity &&
+          requestedIdentity &&
+          Object.entries(requestedIdentity).every(
+            ([name, value]) => existingIdentity[name] === value,
+          )
+        ) {
+          return 'already_succeeded';
+        }
+        await run();
+        existingIdentities.set(key, requestedIdentity || {});
+        return 'succeeded';
+      },
+    );
+    const updateArretes = jest
+      .spyOn(harness.service, 'updateArretes')
+      .mockResolvedValue();
+    const updateHistoriqueArretes = jest
+      .spyOn(harness.service, 'updateHistoriqueArretes')
+      .mockResolvedValue();
+    jest.spyOn(harness.service, 'updateArretesCadre').mockResolvedValue();
+    jest.spyOn(harness.service, 'updateRestrictions').mockResolvedValue();
+    jest.spyOn(harness.service, 'updateCommunes').mockResolvedValue();
+    jest.spyOn(harness.service, 'updateHistoriqueCommunes').mockResolvedValue();
+
+    await harness.service.updateDatagouvData('2026-08-01', {
+      publicationMode: 'legacy',
+    });
+
+    expect(updateArretes).toHaveBeenCalledTimes(1);
+    expect(updateHistoriqueArretes).not.toHaveBeenCalled();
+    expect(harness.publicationRegistry.executeDailyRun).toHaveBeenCalledTimes(
+      6,
+    );
+    for (const call of harness.publicationRegistry.executeDailyRun.mock.calls) {
+      expect(call[4]).toEqual({
+        identity: { publicationMode: 'legacy' },
+      });
+    }
+  });
+
   it('publishes only the explicitly configured arrete archive years', async () => {
     const harness = createHarness('/tmp', {
       API_DATAGOUV_ARRETES_ARCHIVE_YEARS: '2013, 2012, 2013',

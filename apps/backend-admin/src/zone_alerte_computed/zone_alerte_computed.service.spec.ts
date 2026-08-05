@@ -20,6 +20,7 @@ import {
   withHistoricArtifactCleanup,
   ZoneAlerteComputedHistoricService,
 } from './zone_alerte_computed_historic.service';
+import * as emptyPmtiles from './empty-pmtiles';
 
 jest.mock('worker_threads', () => ({
   ...jest.requireActual('worker_threads'),
@@ -596,6 +597,22 @@ describe('ZoneAlerteComputedService', () => {
       '2026-03-25',
       '2026-03-25',
     );
+  });
+
+  it('pins historic catch-up to a source revision in legacy publication mode', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: null,
+      computeStatsDate: null,
+      computeMapGeneration: '0',
+      computeStatsGeneration: '0',
+      historicComputeEpoch: '0',
+    });
+
+    await service.computeHistoric(true);
+
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect((service as any).runHistoricWorker).not.toHaveBeenCalled();
   });
 
   it('handles a monthly aggregate failure in background catch-up', async () => {
@@ -2369,6 +2386,7 @@ describe('withHistoricArtifactCleanup', () => {
 
 describe('ZoneAlerteComputedHistoricService', () => {
   let service: ZoneAlerteComputedHistoricService;
+  let arreteRestrictionService: { findByDate: jest.Mock };
   let statisticDepartementService: {
     computeDepartementStatisticsRestrictions: jest.Mock;
     sortStatDepartement: jest.Mock;
@@ -2389,8 +2407,10 @@ describe('ZoneAlerteComputedHistoricService', () => {
   let zoneAlerteComputedHistoricRepository: {
     createQueryBuilder: jest.Mock;
     delete: jest.Mock;
+    find: jest.Mock;
   };
   let zoneAlerteService: {
+    findByArreteRestriction: jest.Mock;
     findGeometriesByIds: jest.Mock;
     findOne: jest.Mock;
   };
@@ -2443,6 +2463,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
         .fn()
         .mockResolvedValue(undefined),
     };
+    arreteRestrictionService = {
+      findByDate: jest.fn().mockResolvedValue([]),
+    };
     configService = {
       setConfig: jest.fn().mockResolvedValue(undefined),
       advanceComputeMapDate: jest.fn().mockResolvedValue(true),
@@ -2472,8 +2495,10 @@ describe('ZoneAlerteComputedHistoricService', () => {
         .fn()
         .mockReturnValue(updateAllHistoricZonesQuery),
       delete: jest.fn().mockResolvedValue(undefined),
+      find: jest.fn(),
     };
     zoneAlerteService = {
+      findByArreteRestriction: jest.fn().mockResolvedValue([]),
       findGeometriesByIds: jest.fn(),
       findOne: jest.fn(),
     };
@@ -2490,7 +2515,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
     };
 
     service = new ZoneAlerteComputedHistoricService(
-      {} as any,
+      arreteRestrictionService as any,
       zoneAlerteService as any,
       {} as any,
       {} as any,
@@ -2842,6 +2867,166 @@ describe('ZoneAlerteComputedHistoricService', () => {
     ).toBe(false);
   });
 
+  it('publishes and certifies a legacy historic day without mappable source restrictions', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-legacy-historic-empty-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(new Map());
+    arreteRestrictionService.findByDate.mockResolvedValue([{ id: 20958 }]);
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 20958,
+        departmentCode: null,
+        zoneType: null,
+        mappableCount: 0,
+        sourceZoneIds: [],
+      },
+    ]);
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).execPromise = jest.fn();
+
+    try {
+      await expect(
+        service.computeHistoricMaps(
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          '2011-06-06',
+          '2011-06-06',
+          '12',
+          '4',
+          undefined,
+          '2011-06-07',
+        ),
+      ).resolves.toEqual({
+        mapCursor: '2011-06-07',
+        statsCursor: '2011-06-07',
+        mapGeneration: '13',
+        statsGeneration: '5',
+      });
+
+      expect(arreteRestrictionService.findByDate).toHaveBeenCalledWith(
+        expect.objectContaining({ _isAMomentObject: true }),
+      );
+      expect(zoneAlerteService.findByArreteRestriction).toHaveBeenCalledWith([
+        20958,
+      ]);
+      expect(generateEmptyPmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2011-06-07.pmtiles',
+        ),
+      });
+      expect((service as any).execPromise).not.toHaveBeenCalled();
+      expect(
+        uploadFile.mock.calls.map(([file, prefix]) => [
+          file.originalname,
+          prefix,
+        ]),
+      ).toEqual([
+        ['zones_arretes_en_vigueur_2011-06-07.pmtiles', 'pmtiles/'],
+        ['zones_arretes_en_vigueur_2011-06-07.geojson', 'geojson/'],
+      ]);
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString())).toEqual({
+        type: 'FeatureCollection',
+        features: [],
+      });
+      expect(
+        statisticDepartementService.computeDepartementStatisticsRestrictions,
+      ).toHaveBeenCalledWith([], new Date('2011-06-07'), true, true);
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions,
+      ).toHaveBeenCalledWith(
+        [],
+        new Date('2011-06-07'),
+        true,
+        true,
+        undefined,
+        expect.any(Object),
+      );
+      expect(
+        statisticService.computeDepartementsSituationHistoric,
+      ).toHaveBeenCalledWith([], '2011-06-07');
+      expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
+        '2011-06-06',
+        '4',
+        '2011-06-07',
+        undefined,
+      );
+      expect(configService.advanceComputeMapDate).toHaveBeenCalledWith(
+        '2011-06-06',
+        '12',
+        '2011-06-07',
+        undefined,
+      );
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an empty legacy artifact when source restrictions are mappable', async () => {
+    arreteRestrictionService.findByDate.mockResolvedValue([{ id: 42 }]);
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 42,
+        departmentCode: '01',
+        zoneType: 'SUP',
+        mappableCount: 1,
+        sourceZoneIds: [101],
+      },
+    ]);
+    const uploadFile = jest.fn();
+    const generateEmptyPmtiles = jest.spyOn(
+      emptyPmtiles,
+      'generateEmptyPmtiles',
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(tmpdir()),
+    };
+    (service as any).s3Service = { uploadFile };
+
+    try {
+      await expect(
+        service.computeHistoricMaps(
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          undefined,
+          '2011-06-06',
+          undefined,
+          '12',
+          undefined,
+          undefined,
+          '2011-06-07',
+        ),
+      ).rejects.toThrow(
+        'Historic map 2011-06-07 source coverage mismatch (missing=01, unexpected=none)',
+      );
+
+      expect(generateEmptyPmtiles).not.toHaveBeenCalled();
+      expect(uploadFile).not.toHaveBeenCalled();
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions,
+      ).not.toHaveBeenCalled();
+      expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
+      expect(configService.advanceComputeStatsDate).not.toHaveBeenCalled();
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+    }
+  });
+
   it('computes statistics from dateStats onward in computed historic maps', async () => {
     await service.computeHistoricMapsComputed(
       moment('2026-06-21', 'YYYY-MM-DD'),
@@ -2877,6 +3062,265 @@ describe('ZoneAlerteComputedHistoricService', () => {
       enabled: true,
     });
     expect(updateAllHistoricZonesQuery.where).toHaveBeenCalledWith('1 = 1');
+  });
+
+  it('certifies statistics and cursors for a historic day without zones', async () => {
+    (service as any).computeGeoJson = jest.fn().mockResolvedValue([]);
+
+    await service.computeHistoricMapsComputed(
+      moment('2024-04-29', 'YYYY-MM-DD'),
+      moment('2024-04-29', 'YYYY-MM-DD'),
+      '2024-04-28',
+      '2024-04-28',
+      '12',
+      '4',
+      undefined,
+      '2024-04-29',
+    );
+
+    expect(
+      statisticDepartementService.computeDepartementStatisticsRestrictions,
+    ).toHaveBeenCalledWith([], new Date('2024-04-29'), true);
+    expect(
+      statisticCommuneService.computeCommuneStatisticsRestrictions,
+    ).toHaveBeenCalledWith(
+      [],
+      new Date('2024-04-29'),
+      true,
+      false,
+      undefined,
+      expect.any(Object),
+    );
+    expect(statisticService.computeDepartementsSituation).toHaveBeenCalledWith(
+      [],
+      '2024-04-29',
+    );
+    expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
+      '2024-04-28',
+      '4',
+      '2024-04-29',
+      undefined,
+    );
+    expect(configService.advanceComputeMapDate).toHaveBeenCalledWith(
+      '2024-04-28',
+      '12',
+      '2024-04-29',
+      undefined,
+    );
+  });
+
+  it('uses the empty PMTiles generator for computed historic artifacts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-historic-empty-'));
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).execPromise = jest.fn();
+    (service as any).computeGeoJson =
+      ZoneAlerteComputedHistoricService.prototype.computeGeoJson.bind(service);
+
+    try {
+      await expect(
+        service.computeGeoJson(moment('2024-04-29', 'YYYY-MM-DD')),
+      ).resolves.toEqual([]);
+
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString())).toEqual({
+        type: 'FeatureCollection',
+        features: [],
+      });
+      expect(generateEmptyPmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2024-04-29.pmtiles',
+        ),
+      });
+      expect((service as any).execPromise).not.toHaveBeenCalled();
+      expect(
+        uploadFile.mock.calls.map(([file, prefix]) => [
+          file.originalname,
+          prefix,
+        ]),
+      ).toEqual([
+        ['zones_arretes_en_vigueur_2024-04-29.pmtiles', 'pmtiles/'],
+        ['zones_arretes_en_vigueur_2024-04-29.geojson', 'geojson/'],
+      ]);
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an empty computed artifact when source restrictions are mappable', async () => {
+    zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
+    arreteRestrictionService.findByDate.mockResolvedValue([{ id: 42 }]);
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 42,
+        departmentCode: '01',
+        zoneType: 'SUP',
+        mappableCount: 1,
+        sourceZoneIds: [101],
+      },
+    ]);
+    const uploadFile = jest.fn();
+    const generateEmptyPmtiles = jest.spyOn(
+      emptyPmtiles,
+      'generateEmptyPmtiles',
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(tmpdir()),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).computeGeoJson =
+      ZoneAlerteComputedHistoricService.prototype.computeGeoJson.bind(service);
+
+    try {
+      await expect(
+        service.computeGeoJson(moment('2024-04-29', 'YYYY-MM-DD')),
+      ).rejects.toThrow(
+        'Historic map 2024-04-29 source coverage mismatch (missing=01, unexpected=none)',
+      );
+
+      expect(generateEmptyPmtiles).not.toHaveBeenCalled();
+      expect(uploadFile).not.toHaveBeenCalled();
+      expect(dataSource.query.mock.calls[0][0]).toContain(
+        'FROM "restriction_commune" commune_source',
+      );
+      expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
+      expect(configService.advanceComputeStatsDate).not.toHaveBeenCalled();
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+    }
+  });
+
+  it('rejects an active computed source order without a mappable restriction', async () => {
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 42,
+        departmentCode: '01',
+        zoneType: null,
+        mappableCount: 0,
+        sourceZoneIds: [],
+      },
+    ]);
+
+    await expect(
+      (service as any).assertHistoricSourceCoverage(
+        [42],
+        [],
+        moment('2024-04-29', 'YYYY-MM-DD'),
+        'computed',
+      ),
+    ).rejects.toThrow(
+      'Historic map 2024-04-29 has active source order(s) without mappable restrictions: 42',
+    );
+  });
+
+  it('rejects a missing computed department even when another department has zones', async () => {
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 42,
+        departmentCode: '01',
+        zoneType: 'SUP',
+        mappableCount: 1,
+        sourceZoneIds: [101],
+      },
+      {
+        arId: 43,
+        departmentCode: '02',
+        zoneType: 'SOU',
+        mappableCount: 1,
+        sourceZoneIds: [102],
+      },
+    ]);
+
+    await expect(
+      (service as any).assertHistoricSourceCoverage(
+        [42, 43],
+        [
+          {
+            type: 'SUP',
+            departement: { code: '01' },
+            restriction: { arreteRestriction: { id: 42 } },
+          },
+        ],
+        moment('2024-04-29', 'YYYY-MM-DD'),
+        'computed',
+      ),
+    ).rejects.toThrow(
+      'Historic map 2024-04-29 source coverage mismatch (missing=02, unexpected=none)',
+    );
+  });
+
+  it('rejects a missing computed source type within a present department', async () => {
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 42,
+        departmentCode: '01',
+        zoneType: 'SUP',
+        mappableCount: 1,
+        sourceZoneIds: [101],
+      },
+      {
+        arId: 43,
+        departmentCode: '01',
+        zoneType: 'SOU',
+        mappableCount: 1,
+        sourceZoneIds: [102],
+      },
+    ]);
+
+    await expect(
+      (service as any).assertHistoricSourceCoverage(
+        [42, 43],
+        [
+          {
+            type: 'SUP',
+            departement: { code: '01' },
+            restriction: { arreteRestriction: { id: 42 } },
+          },
+        ],
+        moment('2024-04-29', 'YYYY-MM-DD'),
+        'computed',
+      ),
+    ).rejects.toThrow(
+      'Historic map 2024-04-29 source department/type coverage mismatch (missing=01:SOU)',
+    );
+  });
+
+  it('rejects a missing legacy zone within a present department', async () => {
+    dataSource.query.mockResolvedValue([
+      {
+        arId: 42,
+        departmentCode: '01',
+        zoneType: 'SUP',
+        mappableCount: 2,
+        sourceZoneIds: [101, 102],
+      },
+    ]);
+
+    await expect(
+      (service as any).assertHistoricSourceCoverage(
+        [42],
+        [{ id: 101, type: 'SUP', departement: { code: '01' } }],
+        moment('2024-04-28', 'YYYY-MM-DD'),
+        'legacy',
+      ),
+    ).rejects.toThrow(
+      'Historic map 2024-04-28 zone coverage mismatch (missing=102, unexpected=none)',
+    );
   });
 
   it('pins every historic day and snapshot to the expected source revision', async () => {

@@ -3,10 +3,13 @@ import { defineStore } from 'pinia';
 import { computed, Ref, ref } from 'vue';
 import type { ZonePublication } from '../dto/zone-publication.dto';
 import {
+  buildLegacyPmtilesUrl,
   classifyManifestFailure,
+  fetchLegacyPmtilesEtag,
   getManifestFailureAction,
   getNextSuccessfulRefreshVersion,
   isZonePublication,
+  selectLegacyPmtilesEtag,
 } from '../utils/zone-publication';
 
 export type ZonePublicationManifestStatus =
@@ -25,6 +28,7 @@ export const useZonePublicationStore = defineStore(
     const publication: Ref<ZonePublication | null> = ref(null);
     const manifestStatus: Ref<ZonePublicationManifestStatus> = ref('idle');
     const successfulRefreshVersion: Ref<number> = ref(0);
+    const legacyPmtilesEtag: Ref<string | null> = ref(null);
     let loadingPromise: Promise<ZonePublication | null> | null = null;
     let retryAfter = 0;
     let lastLoadError: Error | null = null;
@@ -40,7 +44,10 @@ export const useZonePublicationStore = defineStore(
         return publication.value.pmtilesUrl;
       }
       return manifestStatus.value === 'legacy'
-        ? configuredPmtilesUrl.value
+        ? buildLegacyPmtilesUrl(
+            configuredPmtilesUrl.value,
+            legacyPmtilesEtag.value,
+          )
         : '';
     });
 
@@ -81,13 +88,21 @@ export const useZonePublicationStore = defineStore(
           );
           return publication.value;
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
           const failure = classifyManifestFailure(
             error,
             Boolean(publication.value),
           );
           const failureAction = getManifestFailureAction(failure, force);
           if (failureAction === 'legacy') {
+            const candidateEtag = await fetchLegacyPmtilesEtag(
+              configuredPmtilesUrl.value,
+              (requestUrl, options) => $fetch.raw(requestUrl, options),
+            );
+            legacyPmtilesEtag.value = selectLegacyPmtilesEtag(
+              legacyPmtilesEtag.value,
+              candidateEtag,
+            );
             publication.value = null;
             manifestStatus.value = 'legacy';
             retryAfter = Date.now() + ZONE_PUBLICATION_LEGACY_RETRY_MS;
@@ -119,6 +134,7 @@ export const useZonePublicationStore = defineStore(
       publication,
       manifestStatus,
       successfulRefreshVersion,
+      legacyPmtilesEtag,
       pmtilesUrl,
       configuredPmtilesUrl,
       loadPublication,

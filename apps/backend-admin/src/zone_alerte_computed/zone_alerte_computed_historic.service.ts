@@ -7,12 +7,10 @@ import { Usage } from '@shared/entities/usage.entity';
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
 import { ZoneAlerteComputedHistoric } from '@shared/entities/zone_alerte_computed_historic.entity';
-import { exec } from 'child_process';
-import fs from 'fs';
 import moment, { Moment } from 'moment';
+import { readFileSync } from 'node:fs';
 import { rm, writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, In, IsNull, Repository } from 'typeorm';
-import * as util from 'util';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '../config/config.service';
@@ -29,6 +27,11 @@ import {
   HistoricDepartmentCheckpointOptions,
   HistoricDepartmentCheckpointService,
 } from './historic-department-checkpoint.service';
+import { generateEmptyPmtiles } from './empty-pmtiles';
+import {
+  collectPmtilesFeatureIds,
+  generatePmtiles,
+} from './pmtiles-generation';
 
 export interface HistoricCursorState {
   mapCursor: string | null;
@@ -36,6 +39,13 @@ export interface HistoricCursorState {
   mapGeneration: string;
   statsGeneration: string;
 }
+
+type HistoricCoverageZone = {
+  id?: number;
+  type?: string;
+  departement?: { code?: string };
+  restriction?: { arreteRestriction?: { id?: number } };
+};
 
 export const HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT = 1;
 export const HISTORIC_DEPARTMENT_CONCURRENCY_MAX = 4;
@@ -105,9 +115,6 @@ export class ZoneAlerteComputedHistoricService {
   private readonly logger = new RegleauLogger(
     'ZoneAlerteComputedHistoricService',
   );
-  // Promisifier exec
-  private execPromise = util.promisify(exec);
-
   constructor(
     @Inject(forwardRef(() => ArreteRestrictionService))
     private readonly arreteResrictionService: ArreteRestrictionService,
@@ -190,11 +197,19 @@ export class ZoneAlerteComputedHistoricService {
 
       const historicZones = await this.formatLegacyHistoricZones(zas, arIds, m);
       const zasFormated = historicZones.features;
+      await this.assertHistoricSourceCoverage(
+        arIds,
+        historicZones.zones,
+        m,
+        'legacy',
+      );
+      await this.assertExpectedSourceRevision(expectedSourceRevision);
 
       const geojson = {
         type: 'FeatureCollection',
         features: zasFormated,
       };
+      const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(zasFormated);
 
       const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
@@ -205,28 +220,26 @@ export class ZoneAlerteComputedHistoricService {
         [geojsonPath, pmtilesPath],
         async () => {
           await writeFile(geojsonPath, JSON.stringify(geojson));
-          await this.execPromise(
-            `${path}/tippecanoe_program/bin/tippecanoe \
-              -Z4 \
-              -zg \
-              --maximum-tile-byte=1000000 \
-              --force \
-              --read-parallel \
-              --detect-shared-borders \
-              --coalesce-densest-as-needed \
-              --simplification=28 \
-              --layer=zones_arretes_en_vigueur \
-              --output="${pmtilesPath}" \
-              "${geojsonPath}"
-                `,
-          );
+          if (zasFormated.length === 0) {
+            await generateEmptyPmtiles({
+              workingDirectory: path,
+              outputPath: pmtilesPath,
+            });
+          } else {
+            await generatePmtiles({
+              workingDirectory: path,
+              inputPath: geojsonPath,
+              outputPath: pmtilesPath,
+              expectedFeatureIds: expectedPmtilesFeatureIds,
+            });
+          }
           const fileToTransferPmtiles = {
             originalname: `${fileNameToSave}.pmtiles`,
-            buffer: fs.readFileSync(pmtilesPath),
+            buffer: readFileSync(pmtilesPath),
           };
           const fileToTransferGeojson = {
             originalname: `${fileNameToSave}.geojson`,
-            buffer: fs.readFileSync(geojsonPath),
+            buffer: readFileSync(geojsonPath),
           };
           await this.s3Service.uploadFile(
             fileToTransferPmtiles as Express.Multer.File,
@@ -561,6 +574,9 @@ export class ZoneAlerteComputedHistoricService {
       m.add(1, 'days')
     ) {
       await this.assertExpectedSourceRevision(expectedSourceRevision);
+      const activeArIds = (
+        await this.arreteResrictionService.findByDate(m)
+      ).map((arrete) => arrete.id);
       this.logger.log(
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - BEGIN`,
       );
@@ -575,7 +591,11 @@ export class ZoneAlerteComputedHistoricService {
         `COMPUTING ZONES D'ALERTES ${m.format('DD/MM/YYYY')} - END`,
       );
 
-      const allZonesComputed = await this.computeGeoJson(m);
+      const allZonesComputed = await this.computeGeoJson(
+        m,
+        activeArIds,
+        expectedSourceRevision,
+      );
       if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
         const statisticDate = new Date(m.format('YYYY-MM-DD'));
         const completedThrough = m.format('YYYY-MM-DD');
@@ -749,6 +769,208 @@ export class ZoneAlerteComputedHistoricService {
     if (actualSourceRevision !== expectedSourceRevision) {
       throw new Error(
         `Historic source revision changed (${expectedSourceRevision} -> ${actualSourceRevision})`,
+      );
+    }
+  }
+
+  private async assertHistoricSourceCoverage(
+    activeArIds: number[],
+    outputZones: HistoricCoverageZone[],
+    date: Moment,
+    mode: 'legacy' | 'computed',
+  ): Promise<void> {
+    if (activeArIds.length === 0) {
+      if (outputZones.length > 0) {
+        throw new Error(
+          `Historic map ${date.format('YYYY-MM-DD')} contains zones without an active source order`,
+        );
+      }
+      return;
+    }
+    const computedMode = mode === 'computed';
+    const mappableRestrictionSql = computedMode
+      ? `(restriction_source."zoneAlerteId" IS NOT NULL
+          OR EXISTS (
+            SELECT 1
+            FROM "restriction_commune" commune_source
+            WHERE commune_source."restrictionId" = restriction_source.id
+          ))`
+      : `restriction_source."zoneAlerteId" IS NOT NULL`;
+    const sourceZoneTypeSql = computedMode
+      ? `CASE
+          WHEN restriction_source."zoneAlerteId" IS NOT NULL
+            THEN source_zone.type::text
+          WHEN EXISTS (
+            SELECT 1
+            FROM "restriction_commune" commune_source
+            WHERE commune_source."restrictionId" = restriction_source.id
+          ) THEN 'AEP'
+          ELSE NULL
+        END`
+      : 'source_zone.type::text';
+    const sourceRows: Array<{
+      arId: string | number;
+      departmentCode: string | null;
+      zoneType: string | null;
+      mappableCount: string | number;
+      sourceZoneIds: number[] | null;
+    }> = await this.dataSource.query(
+      `
+        SELECT
+          source_order.id AS "arId",
+          source_department.code AS "departmentCode",
+          ${sourceZoneTypeSql} AS "zoneType",
+          (COUNT(DISTINCT restriction_source.id) FILTER (
+            WHERE ${mappableRestrictionSql}
+          ))::integer AS "mappableCount",
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT restriction_source."zoneAlerteId") FILTER (
+            WHERE restriction_source."zoneAlerteId" IS NOT NULL
+          ), NULL) AS "sourceZoneIds"
+        FROM "arrete_restriction" source_order
+        LEFT JOIN "restriction" restriction_source
+          ON restriction_source."arreteRestrictionId" = source_order.id
+        LEFT JOIN "zone_alerte" source_zone
+          ON source_zone.id = restriction_source."zoneAlerteId"
+        ${
+          computedMode
+            ? `LEFT JOIN "departement" source_department
+              ON source_department.id = source_order."departementId"`
+            : `LEFT JOIN "departement" source_department
+              ON source_department.id = source_zone."departementId"`
+        }
+        WHERE source_order.id = ANY($1::integer[])
+        GROUP BY source_order.id, source_department.code, ${sourceZoneTypeSql}
+      `,
+      [activeArIds],
+    );
+
+    const expectedArIds = new Set(activeArIds);
+    const observedArIds = new Set(sourceRows.map((row) => Number(row.arId)));
+    if (
+      observedArIds.size !== expectedArIds.size ||
+      [...expectedArIds].some((id) => !observedArIds.has(id))
+    ) {
+      throw new Error(
+        `Unable to certify historic source coverage on ${date.format('YYYY-MM-DD')}`,
+      );
+    }
+    for (const row of sourceRows) {
+      const count = Number(row.mappableCount);
+      if (!Number.isSafeInteger(count) || count < 0) {
+        throw new Error(
+          `Unable to certify historic source coverage on ${date.format('YYYY-MM-DD')}`,
+        );
+      }
+    }
+
+    const mappableCountByAr = new Map<number, number>();
+    for (const row of sourceRows) {
+      const arId = Number(row.arId);
+      mappableCountByAr.set(
+        arId,
+        (mappableCountByAr.get(arId) ?? 0) + Number(row.mappableCount),
+      );
+    }
+    const unmappableArIds = [...mappableCountByAr]
+      .filter(([, count]) => count === 0)
+      .map(([arId]) => arId);
+    if (computedMode && unmappableArIds.length > 0) {
+      throw new Error(
+        `Historic map ${date.format('YYYY-MM-DD')} has active source order(s) without mappable restrictions: ${unmappableArIds.join(',')}`,
+      );
+    }
+    if (!computedMode && unmappableArIds.length > 0) {
+      this.logger.warn(
+        `HISTORIC LEGACY SOURCE ${date.format('YYYY-MM-DD')}: ${unmappableArIds.length}/${expectedArIds.size} active orders have no mappable zone restriction`,
+      );
+    }
+
+    const outputDepartmentCodes = new Set<string>();
+    for (const zone of outputZones) {
+      const departmentCode = zone.departement?.code;
+      if (!departmentCode) {
+        throw new Error(
+          `Historic map ${date.format('YYYY-MM-DD')} contains a zone without department`,
+        );
+      }
+      outputDepartmentCodes.add(departmentCode);
+    }
+    const sourceDepartmentCodes = new Set(
+      sourceRows
+        .filter((row) => Number(row.mappableCount) > 0)
+        .map((row) => row.departmentCode)
+        .filter((code): code is string => Boolean(code)),
+    );
+    const missingDepartments = [...sourceDepartmentCodes].filter(
+      (code) => !outputDepartmentCodes.has(code),
+    );
+    const unexpectedDepartments = [...outputDepartmentCodes].filter(
+      (code) => !sourceDepartmentCodes.has(code),
+    );
+    if (missingDepartments.length > 0 || unexpectedDepartments.length > 0) {
+      throw new Error(
+        `Historic map ${date.format('YYYY-MM-DD')} source coverage mismatch (missing=${missingDepartments.join(',') || 'none'}, unexpected=${unexpectedDepartments.join(',') || 'none'})`,
+      );
+    }
+
+    if (!computedMode) {
+      const expectedZoneIds = new Set(
+        sourceRows.flatMap((row) =>
+          (row.sourceZoneIds ?? []).map((id) => Number(id)),
+        ),
+      );
+      const outputZoneIds = new Set(outputZones.map((zone) => Number(zone.id)));
+      const invalidZoneIds = [...expectedZoneIds, ...outputZoneIds].filter(
+        (id) => !Number.isSafeInteger(id) || id <= 0,
+      );
+      if (invalidZoneIds.length > 0) {
+        throw new Error(
+          `Unable to certify historic source coverage on ${date.format('YYYY-MM-DD')}`,
+        );
+      }
+      const missingZoneIds = [...expectedZoneIds].filter(
+        (id) => !outputZoneIds.has(id),
+      );
+      const unexpectedZoneIds = [...outputZoneIds].filter(
+        (id) => !expectedZoneIds.has(id),
+      );
+      if (missingZoneIds.length > 0 || unexpectedZoneIds.length > 0) {
+        throw new Error(
+          `Historic map ${date.format('YYYY-MM-DD')} zone coverage mismatch (missing=${missingZoneIds.join(',') || 'none'}, unexpected=${unexpectedZoneIds.join(',') || 'none'})`,
+        );
+      }
+      return;
+    }
+
+    const expectedSourceKeys = new Set(
+      sourceRows
+        .filter((row) => Number(row.mappableCount) > 0)
+        .map((row) => {
+          if (!row.departmentCode || !row.zoneType) {
+            throw new Error(
+              `Unable to certify historic source coverage on ${date.format('YYYY-MM-DD')}`,
+            );
+          }
+          return `${row.departmentCode}:${row.zoneType}`;
+        }),
+    );
+    const outputSourceKeys = new Set(
+      outputZones.map((zone) => {
+        const departmentCode = zone.departement?.code;
+        if (!departmentCode || !zone.type) {
+          throw new Error(
+            `Unable to certify historic source coverage on ${date.format('YYYY-MM-DD')}`,
+          );
+        }
+        return `${departmentCode}:${zone.type}`;
+      }),
+    );
+    const missingSourceKeys = [...expectedSourceKeys].filter(
+      (key) => !outputSourceKeys.has(key),
+    );
+    if (missingSourceKeys.length > 0) {
+      throw new Error(
+        `Historic map ${date.format('YYYY-MM-DD')} source department/type coverage mismatch (missing=${missingSourceKeys.join(',')})`,
       );
     }
   }
@@ -1662,7 +1884,11 @@ DELETE FROM zone_alerte_computed_historic
     );
   }
 
-  async computeGeoJson(date: Moment) {
+  async computeGeoJson(
+    date: Moment,
+    activeArIds?: number[],
+    expectedSourceRevision?: string,
+  ) {
     const allZonesComputed: any =
       await this.zoneAlerteComputedHistoricRepository.find(<FindManyOptions>{
         select: {
@@ -1721,11 +1947,24 @@ DELETE FROM zone_alerte_computed_historic
       allZonesComputed,
       date,
     );
+    const sourceArIds =
+      activeArIds ??
+      (await this.arreteResrictionService.findByDate(date)).map(
+        (arrete) => arrete.id,
+      );
+    await this.assertHistoricSourceCoverage(
+      sourceArIds,
+      allZonesComputed,
+      date,
+      'computed',
+    );
+    await this.assertExpectedSourceRevision(expectedSourceRevision);
 
     const geojson = {
       type: 'FeatureCollection',
       features: allZones,
     };
+    const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(allZones);
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
     const fileName = `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}`;
@@ -1735,24 +1974,34 @@ DELETE FROM zone_alerte_computed_historic
       [geojsonPath, pmtilesPath],
       async () => {
         await writeFile(geojsonPath, JSON.stringify(geojson));
-        const fileToTransferGeojson = {
-          originalname: `${fileName}.geojson`,
-          buffer: fs.readFileSync(geojsonPath),
-        };
-        await this.s3Service.uploadFile(
-          fileToTransferGeojson as Express.Multer.File,
-          'geojson/',
-        );
-        await this.execPromise(
-          `${path}/tippecanoe_program/bin/tippecanoe -Z4 -z10 -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${pmtilesPath} ${geojsonPath}`,
-        );
+        if (allZones.length === 0) {
+          await generateEmptyPmtiles({
+            workingDirectory: path,
+            outputPath: pmtilesPath,
+          });
+        } else {
+          await generatePmtiles({
+            workingDirectory: path,
+            inputPath: geojsonPath,
+            outputPath: pmtilesPath,
+            expectedFeatureIds: expectedPmtilesFeatureIds,
+          });
+        }
         const fileToTransferPmtiles = {
           originalname: `${fileName}.pmtiles`,
-          buffer: fs.readFileSync(pmtilesPath),
+          buffer: readFileSync(pmtilesPath),
+        };
+        const fileToTransferGeojson = {
+          originalname: `${fileName}.geojson`,
+          buffer: readFileSync(geojsonPath),
         };
         await this.s3Service.uploadFile(
           fileToTransferPmtiles as Express.Multer.File,
           'pmtiles/',
+        );
+        await this.s3Service.uploadFile(
+          fileToTransferGeojson as Express.Multer.File,
+          'geojson/',
         );
       },
       (artifactPath, error) =>

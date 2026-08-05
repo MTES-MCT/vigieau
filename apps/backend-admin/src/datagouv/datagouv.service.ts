@@ -32,9 +32,9 @@ import {
   PublicationRunIdentity,
 } from './external-publication-registry.service';
 
-export interface DatagouvPublicationContext extends PublicationRunIdentity {
-  verifyCurrent: () => Promise<void>;
-}
+export type DatagouvPublicationContext =
+  | (PublicationRunIdentity & { verifyCurrent: () => Promise<void> })
+  | { publicationMode: 'legacy'; verifyCurrent?: never };
 
 interface LocalArtifact {
   byteSize: number;
@@ -143,7 +143,7 @@ export class DatagouvService {
 
     this.logger.log('MISE A JOUR DATAGOUV - DEBUT');
     const failures: Array<{ name: string; error: unknown }> = [];
-    await publicationContext?.verifyCurrent();
+    await publicationContext?.verifyCurrent?.();
 
     let arretes: ArreteRestriction[] | undefined;
     try {
@@ -253,9 +253,9 @@ export class DatagouvService {
         `datagouv:${key}`,
         scheduledFor,
         async () => {
-          await publicationContext?.verifyCurrent();
+          await publicationContext?.verifyCurrent?.();
           await update();
-          await publicationContext?.verifyCurrent();
+          await publicationContext?.verifyCurrent?.();
           return publicationIdentity;
         },
         new Date(),

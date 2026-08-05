@@ -19,6 +19,12 @@ test('keeps APIs, publication manifests and PMTiles out of Workbox caches', () =
     isPwaNetworkOnlyUrl('https://objects.example.test/zones/current.pmtiles'),
     true,
   );
+  assert.equal(
+    isPwaNetworkOnlyUrl(
+      'https://objects.example.test/zones/current.pmtiles?etag=%22etag-42%22',
+    ),
+    true,
+  );
   assert.equal(isPwaNetworkOnlyUrl('/manifest.webmanifest'), true);
   assert.equal(isPwaNetworkOnlyUrl('/carte'), false);
 });

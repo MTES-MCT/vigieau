@@ -7,7 +7,10 @@ import {
 } from 'pmtiles';
 import type { Source } from 'pmtiles';
 import { createAbortError, isAbortError } from './retryable-task';
-import { getPmtilesRequestKind } from './zone-source-transition';
+import {
+  getPmtilesRequestKind,
+  isEmptyPmtilesArchive,
+} from './zone-source-transition';
 import type { PmtilesRequestKind } from './zone-source-transition';
 
 export const zonePmtilesProtocol = new Protocol();
@@ -57,10 +60,15 @@ export const subscribeZonePmtilesStatus = (
   return () => statusListeners.delete(listener);
 };
 
+export interface PreflightPmtilesResult {
+  archive: PMTiles;
+  empty: boolean;
+}
+
 export const preflightPmtiles = async (
   url: string,
   signal: AbortSignal,
-): Promise<PMTiles> => {
+): Promise<PreflightPmtilesResult> => {
   if (signal.aborted) {
     throw createAbortError();
   }
@@ -74,10 +82,17 @@ export const preflightPmtiles = async (
   };
   const candidate = new PMTiles(preflightSource, cache);
 
-  await candidate.getHeader();
+  const header = await candidate.getHeader();
+  const empty = isEmptyPmtilesArchive(header);
+  if (empty) {
+    await candidate.getMetadata();
+  }
   if (signal.aborted) {
     throw createAbortError();
   }
 
-  return new PMTiles(source, cache);
+  return {
+    archive: new PMTiles(source, cache),
+    empty,
+  };
 };

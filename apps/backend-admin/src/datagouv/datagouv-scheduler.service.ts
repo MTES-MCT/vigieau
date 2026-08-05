@@ -17,11 +17,20 @@ import {
 } from '../core/scheduling/historic-run-identity';
 import { ConfigService } from '../config/config.service';
 import { DatagouvService } from './datagouv.service';
-import { ExternalPublicationRegistryService } from './external-publication-registry.service';
+import {
+  ExternalPublicationRegistryService,
+  type PublicationRunIdentity,
+} from './external-publication-registry.service';
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
-import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zone_publication.config';
+import {
+  isZonePublicationEnabled,
+  ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+} from '../zone_publication/zone_publication.config';
 
 const DATAGOUV_JOB_KEY = 'datagouv:daily';
+const LEGACY_DATAGOUV_RUN_IDENTITY = {
+  publicationMode: 'legacy',
+} satisfies PublicationRunIdentity;
 
 type DatagouvHistoricRunIdentity = HistoricRunIdentity & {
   sourceRevision: string;
@@ -59,6 +68,11 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
   @BusinessCron(CronExpression.EVERY_5_MINUTES)
   async publishIfDue(now = new Date()): Promise<void> {
     const scheduledFor = getScheduledCivilDate(now, 6);
+    if (!isZonePublicationEnabled()) {
+      await this.publishLegacyIfDue(scheduledFor, now);
+      return;
+    }
+
     const publicationGate =
       await this.zonePublicationService.getActivePublicationGate(scheduledFor);
     if (!publicationGate) {
@@ -109,6 +123,33 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
       },
       now,
       { identity },
+    );
+  }
+
+  private async publishLegacyIfDue(
+    scheduledFor: string,
+    now: Date,
+  ): Promise<void> {
+    const currentComputed = await this.registry.hasSucceeded(
+      NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      scheduledFor,
+    );
+    if (!currentComputed) {
+      return;
+    }
+
+    await this.registry.executeDailyRun(
+      DATAGOUV_JOB_KEY,
+      scheduledFor,
+      async () => {
+        await this.datagouvService.updateDatagouvData(
+          scheduledFor,
+          LEGACY_DATAGOUV_RUN_IDENTITY,
+        );
+        return LEGACY_DATAGOUV_RUN_IDENTITY;
+      },
+      now,
+      { identity: LEGACY_DATAGOUV_RUN_IDENTITY },
     );
   }
 
