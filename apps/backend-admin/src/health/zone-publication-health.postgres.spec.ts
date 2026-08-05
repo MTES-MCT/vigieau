@@ -115,7 +115,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
           "contentFingerprint", "legacyPromotedAt", "promotionError",
           "createdAt", "validatedAt", "candidateAt"
         ) VALUES (
-          $1, 'active', 10, 3, timestamptz '2026-08-03 12:00:00+00',
+          $1, 'active', 10, 4, timestamptz '2026-08-03 12:00:00+00',
           20, 40, $2, timestamptz '2026-08-03 00:20:00+00', NULL,
           timestamptz '2026-08-03 00:00:00+00',
           timestamptz '2026-08-03 00:10:00+00',
@@ -173,7 +173,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
             jsonb_build_object(
               'publicationId', $1::text,
               'sourceRevision', '10',
-              'materializationVersion', 3
+              'materializationVersion', 4
             ),
             timestamptz '2026-08-03 00:20:00+00'
           ),
@@ -181,7 +181,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
             'compute:historic-catchup', date '2026-08-03', 'succeeded',
             jsonb_build_object(
               'sourceRevision', '10',
-              'materializationVersion', 3,
+              'materializationVersion', 4,
               'historicMapCursor', '2026-08-02',
               'historicStatsCursor', '2026-08-02',
               'historicMapGeneration', '12',
@@ -370,7 +370,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
         "contentFingerprint", "legacyPromotedAt", "promotionError",
         "createdAt", "validatedAt", "candidateAt"
       ) VALUES (
-        'b1c24878-0000-4000-8000-000000000002', 'building', 10, 3,
+        'b1c24878-0000-4000-8000-000000000002', 'building', 10, 4,
         timestamptz '2026-08-01 12:00:00+00', 0, 0, NULL, NULL, NULL,
         timestamptz '2026-08-03 00:29:50+00', NULL, NULL
       )

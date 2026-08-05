@@ -1,5 +1,5 @@
-// Version 3 adds the statistic activation barrier to the published snapshot.
-export const ZONE_PUBLICATION_MATERIALIZATION_VERSION = 3;
+// Version 4 publishes harmonized computed severity in map artifacts.
+export const ZONE_PUBLICATION_MATERIALIZATION_VERSION = 4;
 export const ZONE_PUBLICATION_STABLE_PROMOTION_LOCK =
   'vigieau:zone-publication-stable-promotion';
 export const ZONE_PUBLICATION_DATAGOUV_PROMOTION_LOCK =

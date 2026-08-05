@@ -1,4 +1,5 @@
 import { ZonePublicationHealthService } from './zone-publication-health.service';
+import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zone_publication.config';
 
 describe('ZonePublicationHealthService', () => {
   const now = new Date('2026-08-03T00:30:00.000Z');
@@ -13,7 +14,7 @@ describe('ZonePublicationHealthService', () => {
       candidateRequestedAt: null,
       activeStatus: 'active',
       activeSourceRevision: '42',
-      activeMaterializationVersion: 3,
+      activeMaterializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
       activeBusinessDate: '2026-08-03',
       legacyPromotedAt: '2026-08-03T00:00:00.000Z',
       promotionError: null,
@@ -117,7 +118,7 @@ describe('ZonePublicationHealthService', () => {
       expect.stringContaining(
         'instance."contentFingerprint" = active."contentFingerprint"',
       ),
-      [now, 30, 3, '2026-08-03'],
+      [now, 30, ZONE_PUBLICATION_MATERIALIZATION_VERSION, '2026-08-03'],
     );
     const sql = dataSource.query.mock.calls[0][0];
     expect(sql).toContain("'historicMapGeneration'");

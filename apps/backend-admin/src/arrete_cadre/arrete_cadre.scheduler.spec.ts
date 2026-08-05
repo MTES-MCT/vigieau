@@ -8,6 +8,7 @@ import {
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
 } from '../core/scheduling/daily-job-schedule';
+import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zone_publication.config';
 
 describe('ArreteCadreService scheduled status update', () => {
   it('waits for and propagates a restriction status update failure', async () => {
@@ -177,7 +178,7 @@ describe('ArreteCadreScheduler', () => {
       getSucceededRunMetadata: jest.fn().mockResolvedValue({
         publicationId: 'publication-1',
         sourceRevision: '42',
-        materializationVersion: 3,
+        materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
       }),
     };
     const zonePublicationService = {
@@ -334,7 +335,12 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { sourceRevision: '42', materializationVersion: 3 } },
+      {
+        identity: {
+          sourceRevision: '42',
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        },
+      },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
       2,
@@ -345,7 +351,7 @@ describe('ArreteCadreScheduler', () => {
       {
         identity: {
           sourceRevision: '42',
-          materializationVersion: 3,
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           ...historicRunIdentity,
         },
       },
@@ -441,7 +447,12 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { sourceRevision: '41', materializationVersion: 3 } },
+      {
+        identity: {
+          sourceRevision: '41',
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        },
+      },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenNthCalledWith(
       2,
@@ -452,7 +463,7 @@ describe('ArreteCadreScheduler', () => {
       {
         identity: {
           sourceRevision: '42',
-          materializationVersion: 3,
+          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           ...historicRunIdentity,
         },
       },
@@ -479,7 +490,7 @@ describe('ArreteCadreScheduler', () => {
 
     expect(harness.completedRunMetadata[1]).toEqual({
       sourceRevision: '42',
-      materializationVersion: 3,
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
       historicMapCursor: '2026-07-31',
       historicStatsCursor: '2026-07-31',
       historicMapGeneration: '13',

@@ -192,10 +192,11 @@ active le watchdog, la construction et l'activation. La version de l'algorithme
 est portée par `ZONE_PUBLICATION_MATERIALIZATION_VERSION` dans le code et par
 `zone_publication.materializationVersion` en base. Incrémenter la constante
 force un nouveau snapshot même si la révision source n'a pas changé. Ne jamais
-réécrire la version d'une publication existante. La version 3 introduit la
-barrière d'activation statistique : les exécutions quotidiennes et historiques
-l'incluent dans leur identité persistée, afin qu'un succès enregistré en version
-2 ne puisse pas empêcher le recalcul national en version 3.
+réécrire la version d'une publication existante. La version 4 publie le niveau
+calculé après harmonisation communale dans le GeoJSON et le PMTiles. Les
+exécutions quotidiennes et historiques incluent cette version dans leur identité
+persistée, afin qu'un artefact produit avec un niveau source antérieur ne puisse
+pas empêcher le recalcul national en version 4.
 
 `ZONE_PUBLICATION_HEALTH_PROGRESS_STALE_AFTER_SECONDS` borne la durée pendant
 laquelle le health public peut répondre `updating`. Cette réponse n'est autorisée

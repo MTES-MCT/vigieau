@@ -6,6 +6,7 @@ import {
   ZoneUsageRow,
 } from './zone_publication.service';
 import { createHash } from 'node:crypto';
+import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from './zone_publication.config';
 
 function geojsonArtifact(featureCount: number): Buffer<ArrayBuffer> {
   return Buffer.from(
@@ -221,7 +222,7 @@ describe('ZonePublicationService', () => {
       query: jest.fn(
         async (_sql: string, [sourceRevision, version, scheduledFor]) =>
           sourceRevision === '42' &&
-          version === 3 &&
+          version === ZONE_PUBLICATION_MATERIALIZATION_VERSION &&
           scheduledFor === '2026-08-02'
             ? [publication]
             : [],
@@ -313,7 +314,7 @@ describe('ZonePublicationService', () => {
     expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
     expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
       '2026-08-01',
-      3,
+      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
     ]);
   });
 
@@ -335,7 +336,8 @@ describe('ZonePublicationService', () => {
           {
             sourceRevision: '10',
             activeRevision: '9',
-            activeMaterializationVersion: 3,
+            activeMaterializationVersion:
+              ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             candidateRevision: null,
             candidateMaterializationVersion: null,
             failureCount: 0,
@@ -345,9 +347,11 @@ describe('ZonePublicationService', () => {
           {
             sourceRevision: '10',
             activeRevision: '9',
-            activeMaterializationVersion: 3,
+            activeMaterializationVersion:
+              ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             candidateRevision: '10',
-            candidateMaterializationVersion: 3,
+            candidateMaterializationVersion:
+              ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             failureCount: 0,
           },
         ]),
@@ -383,7 +387,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           automaticPublishingPaused: true,
@@ -430,7 +435,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '3',
@@ -443,10 +449,10 @@ describe('ZonePublicationService', () => {
     const service = new ZonePublicationService(dataSource as any);
 
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
-    expect(dataSource.query).toHaveBeenCalledWith(
-      expect.any(String),
-      [4500, 3],
-    );
+    expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
+      4500,
+      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    ]);
     const query = dataSource.query.mock.calls[0][0] as string;
     expect(query).toContain('failed."sourceRevision" = source."revision"');
     expect(query).toContain('failed."materializationVersion" = $2');
@@ -458,7 +464,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '3',
@@ -482,7 +489,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: '4',
@@ -512,7 +520,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: 0,
@@ -523,10 +532,10 @@ describe('ZonePublicationService', () => {
     const service = new ZonePublicationService(dataSource as any);
 
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
-    expect(dataSource.query).toHaveBeenCalledWith(
-      expect.any(String),
-      [4500, 3],
-    );
+    expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
+      4500,
+      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    ]);
     const sql = dataSource.query.mock.calls[0][0] as string;
     expect(sql).toContain(
       `(in_progress."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date`,
@@ -540,7 +549,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: 0,
@@ -567,7 +577,8 @@ describe('ZonePublicationService', () => {
         {
           sourceRevision: '10',
           activeRevision: '9',
-          activeMaterializationVersion: 3,
+          activeMaterializationVersion:
+            ZONE_PUBLICATION_MATERIALIZATION_VERSION,
           candidateRevision: null,
           candidateMaterializationVersion: null,
           failureCount: 0,
@@ -595,7 +606,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'validated',
               sourceRevision: '5',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             },
           ];
         }
@@ -662,7 +673,7 @@ describe('ZonePublicationService', () => {
               id: 'new-build',
               status: 'validated',
               sourceRevision: '10',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             },
           ];
         }
@@ -715,7 +726,7 @@ describe('ZonePublicationService', () => {
               id: 'validated',
               status: 'validated',
               sourceRevision: '10',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             },
           ];
         }
@@ -784,7 +795,7 @@ describe('ZonePublicationService', () => {
               id: 'validated',
               status: 'validated',
               sourceRevision: '10',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             },
           ];
         }
@@ -837,7 +848,7 @@ describe('ZonePublicationService', () => {
     ).resolves.toBe(true);
     expect(markCandidate).toHaveBeenCalledWith('rebuilt-validated');
     expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
-      3,
+      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
       '2026-08-01',
       '10',
       'dcf24878-0000-4000-8000-000000000000',
@@ -874,7 +885,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -936,7 +947,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               candidateAt: new Date('2020-01-01T00:00:00Z'),
@@ -1009,7 +1020,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               candidateAt: new Date('2020-01-01T00:00:00Z'),
@@ -1087,7 +1098,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -1302,7 +1313,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -1373,7 +1384,7 @@ describe('ZonePublicationService', () => {
               id: 'retired',
               status: 'retired',
               sourceRevision: '42',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
@@ -1439,7 +1450,7 @@ describe('ZonePublicationService', () => {
               id: 'retired',
               status: 'retired',
               sourceRevision: '42',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
@@ -1510,7 +1521,7 @@ describe('ZonePublicationService', () => {
               id: 'retired',
               status: 'retired',
               sourceRevision: '42',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
@@ -1544,7 +1555,7 @@ describe('ZonePublicationService', () => {
   });
 
   it.each([
-    ['source revision', '41', 3],
+    ['source revision', '41', ZONE_PUBLICATION_MATERIALIZATION_VERSION],
     ['materialization version', '42', 2],
   ])(
     'cancels a prepared rollback when its %s changed before activation',
@@ -1672,7 +1683,8 @@ describe('ZonePublicationService', () => {
                 id: 'retired',
                 status: 'retired',
                 sourceRevision: '42',
-                materializationVersion: 3,
+                materializationVersion:
+                  ZONE_PUBLICATION_MATERIALIZATION_VERSION,
                 zoneCount: 10,
                 communeLinkCount: 20,
                 sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
@@ -1755,7 +1767,7 @@ describe('ZonePublicationService', () => {
               id: 'retired-publication',
               status: 'retired',
               sourceRevision: 'current-source',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               contentFingerprint: 'a'.repeat(64),
@@ -1929,7 +1941,7 @@ describe('ZonePublicationService', () => {
               id: 'publication-2026-08-01',
               status: 'retired',
               sourceRevision: 'current-source',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
               sourceComputedAt: new Date('2026-08-01T08:00:00Z'),
@@ -2011,7 +2023,7 @@ describe('ZonePublicationService', () => {
               id: 'candidate',
               status: 'candidate',
               sourceRevision: '7',
-              materializationVersion: 3,
+              materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
               zoneCount: 10,
               communeLinkCount: 20,
             },
@@ -2067,7 +2079,7 @@ describe('ZonePublicationService', () => {
       expect.stringContaining(
         `publication."status" IN ('retired', 'superseded', 'failed')`,
       ),
-      [4, 48, 3],
+      [4, 48, ZONE_PUBLICATION_MATERIALIZATION_VERSION],
     );
     const sql = dataSource.query.mock.calls[0][0];
     expect(sql).toContain(
@@ -2096,10 +2108,11 @@ describe('ZonePublicationService', () => {
       retentionHours: 72,
     });
 
-    expect(dataSource.query).toHaveBeenCalledWith(
-      expect.any(String),
-      [6, 72, 3],
-    );
+    expect(dataSource.query).toHaveBeenCalledWith(expect.any(String), [
+      6,
+      72,
+      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    ]);
   });
 
   it('makes abandoned building and validated publications purgeable', async () => {
@@ -2123,7 +2136,7 @@ describe('ZonePublicationService', () => {
     expect(dataSource.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining(`SET "status" = 'superseded'`),
-      [600, 3],
+      [600, ZONE_PUBLICATION_MATERIALIZATION_VERSION],
     );
     const validatedExpirySql = dataSource.query.mock.calls[1][0] as string;
     expect(validatedExpirySql).toContain(

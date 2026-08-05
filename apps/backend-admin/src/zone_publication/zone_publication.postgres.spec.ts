@@ -146,8 +146,8 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
           "id", "status", "sourceRevision", "materializationVersion",
           "sourceComputedAt"
         ) VALUES
-          ($1, 'failed', 10, 3, $3::date + time '08:00'),
-          ($2, 'validated', 10, 3, date '2026-08-01' + time '09:00')
+          ($1, 'failed', 10, 4, $3::date + time '08:00'),
+          ($2, 'validated', 10, 4, date '2026-08-01' + time '09:00')
       `,
       [failedPublicationId, rebuiltPublicationId, failedSourceDate],
     );
@@ -174,14 +174,14 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
             jsonb_build_object(
               'publicationId', $1::text,
               'sourceRevision', '10',
-              'materializationVersion', 3
+              'materializationVersion', 4
             )
           ),
           (
             'compute:historic-catchup', date '2026-08-01', 'succeeded',
             jsonb_build_object(
               'sourceRevision', '10',
-              'materializationVersion', 3,
+              'materializationVersion', 4,
               'historicMapCursor', '2026-07-31',
               'historicStatsCursor', '2026-07-31',
               'historicMapGeneration', '12',
@@ -449,19 +449,19 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         INSERT INTO "external_publication_run" VALUES
           (
             'compute:national-daily', date '2026-07-31', 'succeeded',
-            '{"sourceRevision":"10","materializationVersion":3}'::jsonb
+            '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           ),
           (
             'compute:historic-catchup', date '2026-07-31', 'failed',
-            '{"sourceRevision":"10","materializationVersion":3}'::jsonb
+            '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           ),
           (
             'compute:national-daily', date '2026-08-01', 'succeeded',
-            '{"sourceRevision":"10","materializationVersion":3}'::jsonb
+            '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           ),
           (
             'compute:historic-catchup', date '2026-08-01', $1,
-            '{"sourceRevision":"10","materializationVersion":3}'::jsonb
+            '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           )
       `,
       [latestHistoricStatus],
@@ -482,8 +482,8 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
           "id", "status", "sourceRevision", "materializationVersion",
           "sourceComputedAt", "createdAt"
         ) VALUES
-          ($1, 'validated', 10, 3, timestamptz '2026-07-31 08:00+00', now() - interval '2 hours'),
-          ($2, 'validated', 10, 3, timestamptz '2026-08-01 08:00+00', now() - interval '2 hours')
+          ($1, 'validated', 10, 4, timestamptz '2026-07-31 08:00+00', now() - interval '2 hours'),
+          ($2, 'validated', 10, 4, timestamptz '2026-08-01 08:00+00', now() - interval '2 hours')
       `,
       [oldPublicationId, latestPublicationId],
     );
@@ -495,7 +495,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
             jsonb_build_object(
               'publicationId', $1::text,
               'sourceRevision', '10',
-              'materializationVersion', 3
+              'materializationVersion', 4
             )
           ),
           (
@@ -503,7 +503,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
             jsonb_build_object(
               'publicationId', $2::text,
               'sourceRevision', '10',
-              'materializationVersion', 3
+              'materializationVersion', 4
             )
           )
       `,
@@ -531,7 +531,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
           "id", "status", "sourceRevision", "materializationVersion",
           "sourceComputedAt", "createdAt"
         ) VALUES (
-          $1, 'failed', 10, 3,
+          $1, 'failed', 10, 4,
           timestamptz '2026-08-01 08:00+00', now() - interval '72 hours'
         )
       `,
@@ -544,7 +544,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
           jsonb_build_object(
             'publicationId', $1::text,
             'sourceRevision', '10',
-            'materializationVersion', 3
+            'materializationVersion', 4
           )
         )
       `,
@@ -562,7 +562,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
           jsonb_build_object(
             'publicationId', $1::text,
             'sourceRevision', '10',
-            'materializationVersion', 3
+            'materializationVersion', 4
           )
         )
       `,

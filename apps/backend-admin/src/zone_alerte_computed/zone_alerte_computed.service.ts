@@ -82,6 +82,76 @@ interface QueuedComputeWaiter {
   reject: (error: unknown) => void;
 }
 
+type ComputedZoneGeoJsonSource = Pick<
+  ZoneAlerteComputed,
+  | 'id'
+  | 'idSandre'
+  | 'nom'
+  | 'code'
+  | 'type'
+  | 'niveauGravite'
+  | 'departement'
+  | 'restriction'
+>;
+
+export function buildComputedZoneGeoJsonFeature(
+  z: ComputedZoneGeoJsonSource,
+  geometry: unknown,
+) {
+  const niveauGravite = z.niveauGravite;
+
+  return {
+    type: 'Feature',
+    geometry,
+    properties: {
+      id: z.id,
+      idSandre: z.idSandre,
+      nom: z.nom,
+      code: z.code,
+      type: z.type,
+      niveauGravite,
+      departement: z.departement,
+      arreteRestriction: {
+        id: z.restriction?.arreteRestriction.id,
+        numero: z.restriction?.arreteRestriction.numero,
+        dateDebut: z.restriction?.arreteRestriction.dateDebut,
+        dateFin: z.restriction?.arreteRestriction.dateFin,
+        dateSignature: z.restriction?.arreteRestriction.dateSignature,
+        fichier: z.restriction?.arreteRestriction.fichier?.url,
+      },
+      restrictions: z.restriction?.usages.map((u) => {
+        let description;
+        switch (niveauGravite) {
+          case 'vigilance':
+            description = u.descriptionVigilance;
+            break;
+          case 'alerte':
+            description = u.descriptionAlerte;
+            break;
+          case 'alerte_renforcee':
+            description = u.descriptionAlerteRenforcee;
+            break;
+          case 'crise':
+            description = u.descriptionCrise;
+            break;
+        }
+        return {
+          nom: u.nom,
+          thematique: u.thematique.nom,
+          concerneParticulier: u.concerneParticulier,
+          concerneEntreprise: u.concerneEntreprise,
+          concerneCollectivite: u.concerneCollectivite,
+          concerneExploitation: u.concerneExploitation,
+          concerneEso: u.concerneEso,
+          concerneEsu: u.concerneEsu,
+          concerneAep: u.concerneAep,
+          description,
+        };
+      }),
+    },
+  };
+}
+
 @Injectable()
 export class ZoneAlerteComputedService {
   private readonly logger = new RegleauLogger('ZoneAlerteComputedService');
@@ -1108,6 +1178,7 @@ DELETE FROM zone_alerte_computed
         code: true,
         nom: true,
         type: true,
+        niveauGravite: true,
         departement: {
           code: true,
           nom: true,
@@ -1156,56 +1227,7 @@ DELETE FROM zone_alerte_computed
     const allZones = await Promise.all(
       allZonesComputed.map(async (z) => {
         z.geom = JSON.parse((await this.findOne(z.id)).geom);
-        return {
-          type: 'Feature',
-          geometry: z.geom,
-          properties: {
-            id: z.id,
-            idSandre: z.idSandre,
-            nom: z.nom,
-            code: z.code,
-            type: z.type,
-            niveauGravite: z.restriction?.niveauGravite,
-            departement: z.departement,
-            arreteRestriction: {
-              id: z.restriction?.arreteRestriction.id,
-              numero: z.restriction?.arreteRestriction.numero,
-              dateDebut: z.restriction?.arreteRestriction.dateDebut,
-              dateFin: z.restriction?.arreteRestriction.dateFin,
-              dateSignature: z.restriction?.arreteRestriction.dateSignature,
-              fichier: z.restriction?.arreteRestriction.fichier?.url,
-            },
-            restrictions: z.restriction?.usages.map((u) => {
-              let d;
-              switch (z.restriction.niveauGravite) {
-                case 'vigilance':
-                  d = u.descriptionVigilance;
-                  break;
-                case 'alerte':
-                  d = u.descriptionAlerte;
-                  break;
-                case 'alerte_renforcee':
-                  d = u.descriptionAlerteRenforcee;
-                  break;
-                case 'crise':
-                  d = u.descriptionCrise;
-                  break;
-              }
-              return {
-                nom: u.nom,
-                thematique: u.thematique.nom,
-                concerneParticulier: u.concerneParticulier,
-                concerneEntreprise: u.concerneEntreprise,
-                concerneCollectivite: u.concerneCollectivite,
-                concerneExploitation: u.concerneExploitation,
-                concerneEso: u.concerneEso,
-                concerneEsu: u.concerneEsu,
-                concerneAep: u.concerneAep,
-                description: d,
-              };
-            }),
-          },
-        };
+        return buildComputedZoneGeoJsonFeature(z, z.geom);
       }),
     );
 

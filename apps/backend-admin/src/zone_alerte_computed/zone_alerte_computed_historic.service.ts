@@ -448,9 +448,13 @@ export class ZoneAlerteComputedHistoricService {
     });
   }
 
-  private formatHistoricUsage(usage: Usage, restriction: Restriction) {
+  private formatHistoricUsage(
+    usage: Usage,
+    restriction: Restriction,
+    niveauGravite = restriction.niveauGravite,
+  ) {
     let description;
-    switch (restriction.niveauGravite) {
+    switch (niveauGravite) {
       case 'vigilance':
         description = usage.descriptionVigilance;
         break;
@@ -1667,6 +1671,7 @@ DELETE FROM zone_alerte_computed_historic
           code: true,
           nom: true,
           type: true,
+          niveauGravite: true,
           departement: {
             code: true,
             nom: true,
@@ -1777,7 +1782,12 @@ DELETE FROM zone_alerte_computed_historic
       zone.geom = geometry;
       const restriction = zone.restriction;
       const usages = restriction
-        ? this.formatHistoricUsagesForComputed(restriction, zone.id, dateString)
+        ? this.formatHistoricUsagesForComputed(
+            restriction,
+            zone.niveauGravite,
+            zone.id,
+            dateString,
+          )
         : undefined;
       return {
         type: 'Feature',
@@ -1788,7 +1798,7 @@ DELETE FROM zone_alerte_computed_historic
           nom: zone.nom,
           code: zone.code,
           type: zone.type,
-          niveauGravite: restriction?.niveauGravite,
+          niveauGravite: zone.niveauGravite,
           departement: zone.departement,
           arreteRestriction: {
             id: restriction?.arreteRestriction?.id,
@@ -1867,6 +1877,7 @@ DELETE FROM zone_alerte_computed_historic
 
   private formatHistoricUsagesForComputed(
     restriction: Restriction,
+    niveauGravite: ZoneAlerteComputedHistoric['niveauGravite'],
     zoneId: number,
     date: string,
   ) {
@@ -1889,7 +1900,7 @@ DELETE FROM zone_alerte_computed_historic
           `Missing theme for computed historic zone ${zoneId} usage ${usage.id} on ${date}`,
         );
       }
-      return this.formatHistoricUsage(usage, restriction);
+      return this.formatHistoricUsage(usage, restriction, niveauGravite);
     });
   }
 

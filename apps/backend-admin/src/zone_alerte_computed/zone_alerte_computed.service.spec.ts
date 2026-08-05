@@ -8,6 +8,7 @@ import {
   HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT,
   HISTORIC_COMPUTE_WORKER_TIMEOUT_MS,
   ZONE_COMPUTE_WORKER_TIMEOUT_MS,
+  buildComputedZoneGeoJsonFeature,
   readHistoricComputeChunkDays,
   ZoneAlerteComputedService,
 } from './zone_alerte_computed.service';
@@ -160,6 +161,54 @@ describe('ZoneAlerteComputedService', () => {
     );
     expect(() => readHistoricComputeChunkDays('3661')).toThrow(
       'must be at most 3660',
+    );
+  });
+
+  it('publishes the computed severity after commune harmonization', () => {
+    const feature = buildComputedZoneGeoJsonFeature(
+      {
+        id: 2282397,
+        idSandre: 1927,
+        code: '84_38_0028',
+        nom: 'Bievre-Liers-Valloire',
+        type: 'SOU',
+        niveauGravite: 'alerte_renforcee',
+        departement: { code: '38', nom: 'Isere' },
+        restriction: {
+          niveauGravite: 'vigilance',
+          arreteRestriction: {
+            id: 37243,
+            numero: 'AP BLV',
+            dateDebut: '2026-07-10',
+            dateFin: '2026-09-30',
+            dateSignature: '2026-07-10',
+            fichier: { url: 'https://example.test/arrete.pdf' },
+          },
+          usages: [
+            {
+              nom: 'Irrigation',
+              thematique: { nom: 'Irriguer' },
+              descriptionVigilance: 'Description vigilance',
+              descriptionAlerte: 'Description alerte',
+              descriptionAlerteRenforcee: 'Description alerte renforcee',
+              descriptionCrise: 'Description crise',
+              concerneParticulier: false,
+              concerneEntreprise: false,
+              concerneCollectivite: false,
+              concerneExploitation: true,
+              concerneEso: true,
+              concerneEsu: false,
+              concerneAep: false,
+            },
+          ],
+        },
+      } as any,
+      { type: 'MultiPolygon', coordinates: [] },
+    );
+
+    expect(feature.properties.niveauGravite).toBe('alerte_renforcee');
+    expect(feature.properties.restrictions[0].description).toBe(
+      'Description alerte renforcee',
     );
   });
 
@@ -3480,5 +3529,39 @@ describe('ZoneAlerteComputedHistoricService', () => {
     );
 
     expect(features[0].properties.restrictions).toEqual([]);
+  });
+
+  it('publishes the harmonized severity in computed historic maps', async () => {
+    dataSource.query.mockResolvedValue([
+      { id: 1, geom: '{"type":"Polygon","coordinates":[]}' },
+    ]);
+
+    const features = await (service as any).formatComputedHistoricZones(
+      [
+        {
+          id: 1,
+          niveauGravite: 'alerte_renforcee',
+          restriction: {
+            niveauGravite: 'vigilance',
+            arreteRestriction: { id: 99 },
+            usages: [
+              {
+                id: 10,
+                nom: 'Irrigation',
+                thematique: { nom: 'Irriguer' },
+                descriptionVigilance: 'Description vigilance',
+                descriptionAlerteRenforcee: 'Description alerte renforcee',
+              },
+            ],
+          },
+        },
+      ],
+      moment('2024-04-29'),
+    );
+
+    expect(features[0].properties.niveauGravite).toBe('alerte_renforcee');
+    expect(features[0].properties.restrictions[0].description).toBe(
+      'Description alerte renforcee',
+    );
   });
 });

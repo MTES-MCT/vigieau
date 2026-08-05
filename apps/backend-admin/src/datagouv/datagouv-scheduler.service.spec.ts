@@ -3,6 +3,7 @@ import {
   BUSINESS_SCHEDULER_PROCESS_ENV,
   DISABLE_SCHEDULED_JOBS_ENV,
 } from '../core/scheduling/business-cron';
+import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zone_publication.config';
 
 describe('DatagouvSchedulerService', () => {
   const historicConfig = {
@@ -13,7 +14,7 @@ describe('DatagouvSchedulerService', () => {
   };
   const historicIdentity = {
     sourceRevision: '42',
-    materializationVersion: 3,
+    materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
     historicMapCursor: '2026-07-31',
     historicStatsCursor: '2026-07-31',
     historicMapGeneration: '12',
@@ -121,7 +122,10 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:national-daily',
       '2026-08-01',
-      { sourceRevision: '42', materializationVersion: 3 },
+      {
+        sourceRevision: '42',
+        materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+      },
     );
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:historic-catchup',
@@ -182,7 +186,10 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:national-daily',
       '2026-08-01',
-      { sourceRevision: '42', materializationVersion: 3 },
+      {
+        sourceRevision: '42',
+        materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+      },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
       'datagouv:daily',

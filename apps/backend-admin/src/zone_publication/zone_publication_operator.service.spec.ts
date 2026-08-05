@@ -1,4 +1,5 @@
 import { ZonePublicationOperatorService } from './zone_publication_operator.service';
+import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from './zone_publication.config';
 
 describe('ZonePublicationOperatorService', () => {
   const previousEnabled = process.env.ZONE_PUBLICATION_ENABLED;
@@ -180,7 +181,7 @@ describe('ZonePublicationOperatorService', () => {
       status: 'blocked',
       blockers: [
         'target source revision 41 does not match current source revision 42',
-        'target materialization version 2 does not match current version 3',
+        `target materialization version 2 does not match current version ${ZONE_PUBLICATION_MATERIALIZATION_VERSION}`,
         'target has no certified national statistic snapshot for its source revision',
         '2 incomplete statistic snapshot(s) exist on or before the target date',
       ],
@@ -421,7 +422,7 @@ function buildManager(options?: {
           {
             id: 'retired',
             sourceRevision: '42',
-            materializationVersion: 3,
+            materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             zoneCount: 10,
             communeLinkCount: 20,
             contentFingerprint: 'a'.repeat(64),
