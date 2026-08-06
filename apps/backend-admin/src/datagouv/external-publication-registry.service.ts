@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import {
+  getCivilDateAtUtcNoon,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
 } from '../core/scheduling/daily-job-schedule';
@@ -326,12 +327,41 @@ export class ExternalPublicationRegistryService {
     return resource?.remoteResourceId || undefined;
   }
 
+  async assertResourceSourceDateNotRegressing(
+    key: string,
+    sourceDate?: string,
+  ): Promise<void> {
+    if (sourceDate) {
+      getCivilDateAtUtcNoon(sourceDate);
+    }
+    const [resource] = await this.dataSource.query(
+      `SELECT "sourceDate"::text AS "sourceDate"
+       FROM "external_publication_resource"
+       WHERE "key" = $1`,
+      [key],
+    );
+    if (resource?.sourceDate && !sourceDate) {
+      throw new Error(
+        `Refus de publier ${key} sans date source: la date source enregistrée est ${resource.sourceDate}`,
+      );
+    }
+    if (
+      resource?.sourceDate &&
+      sourceDate &&
+      resource.sourceDate > sourceDate
+    ) {
+      throw new Error(
+        `Refus de publier ${key} à la date ${sourceDate}: la date source enregistrée est plus récente (${resource.sourceDate})`,
+      );
+    }
+  }
+
   async recordResourceSuccess(
     key: string,
     provider: string,
     details: PublishedResourceDetails,
   ): Promise<void> {
-    await this.dataSource.query(
+    const rows = await this.dataSource.query(
       `
         INSERT INTO "external_publication_resource" (
           "key", "provider", "remoteResourceId", "status", "sourceDate",
@@ -343,10 +373,20 @@ export class ExternalPublicationRegistryService {
             EXCLUDED."remoteResourceId",
             "external_publication_resource"."remoteResourceId"
           ),
-          "status" = 'succeeded', "sourceDate" = EXCLUDED."sourceDate",
+          "status" = 'succeeded',
+          "sourceDate" = COALESCE(
+            EXCLUDED."sourceDate",
+            "external_publication_resource"."sourceDate"
+          ),
           "checksum" = EXCLUDED."checksum", "byteSize" = EXCLUDED."byteSize",
           "metadata" = EXCLUDED."metadata", "lastSuccessAt" = now(),
           "lastError" = NULL, "updatedAt" = now()
+        WHERE "external_publication_resource"."sourceDate" IS NULL
+           OR (
+             EXCLUDED."sourceDate" IS NOT NULL
+             AND EXCLUDED."sourceDate" >= "external_publication_resource"."sourceDate"
+           )
+        RETURNING "sourceDate"::text AS "sourceDate"
       `,
       [
         key,
@@ -358,6 +398,11 @@ export class ExternalPublicationRegistryService {
         JSON.stringify(details.metadata || {}),
       ],
     );
+    if (!Array.isArray(rows) || rows.length !== 1) {
+      throw new Error(
+        `Refus d'enregistrer une régression de date source pour ${key}`,
+      );
+    }
   }
 
   async recordResourceFailure(

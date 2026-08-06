@@ -13,6 +13,7 @@ type SnapshotFinalizer = {
     processedCommuneCount: number,
     nationalSnapshotAlreadyCompleted: boolean,
     deferCertificationUntilPublication: boolean,
+    preserveBootstrapBarrier: boolean,
     sourceRevision?: string,
     historicComputeEpoch?: string,
   ): Promise<void>;
@@ -155,6 +156,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         1,
         false,
         deferCertificationUntilPublication,
+        false,
       );
 
       const [snapshot] = await queryRunner.query(
@@ -211,6 +213,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         snapshotDate,
         'national',
         1,
+        false,
         false,
         false,
         '42',
@@ -503,7 +506,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     ).toHaveLength(1);
   });
 
-  it('materializes an empty date range with one JSONB traversal result and no second-pass rewrite', async () => {
+  it('normalizes an empty date range with one source traversal and no second-pass rewrite', async () => {
     await queryRunner.query(`
       CREATE TEMP TABLE "config" (
         "id" integer PRIMARY KEY,
@@ -554,6 +557,20 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       SUP: 'crise',
       AEP: null,
     };
+    const outsideEarlier = {
+      date: '2025-07-11',
+      SOU: null,
+      SUP: null,
+      AEP: 'vigilance',
+    };
+    const outsideLater = {
+      date: '2025-07-18',
+      SOU: 'alerte',
+      SUP: null,
+      AEP: null,
+    };
+    const malformedFirst = { date: 'date-inconnue', marker: 'first' };
+    const malformedSecond = { marker: 'second' };
     await queryRunner.query(
       `
         INSERT INTO "statistic_commune" ("communeId", "restrictions")
@@ -561,14 +578,16 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       `,
       [
         JSON.stringify([
+          outsideAfter,
+          malformedFirst,
           outsideBefore,
-          outsideDuplicate,
           {
             date: '2025-07-13',
             SOU: null,
             SUP: null,
             AEP: null,
           },
+          outsideEarlier,
           {
             date: '2025-07-14',
             SOU: 'crise',
@@ -581,7 +600,9 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
             SUP: null,
             AEP: null,
           },
-          outsideAfter,
+          outsideDuplicate,
+          outsideLater,
+          malformedSecond,
         ]),
       ],
     );
@@ -600,21 +621,31 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         FROM "statistic_commune"
         WHERE "communeId" = 1
       `);
-      return row as { ctid: string; restrictions: PostgresRestriction[] };
+      return row as { ctid: string; restrictions: unknown[] };
     };
 
     await persistRange();
     const firstPass = await readStatistic();
     expect(firstPass.restrictions).toEqual([
+      outsideEarlier,
       outsideBefore,
       outsideDuplicate,
       { date: '2025-07-13', SOU: null, SUP: null, AEP: null },
       { date: '2025-07-14', SOU: null, SUP: null, AEP: null },
       { date: '2025-07-15', SOU: null, SUP: null, AEP: null },
       outsideAfter,
+      outsideLater,
+      malformedFirst,
+      malformedSecond,
     ]);
     expect(
-      firstPass.restrictions.filter(({ date }) => date === '2025-07-13'),
+      firstPass.restrictions.filter(
+        (value) =>
+          typeof value === 'object' &&
+          value !== null &&
+          'date' in value &&
+          value.date === '2025-07-13',
+      ),
     ).toHaveLength(1);
 
     await persistRange();

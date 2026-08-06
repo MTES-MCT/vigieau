@@ -1220,7 +1220,7 @@ describe('StatisticCommuneService', () => {
 
     expect(harness.communeService.findWithStats).toHaveBeenCalledTimes(1);
     const rangeUpdateCalls = harness.query.mock.calls.filter(([sql]) =>
-      String(sql).includes('existing_target_dates AS MATERIALIZED'),
+      String(sql).includes('candidate AS NOT MATERIALIZED'),
     );
     expect(rangeUpdateCalls).toHaveLength(1);
     expect(JSON.parse(String(rangeUpdateCalls[0][1]?.[1]))).toEqual([
@@ -1292,12 +1292,22 @@ describe('StatisticCommuneService', () => {
     });
 
     const rangeUpdateCalls = harness.query.mock.calls.filter(([sql]) =>
-      String(sql).includes('existing_target_dates AS MATERIALIZED'),
+      String(sql).includes('candidate AS NOT MATERIALIZED'),
     );
     expect(rangeUpdateCalls).toHaveLength(3);
     for (const [sql, parameters] of rangeUpdateCalls) {
+      const statement = String(sql);
+      expect(statement).toContain('matched AS MATERIALIZED');
+      expect(statement).toContain('SELECT DISTINCT statistic.id');
+      expect(statement).toContain('CROSS JOIN LATERAL');
+      expect(statement).toContain('jsonb_agg(');
+      expect(statement).not.toContain('ROW_NUMBER() OVER');
+      expect(statement).not.toContain('expanded AS MATERIALIZED');
+      expect(statement).not.toContain('existing_target_dates AS MATERIALIZED');
       expect(
-        String(sql).match(/CROSS JOIN LATERAL jsonb_array_elements/g),
+        statement.match(
+          /jsonb_array_elements\(\s*COALESCE\(statistic\."restrictions"/g,
+        ),
       ).toHaveLength(1);
       expect(JSON.parse(String(parameters?.[1]))).toHaveLength(7);
     }

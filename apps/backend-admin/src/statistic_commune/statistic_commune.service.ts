@@ -1057,91 +1057,62 @@ export class StatisticCommuneService {
             FROM jsonb_array_elements($2::jsonb)
               WITH ORDINALITY AS target(value, ordinality)
           ), matched AS MATERIALIZED (
-            SELECT
-              statistic.id,
-              statistic."restrictions"
+            SELECT DISTINCT statistic.id
             FROM input
             JOIN "statistic_commune" statistic
               ON statistic."communeId" = input."communeId"
-          ), expanded AS MATERIALIZED (
+          ), candidate AS NOT MATERIALIZED (
             SELECT
               matched.id,
-              item.value,
-              item.ordinality,
-              target_dates."date" AS "targetDate",
-              target_dates.restriction AS "targetRestriction",
-              ROW_NUMBER() OVER (
-                PARTITION BY matched.id, target_dates."date"
-                ORDER BY item.ordinality
-              ) AS "targetOccurrence"
+              statistic."restrictions" AS "currentRestrictions",
+              normalized."nextRestrictions"
             FROM matched
-            CROSS JOIN LATERAL jsonb_array_elements(
-              COALESCE(matched."restrictions", '[]'::jsonb)
-            ) WITH ORDINALITY AS item(value, ordinality)
-            LEFT JOIN target_dates
-              ON target_dates."date" = item.value ->> 'date'
-          ), existing_target_dates AS MATERIALIZED (
-            SELECT DISTINCT id, "targetDate"
-            FROM expanded
-            WHERE "targetDate" IS NOT NULL
-          ), candidate_items AS MATERIALIZED (
-            SELECT
-              expanded.id,
-              CASE
-                WHEN expanded."targetDate" IS NOT NULL
-                  THEN expanded."targetRestriction"
-                ELSE expanded.value
-              END AS value,
-              CASE
-                WHEN expanded."targetDate" IS NOT NULL
-                  THEN expanded."targetDate"
-                ELSE expanded.value ->> 'date'
-              END AS "date",
-              0 AS phase,
-              expanded.ordinality
-            FROM expanded
-            WHERE expanded."targetDate" IS NULL
-               OR expanded."targetOccurrence" = 1
-            UNION ALL
-            SELECT
-              matched.id,
-              target_dates.restriction,
-              target_dates."date",
-              1 AS phase,
-              target_dates.ordinality
-            FROM matched
-            CROSS JOIN target_dates
-            LEFT JOIN existing_target_dates
-              ON existing_target_dates.id = matched.id
-             AND existing_target_dates."targetDate" = target_dates."date"
-            WHERE existing_target_dates.id IS NULL
-          ), candidate AS MATERIALIZED (
-            SELECT
-              matched.id,
-              matched."restrictions" AS "currentRestrictions",
-              COALESCE(
+            JOIN "statistic_commune" statistic
+              ON statistic.id = matched.id
+            CROSS JOIN LATERAL (
+              SELECT COALESCE(
                 jsonb_agg(
-                  candidate_items.value
+                  item.value
                   ORDER BY
-                    CASE
-                      WHEN candidate_items."date"
-                        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
-                      ELSE 1
-                    END,
-                    CASE
-                      WHEN candidate_items."date"
-                        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-                        THEN candidate_items."date"
-                      ELSE NULL
-                    END,
-                    candidate_items.phase,
-                    candidate_items.ordinality
-                ) FILTER (WHERE candidate_items.id IS NOT NULL),
+                    item."sortClass",
+                    item."sortDate",
+                    item.phase,
+                    item.ordinality
+                ),
                 '[]'::jsonb
               ) AS "nextRestrictions"
-            FROM matched
-            LEFT JOIN candidate_items ON candidate_items.id = matched.id
-            GROUP BY matched.id, matched."restrictions"
+              FROM (
+                SELECT
+                  existing.value,
+                  CASE
+                    WHEN existing.value ->> 'date'
+                      ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
+                    ELSE 1
+                  END AS "sortClass",
+                  CASE
+                    WHEN existing.value ->> 'date'
+                      ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                      THEN existing.value ->> 'date'
+                    ELSE NULL
+                  END AS "sortDate",
+                  0 AS phase,
+                  existing.ordinality
+                FROM jsonb_array_elements(
+                  COALESCE(statistic."restrictions", '[]'::jsonb)
+                ) WITH ORDINALITY AS existing(value, ordinality)
+                LEFT JOIN target_dates
+                  ON target_dates."date" = existing.value ->> 'date'
+                WHERE target_dates."date" IS NULL
+                UNION ALL
+                SELECT
+                  target_dates.restriction,
+                  0 AS "sortClass",
+                  target_dates."date" AS "sortDate",
+                  1 AS phase,
+                  target_dates.ordinality
+                FROM target_dates
+              ) item
+            ) normalized
           ), updated AS (
             UPDATE "statistic_commune" statistic
             SET "restrictions" = candidate."nextRestrictions"
@@ -1155,11 +1126,9 @@ export class StatisticCommuneService {
             (SELECT COUNT(*)::integer FROM matched) AS matched,
             (SELECT COUNT(*)::integer FROM updated) AS updated,
             (
-              SELECT COUNT(*)::integer
-              FROM candidate
-              WHERE candidate."nextRestrictions"
-                    IS NOT DISTINCT FROM candidate."currentRestrictions"
-            ) AS unchanged
+              (SELECT COUNT(*) FROM matched) -
+              (SELECT COUNT(*) FROM updated)
+            )::integer AS unchanged
         `,
         [communePayload, datePayload],
       );

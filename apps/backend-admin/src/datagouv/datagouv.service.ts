@@ -896,6 +896,10 @@ export class DatagouvService {
     const url = `${this.datagouvApiUrl}/resources/${resourceId}/`;
     let artifact: LocalArtifact | undefined;
     try {
+      await this.publicationRegistry.assertResourceSourceDateNotRegressing(
+        resource,
+        options?.sourceDate,
+      );
       if (!isUrl) {
         artifact = await this.inspectLocalArtifact(fileName);
         await this.uploadDataGouvFile(
@@ -1122,9 +1126,21 @@ export class DatagouvService {
     year = new Date().getFullYear(),
     expectedSourceDate?: string,
   ): Promise<void> {
+    return this.withAnnualCommunesPublicationLock(year, () =>
+      this.updateCommunesUnlocked(year, expectedSourceDate),
+    );
+  }
+
+  private async updateCommunesUnlocked(
+    year: number,
+    expectedSourceDate?: string,
+  ): Promise<void> {
     const definition = this.getCommunesResourceDefinition(year);
     if (!(await this.getDataGouvResourceId(definition.resource))) {
-      await this.createOrUpdateCommunesResource(year, expectedSourceDate);
+      await this.createOrUpdateCommunesResourceUnlocked(
+        year,
+        expectedSourceDate,
+      );
       return;
     }
 
@@ -1138,12 +1154,16 @@ export class DatagouvService {
       artifact,
       expectedSourceDate,
     );
+    const sourceDate = this.requireArtifactSourceDate(
+      definition.zipFileName,
+      artifact,
+    );
     await this.uploadToDatagouv(
       definition.resource,
       definition.zipFileName,
       definition.title,
       false,
-      { sourceDate: artifact.sourceDate },
+      { sourceDate },
     );
   }
 
@@ -1219,6 +1239,15 @@ export class DatagouvService {
     year: number,
     expectedSourceDate?: string,
   ): Promise<string> {
+    return this.withAnnualCommunesPublicationLock(year, () =>
+      this.createOrUpdateCommunesResourceUnlocked(year, expectedSourceDate),
+    );
+  }
+
+  private async createOrUpdateCommunesResourceUnlocked(
+    year: number,
+    expectedSourceDate?: string,
+  ): Promise<string> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
     }
@@ -1249,6 +1278,14 @@ export class DatagouvService {
       definition.zipFileName,
       artifact,
       expectedSourceDate,
+    );
+    const sourceDate = this.requireArtifactSourceDate(
+      definition.zipFileName,
+      artifact,
+    );
+    await this.publicationRegistry.assertResourceSourceDateNotRegressing(
+      definition.resource,
+      sourceDate,
     );
 
     let resourceId = matchingResources[0]?.id;
@@ -1286,13 +1323,82 @@ export class DatagouvService {
       'data.gouv.fr',
       {
         remoteResourceId: resourceId,
-        sourceDate: artifact.sourceDate,
+        sourceDate,
         checksum: artifact.checksum,
         byteSize: artifact.byteSize,
         metadata: { title: definition.title, url: remoteResource.url },
       },
     );
     return resourceId;
+  }
+
+  private async withAnnualCommunesPublicationLock<T>(
+    year: number,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    this.getCommunesResourceDefinition(year);
+    const lockKey = `vigieau:datagouv-communes:${year}`;
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let locked = false;
+    let operationFailed = false;
+    try {
+      await queryRunner.connect();
+      connected = true;
+      const [lock] = await queryRunner.query(
+        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+        [lockKey],
+      );
+      locked = lock?.locked === true;
+      if (!locked) {
+        throw new Error(
+          `Une publication des communes ${year} est déjà en cours`,
+        );
+      }
+      return await operation();
+    } catch (error) {
+      operationFailed = true;
+      throw error;
+    } finally {
+      let cleanupError: unknown;
+      if (locked) {
+        try {
+          const [unlock] = await queryRunner.query(
+            'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
+            [lockKey],
+          );
+          if (unlock?.unlocked !== true) {
+            throw new Error(
+              `Impossible de libérer le verrou de publication des communes ${year}`,
+            );
+          }
+        } catch (error) {
+          this.logger.error(
+            `ERREUR LORS DE LA LIBERATION DU VERROU DE PUBLICATION DES COMMUNES ${year}`,
+            error,
+          );
+          if (!operationFailed) {
+            cleanupError = error;
+          }
+        }
+      }
+      if (connected) {
+        try {
+          await queryRunner.release();
+        } catch (error) {
+          this.logger.error(
+            `ERREUR LORS DE LA LIBERATION DE LA CONNEXION DE PUBLICATION DES COMMUNES ${year}`,
+            error,
+          );
+          if (!operationFailed && cleanupError === undefined) {
+            cleanupError = error;
+          }
+        }
+      }
+      if (cleanupError !== undefined) {
+        throw cleanupError;
+      }
+    }
   }
 
   private async findDataGouvCommuneResources(
@@ -1575,5 +1681,15 @@ export class DatagouvService {
         `${fileName} est incomplet: dernière date ${artifact.sourceDate || 'absente'}, date attendue ${expectedSourceDate}`,
       );
     }
+  }
+
+  private requireArtifactSourceDate(
+    fileName: string,
+    artifact: LocalArtifact,
+  ): string {
+    if (!artifact.sourceDate) {
+      throw new Error(`L'archive ${fileName} ne contient aucune date source`);
+    }
+    return artifact.sourceDate;
   }
 }

@@ -606,6 +606,95 @@ describe('ExternalPublicationRegistryService', () => {
     ).resolves.toBe('persisted-resource-id');
   });
 
+  it('rejects a source date older than the persisted resource date', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query.mockResolvedValue([{ sourceDate: '2026-08-05' }]);
+
+    await expect(
+      harness.service.assertResourceSourceDateNotRegressing(
+        'communes_2026',
+        '2026-08-04',
+      ),
+    ).rejects.toThrow(
+      'la date source enregistrée est plus récente (2026-08-05)',
+    );
+  });
+
+  it('rejects an omitted source date when the resource has a dated success', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query.mockResolvedValue([{ sourceDate: '2026-08-05' }]);
+
+    await expect(
+      harness.service.assertResourceSourceDateNotRegressing('communes_2026'),
+    ).rejects.toThrow(
+      'Refus de publier communes_2026 sans date source: la date source enregistrée est 2026-08-05',
+    );
+  });
+
+  it('rejects an invalid source date before reading or writing the registry', async () => {
+    const harness = createHarness(jest.fn());
+
+    await expect(
+      harness.service.assertResourceSourceDateNotRegressing(
+        'communes_2026',
+        '2026-02-30',
+      ),
+    ).rejects.toThrow('Invalid civil date: 2026-02-30');
+
+    expect(harness.dataSource.query).not.toHaveBeenCalled();
+  });
+
+  it('allows an equal or newer resource source date', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query
+      .mockResolvedValueOnce([{ sourceDate: '2026-08-05' }])
+      .mockResolvedValueOnce([{ sourceDate: '2026-08-05' }]);
+
+    await expect(
+      harness.service.assertResourceSourceDateNotRegressing(
+        'communes_2026',
+        '2026-08-05',
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      harness.service.assertResourceSourceDateNotRegressing(
+        'communes_2026',
+        '2026-08-06',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('atomically refuses to record a source-date regression', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query.mockResolvedValue([]);
+
+    await expect(
+      harness.service.recordResourceSuccess('communes_2026', 'data.gouv.fr', {
+        sourceDate: '2026-08-04',
+      }),
+    ).rejects.toThrow(
+      "Refus d'enregistrer une régression de date source pour communes_2026",
+    );
+
+    const [sql] = harness.dataSource.query.mock.calls[0];
+    expect(sql).toContain(
+      'EXCLUDED."sourceDate" >= "external_publication_resource"."sourceDate"',
+    );
+    expect(sql).toContain('RETURNING "sourceDate"::text');
+  });
+
+  it('records a resource success when the source date does not regress', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query.mockResolvedValue([{ sourceDate: '2026-08-05' }]);
+
+    await expect(
+      harness.service.recordResourceSuccess('communes_2026', 'data.gouv.fr', {
+        remoteResourceId: 'resource-2026',
+        sourceDate: '2026-08-05',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it('checks the persisted success barrier for a daily job', async () => {
     const harness = createHarness(jest.fn());
     harness.dataSource.query

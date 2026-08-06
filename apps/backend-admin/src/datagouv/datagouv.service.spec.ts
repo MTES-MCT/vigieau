@@ -61,6 +61,7 @@ interface ServiceHarness {
   publicationRegistry: {
     executeDailyRun: jest.Mock;
     resolveResourceId: jest.Mock;
+    assertResourceSourceDateNotRegressing: jest.Mock;
     recordResourceSuccess: jest.Mock;
     recordResourceFailure: jest.Mock;
   };
@@ -122,6 +123,9 @@ function createHarness(
       async (_key: string, _provider: string, configuredResourceId?: string) =>
         configuredResourceId,
     ),
+    assertResourceSourceDateNotRegressing: jest
+      .fn()
+      .mockResolvedValue(undefined),
     recordResourceSuccess: jest.fn().mockResolvedValue(undefined),
     recordResourceFailure: jest.fn().mockResolvedValue(undefined),
   };
@@ -1207,12 +1211,17 @@ describe('DatagouvService', () => {
   it('creates the annual resource automatically when it is not configured', async () => {
     const harness = createHarness('/tmp');
     const createResource = jest
-      .spyOn(harness.service, 'createOrUpdateCommunesResource')
+      .spyOn(harness.service as any, 'createOrUpdateCommunesResourceUnlocked')
       .mockResolvedValue('new-resource-id');
 
     await expect(harness.service.updateCommunes(2026)).resolves.toBeUndefined();
 
     expect(createResource).toHaveBeenCalledWith(2026, undefined);
+    expect(
+      harness.queryRunner.query.mock.calls.filter(([sql]) =>
+        sql.includes('pg_try_advisory_lock'),
+      ),
+    ).toHaveLength(1);
     expect(
       harness.statisticCommuneService.getStatisticCommuneStreamForYear,
     ).not.toHaveBeenCalled();
@@ -1222,6 +1231,133 @@ describe('DatagouvService', () => {
       'data.gouv.fr',
       undefined,
     );
+  });
+
+  it('uses one shared advisory lock for both annual publication entry points', async () => {
+    const harness = createHarness('/tmp');
+    jest
+      .spyOn(harness.service as any, 'updateCommunesUnlocked')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(harness.service as any, 'createOrUpdateCommunesResourceUnlocked')
+      .mockResolvedValue('resource-2026');
+
+    await harness.service.updateCommunes(2026, '2026-08-05');
+    await harness.service.createOrUpdateCommunesResource(2026, '2026-08-05');
+
+    const lockCalls = harness.queryRunner.query.mock.calls.filter(([sql]) =>
+      sql.includes('pg_try_advisory_lock'),
+    );
+    const unlockCalls = harness.queryRunner.query.mock.calls.filter(([sql]) =>
+      sql.includes('pg_advisory_unlock'),
+    );
+    expect(lockCalls).toHaveLength(2);
+    expect(unlockCalls).toHaveLength(2);
+    for (const call of [...lockCalls, ...unlockCalls]) {
+      expect(call[1]).toEqual(['vigieau:datagouv-communes:2026']);
+    }
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a busy annual publication lock before doing any work', async () => {
+    const harness = createHarness('/tmp');
+    harness.queryRunner.query.mockResolvedValue([{ locked: false }]);
+    const updateUnlocked = jest.spyOn(
+      harness.service as any,
+      'updateCommunesUnlocked',
+    );
+
+    await expect(harness.service.updateCommunes(2026)).rejects.toThrow(
+      'Une publication des communes 2026 est déjà en cours',
+    );
+
+    expect(updateUnlocked).not.toHaveBeenCalled();
+    expect(harness.queryRunner.query).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('unlocks annual publication after an operation error and preserves it', async () => {
+    const harness = createHarness('/tmp');
+    jest
+      .spyOn(harness.service as any, 'updateCommunesUnlocked')
+      .mockRejectedValue(new Error('annual archive failed'));
+
+    await expect(harness.service.updateCommunes(2026)).rejects.toThrow(
+      'annual archive failed',
+    );
+
+    expect(harness.queryRunner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
+      ['vigieau:datagouv-communes:2026'],
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails when the annual publication lock cannot be released', async () => {
+    const harness = createHarness('/tmp');
+    harness.queryRunner.query.mockImplementation(async (sql: string) =>
+      sql.includes('pg_try_advisory_lock')
+        ? [{ locked: true }]
+        : [{ unlocked: false }],
+    );
+    jest
+      .spyOn(harness.service as any, 'updateCommunesUnlocked')
+      .mockResolvedValue(undefined);
+
+    await expect(harness.service.updateCommunes(2026)).rejects.toThrow(
+      'Impossible de libérer le verrou de publication des communes 2026',
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an annual source-date regression before any remote write', async () => {
+    const harness = createHarness('/tmp');
+    jest
+      .spyOn(harness.service as any, 'generateCommunesArchive')
+      .mockResolvedValue({
+        byteSize: 100,
+        checksum: 'a'.repeat(64),
+        sourceDate: '2026-08-01',
+      });
+    jest
+      .spyOn(harness.service as any, 'findDataGouvCommuneResources')
+      .mockResolvedValue([{ id: 'resource-2026' }]);
+    harness.publicationRegistry.assertResourceSourceDateNotRegressing.mockRejectedValue(
+      new Error('source date regression'),
+    );
+
+    await expect(
+      harness.service.createOrUpdateCommunesResource(2026),
+    ).rejects.toThrow('source date regression');
+
+    expect(harness.httpService.post).not.toHaveBeenCalled();
+    expect(harness.httpService.put).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an annual archive without a source date before any remote write', async () => {
+    const harness = createHarness('/tmp');
+    jest
+      .spyOn(harness.service as any, 'generateCommunesArchive')
+      .mockResolvedValue({
+        byteSize: 100,
+        checksum: 'a'.repeat(64),
+      });
+    jest
+      .spyOn(harness.service as any, 'findDataGouvCommuneResources')
+      .mockResolvedValue([{ id: 'resource-2026' }]);
+
+    await expect(
+      harness.service.createOrUpdateCommunesResource(2026),
+    ).rejects.toThrow(
+      "L'archive restrictions_communes_2026.zip ne contient aucune date source",
+    );
+
+    expect(
+      harness.publicationRegistry.assertResourceSourceDateNotRegressing,
+    ).not.toHaveBeenCalled();
+    expect(harness.httpService.post).not.toHaveBeenCalled();
+    expect(harness.httpService.put).not.toHaveBeenCalled();
   });
 
   it('never includes request headers in Datagouv error logs', async () => {
