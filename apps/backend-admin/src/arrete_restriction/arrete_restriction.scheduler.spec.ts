@@ -135,6 +135,77 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
   });
 
+  it('reactivates a repealed restriction when its calculated boundary moves forward', async () => {
+    const harness = createService(jest.fn().mockResolvedValue(undefined));
+    const candidate = {
+      id: 37577,
+      dateDebut: '2026-07-01',
+      dateFin: '2026-08-03',
+      statut: 'abroge',
+    };
+    harness.transactionRepository.query.mockResolvedValue([candidate]);
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      ...candidate,
+      dateFinSaisie: '2026-08-31',
+      dateFinCalculee: true,
+      dateFinSaisieConnue: true,
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [
+        { id: 37578, dateDebut: '2026-08-10', statut: 'a_venir' },
+      ],
+      arretesCadre: [{ id: 30697, statut: 'publie', dateFin: null }],
+    });
+
+    await harness.service.updateArreteRestrictionStatut(undefined, false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({
+        dateFin: '2026-08-09',
+        dateFinSaisie: '2026-08-31',
+        dateFinCalculee: true,
+        statut: 'publie',
+      }),
+    );
+  });
+
+  it('reactivates a restriction after its framework order is reactivated', async () => {
+    const harness = createService(jest.fn().mockResolvedValue(undefined));
+    harness.transactionRepository.find.mockResolvedValue([{ id: 37577 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 37577 }]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue({
+      id: 37577,
+      dateDebut: '2011-06-07',
+      dateFin: null,
+      dateFinSaisie: null,
+      dateFinCalculee: false,
+      dateFinSaisieConnue: true,
+      statut: 'abroge',
+      arreteRestrictionAbroge: null,
+      arretesRestriction: [],
+      arretesCadre: [{ id: 30697, statut: 'publie', dateFin: null }],
+    });
+
+    await expect(
+      harness.service.reconcileArreteRestrictionsForArreteCadres(
+        harness.manager as never,
+        [30697],
+        '2026-08-05',
+        false,
+      ),
+    ).resolves.toEqual([]);
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 37577 },
+      expect.objectContaining({ statut: 'publie' }),
+    );
+  });
+
   it('propagates a zone computation failure to the scheduled caller', async () => {
     const expectedError = new Error('zone computation failed');
     const askCompute = jest.fn().mockRejectedValue(expectedError);

@@ -20,7 +20,11 @@ import { RegleauLogger } from '../logger/regleau.logger';
 import { RestrictionService } from '../restriction/restriction.service';
 import { S3Service } from '../shared/services/s3.service';
 import { StatisticService } from '../statistic/statistic.service';
-import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
+import {
+  EmptyHistoricStatisticDay,
+  parseHistoricEmptyStatisticsRangeMaxDays,
+  StatisticCommuneService,
+} from '../statistic_commune/statistic_commune.service';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import {
@@ -49,6 +53,26 @@ type HistoricCoverageZone = {
 
 export const HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT = 1;
 export const HISTORIC_DEPARTMENT_CONCURRENCY_MAX = 4;
+export const HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED_ENV =
+  'HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED';
+
+export function isHistoricEmptyStatisticsRangeEnabled(
+  value = process.env[HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED_ENV],
+): boolean {
+  if (value === undefined || value.trim() === '') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  throw new Error(
+    `${HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED_ENV} must be true or false`,
+  );
+}
 
 export function readHistoricDepartmentConcurrency(
   value = process.env.HISTORIC_DEPARTMENT_CONCURRENCY,
@@ -166,6 +190,7 @@ export class ZoneAlerteComputedHistoricService {
     expectedStatsGeneration?: string | number,
     expectedSourceRevision?: string,
     dateMax?: string,
+    expectedHistoricComputeEpoch?: string | number,
   ) {
     const dateDebut = date ? date : moment();
     const dateFin = this.getBoundedHistoricEndDate(
@@ -182,6 +207,103 @@ export class ZoneAlerteComputedHistoricService {
         : expectedStatsCursor;
     let mapGeneration = String(expectedMapGeneration ?? 0);
     let statsGeneration = String(expectedStatsGeneration ?? 0);
+    const historicComputeEpoch =
+      expectedHistoricComputeEpoch === undefined
+        ? undefined
+        : String(expectedHistoricComputeEpoch);
+    const emptyRangeEnabled =
+      isHistoricEmptyStatisticsRangeEnabled() &&
+      expectedSourceRevision !== undefined &&
+      historicComputeEpoch !== undefined;
+    const emptyRangeMaxDays = emptyRangeEnabled
+      ? parseHistoricEmptyStatisticsRangeMaxDays()
+      : 0;
+    const pendingEmptyDays: Array<{
+      dateString: string;
+      statisticDate: Date;
+    }> = [];
+
+    const advanceMapCursor = async (completedThrough: string) => {
+      if (!mapCursor || completedThrough >= mapCursor) {
+        await this.assertExpectedSourceRevision(expectedSourceRevision);
+        const advanced = await this.configService.advanceComputeMapDate(
+          mapCursor,
+          mapGeneration,
+          completedThrough,
+          expectedSourceRevision,
+        );
+        this.assertHistoricCursorAdvanced(
+          'map',
+          advanced,
+          mapCursor,
+          mapGeneration,
+          completedThrough,
+        );
+        mapCursor = completedThrough;
+        mapGeneration = this.nextGeneration(mapGeneration);
+      }
+    };
+
+    const flushPendingEmptyDays = async () => {
+      if (pendingEmptyDays.length === 0) {
+        return;
+      }
+      const range = pendingEmptyDays.splice(0, pendingEmptyDays.length);
+      let lastStatsCursorAdvanced: string | undefined;
+      const rangeDays: EmptyHistoricStatisticDay[] = range.map((day) => ({
+        date: day.statisticDate,
+        beforeCommuneStatistics: () =>
+          this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+            [],
+            day.statisticDate,
+            true,
+            true,
+          ),
+        beforeCertification: async () => {
+          await this.statisticService.computeDepartementsSituationHistoric(
+            [],
+            day.dateString,
+          );
+          await this.assertExpectedSourceRevision(expectedSourceRevision);
+          const advanced = await this.configService.advanceComputeStatsDate(
+            statsCursor,
+            statsGeneration,
+            day.dateString,
+            expectedSourceRevision,
+          );
+          this.assertHistoricCursorAdvanced(
+            'statistics',
+            advanced,
+            statsCursor,
+            statsGeneration,
+            day.dateString,
+          );
+          statsCursor = day.dateString;
+          statsGeneration = this.nextGeneration(statsGeneration);
+          lastStatsCursorAdvanced = day.dateString;
+        },
+      }));
+      try {
+        await this.statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange(
+          rangeDays,
+          {
+            sourceRevision: expectedSourceRevision!,
+            historicComputeEpoch: historicComputeEpoch!,
+          },
+        );
+      } catch (error) {
+        if (lastStatsCursorAdvanced) {
+          await this.configService.setConfig(
+            lastStatsCursorAdvanced,
+            lastStatsCursorAdvanced,
+          );
+        }
+        throw error;
+      }
+      for (const day of range) {
+        await advanceMapCursor(day.dateString);
+      }
+    };
 
     for (
       let m = moment(dateDebut);
@@ -204,6 +326,13 @@ export class ZoneAlerteComputedHistoricService {
         'legacy',
       );
       await this.assertExpectedSourceRevision(expectedSourceRevision);
+      const shouldBufferEmptyDay =
+        emptyRangeEnabled &&
+        Boolean(dateStats && m.isSameOrAfter(dateStats, 'day')) &&
+        historicZones.zones.length === 0;
+      if (!shouldBufferEmptyDay) {
+        await flushPendingEmptyDays();
+      }
 
       const geojson = {
         type: 'FeatureCollection',
@@ -256,6 +385,16 @@ export class ZoneAlerteComputedHistoricService {
             error instanceof Error ? error.toString() : String(error),
           ),
       );
+      if (shouldBufferEmptyDay) {
+        pendingEmptyDays.push({
+          dateString: m.format('YYYY-MM-DD'),
+          statisticDate: new Date(m.format('YYYY-MM-DD')),
+        });
+        if (pendingEmptyDays.length >= emptyRangeMaxDays) {
+          await flushPendingEmptyDays();
+        }
+        continue;
+      }
       if (dateStats && m.isSameOrAfter(dateStats, 'day')) {
         const zonesForStatistics = historicZones.zones.map((zone) => {
           const computedZone = zone as unknown as ZoneAlerteComputed;
@@ -303,6 +442,7 @@ export class ZoneAlerteComputedHistoricService {
                 statsCursorAdvanced = true;
               },
               sourceRevision: expectedSourceRevision,
+              historicComputeEpoch,
             },
           );
         } catch (error) {
@@ -318,25 +458,9 @@ export class ZoneAlerteComputedHistoricService {
         statsGeneration = this.nextGeneration(statsGeneration);
       }
       const completedThrough = m.format('YYYY-MM-DD');
-      if (!mapCursor || completedThrough >= mapCursor) {
-        await this.assertExpectedSourceRevision(expectedSourceRevision);
-        const advanced = await this.configService.advanceComputeMapDate(
-          mapCursor,
-          mapGeneration,
-          completedThrough,
-          expectedSourceRevision,
-        );
-        this.assertHistoricCursorAdvanced(
-          'map',
-          advanced,
-          mapCursor,
-          mapGeneration,
-          completedThrough,
-        );
-        mapCursor = completedThrough;
-        mapGeneration = this.nextGeneration(mapGeneration);
-      }
+      await advanceMapCursor(completedThrough);
     }
+    await flushPendingEmptyDays();
     return { mapCursor, statsCursor, mapGeneration, statsGeneration };
   }
 
@@ -637,6 +761,7 @@ export class ZoneAlerteComputedHistoricService {
                 statsCursorAdvanced = true;
               },
               sourceRevision: expectedSourceRevision,
+              historicComputeEpoch: checkpointContext.historicComputeEpoch,
             },
           );
         } catch (error) {

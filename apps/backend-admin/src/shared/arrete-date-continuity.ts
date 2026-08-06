@@ -87,6 +87,38 @@ export function getArreteLifecycleStatus(
   return 'publie';
 }
 
+export interface ReconciledArreteLifecycleState {
+  dateDebut: string;
+  dateFin: string | null | undefined;
+  dateFinCalculee: boolean | null | undefined;
+  resolvedDateFin: string | null | undefined;
+  statut: StatutArreteCadre;
+}
+
+export function getReconciledArreteLifecycleStatus(
+  current: ReconciledArreteLifecycleState,
+  businessDate = getCurrentParisCivilDate(),
+): StatutArreteCadre {
+  // On legacy rows, the persisted status can be the only evidence of repeal.
+  if (
+    current.statut === 'abroge' &&
+    current.dateFinCalculee === false &&
+    ((!current.dateFin && !current.resolvedDateFin) ||
+      (!!current.dateFin &&
+        !!current.resolvedDateFin &&
+        normalizeCivilDate(current.dateFin) ===
+          normalizeCivilDate(current.resolvedDateFin) &&
+        normalizeCivilDate(current.dateFin) > normalizeCivilDate(businessDate)))
+  ) {
+    return 'abroge';
+  }
+  return getArreteLifecycleStatus(
+    current.dateDebut,
+    current.resolvedDateFin,
+    businessDate,
+  );
+}
+
 export function getPredecessorEndDateConstraint(
   successorStartDates: string[],
 ): string | null {

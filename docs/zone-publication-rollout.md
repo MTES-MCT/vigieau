@@ -123,6 +123,8 @@ HISTORIC_COMPUTE_CHUNK_DAYS=7  # entier compris entre 1 et 3660
 HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED=false
 HISTORIC_SKIP_COMMUNE_INTERSECTIONS=false
 HISTORIC_DEPARTMENT_CONCURRENCY=1  # entier compris entre 1 et 4
+HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED=false
+HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS=7  # entier compris entre 1 et 31
 ```
 
 `COMMUNE_STATISTICS_BATCH_SIZE` vaut `250` par défaut. Une valeur plus élevée
@@ -170,6 +172,16 @@ historique entre zones et communes. Les GeoJSON, PMTiles et statistiques
 communales utilisent les géométries et leurs propres intersections. Le mode est
 inclus dans la signature des checkpoints, de sorte qu'un retour à `false`
 recalcule les départements concernés.
+
+`HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED=true` groupe uniquement l'écriture
+communale des journées historiques legacy qui ne contiennent aucune zone. Les
+GeoJSON, PMTiles, situations départementales, snapshots et avancées CAS restent
+produits et certifiés journée par journée. La plage groupée est bornée par
+`HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS`, à `7` par défaut et `31` au maximum.
+Le tri JSONB reste globalement chronologique et la révision source ainsi que
+l'époque historique sont contrôlées dans les transactions de progression et de
+certification. Laisser ce mode désactivé jusqu'à la mesure d'un chunk complet
+sur l'environnement cible.
 
 Augmenter `HISTORIC_DEPARTMENT_CONCURRENCY` progressivement, d'abord de `1` à
 `2`, puis seulement après plusieurs journées stables. Les dates, les fichiers,
@@ -506,6 +518,83 @@ n'effectue volontairement aucune écriture.
     navigateur; tous doivent être verts avant de remettre
     `ADMIN_WRITES_DISABLED=false`. `/resume` est lui-même bloqué pendant le gel :
     lever ce gel avant une reprise manuelle.
+
+## Recalcul communal historique cible
+
+Le script `recompute:commune-statistics` répare des dates communales précises
+sans déplacer les curseurs de la chaîne historique. Avant une exécution en
+production : geler les écritures admin, arrêter le `clock`, attendre la
+libération des verrous historique et communal, créer un backup PostgreSQL et
+contrôler son statut `done`. Le script désactive aussi ses jobs de démarrage,
+prend les deux verrous de session, fixe la révision source et l'époque, puis
+refuse toute certification si ce contexte change. Son contrôle préalable refuse
+toute exécution tant qu'une ligne de barrière `bootstrap` existe : attendre que
+la chaîne historique normale la lève ou restaurer le backup selon la procédure
+d'incident avant de relancer. La conservation de cette barrière reste également
+active comme défense secondaire pendant le calcul ciblé.
+
+Une exécution nationale doit être confirmée explicitement et reste limitée à
+100 dates par défaut. Les dates futures sont refusées. Exemple pour deux plages
+disjointes en production :
+
+```bash
+scalingo --region osc-fr1 --app regleau-back-prod run --detached --size 2XL \
+  -e DATE_FROM=2026-03-28 \
+  -e DATE_TO=2026-06-05 \
+  -e DATES=2026-06-20,2026-06-21,2026-06-22 \
+  -e CONFIRM_NATIONAL_RECOMPUTE=true \
+  -e HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED=false \
+  npm run recompute:commune-statistics
+```
+
+La commande s'exécute dans la racine applicative du backend admin déployé, où le
+script npm existe. Pour valider d'abord en preprod, remplacer uniquement l'app
+par `regleau-back-preprod`. `HISTORIC_RECOMPUTE_MAX_DATES` ne doit être augmenté
+explicitement qu'après revue de la plage. Les checkpoints restent désactivés
+pour une réparation complète ; ne passer
+`HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED=true` qu'après validation explicite de
+la réutilisation des matérialisations existantes.
+
+Pour une réparation départementale, définir `DEP_CODES` et ne pas fournir la
+confirmation nationale, par exemple :
+
+```bash
+scalingo --region osc-fr1 --app regleau-back-prod run --detached --size 2XL \
+  -e DATES=2026-06-20,2026-06-21,2026-06-22 \
+  -e DEP_CODES=65 \
+  -e HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED=false \
+  npm run recompute:commune-statistics
+```
+
+Après succès national, vérifier pour chaque date le snapshot `national`
+`completed`, sa révision source et l'égalité des nombres attendus et traités.
+Après succès départemental, contrôler le scope exact
+`departements:<codes-tries>` ; son statut peut rester `partial` lorsqu'aucun
+snapshot national complet n'existait déjà pour la date. Dans les deux cas,
+contrôler les doublons, un département témoin déjà complet et l'absence de
+modification hors plage. Le script recalcule ensuite une fois chaque agrégat
+mensuel concerné et effectue un tri final sous le verrou communal.
+
+La ressource annuelle des communes peut être republiée après un recalcul
+national ciblé sans attendre le rattrapage multiannuel uniquement lorsqu'aucune
+barrière `bootstrap` n'existe. Tous les snapshots des dates réparées doivent être
+`completed` sous la révision attendue, aucun snapshot non terminé ne doit
+concerner l'année, et le générateur doit confirmer pour chaque commune la
+couverture quotidienne exacte du 1er janvier à la date source attendue.
+Contrôler le contenu et la date de la ressource annuelle, puis redémarrer le
+`clock` et lever le gel. Une réparation départementale ne constitue jamais
+cette autorisation.
+
+La ressource historique multiannuelle reste bloquée jusqu'à la certification du
+rattrapage global : `historicDirtyFrom` et `historicDirtyThrough` sont `NULL`,
+les deux curseurs `computeMapDate` et `computeStatsDate` couvrent la date requise,
+aucun snapshot n'est `running`, `failed` ou `partial`, et la barrière `bootstrap`
+a été levée par la chaîne historique normale.
+
+En cas d'échec, ne rien publier et ne pas redémarrer le `clock`. Contrôler les
+snapshots `running`, `failed` et `partial`, puis soit rejouer idempotemment le
+même scope et les mêmes dates après correction, soit restaurer le backup. Dans
+les deux cas, reprendre tous les contrôles de sortie avant publication.
 
 ## Déploiement production
 

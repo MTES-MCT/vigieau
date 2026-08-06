@@ -1,5 +1,7 @@
 import {
+  HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT,
   parseCommuneStatisticsBatchSize,
+  parseHistoricEmptyStatisticsRangeMaxDays,
   StatisticCommuneService,
 } from './statistic_commune.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -7,9 +9,12 @@ import moment = require('moment');
 
 describe('StatisticCommuneService', () => {
   const previousBatchSize = process.env.COMMUNE_STATISTICS_BATCH_SIZE;
+  const previousEmptyRangeMaxDays =
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
 
   beforeEach(() => {
     delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
+    delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
   });
 
   afterAll(() => {
@@ -17,6 +22,12 @@ describe('StatisticCommuneService', () => {
       delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
     } else {
       process.env.COMMUNE_STATISTICS_BATCH_SIZE = previousBatchSize;
+    }
+    if (previousEmptyRangeMaxDays === undefined) {
+      delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
+    } else {
+      process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS =
+        previousEmptyRangeMaxDays;
     }
   });
 
@@ -35,6 +46,24 @@ describe('StatisticCommuneService', () => {
     (value) => {
       expect(() => parseCommuneStatisticsBatchSize(value)).toThrow(
         'Invalid COMMUNE_STATISTICS_BATCH_SIZE',
+      );
+    },
+  );
+
+  it.each([
+    [undefined, HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT],
+    ['', HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT],
+    ['1', 1],
+    ['31', 31],
+  ])('parses empty historic range bound %s as %i', (value, expected) => {
+    expect(parseHistoricEmptyStatisticsRangeMaxDays(value)).toBe(expected);
+  });
+
+  it.each(['0', '-1', '1.5', '32', 'invalid'])(
+    'rejects invalid empty historic range bound %p',
+    (value) => {
+      expect(() => parseHistoricEmptyStatisticsRangeMaxDays(value)).toThrow(
+        'Invalid HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS',
       );
     },
   );
@@ -206,6 +235,23 @@ describe('StatisticCommuneService', () => {
         events.push('lock');
         return [{ locked: true }];
       }
+      if (
+        sql.includes('WITH current_context AS MATERIALIZED') &&
+        sql.includes('target_dates AS MATERIALIZED') &&
+        sql.includes('started AS')
+      ) {
+        events.push('range-running');
+        return [
+          {
+            contextMatches: true,
+            affected: (params?.[0] as unknown[]).length,
+          },
+        ];
+      }
+      if (sql.includes('FOR SHARE OF config, source_state')) {
+        events.push('range-context');
+        return [{ '?column?': 1 }];
+      }
       if (sql.includes('"scope" = \'national\'') && sql.includes('SELECT 1')) {
         events.push('national-check');
         return options?.nationalAlreadyCompleted ? [{ '?column?': 1 }] : [];
@@ -250,8 +296,12 @@ describe('StatisticCommuneService', () => {
       if (sql.includes('WITH progressed_snapshot AS')) {
         return [{ affected: 1 }];
       }
+      if (sql.includes('WITH progressed AS')) {
+        events.push('range-progress');
+        return [{ affected: (params?.[0] as unknown[]).length }];
+      }
       if (
-        sql.includes('WITH completed_snapshot AS') &&
+        sql.includes('completed_snapshot AS') &&
         sql.includes('SELECT COUNT(*)::integer AS affected')
       ) {
         events.push(`scope-completed:${String(params?.[2])}`);
@@ -360,6 +410,22 @@ describe('StatisticCommuneService', () => {
       'unlock',
     ]);
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the bootstrap barrier during a targeted recomputation', async () => {
+    const harness = createComputationHarness();
+
+    await harness.service.computeCommuneStatisticsRestrictions(
+      [],
+      new Date('2025-07-13T00:00:00.000Z'),
+      true,
+      false,
+      undefined,
+      { preserveBootstrapBarrier: true },
+    );
+
+    expect(harness.events).toContain('national-certified');
+    expect(harness.events).not.toContain('bootstrap-cleared');
   });
 
   it('keeps the barrier failed when a write before communes fails', async () => {
@@ -1078,5 +1144,218 @@ describe('StatisticCommuneService', () => {
       'unlock',
     ]);
     expect(harness.events).not.toContain('national-certified');
+  });
+
+  it('fails closed when the historic context changes after the certification hook', async () => {
+    const harness = createComputationHarness({ snapshotAffectedRows: 0 });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        true,
+        false,
+        undefined,
+        {
+          beforeCertification: async () => {
+            harness.events.push('historic-context-changed');
+          },
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+        },
+      ),
+    ).rejects.toThrow(
+      'Le snapshot communal 2025-07-13 ne couvre pas toutes les communes attendues',
+    );
+
+    const completionCall = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes('WITH current_context AS MATERIALIZED'),
+    );
+    expect(completionCall?.[0]).toContain('FOR SHARE OF source_state, config');
+    expect(completionCall?.[0]).toContain(
+      'snapshot."sourceRevision" = $5::bigint',
+    );
+    expect(completionCall?.[0]).toContain(
+      'current_context."sourceRevision" = $5::bigint',
+    );
+    expect(completionCall?.[0]).toContain(
+      'current_context."historicComputeEpoch" = $6::bigint',
+    );
+    expect(completionCall?.[1]).toEqual([
+      '2025-07-13',
+      'national',
+      'completed',
+      1,
+      '42',
+      '9',
+    ]);
+    expect(harness.events).toEqual([
+      'lock',
+      'running:national',
+      'commune-updated',
+      'historic-context-changed',
+      'scope-completed:completed',
+      'failed',
+      'unlock',
+    ]);
+    expect(harness.events).not.toContain('national-certified');
+  });
+
+  it('materializes a contiguous empty range once and certifies every date in order', async () => {
+    const harness = createComputationHarness();
+    const days = ['2025-07-13', '2025-07-14'].map((date) => ({
+      date: new Date(`${date}T00:00:00.000Z`),
+      beforeCommuneStatistics: async () => {
+        harness.events.push(`department:${date}`);
+      },
+      beforeCertification: async () => {
+        harness.events.push(`aggregate:${date}`);
+      },
+    }));
+
+    await harness.service.computeEmptyHistoricCommuneStatisticsRange(days, {
+      sourceRevision: '42',
+      historicComputeEpoch: '9',
+    });
+
+    expect(harness.communeService.findWithStats).toHaveBeenCalledTimes(1);
+    const rangeUpdateCalls = harness.query.mock.calls.filter(([sql]) =>
+      String(sql).includes('existing_target_dates AS MATERIALIZED'),
+    );
+    expect(rangeUpdateCalls).toHaveLength(1);
+    expect(JSON.parse(String(rangeUpdateCalls[0][1]?.[1]))).toEqual([
+      {
+        date: '2025-07-13',
+        restriction: {
+          date: '2025-07-13',
+          SOU: null,
+          SUP: null,
+          AEP: null,
+        },
+      },
+      {
+        date: '2025-07-14',
+        restriction: {
+          date: '2025-07-14',
+          SOU: null,
+          SUP: null,
+          AEP: null,
+        },
+      },
+    ]);
+    expect(harness.events.indexOf('department:2025-07-14')).toBeLessThan(
+      harness.events.indexOf('commune-updated'),
+    );
+    expect(harness.events.indexOf('commune-updated')).toBeLessThan(
+      harness.events.indexOf('aggregate:2025-07-13'),
+    );
+    expect(harness.events.indexOf('aggregate:2025-07-13')).toBeLessThan(
+      harness.events.indexOf('aggregate:2025-07-14'),
+    );
+    expect(
+      harness.events.filter((event) =>
+        event.startsWith('scope-completed:completed'),
+      ),
+    ).toHaveLength(2);
+    expect(harness.queryRunner.startTransaction).toHaveBeenCalledTimes(3);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(3);
+    const guardedContextCall = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes('FOR SHARE OF config, source_state'),
+    );
+    expect(guardedContextCall?.[0]).toContain(
+      'config."historicComputeEpoch" = $1::bigint',
+    );
+    expect(guardedContextCall?.[0]).toContain(
+      'source_state."revision" = $2::bigint',
+    );
+    expect(guardedContextCall?.[1]).toEqual(['9', '42']);
+  });
+
+  it('keeps empty-range JSONB traversals proportional to commune batches instead of days', async () => {
+    process.env.COMMUNE_STATISTICS_BATCH_SIZE = '1000';
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS = '7';
+    const communes = Array.from({ length: 2001 }, (_, index) => ({
+      id: index + 1,
+      departement: { code: '18' },
+      statisticCommune: { id: index + 1000, restrictions: [] },
+    }));
+    const harness = createComputationHarness({ communes });
+    const days = Array.from({ length: 7 }, (_, index) => ({
+      date: new Date(
+        moment.utc('2025-07-13').add(index, 'day').format('YYYY-MM-DD'),
+      ),
+    }));
+
+    await harness.service.computeEmptyHistoricCommuneStatisticsRange(days, {
+      sourceRevision: '42',
+      historicComputeEpoch: '9',
+    });
+
+    const rangeUpdateCalls = harness.query.mock.calls.filter(([sql]) =>
+      String(sql).includes('existing_target_dates AS MATERIALIZED'),
+    );
+    expect(rangeUpdateCalls).toHaveLength(3);
+    for (const [sql, parameters] of rangeUpdateCalls) {
+      expect(
+        String(sql).match(/CROSS JOIN LATERAL jsonb_array_elements/g),
+      ).toHaveLength(1);
+      expect(JSON.parse(String(parameters?.[1]))).toHaveLength(7);
+    }
+    expect(rangeUpdateCalls).toHaveLength(Math.ceil(2001 / 1000));
+    expect(rangeUpdateCalls).not.toHaveLength(7 * Math.ceil(2001 / 1000));
+  });
+
+  it('fails every still-running range snapshot when guarded certification cannot complete', async () => {
+    const harness = createComputationHarness({ snapshotAffectedRows: 0 });
+
+    await expect(
+      harness.service.computeEmptyHistoricCommuneStatisticsRange(
+        [
+          {
+            date: new Date('2025-07-13T00:00:00.000Z'),
+          },
+          {
+            date: new Date('2025-07-14T00:00:00.000Z'),
+          },
+        ],
+        { sourceRevision: '42', historicComputeEpoch: '9' },
+      ),
+    ).rejects.toThrow(
+      'Le snapshot communal 2025-07-13 ne couvre pas toutes les communes attendues',
+    );
+
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.events).toContain('failed');
+    const failedCall = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes('AND "status" = \'running\''),
+    );
+    expect(failedCall?.[1]?.[0]).toEqual(['2025-07-13', '2025-07-14']);
+  });
+
+  it('rejects non-contiguous or oversized empty ranges before acquiring the lock', async () => {
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS = '2';
+    const harness = createComputationHarness();
+    const context = { sourceRevision: '42', historicComputeEpoch: '9' };
+
+    await expect(
+      harness.service.computeEmptyHistoricCommuneStatisticsRange(
+        [
+          { date: new Date('2025-07-13T00:00:00.000Z') },
+          { date: new Date('2025-07-15T00:00:00.000Z') },
+        ],
+        context,
+      ),
+    ).rejects.toThrow('range is not contiguous');
+    await expect(
+      harness.service.computeEmptyHistoricCommuneStatisticsRange(
+        [
+          { date: new Date('2025-07-13T00:00:00.000Z') },
+          { date: new Date('2025-07-14T00:00:00.000Z') },
+          { date: new Date('2025-07-15T00:00:00.000Z') },
+        ],
+        context,
+      ),
+    ).rejects.toThrow('range length: 3/2');
+    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
   });
 });

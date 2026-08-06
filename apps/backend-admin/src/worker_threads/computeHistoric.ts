@@ -68,6 +68,7 @@ async function run() {
         expectedStatsGeneration,
         expectedSourceRevision,
         dateMax,
+        expectedHistoricComputeEpoch,
       );
     } else {
       result =

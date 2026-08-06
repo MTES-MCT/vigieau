@@ -38,6 +38,7 @@ import {
   getCurrentParisCivilDate,
   getPredecessorEndDateConstraint,
   getPublicationEndDateProvenance,
+  getReconciledArreteLifecycleStatus,
   hasArreteComputationStateChanged,
   hasArreteMutationVersionChanged,
   normalizeCivilDate,
@@ -1109,9 +1110,14 @@ export class ArreteCadreService {
     const statut =
       arrete.statut === 'a_valider'
         ? arrete.statut
-        : getArreteLifecycleStatus(
-            arrete.dateDebut,
-            resolved.dateFin,
+        : getReconciledArreteLifecycleStatus(
+            {
+              dateDebut: arrete.dateDebut,
+              dateFin: arrete.dateFin,
+              dateFinCalculee: arrete.dateFinCalculee,
+              resolvedDateFin: resolved.dateFin,
+              statut: arrete.statut,
+            },
             businessDate,
           );
     const update = { ...resolved, statut };
@@ -1635,6 +1641,19 @@ export class ArreteCadreService {
               AND (
                 framework_order.statut::text IS DISTINCT FROM (
                   CASE
+                    WHEN framework_order.statut = 'abroge'
+                      AND framework_order."dateFinCalculee" = false
+                      AND (
+                        (
+                          framework_order."dateFin" IS NULL
+                          AND expected_end.resolved_end IS NULL
+                        )
+                        OR (
+                          framework_order."dateFin" > $1::date
+                          AND framework_order."dateFin"
+                            IS NOT DISTINCT FROM expected_end.resolved_end
+                        )
+                      ) THEN 'abroge'
                     WHEN framework_order."dateDebut" > $1::date THEN 'a_venir'
                     WHEN framework_order."dateFin" IS NOT NULL
                       AND framework_order."dateFin" < $1::date THEN 'abroge'

@@ -155,6 +155,63 @@ describe('ArreteCadreService continuity entry points', () => {
     ).toHaveBeenCalledWith(harness.manager, '2026-07-01');
   });
 
+  it('does not reactivate an explicitly repealed legacy framework without an end boundary', async () => {
+    const harness = createHarness();
+    const candidate = createArrete({
+      id: 100,
+      dateDebut: '2011-06-07',
+      dateFin: null,
+      statut: 'abroge',
+    });
+    harness.transactionRepository.query.mockResolvedValue([candidate]);
+    harness.lockIds([100]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue(candidate);
+
+    await harness.service.updateArreteCadreStatut(false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    const statusSelectionSql =
+      harness.transactionRepository.query.mock.calls[0][0];
+    expect(statusSelectionSql).toContain("framework_order.statut = 'abroge'");
+    expect(statusSelectionSql).toContain(
+      'framework_order."dateFinCalculee" = false',
+    );
+    expect(statusSelectionSql).toContain('framework_order."dateFin" IS NULL');
+    expect(statusSelectionSql).toContain('expected_end.resolved_end IS NULL');
+    expect(harness.transactionRepository.update).not.toHaveBeenCalled();
+  });
+
+  it('does not reactivate an explicitly repealed legacy framework with a future entered end', async () => {
+    const harness = createHarness();
+    const candidate = createArrete({
+      id: 101,
+      dateDebut: '2011-06-07',
+      dateFin: '2050-12-31',
+      dateFinCalculee: false,
+      statut: 'abroge',
+    });
+    harness.transactionRepository.query.mockResolvedValue([candidate]);
+    harness.lockIds([101]);
+    harness.transactionRepository.findOneOrFail.mockResolvedValue(candidate);
+
+    await harness.service.updateArreteCadreStatut(false, {
+      scheduledFor: '2026-08-05',
+      sourceRevision: '42',
+    });
+
+    const statusSelectionSql =
+      harness.transactionRepository.query.mock.calls[0][0];
+    expect(statusSelectionSql).toContain(
+      'framework_order."dateFin" > $1::date',
+    );
+    expect(statusSelectionSql).toContain(
+      'IS NOT DISTINCT FROM expected_end.resolved_end',
+    );
+    expect(harness.transactionRepository.update).not.toHaveBeenCalled();
+  });
+
   it('persists affected departments before continuing the legacy scheduled run', async () => {
     const harness = createHarness();
     const candidate = createArrete({

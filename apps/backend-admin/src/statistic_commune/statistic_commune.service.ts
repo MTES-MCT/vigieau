@@ -14,6 +14,8 @@ const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
   'vigieau:statistic-commune:snapshot-computation';
 const DEFAULT_COMMUNE_STATISTICS_BATCH_SIZE = 250;
 const MAX_COMMUNE_STATISTICS_BATCH_SIZE = 1000;
+export const HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT = 7;
+const HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_LIMIT = 31;
 const STATISTIC_ZONE_TYPES = ['SUP', 'SOU', 'AEP'] as const;
 const STATISTIC_SEVERITIES = [
   'vigilance',
@@ -52,6 +54,30 @@ export function parseCommuneStatisticsBatchSize(
   return batchSize;
 }
 
+export function parseHistoricEmptyStatisticsRangeMaxDays(
+  value = process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS,
+): number {
+  if (value === undefined || value.trim() === '') {
+    return HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT;
+  }
+  const normalizedValue = value.trim();
+  if (!/^[1-9]\d*$/.test(normalizedValue)) {
+    throw new Error(
+      'Invalid HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS: expected a positive integer',
+    );
+  }
+  const maxDays = Number(normalizedValue);
+  if (
+    !Number.isSafeInteger(maxDays) ||
+    maxDays > HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_LIMIT
+  ) {
+    throw new Error(
+      `Invalid HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS: expected at most ${HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_LIMIT}`,
+    );
+  }
+  return maxDays;
+}
+
 interface CommuneStatisticRestriction {
   date: string;
   SOU: StatisticSeverity | null;
@@ -73,7 +99,20 @@ interface StatisticSnapshotHooks {
   beforeCommuneStatistics?: () => Promise<void>;
   beforeCertification?: () => Promise<void>;
   deferCertificationUntilPublication?: boolean;
+  preserveBootstrapBarrier?: boolean;
   sourceRevision?: string;
+  historicComputeEpoch?: string;
+}
+
+export interface EmptyHistoricStatisticDay {
+  date: Date;
+  beforeCommuneStatistics?: () => Promise<void>;
+  beforeCertification?: () => Promise<void>;
+}
+
+export interface EmptyHistoricStatisticRangeOptions {
+  sourceRevision: string;
+  historicComputeEpoch: string;
 }
 
 interface MonthlyStatisticComputationOptions {
@@ -311,6 +350,9 @@ export class StatisticCommuneService {
         processedCommuneCount,
         nationalSnapshotAlreadyCompleted,
         hooks?.deferCertificationUntilPublication === true,
+        hooks?.preserveBootstrapBarrier === true,
+        hooks?.sourceRevision,
+        hooks?.historicComputeEpoch,
       );
     } catch (error) {
       if (snapshotStarted) {
@@ -360,6 +402,179 @@ export class StatisticCommuneService {
         }
       }
     }
+  }
+
+  async computeEmptyHistoricCommuneStatisticsRange(
+    days: EmptyHistoricStatisticDay[],
+    options: EmptyHistoricStatisticRangeOptions,
+  ): Promise<void> {
+    const maxDays = parseHistoricEmptyStatisticsRangeMaxDays();
+    const dateStrings = this.validateEmptyHistoricStatisticRange(
+      days,
+      maxDays,
+      options,
+    );
+    const batchSize = parseCommuneStatisticsBatchSize(
+      process.env.COMMUNE_STATISTICS_BATCH_SIZE,
+    );
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let locked = false;
+    let snapshotsStarted = false;
+    let processedCommuneCount = 0;
+
+    this.logger.log(
+      `COMPUTING EMPTY COMMUNE STATISTICS RANGE - ${dateStrings[0]}..${dateStrings[dateStrings.length - 1]}`,
+    );
+
+    try {
+      await queryRunner.connect();
+      connected = true;
+      const [lock] = await queryRunner.query(
+        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+        [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
+      );
+      locked = lock?.locked === true;
+      if (!locked) {
+        throw new Error(
+          'Un calcul des statistiques communales est deja en cours',
+        );
+      }
+
+      const communeSize = await this.communeService.count();
+      if (communeSize === 0) {
+        throw new Error('Aucune commune a calculer pour les snapshots vides');
+      }
+      await this.markEmptyHistoricSnapshotsRunning(
+        queryRunner,
+        dateStrings,
+        communeSize,
+        options,
+      );
+      snapshotsStarted = true;
+
+      for (const day of days) {
+        await this.assertEmptyHistoricRangeContext(queryRunner, options);
+        await day.beforeCommuneStatistics?.();
+        await this.assertEmptyHistoricRangeContext(queryRunner, options);
+      }
+
+      for (let offset = 0; offset < communeSize; offset += batchSize) {
+        this.logger.log(`EMPTY RANGE BATCH ${offset}`);
+        const communes = await this.communeService.findWithStats(
+          batchSize,
+          offset,
+        );
+        if (communes.length === 0) {
+          throw new Error(
+            `Lot communal vide a partir de ${offset} pour ${communeSize} communes attendues`,
+          );
+        }
+        const nextProcessedCommuneCount =
+          processedCommuneCount + communes.length;
+        await this.persistEmptyHistoricCommuneStatisticsBatch(
+          queryRunner,
+          communes.map((commune) => commune.id),
+          dateStrings,
+          communeSize,
+          nextProcessedCommuneCount,
+          options,
+        );
+        processedCommuneCount = nextProcessedCommuneCount;
+      }
+
+      const finalCommuneSize = await this.communeService.count();
+      if (
+        processedCommuneCount !== finalCommuneSize ||
+        finalCommuneSize !== communeSize
+      ) {
+        throw new Error(
+          `Snapshots communaux vides incomplets: ${processedCommuneCount}/${finalCommuneSize} communes calculees, ${communeSize} attendues`,
+        );
+      }
+
+      for (let index = 0; index < days.length; index += 1) {
+        await this.assertEmptyHistoricRangeContext(queryRunner, options);
+        await days[index].beforeCertification?.();
+        await this.assertEmptyHistoricRangeContext(queryRunner, options);
+        await this.markEmptyHistoricSnapshotCompleted(
+          queryRunner,
+          dateStrings[index],
+          processedCommuneCount,
+          options,
+        );
+      }
+    } catch (error) {
+      if (snapshotsStarted) {
+        await this.markEmptyHistoricSnapshotsFailed(
+          queryRunner,
+          dateStrings,
+          processedCommuneCount,
+          error,
+        );
+      }
+      throw error;
+    } finally {
+      if (locked) {
+        try {
+          await queryRunner.query(
+            'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
+            [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
+          );
+        } catch (error) {
+          this.logger.error(
+            'ERREUR LORS DE LA LIBERATION DU VERROU DES STATISTIQUES COMMUNALES',
+            error,
+          );
+        }
+      }
+      if (connected) {
+        try {
+          await queryRunner.release();
+        } catch (error) {
+          this.logger.error(
+            'ERREUR LORS DE LA LIBERATION DE LA CONNEXION DES STATISTIQUES COMMUNALES',
+            error,
+          );
+        }
+      }
+    }
+  }
+
+  private validateEmptyHistoricStatisticRange(
+    days: EmptyHistoricStatisticDay[],
+    maxDays: number,
+    options: EmptyHistoricStatisticRangeOptions,
+  ): string[] {
+    if (days.length === 0 || days.length > maxDays) {
+      throw new Error(
+        `Invalid empty historic statistic range length: ${days.length}/${maxDays}`,
+      );
+    }
+    if (
+      !/^\d+$/.test(options.sourceRevision) ||
+      !/^\d+$/.test(options.historicComputeEpoch)
+    ) {
+      throw new Error('Invalid empty historic statistic range context');
+    }
+    const dateStrings = days.map((day) => {
+      if (!(day.date instanceof Date) || Number.isNaN(day.date.getTime())) {
+        throw new Error('Invalid empty historic statistic date');
+      }
+      return day.date.toISOString().slice(0, 10);
+    });
+    for (let index = 1; index < dateStrings.length; index += 1) {
+      const expected = moment
+        .utc(dateStrings[index - 1], 'YYYY-MM-DD', true)
+        .add(1, 'day')
+        .format('YYYY-MM-DD');
+      if (dateStrings[index] !== expected) {
+        throw new Error(
+          `Empty historic statistic range is not contiguous: ${dateStrings[index - 1]} -> ${dateStrings[index]}`,
+        );
+      }
+    }
+    return dateStrings;
   }
 
   private prepareStatisticZones(
@@ -711,6 +926,386 @@ export class StatisticCommuneService {
     }
   }
 
+  private async markEmptyHistoricSnapshotsRunning(
+    queryRunner: QueryRunner,
+    dateStrings: string[],
+    expectedCommuneCount: number,
+    options: EmptyHistoricStatisticRangeOptions,
+  ): Promise<void> {
+    const [result] = await queryRunner.query(
+      `
+        WITH current_context AS MATERIALIZED (
+          SELECT 1
+          FROM "config" config
+          CROSS JOIN "zone_publication_source_state" source_state
+          WHERE config."id" = 1
+            AND config."historicComputeEpoch" = $4::bigint
+            AND source_state."id" = 1
+            AND source_state."revision" = $3::bigint
+        ), target_dates AS MATERIALIZED (
+          SELECT unnest($1::date[]) AS "snapshotDate"
+        ), started AS (
+          INSERT INTO "statistic_commune_snapshot" (
+            "snapshotDate", "scope", "status", "expectedCommuneCount",
+            "processedCommuneCount", "startedAt", "completedAt", "lastError",
+            "sourceRevision", "createdAt", "updatedAt"
+          )
+          SELECT
+            target_dates."snapshotDate", 'national', 'running', $2, 0,
+            now(), NULL, NULL, $3::bigint, now(), now()
+          FROM target_dates
+          CROSS JOIN current_context
+          ON CONFLICT ("snapshotDate", "scope") DO UPDATE SET
+            "status" = 'running',
+            "expectedCommuneCount" = EXCLUDED."expectedCommuneCount",
+            "processedCommuneCount" = 0,
+            "startedAt" = now(),
+            "completedAt" = NULL,
+            "lastError" = NULL,
+            "sourceRevision" = EXCLUDED."sourceRevision",
+            "updatedAt" = now()
+          RETURNING 1
+        )
+        SELECT
+          EXISTS(SELECT 1 FROM current_context) AS "contextMatches",
+          (SELECT COUNT(*)::integer FROM started) AS affected
+      `,
+      [
+        dateStrings,
+        expectedCommuneCount,
+        options.sourceRevision,
+        options.historicComputeEpoch,
+      ],
+    );
+    if (
+      result?.contextMatches !== true ||
+      Number(result?.affected ?? 0) !== dateStrings.length
+    ) {
+      throw new Error(
+        `Unable to start empty historic statistic range ${dateStrings[0]}..${dateStrings[dateStrings.length - 1]} in the expected context`,
+      );
+    }
+  }
+
+  private async assertEmptyHistoricRangeContext(
+    queryRunner: QueryRunner,
+    options: EmptyHistoricStatisticRangeOptions,
+  ): Promise<void> {
+    const rows = await queryRunner.query(
+      `
+        SELECT 1
+        FROM "config" config
+        CROSS JOIN "zone_publication_source_state" source_state
+        WHERE config."id" = 1
+          AND config."historicComputeEpoch" = $1::bigint
+          AND source_state."id" = 1
+          AND source_state."revision" = $2::bigint
+        FOR SHARE OF config, source_state
+      `,
+      [options.historicComputeEpoch, options.sourceRevision],
+    );
+    if (rows.length !== 1) {
+      throw new Error(
+        `Empty historic statistic range context changed (epoch=${options.historicComputeEpoch}, sourceRevision=${options.sourceRevision})`,
+      );
+    }
+  }
+
+  private async persistEmptyHistoricCommuneStatisticsBatch(
+    queryRunner: QueryRunner,
+    communeIds: number[],
+    dateStrings: string[],
+    expectedCommuneCount: number,
+    processedCommuneCount: number,
+    options: EmptyHistoricStatisticRangeOptions,
+  ): Promise<void> {
+    let transactionStarted = false;
+    try {
+      await queryRunner.startTransaction();
+      transactionStarted = true;
+      await this.assertEmptyHistoricRangeContext(queryRunner, options);
+      const communePayload = JSON.stringify(
+        communeIds.map((communeId) => ({ communeId })),
+      );
+      const datePayload = JSON.stringify(
+        dateStrings.map((date) => ({
+          date,
+          restriction: { date, SOU: null, SUP: null, AEP: null },
+        })),
+      );
+      await queryRunner.query(
+        `
+          INSERT INTO "statistic_commune" ("communeId", "restrictions")
+          SELECT input."communeId", '[]'::jsonb
+          FROM jsonb_to_recordset($1::jsonb)
+            AS input("communeId" integer)
+          ON CONFLICT ("communeId") DO NOTHING
+        `,
+        [communePayload],
+      );
+      const [updateResult] = await queryRunner.query(
+        `
+          WITH input AS MATERIALIZED (
+            SELECT *
+            FROM jsonb_to_recordset($1::jsonb)
+              AS value("communeId" integer)
+          ), target_dates AS MATERIALIZED (
+            SELECT
+              target.value ->> 'date' AS "date",
+              target.value -> 'restriction' AS restriction,
+              target.ordinality
+            FROM jsonb_array_elements($2::jsonb)
+              WITH ORDINALITY AS target(value, ordinality)
+          ), matched AS MATERIALIZED (
+            SELECT
+              statistic.id,
+              statistic."restrictions"
+            FROM input
+            JOIN "statistic_commune" statistic
+              ON statistic."communeId" = input."communeId"
+          ), expanded AS MATERIALIZED (
+            SELECT
+              matched.id,
+              item.value,
+              item.ordinality,
+              target_dates."date" AS "targetDate",
+              target_dates.restriction AS "targetRestriction",
+              ROW_NUMBER() OVER (
+                PARTITION BY matched.id, target_dates."date"
+                ORDER BY item.ordinality
+              ) AS "targetOccurrence"
+            FROM matched
+            CROSS JOIN LATERAL jsonb_array_elements(
+              COALESCE(matched."restrictions", '[]'::jsonb)
+            ) WITH ORDINALITY AS item(value, ordinality)
+            LEFT JOIN target_dates
+              ON target_dates."date" = item.value ->> 'date'
+          ), existing_target_dates AS MATERIALIZED (
+            SELECT DISTINCT id, "targetDate"
+            FROM expanded
+            WHERE "targetDate" IS NOT NULL
+          ), candidate_items AS MATERIALIZED (
+            SELECT
+              expanded.id,
+              CASE
+                WHEN expanded."targetDate" IS NOT NULL
+                  THEN expanded."targetRestriction"
+                ELSE expanded.value
+              END AS value,
+              CASE
+                WHEN expanded."targetDate" IS NOT NULL
+                  THEN expanded."targetDate"
+                ELSE expanded.value ->> 'date'
+              END AS "date",
+              0 AS phase,
+              expanded.ordinality
+            FROM expanded
+            WHERE expanded."targetDate" IS NULL
+               OR expanded."targetOccurrence" = 1
+            UNION ALL
+            SELECT
+              matched.id,
+              target_dates.restriction,
+              target_dates."date",
+              1 AS phase,
+              target_dates.ordinality
+            FROM matched
+            CROSS JOIN target_dates
+            LEFT JOIN existing_target_dates
+              ON existing_target_dates.id = matched.id
+             AND existing_target_dates."targetDate" = target_dates."date"
+            WHERE existing_target_dates.id IS NULL
+          ), candidate AS MATERIALIZED (
+            SELECT
+              matched.id,
+              matched."restrictions" AS "currentRestrictions",
+              COALESCE(
+                jsonb_agg(
+                  candidate_items.value
+                  ORDER BY
+                    CASE
+                      WHEN candidate_items."date"
+                        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
+                      ELSE 1
+                    END,
+                    CASE
+                      WHEN candidate_items."date"
+                        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                        THEN candidate_items."date"
+                      ELSE NULL
+                    END,
+                    candidate_items.phase,
+                    candidate_items.ordinality
+                ) FILTER (WHERE candidate_items.id IS NOT NULL),
+                '[]'::jsonb
+              ) AS "nextRestrictions"
+            FROM matched
+            LEFT JOIN candidate_items ON candidate_items.id = matched.id
+            GROUP BY matched.id, matched."restrictions"
+          ), updated AS (
+            UPDATE "statistic_commune" statistic
+            SET "restrictions" = candidate."nextRestrictions"
+            FROM candidate
+            WHERE statistic.id = candidate.id
+              AND candidate."nextRestrictions"
+                  IS DISTINCT FROM candidate."currentRestrictions"
+            RETURNING statistic.id
+          )
+          SELECT
+            (SELECT COUNT(*)::integer FROM matched) AS matched,
+            (SELECT COUNT(*)::integer FROM updated) AS updated,
+            (
+              SELECT COUNT(*)::integer
+              FROM candidate
+              WHERE candidate."nextRestrictions"
+                    IS NOT DISTINCT FROM candidate."currentRestrictions"
+            ) AS unchanged
+        `,
+        [communePayload, datePayload],
+      );
+      const matchedCount = Number(updateResult?.matched ?? 0);
+      const updatedCount = Number(updateResult?.updated ?? 0);
+      const unchangedCount = Number(updateResult?.unchanged ?? 0);
+      if (matchedCount !== communeIds.length) {
+        throw new Error(
+          `Lot communal vide incomplet: ${matchedCount}/${communeIds.length} statistiques trouvees`,
+        );
+      }
+      if (updatedCount + unchangedCount !== communeIds.length) {
+        throw new Error(
+          `Lot communal vide incomplet: ${updatedCount} mises a jour + ${unchangedCount} inchangees / ${communeIds.length} statistiques attendues`,
+        );
+      }
+      await this.markEmptyHistoricSnapshotsProgress(
+        queryRunner,
+        dateStrings,
+        expectedCommuneCount,
+        processedCommuneCount,
+      );
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (rollbackError) {
+          this.logger.error(
+            "ERREUR LORS DE L'ANNULATION DU LOT VIDE DE STATISTIQUES COMMUNALES",
+            rollbackError,
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async markEmptyHistoricSnapshotsProgress(
+    queryRunner: QueryRunner,
+    dateStrings: string[],
+    expectedCommuneCount: number,
+    processedCommuneCount: number,
+  ): Promise<void> {
+    const [result] = await queryRunner.query(
+      `
+        WITH progressed AS (
+          UPDATE "statistic_commune_snapshot"
+          SET "processedCommuneCount" = $3, "updatedAt" = now()
+          WHERE "snapshotDate" = ANY($1::date[])
+            AND "scope" = 'national'
+            AND "status" = 'running'
+            AND "expectedCommuneCount" = $2
+          RETURNING 1
+        )
+        SELECT COUNT(*)::integer AS affected FROM progressed
+      `,
+      [dateStrings, expectedCommuneCount, processedCommuneCount],
+    );
+    if (Number(result?.affected ?? 0) !== dateStrings.length) {
+      throw new Error(
+        `La progression de la plage de snapshots communaux ${dateStrings[0]}..${dateStrings[dateStrings.length - 1]} n'a pas ete enregistree`,
+      );
+    }
+  }
+
+  private async markEmptyHistoricSnapshotCompleted(
+    queryRunner: QueryRunner,
+    dateString: string,
+    processedCommuneCount: number,
+    options: EmptyHistoricStatisticRangeOptions,
+  ): Promise<void> {
+    let transactionStarted = false;
+    try {
+      await queryRunner.startTransaction();
+      transactionStarted = true;
+      await this.assertEmptyHistoricRangeContext(queryRunner, options);
+      await this.markSnapshotCompleted(
+        queryRunner,
+        dateString,
+        'national',
+        processedCommuneCount,
+        false,
+        false,
+        false,
+        options.sourceRevision,
+        options.historicComputeEpoch,
+      );
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (rollbackError) {
+          this.logger.error(
+            "ERREUR LORS DE L'ANNULATION DE LA CERTIFICATION DU SNAPSHOT COMMUNAL VIDE",
+            rollbackError,
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async markEmptyHistoricSnapshotsFailed(
+    queryRunner: QueryRunner,
+    dateStrings: string[],
+    processedCommuneCount: number,
+    error: unknown,
+  ): Promise<void> {
+    const query = `
+      UPDATE "statistic_commune_snapshot"
+      SET "status" = 'failed',
+          "processedCommuneCount" = $2,
+          "completedAt" = NULL,
+          "lastError" = $3,
+          "updatedAt" = now()
+      WHERE "snapshotDate" = ANY($1::date[])
+        AND "scope" = 'national'
+        AND "status" = 'running'
+    `;
+    const parameters = [
+      dateStrings,
+      processedCommuneCount,
+      error instanceof Error ? error.message : String(error),
+    ];
+    try {
+      await queryRunner.query(query, parameters);
+    } catch (snapshotError) {
+      this.logger.error(
+        "ERREUR LORS DE L'ENREGISTREMENT DE L'ECHEC DE LA PLAGE DE SNAPSHOTS COMMUNAUX",
+        snapshotError,
+      );
+      try {
+        await this.dataSource.query(query, parameters);
+      } catch (fallbackError) {
+        this.logger.error(
+          "ERREUR LORS DE L'ENREGISTREMENT DE SECOURS DE LA PLAGE DE SNAPSHOTS COMMUNAUX",
+          fallbackError,
+        );
+      }
+    }
+  }
+
   private async assertNoIncompleteSnapshots(
     startDate?: string,
     endDate?: string,
@@ -841,6 +1436,9 @@ export class StatisticCommuneService {
     processedCommuneCount: number,
     nationalSnapshotAlreadyCompleted: boolean,
     deferCertificationUntilPublication: boolean,
+    preserveBootstrapBarrier: boolean,
+    sourceRevision?: string,
+    historicComputeEpoch?: string,
   ): Promise<void> {
     if (deferCertificationUntilPublication && snapshotScope !== 'national') {
       throw new Error(
@@ -852,8 +1450,53 @@ export class StatisticCommuneService {
       : snapshotScope === 'national' || nationalSnapshotAlreadyCompleted
         ? 'completed'
         : 'partial';
+    if (
+      (sourceRevision !== undefined && !/^\d+$/.test(sourceRevision)) ||
+      (historicComputeEpoch !== undefined &&
+        (!/^\d+$/.test(historicComputeEpoch) || sourceRevision === undefined))
+    ) {
+      throw new Error('Invalid statistic snapshot certification context');
+    }
+    const guardedCertification = sourceRevision !== undefined;
     const [result] = await queryRunner.query(
+      guardedCertification
+        ? `
+        WITH current_context AS MATERIALIZED (
+          SELECT
+            source_state."revision" AS "sourceRevision",
+            config."historicComputeEpoch" AS "historicComputeEpoch"
+          FROM "zone_publication_source_state" source_state
+          CROSS JOIN "config" config
+          WHERE source_state."id" = 1
+            AND config."id" = 1
+          FOR SHARE OF source_state, config
+        ),
+        completed_snapshot AS (
+          UPDATE "statistic_commune_snapshot" snapshot
+          SET "status" = $3::varchar,
+              "processedCommuneCount" = $4,
+              "completedAt" = CASE
+                WHEN $3::varchar = 'ready' THEN NULL
+                ELSE now()
+              END,
+              "lastError" = NULL,
+              "updatedAt" = now()
+          FROM current_context
+          WHERE snapshot."snapshotDate" = $1
+            AND snapshot."scope" = $2
+            AND snapshot."status" = 'running'
+            AND snapshot."expectedCommuneCount" = $4
+            AND snapshot."sourceRevision" = $5::bigint
+            AND current_context."sourceRevision" = $5::bigint
+            AND (
+              $6::bigint IS NULL
+              OR current_context."historicComputeEpoch" = $6::bigint
+            )
+          RETURNING 1
+        )
+        SELECT COUNT(*)::integer AS affected FROM completed_snapshot
       `
+        : `
         WITH completed_snapshot AS (
           UPDATE "statistic_commune_snapshot"
           SET "status" = $3::varchar,
@@ -872,7 +1515,16 @@ export class StatisticCommuneService {
         )
         SELECT COUNT(*)::integer AS affected FROM completed_snapshot
       `,
-      [snapshotDate, snapshotScope, completedStatus, processedCommuneCount],
+      guardedCertification
+        ? [
+            snapshotDate,
+            snapshotScope,
+            completedStatus,
+            processedCommuneCount,
+            sourceRevision,
+            historicComputeEpoch ?? null,
+          ]
+        : [snapshotDate, snapshotScope, completedStatus, processedCommuneCount],
     );
     if (Number(result?.affected ?? 0) !== 1) {
       throw new Error(
@@ -891,12 +1543,14 @@ export class StatisticCommuneService {
         `,
         [snapshotDate],
       );
-      await queryRunner.query(
-        `
-          DELETE FROM "statistic_commune_snapshot"
-          WHERE "scope" = 'bootstrap'
-        `,
-      );
+      if (!preserveBootstrapBarrier) {
+        await queryRunner.query(
+          `
+            DELETE FROM "statistic_commune_snapshot"
+            WHERE "scope" = 'bootstrap'
+          `,
+        );
+      }
     }
   }
 

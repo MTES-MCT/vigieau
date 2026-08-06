@@ -3,6 +3,7 @@ import {
   getCurrentParisCivilDate,
   getPredecessorEndDateConstraint,
   getPublicationEndDateProvenance,
+  getReconciledArreteLifecycleStatus,
   hasArreteComputationStateChanged,
   normalizeCivilDate,
   resolveArreteEndDate,
@@ -321,6 +322,50 @@ describe('arrete date continuity', () => {
         expect(getArreteLifecycleStatus(dateDebut, dateFin, businessDate)).toBe(
           expected,
         );
+      },
+    );
+  });
+
+  describe('getReconciledArreteLifecycleStatus', () => {
+    it('preserves an explicitly repealed legacy order without any end evidence', () => {
+      expect(
+        getReconciledArreteLifecycleStatus(
+          {
+            dateDebut: '2011-06-07',
+            dateFin: null,
+            dateFinCalculee: false,
+            resolvedDateFin: null,
+            statut: 'abroge',
+          },
+          '2026-08-05',
+        ),
+      ).toBe('abroge');
+    });
+
+    it.each([
+      ['abroge', '2026-08-03', true, '2026-08-09', 'publie'],
+      ['abroge', null, false, '2026-08-09', 'publie'],
+      ['abroge', '2050-12-31', false, '2050-12-31', 'abroge'],
+      ['abroge', '2050-12-31', false, '2026-08-09', 'publie'],
+      ['abroge', '2026-08-05', false, '2026-08-05', 'publie'],
+      ['a_venir', null, false, null, 'publie'],
+      ['publie', null, false, null, 'publie'],
+      ['publie', '2026-08-03', false, '2026-08-03', 'abroge'],
+    ] as const)(
+      'reconciles %p with current end %p, calculated=%p and resolved end %p to %p',
+      (statut, dateFin, dateFinCalculee, resolvedDateFin, expected) => {
+        expect(
+          getReconciledArreteLifecycleStatus(
+            {
+              dateDebut: '2026-08-01',
+              dateFin,
+              dateFinCalculee,
+              resolvedDateFin,
+              statut,
+            },
+            '2026-08-05',
+          ),
+        ).toBe(expected);
       },
     );
   });

@@ -13,6 +13,8 @@ type SnapshotFinalizer = {
     processedCommuneCount: number,
     nationalSnapshotAlreadyCompleted: boolean,
     deferCertificationUntilPublication: boolean,
+    sourceRevision?: string,
+    historicComputeEpoch?: string,
   ): Promise<void>;
 };
 
@@ -36,7 +38,20 @@ type StatisticCommunePersister = {
   ): Promise<void>;
 };
 
-type StatisticCommuneInternals = SnapshotFinalizer & StatisticCommunePersister;
+type EmptyHistoricStatisticRangePersister = {
+  persistEmptyHistoricCommuneStatisticsBatch(
+    queryRunner: QueryRunner,
+    communeIds: number[],
+    dateStrings: string[],
+    expectedCommuneCount: number,
+    processedCommuneCount: number,
+    options: { sourceRevision: string; historicComputeEpoch: string },
+  ): Promise<void>;
+};
+
+type StatisticCommuneInternals = SnapshotFinalizer &
+  StatisticCommunePersister &
+  EmptyHistoricStatisticRangePersister;
 
 type StatisticCommuneExportGuard = {
   assertNoIncompleteSnapshots(
@@ -159,6 +174,83 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       });
     },
   );
+
+  it('certifies a historic snapshot only in the locked source and epoch context', async () => {
+    const snapshotDate = '9998-12-29';
+    await queryRunner.query(`
+      CREATE TEMP TABLE "config" (
+        "id" integer PRIMARY KEY,
+        "historicComputeEpoch" bigint NOT NULL
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "zone_publication_source_state" (
+        "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_commune_snapshot" (
+        "snapshotDate" date NOT NULL,
+        "scope" varchar NOT NULL,
+        "status" varchar NOT NULL,
+        "processedCommuneCount" integer NOT NULL DEFAULT 0,
+        "expectedCommuneCount" integer NOT NULL DEFAULT 0,
+        "sourceRevision" bigint,
+        "completedAt" timestamptz,
+        "lastError" text,
+        "updatedAt" timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY ("snapshotDate", "scope")
+      ) ON COMMIT DROP;
+      INSERT INTO "config" VALUES (1, 10);
+      INSERT INTO "zone_publication_source_state" VALUES (1, 42);
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "expectedCommuneCount",
+        "processedCommuneCount", "sourceRevision"
+      ) VALUES ('9998-12-29', 'national', 'running', 1, 1, 42);
+    `);
+    const complete = () =>
+      service.markSnapshotCompleted(
+        queryRunner,
+        snapshotDate,
+        'national',
+        1,
+        false,
+        false,
+        '42',
+        '9',
+      );
+    const readStatus = async () => {
+      const [snapshot] = await queryRunner.query(
+        `
+          SELECT "status"
+          FROM "statistic_commune_snapshot"
+          WHERE "snapshotDate" = $1
+            AND "scope" = 'national'
+        `,
+        [snapshotDate],
+      );
+      return snapshot.status as string;
+    };
+
+    await expect(complete()).rejects.toThrow(
+      'Le snapshot communal 9998-12-29 ne couvre pas toutes les communes attendues',
+    );
+    expect(await readStatus()).toBe('running');
+
+    await queryRunner.query(
+      `UPDATE "config" SET "historicComputeEpoch" = 9 WHERE "id" = 1`,
+    );
+    await queryRunner.query(
+      `UPDATE "zone_publication_source_state" SET "revision" = 41 WHERE "id" = 1`,
+    );
+    await expect(complete()).rejects.toThrow(
+      'Le snapshot communal 9998-12-29 ne couvre pas toutes les communes attendues',
+    );
+    expect(await readStatus()).toBe('running');
+
+    await queryRunner.query(
+      `UPDATE "zone_publication_source_state" SET "revision" = 42 WHERE "id" = 1`,
+    );
+    await expect(complete()).resolves.toBeUndefined();
+    expect(await readStatus()).toBe('completed');
+  });
 
   it('compares export bounds as PostgreSQL dates', async () => {
     await queryRunner.query(`
@@ -409,6 +501,136 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         (value: { date?: string }) => value.date === date,
       ),
     ).toHaveLength(1);
+  });
+
+  it('materializes an empty date range with one JSONB traversal result and no second-pass rewrite', async () => {
+    await queryRunner.query(`
+      CREATE TEMP TABLE "config" (
+        "id" integer PRIMARY KEY,
+        "historicComputeEpoch" bigint NOT NULL
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "zone_publication_source_state" (
+        "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_commune" (
+        "id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        "communeId" integer NOT NULL UNIQUE,
+        "restrictions" jsonb NOT NULL DEFAULT '[]'::jsonb
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_commune_snapshot" (
+        "snapshotDate" date NOT NULL,
+        "scope" varchar NOT NULL,
+        "status" varchar NOT NULL,
+        "expectedCommuneCount" integer NOT NULL,
+        "processedCommuneCount" integer NOT NULL DEFAULT 0,
+        "updatedAt" timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY ("snapshotDate", "scope")
+      ) ON COMMIT DROP;
+      INSERT INTO "config" VALUES (1, 9);
+      INSERT INTO "zone_publication_source_state" VALUES (1, 42);
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "expectedCommuneCount"
+      ) VALUES
+        ('2025-07-13', 'national', 'running', 1),
+        ('2025-07-14', 'national', 'running', 1),
+        ('2025-07-15', 'national', 'running', 1);
+    `);
+    const outsideBefore = {
+      date: '2025-07-12',
+      SOU: 'vigilance',
+      SUP: null,
+      AEP: null,
+    };
+    const outsideAfter = {
+      date: '2025-07-16',
+      SOU: null,
+      SUP: 'alerte',
+      AEP: null,
+    };
+    const outsideDuplicate = {
+      date: '2025-07-12',
+      SOU: null,
+      SUP: 'crise',
+      AEP: null,
+    };
+    await queryRunner.query(
+      `
+        INSERT INTO "statistic_commune" ("communeId", "restrictions")
+        VALUES (1, $1::jsonb)
+      `,
+      [
+        JSON.stringify([
+          outsideBefore,
+          outsideDuplicate,
+          {
+            date: '2025-07-13',
+            SOU: null,
+            SUP: null,
+            AEP: null,
+          },
+          {
+            date: '2025-07-14',
+            SOU: 'crise',
+            SUP: null,
+            AEP: null,
+          },
+          {
+            date: '2025-07-13',
+            SOU: 'alerte',
+            SUP: null,
+            AEP: null,
+          },
+          outsideAfter,
+        ]),
+      ],
+    );
+    const persistRange = () =>
+      service.persistEmptyHistoricCommuneStatisticsBatch(
+        queryRunner,
+        [1],
+        ['2025-07-13', '2025-07-14', '2025-07-15'],
+        1,
+        1,
+        { sourceRevision: '42', historicComputeEpoch: '9' },
+      );
+    const readStatistic = async () => {
+      const [row] = await queryRunner.query(`
+        SELECT ctid::text AS ctid, "restrictions"
+        FROM "statistic_commune"
+        WHERE "communeId" = 1
+      `);
+      return row as { ctid: string; restrictions: PostgresRestriction[] };
+    };
+
+    await persistRange();
+    const firstPass = await readStatistic();
+    expect(firstPass.restrictions).toEqual([
+      outsideBefore,
+      outsideDuplicate,
+      { date: '2025-07-13', SOU: null, SUP: null, AEP: null },
+      { date: '2025-07-14', SOU: null, SUP: null, AEP: null },
+      { date: '2025-07-15', SOU: null, SUP: null, AEP: null },
+      outsideAfter,
+    ]);
+    expect(
+      firstPass.restrictions.filter(({ date }) => date === '2025-07-13'),
+    ).toHaveLength(1);
+
+    await persistRange();
+    const secondPass = await readStatistic();
+    expect(secondPass.ctid).toBe(firstPass.ctid);
+    expect(secondPass.restrictions).toEqual(firstPass.restrictions);
+    const snapshots = await queryRunner.query(`
+      SELECT "snapshotDate"::text AS date, "processedCommuneCount" AS processed
+      FROM "statistic_commune_snapshot"
+      ORDER BY "snapshotDate"
+    `);
+    expect(snapshots).toEqual([
+      { date: '2025-07-13', processed: 1 },
+      { date: '2025-07-14', processed: 1 },
+      { date: '2025-07-15', processed: 1 },
+    ]);
   });
 
   it('excludes only versioned failed days from monthly barriers and weighting', async () => {

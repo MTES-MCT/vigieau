@@ -15,6 +15,7 @@ import {
 import {
   HISTORIC_DEPARTMENT_CONCURRENCY_DEFAULT,
   HISTORIC_DEPARTMENT_CONCURRENCY_MAX,
+  isHistoricEmptyStatisticsRangeEnabled,
   readHistoricDepartmentConcurrency,
   readHistoricSkipCommuneIntersections,
   withHistoricArtifactCleanup,
@@ -2393,6 +2394,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   };
   let statisticCommuneService: {
     computeCommuneStatisticsRestrictions: jest.Mock;
+    computeEmptyHistoricCommuneStatisticsRange: jest.Mock;
     sortStatCommune: jest.Mock;
   };
   let statisticService: {
@@ -2434,11 +2436,17 @@ describe('ZoneAlerteComputedHistoricService', () => {
     process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS;
   const previousHistoricDepartmentCheckpoint =
     process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED;
+  const previousHistoricEmptyStatisticsRange =
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED;
+  const previousHistoricEmptyStatisticsRangeMaxDays =
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
 
   beforeEach(() => {
     delete process.env.HISTORIC_DEPARTMENT_CONCURRENCY;
     delete process.env.HISTORIC_SKIP_COMMUNE_INTERSECTIONS;
     delete process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED;
+    delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED;
+    delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
     statisticDepartementService = {
@@ -2454,6 +2462,16 @@ describe('ZoneAlerteComputedHistoricService', () => {
           const hooks = args[5];
           await hooks?.beforeCommuneStatistics?.();
           await hooks?.beforeCertification?.();
+        }),
+      computeEmptyHistoricCommuneStatisticsRange: jest
+        .fn()
+        .mockImplementation(async (days: any[]) => {
+          for (const day of days) {
+            await day.beforeCommuneStatistics?.();
+          }
+          for (const day of days) {
+            await day.beforeCertification?.();
+          }
         }),
       sortStatCommune: jest.fn().mockResolvedValue(undefined),
     };
@@ -2581,6 +2599,18 @@ describe('ZoneAlerteComputedHistoricService', () => {
       process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED =
         previousHistoricDepartmentCheckpoint;
     }
+    if (previousHistoricEmptyStatisticsRange === undefined) {
+      delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED;
+    } else {
+      process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED =
+        previousHistoricEmptyStatisticsRange;
+    }
+    if (previousHistoricEmptyStatisticsRangeMaxDays === undefined) {
+      delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
+    } else {
+      process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS =
+        previousHistoricEmptyStatisticsRangeMaxDays;
+    }
   });
 
   it('uses conservative historic acceleration defaults and validates overrides', () => {
@@ -2600,6 +2630,12 @@ describe('ZoneAlerteComputedHistoricService', () => {
     expect(readHistoricSkipCommuneIntersections(' TRUE ')).toBe(true);
     expect(readHistoricSkipCommuneIntersections('false')).toBe(false);
     expect(() => readHistoricSkipCommuneIntersections('1')).toThrow(
+      'must be true or false',
+    );
+    expect(isHistoricEmptyStatisticsRangeEnabled()).toBe(false);
+    expect(isHistoricEmptyStatisticsRangeEnabled(' TRUE ')).toBe(true);
+    expect(isHistoricEmptyStatisticsRangeEnabled('false')).toBe(false);
+    expect(() => isHistoricEmptyStatisticsRangeEnabled('1')).toThrow(
       'must be true or false',
     );
   });
@@ -2879,15 +2915,19 @@ describe('ZoneAlerteComputedHistoricService', () => {
       });
     zoneAlerteService.findGeometriesByIds.mockResolvedValue(new Map());
     arreteRestrictionService.findByDate.mockResolvedValue([{ id: 20958 }]);
-    dataSource.query.mockResolvedValue([
-      {
-        arId: 20958,
-        departmentCode: null,
-        zoneType: null,
-        mappableCount: 0,
-        sourceZoneIds: [],
-      },
-    ]);
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state')
+        ? [{ revision: '42' }]
+        : [
+            {
+              arId: 20958,
+              departmentCode: null,
+              zoneType: null,
+              mappableCount: 0,
+              sourceZoneIds: [],
+            },
+          ],
+    );
     (service as any).nestConfigService = {
       get: jest.fn().mockReturnValue(directory),
     };
@@ -2903,8 +2943,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
           '2011-06-06',
           '12',
           '4',
-          undefined,
+          '42',
           '2011-06-07',
+          '9',
         ),
       ).resolves.toEqual({
         mapCursor: '2011-06-07',
@@ -2958,19 +2999,31 @@ describe('ZoneAlerteComputedHistoricService', () => {
         expect.any(Object),
       );
       expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange,
+      ).not.toHaveBeenCalled();
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions.mock
+          .calls[0][5],
+      ).toEqual(
+        expect.objectContaining({
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+        }),
+      );
+      expect(
         statisticService.computeDepartementsSituationHistoric,
       ).toHaveBeenCalledWith([], '2011-06-07');
       expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
         '2011-06-06',
         '4',
         '2011-06-07',
-        undefined,
+        '42',
       );
       expect(configService.advanceComputeMapDate).toHaveBeenCalledWith(
         '2011-06-06',
         '12',
         '2011-06-07',
-        undefined,
+        '42',
       );
     } finally {
       generateEmptyPmtiles.mockRestore();
@@ -2978,17 +3031,263 @@ describe('ZoneAlerteComputedHistoricService', () => {
     }
   });
 
-  it('rejects an empty legacy artifact when source restrictions are mappable', async () => {
-    arreteRestrictionService.findByDate.mockResolvedValue([{ id: 42 }]);
-    dataSource.query.mockResolvedValue([
-      {
-        arId: 42,
-        departmentCode: '01',
-        zoneType: 'SUP',
-        mappableCount: 1,
-        sourceZoneIds: [101],
+  it('batches certified empty legacy days only when the dedicated flag is enabled', async () => {
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED = 'true';
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS = '2';
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-legacy-historic-empty-range-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(new Map());
+    arreteRestrictionService.findByDate.mockResolvedValue([]);
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+
+    try {
+      await expect(
+        service.computeHistoricMaps(
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          '2011-06-06',
+          '2011-06-06',
+          '12',
+          '4',
+          '42',
+          '2011-06-09',
+          '9',
+        ),
+      ).resolves.toEqual({
+        mapCursor: '2011-06-09',
+        statsCursor: '2011-06-09',
+        mapGeneration: '15',
+        statsGeneration: '7',
+      });
+
+      expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange,
+      ).toHaveBeenCalledTimes(2);
+      expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange.mock.calls.map(
+          ([days, options]) => ({
+            dates: days.map((day) => day.date.toISOString().slice(0, 10)),
+            options,
+          }),
+        ),
+      ).toEqual([
+        {
+          dates: ['2011-06-07', '2011-06-08'],
+          options: { sourceRevision: '42', historicComputeEpoch: '9' },
+        },
+        {
+          dates: ['2011-06-09'],
+          options: { sourceRevision: '42', historicComputeEpoch: '9' },
+        },
+      ]);
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions,
+      ).not.toHaveBeenCalled();
+      expect(configService.advanceComputeStatsDate.mock.calls).toEqual([
+        ['2011-06-06', '4', '2011-06-07', '42'],
+        ['2011-06-07', '5', '2011-06-08', '42'],
+        ['2011-06-08', '6', '2011-06-09', '42'],
+      ]);
+      expect(configService.advanceComputeMapDate.mock.calls).toEqual([
+        ['2011-06-06', '12', '2011-06-07', '42'],
+        ['2011-06-07', '13', '2011-06-08', '42'],
+        ['2011-06-08', '14', '2011-06-09', '42'],
+      ]);
+      expect(
+        statisticDepartementService.computeDepartementStatisticsRestrictions,
+      ).toHaveBeenCalledTimes(3);
+      expect(
+        statisticService.computeDepartementsSituationHistoric,
+      ).toHaveBeenCalledTimes(3);
+      expect(generateEmptyPmtiles).toHaveBeenCalledTimes(3);
+      expect(uploadFile).toHaveBeenCalledTimes(6);
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('flushes a pending empty range before processing the next non-empty day', async () => {
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED = 'true';
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS = '7';
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-legacy-historic-empty-then-nonempty-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const zone = {
+      id: 101,
+      type: 'SUP',
+      departement: { code: '01' },
+      restrictions: [{ niveauGravite: 'vigilance' }],
+    } as any;
+    const formatLegacyHistoricZones = jest
+      .spyOn(service as any, 'formatLegacyHistoricZones')
+      .mockResolvedValueOnce({ features: [], zones: [] })
+      .mockResolvedValueOnce({ features: [], zones: [zone] });
+    jest
+      .spyOn(service as any, 'assertHistoricSourceCoverage')
+      .mockResolvedValue(undefined);
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+
+    try {
+      await service.computeHistoricMaps(
+        moment('2011-06-07', 'YYYY-MM-DD'),
+        moment('2011-06-07', 'YYYY-MM-DD'),
+        '2011-06-06',
+        '2011-06-06',
+        '12',
+        '4',
+        '42',
+        '2011-06-08',
+        '9',
+      );
+
+      expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange.mock.calls[0][0].map(
+          (day) => day.date.toISOString().slice(0, 10),
+        ),
+      ).toEqual(['2011-06-07']);
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange.mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        statisticCommuneService.computeCommuneStatisticsRestrictions.mock
+          .invocationCallOrder[0],
+      );
+      expect(configService.advanceComputeStatsDate.mock.calls).toEqual([
+        ['2011-06-06', '4', '2011-06-07', '42'],
+        ['2011-06-07', '5', '2011-06-08', '42'],
+      ]);
+      expect(configService.advanceComputeMapDate.mock.calls).toEqual([
+        ['2011-06-06', '12', '2011-06-07', '42'],
+        ['2011-06-07', '13', '2011-06-08', '42'],
+      ]);
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions.mock
+          .calls[0][5],
+      ).toEqual(
+        expect.objectContaining({
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+        }),
+      );
+    } finally {
+      formatLegacyHistoricZones.mockRestore();
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rewinds the historic cursors when an empty range fails after a daily CAS', async () => {
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED = 'true';
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-legacy-historic-empty-range-failure-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange.mockImplementationOnce(
+      async (days: any[]) => {
+        for (const day of days) {
+          await day.beforeCommuneStatistics?.();
+        }
+        await days[0].beforeCertification?.();
+        throw new Error('empty range completion failed');
       },
-    ]);
+    );
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+
+    try {
+      await expect(
+        service.computeHistoricMaps(
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          moment('2011-06-07', 'YYYY-MM-DD'),
+          '2011-06-06',
+          '2011-06-06',
+          '12',
+          '4',
+          '42',
+          '2011-06-08',
+          '9',
+        ),
+      ).rejects.toThrow('empty range completion failed');
+
+      expect(configService.advanceComputeStatsDate).toHaveBeenCalledTimes(1);
+      expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
+        '2011-06-06',
+        '4',
+        '2011-06-07',
+        '42',
+      );
+      expect(configService.setConfig).toHaveBeenCalledWith(
+        '2011-06-07',
+        '2011-06-07',
+      );
+      expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an empty legacy artifact when source restrictions are mappable', async () => {
+    process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED = 'true';
+    arreteRestrictionService.findByDate.mockResolvedValue([{ id: 42 }]);
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state')
+        ? [{ revision: '42' }]
+        : [
+            {
+              arId: 42,
+              departmentCode: '01',
+              zoneType: 'SUP',
+              mappableCount: 1,
+              sourceZoneIds: [101],
+            },
+          ],
+    );
     const uploadFile = jest.fn();
     const generateEmptyPmtiles = jest.spyOn(
       emptyPmtiles,
@@ -3003,13 +3302,14 @@ describe('ZoneAlerteComputedHistoricService', () => {
       await expect(
         service.computeHistoricMaps(
           moment('2011-06-07', 'YYYY-MM-DD'),
-          undefined,
+          moment('2011-06-07', 'YYYY-MM-DD'),
           '2011-06-06',
-          undefined,
+          '2011-06-06',
           '12',
-          undefined,
-          undefined,
+          '4',
+          '42',
           '2011-06-07',
+          '9',
         ),
       ).rejects.toThrow(
         'Historic map 2011-06-07 source coverage mismatch (missing=01, unexpected=none)',
@@ -3019,6 +3319,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
       expect(uploadFile).not.toHaveBeenCalled();
       expect(
         statisticCommuneService.computeCommuneStatisticsRestrictions,
+      ).not.toHaveBeenCalled();
+      expect(
+        statisticCommuneService.computeEmptyHistoricCommuneStatisticsRange,
       ).not.toHaveBeenCalled();
       expect(configService.advanceComputeMapDate).not.toHaveBeenCalled();
       expect(configService.advanceComputeStatsDate).not.toHaveBeenCalled();
@@ -3344,6 +3647,10 @@ describe('ZoneAlerteComputedHistoricService', () => {
       statisticCommuneService.computeCommuneStatisticsRestrictions.mock
         .calls[0][5].sourceRevision,
     ).toBe('42');
+    expect(
+      statisticCommuneService.computeCommuneStatisticsRestrictions.mock
+        .calls[0][5].historicComputeEpoch,
+    ).toBe('13');
     expect(configService.advanceComputeStatsDate).toHaveBeenCalledWith(
       '2026-06-22',
       '4',
