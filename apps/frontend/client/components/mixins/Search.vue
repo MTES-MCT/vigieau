@@ -252,6 +252,6 @@ const closeModal = (): void => {
     :actions="modalActions"
     @close="closeModal"
   >
-    <div v-html="modalText" />
+    <p>{{ modalText }}</p>
   </DsfrModal>
 </template>

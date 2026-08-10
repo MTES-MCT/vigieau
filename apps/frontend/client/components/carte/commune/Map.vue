@@ -119,8 +119,8 @@ onMounted(() => {
     if (!feature) {
       return;
     }
-    const description = utils.generatePopupCommuneHtml(communeNameSelected.value);
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    const popupContent = utils.generatePopupCommuneHtml(communeNameSelected.value);
+    popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
 
     linkPopupBtn();
   });
@@ -278,7 +278,7 @@ const loadPopupData = async () => {
       return r.niveauGravite === 4;
     }).length;
     const nbDays = dateEnd ? dateEnd.diff(dateBegin, 'days') : 1;
-    const description = utils.generateFullPopupCommuneHtml(communeNameSelected.value, {
+    const popupContent = utils.generateFullPopupCommuneHtml(communeNameSelected.value, {
       noDays,
       vigilanceDays,
       alerteDays,
@@ -286,7 +286,7 @@ const loadPopupData = async () => {
       criseDays,
       nbDays,
     });
-    popup.setHTML(description);
+    popup.setDOMContent(popupContent);
     linkPopupBtn();
   }
 };

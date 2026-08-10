@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Ref } from 'vue';
+import type { Ref } from 'vue';
 import { Zone } from '../../dto/zone.dto';
 import { Usage } from '~/client/dto/usage.dto';
 import { Icon } from '@iconify/vue';
@@ -80,9 +80,16 @@ const thematiqueTagsFiltered = computed<TagProps[]>(() => {
   );
 });
 
-const usagesFiltered = (thematique: string): Usage[] => {
+const usagesFiltered = (thematique: TagProps): Usage[] => {
   return props.usages.filter((u) => u.thematique === thematique.label);
 };
+
+const selectedThematique = computed(
+  () => thematiqueTagsFiltered.value[selectedTagIndex.value],
+);
+const selectedThematiqueButtonId = computed(
+  () => `restriction-theme-filter-${selectedTagIndex.value}`,
+);
 
 const formatDate = (date: string) => {
   return moment(date).format('DD/MM/YYYY');
@@ -104,6 +111,16 @@ watch(
     selectedTagIndex.value = 0;
   },
 );
+
+watch(
+  thematiqueTagsFiltered,
+  (themes) => {
+    if (selectedTagIndex.value >= themes.length) {
+      selectedTagIndex.value = 0;
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -119,7 +136,10 @@ watch(
       </p>
     </div>
     <DsfrAccordionsGroup v-model="activeAccordion" class="full-width show-sm">
-      <template v-for="(thematique, index) in thematiqueTagsFiltered">
+      <template
+        v-for="(thematique, index) in thematiqueTagsFiltered"
+        :key="thematique.label"
+      >
         <DsfrAccordion
           :title="thematique.label"
           titleTag="h4"
@@ -129,6 +149,7 @@ watch(
             <div class="fr-grid-row fr-grid-row--gutters">
               <div
                 v-for="usage in usagesFiltered(thematique)"
+                :key="usage.id"
                 class="fr-col-12"
               >
                 <SituationRestrictionCard
@@ -152,51 +173,59 @@ watch(
     <div
       class="hide-sm fr-col-12 fr-grid-row fr-grid-row fr-grid-row--gutters fr-grid-row--center"
     >
-      <div class="text-align-center fr-mb-2w">
+      <div
+        class="text-align-center fr-mb-2w"
+        role="group"
+        aria-label="Filtrer les restrictions par type d’usage"
+      >
         <DsfrTag
           v-for="(thematique, index) in thematiqueTagsFiltered"
+          :id="`restriction-theme-filter-${index}`"
+          :key="thematique.label"
           class="fr-m-1w no-checkmark tag-lg"
+          aria-controls="restriction-theme-results"
           :aria-pressed="selectedTagIndex === index"
           @click="selectedTagIndex = index"
           tag-name="button"
         >
-          <Icon :icon="'vigieau:' + thematique.icon" class="fr-mr-1w" />
+          <Icon
+            :icon="`vigieau:${thematique.icon}`"
+            class="fr-mr-1w"
+          />
           {{ thematique.label }}
         </DsfrTag>
       </div>
-      <div class="restriction full-width">
-        <DsfrTabs class="tabs-light" v-model="selectedTagIndex">
-          <DsfrTabContent
-            v-for="(thematique, index) in thematiqueTagsFiltered"
-            :panel-id="'tab-content-' + index"
-            :tab-id="'tab-' + index"
-            role=""
-          >
+      <div
+        v-if="selectedThematique"
+        id="restriction-theme-results"
+        class="restriction full-width tabs-light"
+        role="region"
+        :aria-labelledby="selectedThematiqueButtonId"
+      >
+        <div
+          class="full-width fr-grid-row fr-grid-row--gutters fr-grid-row--center fr-pb-2w"
+        >
+          <template v-if="usagesFiltered(selectedThematique).length > 0">
             <div
-              class="full-width fr-grid-row fr-grid-row--gutters fr-grid-row--center fr-pb-2w"
+              v-for="usage in usagesFiltered(selectedThematique)"
+              :key="usage.id"
+              class="fr-col-12 fr-col-md-4"
             >
-              <template v-if="usagesFiltered(thematique).length > 0">
-                <div
-                  v-for="usage in usagesFiltered(thematique)"
-                  class="fr-col-12 fr-col-md-4"
-                >
-                  <SituationRestrictionCard
-                    :usage="usage"
-                    :thematique="thematique"
-                    :departement="zone.departement"
-                  />
-                </div>
-              </template>
-              <template v-else>
-                <div class="fr-col-12 fr-col-md-4">
-                  <div class="eau-card fr-p-2w">
-                    <div class="eau-card__desc">Aucune restriction</div>
-                  </div>
-                </div>
-              </template>
+              <SituationRestrictionCard
+                :usage="usage"
+                :thematique="selectedThematique"
+                :departement="zone.departement"
+              />
             </div>
-          </DsfrTabContent>
-        </DsfrTabs>
+          </template>
+          <template v-else>
+            <div class="fr-col-12 fr-col-md-4">
+              <div class="eau-card fr-p-2w">
+                <p class="eau-card__desc">Aucune restriction</p>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -246,7 +275,7 @@ watch(
             <p class="fr-mt-1w">
               Voir l'évolution de la sécheresse dans
               <router-link
-                :to="'/donnees/commune/' + getCommuneCode()"
+                :to="`/donnees/commune/${getCommuneCode()}`"
                 title="Je consulte les données de ma commune"
               >
                 votre commune
@@ -264,10 +293,6 @@ watch(
 </template>
 
 <style lang="scss">
-.fr-tabs {
-  width: 100%;
-}
-
 .fr-highlight {
   text-align: left;
 }

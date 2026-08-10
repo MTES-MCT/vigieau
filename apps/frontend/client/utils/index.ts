@@ -8,6 +8,11 @@ import niveauxGravite from '../dto/niveauGravite';
 import { Zone } from '../dto/zone.dto';
 import { useAddressStore } from '../store/address';
 import { useZoneStore } from '../store/zone';
+import {
+  createCommunePopupContent,
+  createFullCommunePopupContent,
+  createRestrictionsPopupContent,
+} from './map-popup-content';
 import { openAccessibleTallyPopup } from './tally-popup';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
@@ -237,8 +242,7 @@ const index = {
       case undefined:
         return {
           title: `Pas d'arrêté en vigueur`,
-          text: `Votre adresse n'est actuellement pas concernée par un arrêté préfectoral.
-<br/>Aucune restriction n'est à appliquer à votre adresse, nous vous conseillons tout de même de suivre les eco-gestes présents sur notre site !`,
+          text: `Votre adresse n'est actuellement pas concernée par un arrêté préfectoral. Aucune restriction n'est à appliquer à votre adresse, nous vous conseillons tout de même de suivre les éco-gestes présents sur notre site !`,
           icon: `ri-arrow-right-line`,
           actions: [],
         };
@@ -274,90 +278,41 @@ const index = {
     showRestrictionsBtn: boolean,
     address?: Address,
     geo?: Geo,
-  ) {
+  ): HTMLElement {
     let addressName = '';
     if (address?.properties?.label) {
-      addressName = `Adresse proche&nbsp: ${address.properties.label}`;
+      addressName = `Adresse proche\u00A0: ${address.properties.label}`;
     } else if (geo?.code) {
-      addressName = `Commune&nbsp: ${geo.nom} (${geo.code})`;
+      addressName = `Commune\u00A0: ${geo.nom} (${geo.code})`;
     }
-    let popupHtml = '';
+    const entries = (pmtilesData ?? []).map((p) => {
+      const niveauGravite = niveauxGravite.find(
+        (n) => n.niveauGravite === p.niveauGravite,
+      );
 
-    if (pmtilesData && pmtilesData.length > 0) {
-      pmtilesData.forEach((p, index) => {
-        const niveauGravite = niveauxGravite.find(
-          (n) => n.niveauGravite === p.niveauGravite,
-        );
-        if (index > 0) {
-          popupHtml += '<div class="divider fr-my-1w"></div>';
-        }
-        popupHtml += `<div class="fr-mb-1w">
-<p class="fr-badge situation-level-bg-${this.getRestrictionRank(
-          p.niveauGravite,
-        )}">${niveauGravite.text}</p>
-</div>
-<div class="map-popup-zone">Zone&nbsp;: ${p.nom}</div>`;
-      });
-    } else {
-      popupHtml += `<div class="fr-mb-1w">
-<p class="fr-badge situation-level-bg-0">Pas de restrictions</p>
-</div>`;
-    }
+      return {
+        badgeLabel: niveauGravite?.text,
+        rank: this.getRestrictionRank(p.niveauGravite),
+        zoneName: p.nom,
+      };
+    });
 
-    popupHtml += `<div class="fr-my-1w">${addressName}</div>`;
-
-    if (showRestrictionsBtn && pmtilesData) {
-      popupHtml += `
-<div>
-<button class="fr-btn btn-map-popup">
-Je consulte les restrictions
-</button>
-</div>`;
-    }
-    return popupHtml;
+    return createRestrictionsPopupContent(
+      entries,
+      Boolean(showRestrictionsBtn && pmtilesData),
+      addressName,
+    );
   },
 
-  generatePopupCommuneHtml(communeName: any) {
-    return `
-<div class="map-popup-zone">${communeName}</div>
-<div class="lds-ring">
-  <div></div>
-  <div></div>
-  <div></div>
-  <div></div>
-</div>
-<div>
-<button class="fr-btn btn-map-popup">
-Voir l'historique
-</button>
-</div>`;
+  generatePopupCommuneHtml(communeName: any): HTMLElement {
+    return createCommunePopupContent(communeName);
   },
 
-  generateFullPopupCommuneHtml(communeName: any, data: any) {
-    return `
-<div class="map-popup-zone">${communeName}</div>
-<ul class="text-align-left">
-  <li>Jours sans restrictions&nbsp: ${data.noDays} (${Math.round(
-      (data.noDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en vigilance&nbsp: ${data.vigilanceDays} (${Math.round(
-      (data.vigilanceDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en alerte&nbsp: ${data.alerteDays} (${Math.round(
-      (data.alerteDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en alerte renforcée&nbsp: ${data.alerteRenforceeDays} (${Math.round(
-      (data.alerteRenforceeDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en crise&nbsp: ${data.criseDays} (${Math.round(
-      (data.criseDays / data.nbDays) * 100,
-    )}%)</li>
-</ul>
-<div>
-<button class="fr-btn btn-map-popup">
-Voir l'historique
-</button>
-</div>`;
+  generateFullPopupCommuneHtml(
+    communeName: any,
+    data: any,
+  ): HTMLElement {
+    return createFullCommunePopupContent(communeName, data);
   },
 
   isWebglSupported() {

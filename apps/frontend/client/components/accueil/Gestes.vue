@@ -1,23 +1,38 @@
 <script setup lang="ts">
-import gestes from '../../data/gestes.json'
-import { Ref } from "vue";
+import gestes from '../../data/gestes.json';
+import type { Ref } from 'vue';
 import { Icon } from '@iconify/vue';
 
-const gesteTags: Ref<any[]> = ref([{
-  label: "À la maison",
-  icon: "eau-maison",
-  home: true
-}, {
-  label: "À l'extérieur",
-  icon: "eau-soleil",
-  home: false
-}]);
+interface GestureTag {
+  label: string;
+  icon: string;
+  home: boolean;
+}
 
-const gestesFiltered = (tag: any) => {
-  return gestes.data.filter(g => g.home === tag.home);
+const gesteTags: Ref<GestureTag[]> = ref([
+  {
+    label: 'À la maison',
+    icon: 'eau-maison',
+    home: true,
+  },
+  {
+    label: "À l'extérieur",
+    icon: 'eau-soleil',
+    home: false,
+  },
+]);
+
+const gestesFiltered = (tag: GestureTag) => {
+  return gestes.data.filter((gesture) => gesture.home === tag.home);
 };
 
 const selectedTagIndex: Ref<number> = ref(0);
+const selectedTag = computed<GestureTag>(
+  () => gesteTags.value[selectedTagIndex.value] || gesteTags.value[0],
+);
+const selectedTagButtonId = computed(
+  () => `home-gestures-filter-${selectedTagIndex.value}`,
+);
 </script>
 
 <template>
@@ -42,28 +57,42 @@ const selectedTagIndex: Ref<number> = ref(0);
       <p>En plus des restrictions, l’adoption des éco-gestes est un bon moyen de préserver les ressources en eau et d’éviter que la situation s’aggrave. Voici quelques exemples d’habitudes à prendre pour limiter sa consommation d’eau à l’échelle individuelle.</p>
     </div>
     <div class="fr-grid-row fr-grid-row--gutters">
-      <div class="fr-col-12 fr-grid-row fr-grid-row fr-grid-row--center">
-        <DsfrTag v-for="(tag, index) in gesteTags"
-                 class="fr-mx-1w tag-lg"
-                 :aria-pressed="selectedTagIndex === index"
-                 @click="selectedTagIndex = index"
-                 tag-name="button">
-          <Icon :icon="'vigieau:' + tag.icon" class="fr-mr-1w" />
+      <div
+        class="fr-col-12 fr-grid-row fr-grid-row--center"
+        role="group"
+        aria-label="Filtrer les éco-gestes"
+      >
+        <DsfrTag
+          v-for="(tag, index) in gesteTags"
+          :id="`home-gestures-filter-${index}`"
+          :key="tag.label"
+          class="fr-mx-1w tag-lg"
+          aria-controls="home-gestures-results"
+          :aria-pressed="selectedTagIndex === index"
+          @click="selectedTagIndex = index"
+          tag-name="button"
+        >
+          <Icon :icon="`vigieau:${tag.icon}`" class="fr-mr-1w" />
           {{ tag.label }}
         </DsfrTag>
       </div>
-      <DsfrTabs class="tabs-light" v-model="selectedTagIndex">
-        <DsfrTabContent v-for="(tag, index) in gesteTags"
-                        :panel-id="'tab-content-' + index"
-                        :tab-id="'tab-' + index"
-                        role="">
-          <div class="fr-grid-row fr-grid-row fr-grid-row--gutters fr-grid-row--center">
-            <GestesCard v-for="geste in gestesFiltered(tag)"
-                        :geste="geste"
-            />
-          </div>
-        </DsfrTabContent>
-      </DsfrTabs>
+      <div
+        id="home-gestures-results"
+        class="tabs-light full-width"
+        role="region"
+        :aria-labelledby="selectedTagButtonId"
+      >
+        <ul
+          class="gestures-list fr-grid-row fr-grid-row--gutters fr-grid-row--center"
+          role="list"
+        >
+          <GestesCard
+            v-for="gesture in gestesFiltered(selectedTag)"
+            :key="gesture.title"
+            :geste="gesture"
+          />
+        </ul>
+      </div>
     </div>
   </div>
 </template>
@@ -92,6 +121,11 @@ const selectedTagIndex: Ref<number> = ref(0);
 
   img {
     aspect-ratio: auto !important;
+  }
+
+  .gestures-list {
+    padding: 0;
+    list-style: none;
   }
 }
 

@@ -16,9 +16,9 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Abon
 const loading: Ref<boolean> = ref(false);
 const modalOpened: Ref<boolean> = ref(false);
 const modalTitle: Ref<string> = ref('');
-const modalText: Ref<string> = ref('');
 const modalIcon: Ref<string> = ref('');
 const modalActions: Ref<any[]> = ref([]);
+const subscriptionsToUnsubscribe: Ref<Subscription[]> = ref([]);
 
 const router = useRouter();
 const route = useRoute();
@@ -30,10 +30,9 @@ if (!userSubscriptions.value || userSubscriptions.value.length < 1 || error.valu
 
 const unsubscribe = async (ids: string[]) => {
   loading.value = true;
-  const {
-    data,
-    error,
-  } = ids.length > 1 ? await api.unsubscribeAll(route.query.token) : await api.unsubscribe(ids[0], route.query.token);
+  const { error } = ids.length > 1
+    ? await api.unsubscribeAll(route.query.token)
+    : await api.unsubscribe(ids[0], route.query.token);
   if (!error.value) {
     userSubscriptions.value = userSubscriptions.value.filter(s => !ids.includes(s.id));
   }
@@ -43,8 +42,7 @@ const unsubscribe = async (ids: string[]) => {
 
 const askUnsubscribe = (subscriptions: Subscription[]) => {
   modalTitle.value = 'Désabonnement';
-  modalText.value = subscriptions.length > 1 ? `Voulez-vous vous désabonner de toutes les notifications de changement de restrictions pour vos <b>${subscriptions.length} adresses</b> ?`
-    : `Voulez-vous vous désabonner des notifications de changement de restrictions pour l'adresse <b>${subscriptions[0].libelleLocalisation}</b> ?`;
+  subscriptionsToUnsubscribe.value = subscriptions;
   modalActions.value = [{
     label: 'Valider',
     onClick: unsubscribe.bind(this, subscriptions.map(s => s.id)),
@@ -68,6 +66,7 @@ const closeModal = () => {
       <h2>{{ route.query.email }}</h2>
       <div class="fr-grid-row fr-grid-row--gutters">
         <SubscriptionsCard v-for="subscription in userSubscriptions"
+                           :key="subscription.id"
                            :loading="loading"
                            :subscription="subscription"
                            @unsubscribe="askUnsubscribe([subscription])" />
@@ -83,8 +82,18 @@ const closeModal = () => {
   <DsfrModal :opened="modalOpened"
              :title="modalTitle"
              :icon="modalIcon"
-             :actions=modalActions
+             :actions="modalActions"
              @close="closeModal">
-    <div v-html="modalText"></div>
+    <p v-if="subscriptionsToUnsubscribe.length > 1">
+      Voulez-vous vous désabonner de toutes les notifications de changement de
+      restrictions pour vos
+      <strong>{{ subscriptionsToUnsubscribe.length }} adresses</strong> ?
+    </p>
+    <p v-else-if="subscriptionsToUnsubscribe[0]">
+      Voulez-vous vous désabonner des notifications de changement de
+      restrictions pour l'adresse
+      <strong>{{ subscriptionsToUnsubscribe[0].libelleLocalisation }}</strong>
+      ?
+    </p>
   </DsfrModal>
 </template>

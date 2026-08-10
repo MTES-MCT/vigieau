@@ -3,6 +3,7 @@ import * as maplibregl from 'maplibre-gl';
 import { Ref } from "vue";
 import utils from "../../utils";
 import { getFrenchMapLocale } from '../../utils/map-locale';
+import { createStatsPopupContent } from '../../utils/map-popup-content';
 
 const props = defineProps<{
   stats: any
@@ -130,20 +131,25 @@ onMounted(() => {
     map.value.getCanvas().style.cursor = 'pointer';
 
     const searches = props.stats.departementRepartition[e.features[0].properties.code];
-    const description = `<div>${e.features[0].properties.nom} (${e.features[0].properties.code})</div>
-<div>${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)</div>`;
+    const popupContent = createStatsPopupContent({
+      name: e.features[0].properties.nom,
+      code: e.features[0].properties.code,
+      summary: `${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)`,
+    });
 
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
   });
 
   map.value?.on('mousemove', 'regions-data', (e: any) => {
     map.value.getCanvas().style.cursor = 'pointer';
 
     const searches = props.stats.regionRepartition[e.features[0].properties.code];
-    const description = `<div>${e.features[0].properties.nom}</div>
-<div>${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)</div>`;
+    const popupContent = createStatsPopupContent({
+      name: e.features[0].properties.nom,
+      summary: `${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)`,
+    });
 
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
   });
 
   map.value?.on('mouseleave', 'departements-data', () => {

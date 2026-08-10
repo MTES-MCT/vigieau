@@ -586,14 +586,14 @@ function renderMapPopup(
   address?: any,
   geo?: any,
 ) {
-  const description = utils.generatePopupHtml(
+  const popupContent = utils.generatePopupHtml(
     properties,
     showRestrictionsBtn.value,
     address,
     geo,
   );
 
-  popup.setLngLat(coordinates).setHTML(description).addTo(map.value);
+  popup.setLngLat(coordinates).setDOMContent(popupContent).addTo(map.value);
   bindMapPopupButton(coordinates, address, geo);
 }
 
@@ -1265,7 +1265,7 @@ watch(
     :actions="modalActions"
     @close="closeModal"
   >
-    <div v-html="modalText"></div>
+    <p>{{ modalText }}</p>
   </DsfrModal>
 </template>
 

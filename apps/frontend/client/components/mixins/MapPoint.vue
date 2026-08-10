@@ -3,6 +3,7 @@ import type { Ref } from 'vue';
 import * as maplibregl from 'maplibre-gl';
 import api from '../../api';
 import { getFrenchMapLocale } from '../../utils/map-locale';
+import { createPointSelectionPopupContent } from '../../utils/map-popup-content';
 
 const props = defineProps({
   disabled: {
@@ -28,12 +29,6 @@ const popup = new maplibregl.Popup({
 }).setMaxWidth('300px');
 
 const marker = new maplibregl.Marker();
-
-const popupHtml = `<div>
-<button class="fr-btn btn-map-popup" type="button">
-Sélectionner ce point
-</button>
-</div>`;
 
 onMounted(() => {
   if (!isMapSupported) {
@@ -71,14 +66,13 @@ onMounted(() => {
     const coordinates = e.lngLat;
     const dataAddress = (await api.searchAddressByLatlon(coordinates.lng, coordinates.lat)).data;
     const dataGeo = (await api.searchGeoByLatlon(coordinates.lng, coordinates.lat)).data;
-    let html = popupHtml;
-    if (dataAddress.value?.features[0]?.properties?.label) {
-      html = `Adresse proche&nbsp: ${dataAddress.value.features[0].properties.label}<br/><br/>` + html;
-    } else if (dataGeo.value && dataGeo.value[0]?.code) {
-      html = `Commune&nbsp: ${dataGeo.value[0].nom} (${dataGeo.value[0].code})<br/><br/>` + html;
-    }
+    const popupContent = createPointSelectionPopupContent({
+      addressLabel: dataAddress.value?.features[0]?.properties?.label,
+      communeName: dataGeo.value?.[0]?.nom,
+      communeCode: dataGeo.value?.[0]?.code,
+    });
     loading.value = false;
-    popup.setLngLat(coordinates).setHTML(html).addTo(map.value);
+    popup.setLngLat(coordinates).setDOMContent(popupContent).addTo(map.value);
 
     const btn = document.getElementsByClassName('btn-map-popup')[0];
     if (!btn) {
