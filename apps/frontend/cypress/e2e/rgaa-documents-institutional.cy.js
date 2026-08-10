@@ -164,6 +164,7 @@ describe('Documents et pages institutionnelles accessibles', () => {
   });
 
   it('conserve des paragraphes, listes et tableaux valides sur les données personnelles', () => {
+    cy.viewport(1440, 900);
     cy.visit('/donnees-personnelles');
     cy.get('main h1').should('have.text', 'Politique de confidentialité');
     assertInstitutionalStructure(2);
@@ -186,7 +187,28 @@ describe('Documents et pages institutionnelles accessibles', () => {
         .should('not.contain.text', 'RPGD')
         .and('not.contain.text', 'identité.}')
         .and('not.contain.text', 'l’accès physiques');
+      cy.get('.personal-data-table__scroll').should(($regions) => {
+        expect($regions).to.have.length(2);
+        $regions.each((_index, region) => {
+          expect(
+            region.getAttribute('tabindex'),
+            'tabulation uniquement si la région déborde',
+          ).to.equal(
+            region.scrollWidth > region.clientWidth ? '0' : null,
+          );
+        });
+      });
     });
+
+    cy.viewport(320, 800);
+    cy.get('.personal-data-table__scroll')
+      .should(($regions) => {
+        expect($regions).to.have.length(2);
+        $regions.each((_index, region) => {
+          expect(region.scrollWidth).to.be.greaterThan(region.clientWidth);
+          expect(region.getAttribute('tabindex')).to.equal('0');
+        });
+      });
   });
 
   it('conserve la structure et les libellés corrigés des mentions légales', () => {

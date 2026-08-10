@@ -6,7 +6,7 @@ const operatorImgStyle: any = {
   'max-width': '300px'
 };
 const a11yCompliance: string = 'Partiellement conforme';
-let quickLinks: any[] = [];
+const quickLinks: any[] = [];
 const mandatoryLinks: any[] = [{
   label: `Accessibilité : ${a11yCompliance}`,
   to: '/accessibilite',
@@ -46,12 +46,13 @@ const runTimeConfig = useRuntimeConfig().public;
               :quickLinks="quickLinks"
               :key="key"
               :show-beta="runTimeConfig.domainName !== 'vigieau.gouv.fr' || runTimeConfig.domainProdNotActivated === 'true'"
-              :serviceTitle="''"
+              serviceTitle=""
               serviceDescription="''">
   </DsfrHeader>
   <div class="fr-mb-8w">
     <div class="fr-container" v-if="runTimeConfig.appEnv !== 'prod'">
-      <DsfrAlert description="Plateforme de développement, les données sont fictives. Si vous souhaitez accéder à la plateforme de production, allez sur https://vigieau.gouv.fr"
+      <DsfrAlert title="Plateforme de développement"
+                 description="Plateforme de développement, les données sont fictives. Si vous souhaitez accéder à la plateforme de production, allez sur https://vigieau.gouv.fr"
                  type="warning"
                  class="fr-my-2w"
                  :closeable="false"

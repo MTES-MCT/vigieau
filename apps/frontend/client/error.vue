@@ -1,11 +1,11 @@
 <script setup lang="ts">
-useHead({
-  title: `Préservons l'eau - Erreur`
-})
-
 const props = defineProps<{
   error: any
 }>()
+
+useHead({
+  title: `Préservons l'eau - Erreur`
+})
 const router = useRouter();
 
 if(props.error.statusCode === 404) {

@@ -21,17 +21,17 @@ const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 export const alphanum = alphanumBase.repeat(10);
 
 const index = {
-  debounce(fn: Function, delay: number) {
-    let timeoutID: any = null;
-    return function () {
-      clearTimeout(timeoutID);
-      // eslint-disable-next-line prefer-rest-params
-      const args = arguments;
-      // @ts-ignore
-      // eslint-disable-next-line @typescript-eslint/no-this-alias
-      const that = this;
-      timeoutID = setTimeout(function () {
-        fn.apply(that, args);
+  debounce<Arguments extends unknown[]>(
+    fn: (...args: Arguments) => void,
+    delay: number,
+  ) {
+    let timeoutID: ReturnType<typeof setTimeout> | null = null;
+    return function (this: unknown, ...args: Arguments) {
+      if (timeoutID !== null) {
+        clearTimeout(timeoutID);
+      }
+      timeoutID = setTimeout(() => {
+        fn.apply(this, args);
       }, delay);
     };
   },
@@ -67,7 +67,6 @@ const index = {
   },
 
   getSituationBadgeLabel(situationRank: number | undefined): string {
-    console.log('SITUATION RANK', situationRank);
     if (!situationRank) {
       return 'Pas de restrictions';
     }
@@ -187,7 +186,7 @@ const index = {
         1,
       ]);
       window._paq.push(['trackEvent', 'API CALL', 'PROFIL', profile, 1]);
-    } catch (e) {}
+    } catch {}
 
     if (loadingRestrictions) loadingRestrictions.value = false;
 
@@ -214,7 +213,7 @@ const index = {
     addressStore.setProfile(profile);
     addressStore.setTypeEau(typeEau);
     setZones(data?.value ? data.value : []);
-    let query: any = {};
+    const query: any = {};
     query.profil = profile;
     query.typeEau = typeEau;
     query.adresse = address
@@ -331,7 +330,7 @@ const index = {
         if (context && typeof context.getParameter == 'function') {
           return true;
         }
-      } catch (e) {
+      } catch {
         // WebGL is supported, but disabled
       }
       return false;
@@ -353,7 +352,7 @@ const index = {
   },
 
   getRandomString(length: number): string {
-    return Array.from({ length }).map(this.getRandomAlphaNum).join('');
+    return Array.from({ length }, () => this.getRandomAlphaNum()).join('');
   },
 };
 export default index;

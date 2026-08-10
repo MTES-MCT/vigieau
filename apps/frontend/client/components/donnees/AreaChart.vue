@@ -123,7 +123,7 @@ async function loadData() {
     return;
   }
   loading.value = true;
-  const { data, error } = await api.getDataArea(formData.dateDebut, formData.dateFin, formData.area);
+  const { data } = await api.getDataArea(formData.dateDebut, formData.dateFin, formData.area);
   if (data.value) {
     dataArea.value = data.value;
     territoire.value = areaOptions.value.find((a: any) => a.value === formData.area);
@@ -333,7 +333,12 @@ watch(() => refDataStore.departements, () => {
       </div>
     </div>
     <div class="fr-col-12">
-      <DsfrAlert data-html2canvas-ignore="true" type="info" class="fr-my-2w">
+      <DsfrAlert
+        title="Données historiques sur l’eau potable limitées"
+        data-html2canvas-ignore="true"
+        type="info"
+        class="fr-my-2w"
+      >
         Nous ne sommes pas en mesure de fournir les restrictions appliquées sur l'eau potable avant le 28/04/2024. Pour
         connaître les niveaux de restrictions en vigueur, veuillez vous référer aux niveaux de restrictions des eaux
         superficielles et souterraines.

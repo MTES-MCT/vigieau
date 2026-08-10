@@ -67,7 +67,7 @@ const date = computed(() => {
                   class="notice-light fr-mt-1w"/>
     </div>
     <div class="legende fr-mb-1w fr-grid-row fr-grid-row--center fr-grid-row--gutters">
-      <div v-for="legend in legends" class="fr-grid-row fr-grid-row--center fr-col-xl-2 fr-col-12">
+      <div v-for="legend in legends" :key="legend.text" class="fr-grid-row fr-grid-row--center fr-col-xl-2 fr-col-12">
         <div class="legende-carre fr-mr-1w" :class="legend.class">
         </div>
         {{ legend.text }}
@@ -84,7 +84,7 @@ const date = computed(() => {
         </div>
       </div>
       <div class="fr-col-lg-4 fr-col-12 fr-grid-row fr-grid-row--center">
-        <template v-for="(territoire, index) in territoires">
+        <template v-for="(territoire, index) in territoires" :key="territoire.name">
           <div v-if="index > 0"
                class="fr-col-6 carte-drom text-align-center">
             <h3 class="h6">{{ territoire.name }}</h3>

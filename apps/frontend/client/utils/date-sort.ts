@@ -1,6 +1,6 @@
-type DatedItem = {
+interface DatedItem {
   date?: string | number | Date | null;
-};
+}
 
 const dateValue = (date: DatedItem['date']): number => {
   const time = new Date(date ?? '').getTime();

@@ -7,9 +7,12 @@ import {
 import type { LocalDateRollover } from '../../utils/zone-publication';
 import type { ZonePublicationPin } from '../../api';
 
-defineProps<{
+withDefaults(defineProps<{
   embedded: any;
-}>();
+  headingTag?: 'h1' | 'h2';
+}>(), {
+  headingTag: 'h2',
+});
 
 const tabs = [
   { id: 'map', label: 'Carte' },
@@ -48,7 +51,9 @@ onBeforeUnmount(() => {
   <div :class="embedded ? '' : 'fr-py-4w'">
     <div class="fr-container">
       <div class="fr-mb-4w">
-        <h2 class="fr-mb-0">Carte des restrictions</h2>
+        <component :is="headingTag" class="fr-mb-0">
+          Carte des restrictions
+        </component>
         <p>Arrêtés publiés avant le {{ dateCarte }}</p>
         <p id="restrictions-map-instructions" class="fr-mb-2w">
           La carte interactive se déplace avec les flèches et se zoome avec
@@ -71,15 +76,17 @@ onBeforeUnmount(() => {
             <CarteMap
               :embedded="embedded"
               :date="dateCarte"
+              profil="particulier"
+              type-eau="AEP"
               accessible-description-id="restrictions-map-instructions"
-              @displayedPublicationPin="updateDisplayedPublicationPin"
+              @displayed-publication-pin="updateDisplayedPublicationPin"
             />
           </div>
         </template>
         <template #data>
           <CarteTable
             :date="dateCarte"
-            :publicationPin="displayedPublicationPin"
+            :publication-pin="displayedPublicationPin"
           />
         </template>
       </AccessibleTabs>

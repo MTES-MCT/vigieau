@@ -27,7 +27,7 @@ const loadData = (() => {
   emit('filterChange', {
     date: date.value,
     area: area.value,
-    areaText: areaText,
+    areaText,
   });
   computeDisabled.value = true;
 });

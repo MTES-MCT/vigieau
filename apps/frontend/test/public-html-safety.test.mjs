@@ -3,6 +3,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { NodeTypes } from '@vue/compiler-dom';
+import { parse } from '@vue/compiler-sfc';
 
 const clientRoot = fileURLToPath(new URL('../client/', import.meta.url));
 
@@ -71,4 +73,130 @@ test('keeps the cookies page paragraphs and lists structurally separate', async 
   assert.doesNotMatch(source, /<p\b[^>]*>(?:(?!<\/p>)[\s\S])*<ul\b/);
   assert.doesNotMatch(source, /<br\b/i);
   assert.match(source, /<ul>[\s\S]*?<li>[\s\S]*?<\/li>[\s\S]*?<\/ul>/);
+});
+
+test('keeps block content out of every public Vue paragraph', async () => {
+  const blockTags = new Set([
+    'address',
+    'article',
+    'aside',
+    'blockquote',
+    'details',
+    'dialog',
+    'div',
+    'dl',
+    'fieldset',
+    'figure',
+    'footer',
+    'form',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'header',
+    'hr',
+    'main',
+    'nav',
+    'ol',
+    'p',
+    'pre',
+    'section',
+    'table',
+    'ul',
+  ]);
+  const violations = [];
+
+  for (const file of await collectVueFiles(clientRoot)) {
+    const source = await readFile(file, 'utf8');
+    const relativeFile = path.relative(clientRoot, file);
+    const { descriptor, errors } = parse(source, { filename: relativeFile });
+
+    assert.deepEqual(errors, [], `${relativeFile}: invalid Vue syntax`);
+    const template = descriptor.template?.ast;
+    if (!template) {
+      continue;
+    }
+
+    const visit = (node, paragraph = null) => {
+      let currentParagraph = paragraph;
+      if (node.type === NodeTypes.ELEMENT) {
+        if (paragraph && blockTags.has(node.tag)) {
+          violations.push(
+            `${relativeFile}:${node.loc.start.line} <${node.tag}> in paragraph line ${paragraph.loc.start.line}`,
+          );
+        }
+        if (node.tag === 'p') {
+          currentParagraph = node;
+        }
+      }
+
+      for (const child of node.children ?? []) {
+        visit(child, currentParagraph);
+      }
+    };
+
+    visit(template);
+  }
+
+  assert.deepEqual(violations, []);
+});
+
+test('keeps every client alert named and removes level-six headings', async () => {
+  const unnamedAlerts = [];
+  const levelSixHeadings = [];
+
+  for (const file of await collectVueFiles(clientRoot)) {
+    const source = await readFile(file, 'utf8');
+    const relativeFile = path.relative(clientRoot, file);
+    const { descriptor, errors } = parse(source, { filename: relativeFile });
+
+    assert.deepEqual(errors, [], `${relativeFile}: invalid Vue syntax`);
+    const template = descriptor.template?.ast;
+    if (!template) {
+      continue;
+    }
+
+    const visit = (node) => {
+      if (node.type === NodeTypes.ELEMENT) {
+        if (node.tag.toLowerCase() === 'h6') {
+          levelSixHeadings.push(`${relativeFile}:${node.loc.start.line}`);
+        }
+
+        if (node.tag.toLowerCase() === 'dsfralert') {
+          const hasNonEmptyTitle = node.props.some((property) => {
+            if (
+              property.type === NodeTypes.ATTRIBUTE &&
+              property.name === 'title'
+            ) {
+              return Boolean(property.value?.content.trim());
+            }
+
+            return (
+              property.type === NodeTypes.DIRECTIVE &&
+              property.name === 'bind' &&
+              property.arg?.type === NodeTypes.SIMPLE_EXPRESSION &&
+              property.arg.content === 'title' &&
+              property.exp?.type === NodeTypes.SIMPLE_EXPRESSION &&
+              Boolean(property.exp.content.trim())
+            );
+          });
+
+          if (!hasNonEmptyTitle) {
+            unnamedAlerts.push(`${relativeFile}:${node.loc.start.line}`);
+          }
+        }
+      }
+
+      for (const child of node.children ?? []) {
+        visit(child);
+      }
+    };
+
+    visit(template);
+  }
+
+  assert.deepEqual(unnamedAlerts, []);
+  assert.deepEqual(levelSixHeadings, []);
 });

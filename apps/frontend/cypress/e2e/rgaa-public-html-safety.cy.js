@@ -33,6 +33,87 @@ describe('Rendu sûr des contenus publics dynamiques', () => {
     });
   });
 
+  it('conserve la modale et une seule requête lorsque le désabonnement échoue', () => {
+    let unsubscribeRequests = 0;
+
+    cy.intercept('GET', '**/subscriptions', {
+      statusCode: 200,
+      body: [
+        {
+          id: 'subscription-test',
+          profil: 'particulier',
+          libelleLocalisation: 'Paris 7e',
+          typesEau: ['AEP'],
+        },
+      ],
+    });
+    cy.intercept('DELETE', '**/subscriptions/subscription-test', (request) => {
+      unsubscribeRequests += 1;
+      request.reply({
+        delay: 200,
+        statusCode: 500,
+        body: { message: 'Erreur de test' },
+      });
+    }).as('unsubscribe');
+
+    cy.visit('/abonnements?token=test-token');
+    cy.contains('button', 'Me désabonner').click();
+    cy.contains('button', 'Valider').then(($button) => {
+      $button[0].click();
+      $button[0].click();
+    });
+
+    cy.wait('@unsubscribe');
+    cy.get('dialog[open][aria-modal="true"]').should('be.visible');
+    cy.get('#unsubscribe-error')
+      .should('be.focused')
+      .and('contain.text', 'n’a pas pu être effectué');
+    cy.contains('button', 'Valider').should('not.be.disabled');
+    cy.contains('.eau-card__title', 'Paris 7e').should('exist');
+    cy.then(() => {
+      expect(unsubscribeRequests).to.equal(1);
+    });
+  });
+
+  it('annonce un désabonnement réussi et focalise la liste mise à jour', () => {
+    cy.intercept('GET', '**/subscriptions', {
+      statusCode: 200,
+      body: [
+        {
+          id: 'subscription-paris',
+          profil: 'particulier',
+          libelleLocalisation: 'Paris 7e',
+          typesEau: ['AEP'],
+        },
+        {
+          id: 'subscription-lyon',
+          profil: 'particulier',
+          libelleLocalisation: 'Lyon 2e',
+          typesEau: ['AEP'],
+        },
+      ],
+    });
+    cy.intercept('DELETE', '**/subscriptions/subscription-paris', {
+      statusCode: 204,
+      body: null,
+    }).as('unsubscribe');
+
+    cy.visit('/abonnements?token=test-token');
+    cy.contains('.eau-card__title', 'Paris 7e')
+      .parents('.eau-card')
+      .contains('button', 'Me désabonner')
+      .click();
+    cy.contains('dialog[open] button', 'Valider').click();
+    cy.wait('@unsubscribe');
+
+    cy.get('dialog[open]').should('not.exist');
+    cy.get('#subscriptions-heading').should('be.focused');
+    cy.get('#unsubscribe-status')
+      .should('contain.text', 'Désabonnement de l’adresse effectué');
+    cy.contains('.eau-card__title', 'Paris 7e').should('not.exist');
+    cy.contains('.eau-card__title', 'Lyon 2e').should('be.visible');
+  });
+
   it('rend la page Cookies sans paragraphe vide ni liste imbriquée', () => {
     cy.visit('/cookies');
 

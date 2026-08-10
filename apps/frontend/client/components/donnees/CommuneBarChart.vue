@@ -15,13 +15,13 @@ import { Bar } from 'vue-chartjs';
 import moment from 'moment';
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
 
-ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, PointElement, TimeScale, ArcElement, Colors, Filler);
-
 const props = defineProps<{
   typeEau: string,
   restrictions: any[],
   communeNom: string,
 }>();
+
+ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, PointElement, TimeScale, ArcElement, Colors, Filler);
 
 const chartLineData = ref(null);
 const niveauGravitePriority = {
@@ -38,7 +38,7 @@ function computeBarChart() {
     datasets: [
       {
         label: `${props.communeNom}`,
-        data: props.restrictions.map((r: any) => 1),
+        data: props.restrictions.map(() => 1),
         backgroundColor: (context: any) => colorFunction(context),
         segment: {},
       },

@@ -18,16 +18,24 @@ const email = useRuntimeConfig().public.email;
     <AppBreadcrumb :links="links" />
     <h1>Données sécheresse</h1>
     <DsfrHighlight class="fr-mb-2w">
-      Retrouvez les données brutes sur <a href="https://www.data.gouv.fr/fr/datasets/donnee-secheresse-vigieau/"
-                                          title="Lien vers data.gouv (nouvelle fenêtre)"
-                                          target="_blank"
-                                          rel="external"
-                                          class="fr-link">data.gouv</a><br />
-      Si vous avez des besoins spécifiques, envoyez nous un email à  <a class="fr-link"
-                                                                        :title="`Contactez-nous sur ${email}`"
-                                                                        :href="`mailto:${email}`">
-      {{ email }}
-    </a>
+      Retrouvez les données brutes sur
+      <a
+        href="https://www.data.gouv.fr/fr/datasets/donnee-secheresse-vigieau/"
+        title="Lien vers data.gouv (nouvelle fenêtre)"
+        target="_blank"
+        rel="external"
+        class="fr-link"
+      >
+        data.gouv
+      </a><br>
+      Si vous avez des besoins spécifiques, envoyez nous un email à
+      <a
+        class="fr-link"
+        :title="`Contactez-nous sur ${email}`"
+        :href="`mailto:${email}`"
+      >
+        {{ email }}
+      </a>
     </DsfrHighlight>
   </div>
   <div class="background-blue fr-py-2w">
@@ -39,8 +47,7 @@ const email = useRuntimeConfig().public.email;
             link="/donnees/carte-historique"
             alt-img=""
             title="Carte et historique des restrictions"
-          >
-          </DsfrCard>
+          />
         </div>
         <div class="fr-col-12 fr-col-md-6 fr-col-lg-3">
           <DsfrCard
@@ -48,8 +55,7 @@ const email = useRuntimeConfig().public.email;
             link="/donnees/surface"
             alt-img=""
             title="Évolution journalière du pourcentage de la surface concernée par des niveaux de gravité"
-          >
-          </DsfrCard>
+          />
         </div>
         <div class="fr-col-12 fr-col-md-6 fr-col-lg-3">
           <DsfrCard
@@ -57,8 +63,7 @@ const email = useRuntimeConfig().public.email;
             link="/donnees/departement"
             alt-img=""
             title="Évolution journalière du nombre de départements soumis à restriction"
-          >
-          </DsfrCard>
+          />
         </div>
         <div class="fr-col-12 fr-col-md-6 fr-col-lg-3">
           <DsfrCard
@@ -66,8 +71,7 @@ const email = useRuntimeConfig().public.email;
             link="/donnees/carte-commune"
             alt-img=""
             title="Intensité des sécheresses passées"
-          >
-          </DsfrCard>
+          />
         </div>
       </div>
     </div>

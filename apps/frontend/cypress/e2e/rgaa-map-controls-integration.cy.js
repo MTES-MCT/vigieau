@@ -1,4 +1,4 @@
-/* global cy, describe, expect, it */
+/* global Cypress, cy, describe, expect, it */
 
 const zonePublication = {
   id: '29959a00-0000-4000-8000-000000000000',
@@ -344,6 +344,141 @@ describe('Contrôles MapLibre accessibles dans le DOM rendu', () => {
         .and('have.attr', 'title', accessibleName)
         .and('have.attr', 'aria-label', accessibleName);
     }
+  });
+
+  it('ouvre et utilise le popup de restrictions au clavier sur une couche rendue', () => {
+    stubRestrictionMap();
+    cy.intercept('GET', '**/departements?*', {
+      statusCode: 200,
+      body: [],
+    });
+    cy.intercept('GET', '**/reverse?*', {
+      statusCode: 200,
+      body: {
+        features: [
+          {
+            geometry: { coordinates: [2.308, 48.85] },
+            properties: {
+              citycode: '75107',
+              context: '75, Paris, Île-de-France',
+              label: '20 Avenue de Ségur 75007 Paris',
+            },
+          },
+        ],
+      },
+    }).as('reverseGeocoding');
+    cy.intercept('GET', '**/communes?*', {
+      statusCode: 200,
+      body: [
+        {
+          code: '75107',
+          codeDepartement: '75',
+          nom: 'Paris 7e arrondissement',
+        },
+      ],
+    }).as('communeGeocoding');
+    cy.intercept('GET', '**/zones?*', {
+      statusCode: 200,
+      body: [
+        {
+          id: 'zone-keyboard-test',
+          type: 'AEP',
+          profil: 'particulier',
+          nom: 'Zone clavier test',
+          departement: '75',
+          niveauGravite: 'alerte',
+          arreteMunicipalCheminFichier: '',
+          usages: [],
+          usagesHash: 'zone-keyboard-test',
+        },
+      ],
+    }).as('restrictions');
+    cy.visit('/carte');
+
+    cy.window().should((window) => {
+      expect(window.__vigieauMapForTests, 'instance MapLibre du composant')
+        .not.to.equal(undefined);
+      expect(
+        window.__vigieauMapForTests.map.isStyleLoaded(),
+        'style MapLibre chargé',
+      ).to.equal(true);
+    });
+    cy.window().then((window) => {
+      const mapControls = window.__vigieauMapForTests;
+      const map = mapControls?.map;
+      expect(map, 'instance MapLibre du composant').not.to.equal(undefined);
+      const center = map.getCenter();
+      map.addSource('zones-keyboard-test', {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: {
+                id: 'zone-keyboard-test',
+                type: 'AEP',
+                niveauGravite: 'alerte',
+                nom: 'Zone clavier test',
+              },
+              geometry: {
+                type: 'Polygon',
+                coordinates: [[
+                  [center.lng - 5, center.lat - 5],
+                  [center.lng + 5, center.lat - 5],
+                  [center.lng + 5, center.lat + 5],
+                  [center.lng - 5, center.lat + 5],
+                  [center.lng - 5, center.lat - 5],
+                ]],
+              },
+            },
+          ],
+        },
+      });
+      map.addLayer({
+        id: 'zones-data',
+        type: 'fill',
+        source: 'zones-keyboard-test',
+        paint: { 'fill-color': '#feb24c' },
+      });
+      mapControls.enableRestrictionsButton();
+      return new Cypress.Promise((resolve) => {
+        map.once('idle', resolve);
+        map.triggerRepaint();
+      });
+    });
+
+    cy.get('.maplibregl-canvas')
+      .focus()
+      .trigger('keydown', { key: 'Enter' });
+    cy.wait(['@reverseGeocoding', '@communeGeocoding']);
+    cy.get('.maplibregl-popup[role="dialog"]')
+      .should('have.attr', 'aria-label', 'Informations sur le point sélectionné')
+      .and('contain.text', 'Zone clavier test');
+    cy.contains(
+      '.maplibregl-popup',
+      'Adresse proche : 20 Avenue de Ségur 75007 Paris',
+    ).should('be.visible');
+    cy.get('.maplibregl-popup-close-button')
+      .should('have.attr', 'aria-label', 'Fermer les informations du point sélectionné')
+      .click();
+    cy.get('.maplibregl-canvas').should('be.focused');
+
+    cy.get('.maplibregl-canvas')
+      .trigger('keydown', { key: ' ' });
+    cy.contains('.maplibregl-popup button', 'Je consulte les restrictions')
+      .should('be.focused');
+    cy.press(Cypress.Keyboard.Keys.TAB);
+    cy.get('.maplibregl-popup-close-button').should('be.focused');
+    cy.contains('.maplibregl-popup button', 'Je consulte les restrictions')
+      .focus()
+      .should('be.focused')
+      .click();
+    cy.wait('@restrictions');
+    cy.location('pathname').should('equal', '/situation');
+    cy.location('search')
+      .should('contain', 'profil=particulier')
+      .and('contain', 'typeEau=AEP');
   });
 });
 

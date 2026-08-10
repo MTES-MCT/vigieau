@@ -7,6 +7,6 @@ useHead({
 
 <template>
   <main id="main-content" role="main" tabindex="-1">
-    <CarteWrapper :embedded="true" />
+    <CarteWrapper :embedded="true" heading-tag="h1" />
   </main>
 </template>

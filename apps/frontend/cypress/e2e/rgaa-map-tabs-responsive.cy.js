@@ -65,7 +65,7 @@ describe('Onglets accessibles de la carte et alternative de données', () => {
     });
     cy.visit('/carte');
 
-    cy.contains('h2', 'Carte des restrictions')
+    cy.contains('h1', 'Carte des restrictions')
       .next('p')
       .should('contain.text', 'Arrêtés publiés avant le');
     cy.get('[role="tablist"]')

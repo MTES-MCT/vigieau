@@ -134,10 +134,14 @@ const flyToLocation = (bounds: any) => {
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 overall-wrapper">
         <div class="map-pre-actions">
-          <div class="map-pre-actions-card fr-p-1w fr-m-1w">
-            <h6 class="fr-mb-1w fr-mr-2w">
+          <div
+            class="map-pre-actions-card fr-p-1w fr-m-1w"
+            role="group"
+            aria-label="Raccourcis de la carte"
+          >
+            <p class="fr-mb-1w fr-mr-2w">
               Raccourcis&nbsp;:
-            </h6>
+            </p>
             <button
               v-for="tag in mapTags"
               :key="tag.label"

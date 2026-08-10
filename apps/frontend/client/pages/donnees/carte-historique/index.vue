@@ -51,33 +51,45 @@ const downloadMap = (typeEau) => {
   <div class="background-blue fr-py-2w">
     <div class="fr-container">
       <div ref="screenshotZone">
-        <DonneesFilter @filterChange="setFilterData($event)" />
-        <h2 class="fr-h4 fr-mt-2w">Carte et historique des restrictions <span v-if="filterText">({{ filterText
-          }})</span>
+        <DonneesFilter @filter-change="setFilterData($event)" />
+        <h2 class="fr-h4 fr-mt-2w">
+          Carte et historique des restrictions
+          <span v-if="filterText">({{ filterText }})</span>
         </h2>
-        <DsfrAlert data-html2canvas-ignore="true" class="fr-mb-2w" type="info">
+        <DsfrAlert
+          title="Données historiques sur l’eau potable limitées"
+          data-html2canvas-ignore="true"
+          class="fr-mb-2w"
+          type="info"
+        >
           Nous ne sommes pas en mesure de fournir les restrictions appliquées sur l'eau potable avant le 28/04/2024.
           Pour connaître les niveaux de restrictions en vigueur; veuillez vous référer aux niveaux de restrictions des
           eaux superficielles et souterraines.
         </DsfrAlert>
         <template v-if="filterData">
           <div class="fr-mb-12w wrap-map">
-            <CarteMap :embedded="false"
-                      :light="true"
-                      :date="filterData.date"
-                      :area="filterData.area"
-                      @downloadMap="downloadMap($event)" />
+            <CarteMap
+              :embedded="false"
+              :light="true"
+              :date="filterData.date"
+              :area="filterData.area"
+              @download-map="downloadMap($event)"
+            />
           </div>
         </template>
       </div>
       <template v-if="filterData">
-        <DonneesArretesRestrictionsTable :date="filterData.date"
-                                         :area="filterData.area"
-                                         :filterText="filterText" />
-        <CarteTable :light="true"
-                    :date="filterData.date"
-                    :area="filterData.area"
-                    :filterText="filterText" />
+        <DonneesArretesRestrictionsTable
+          :date="filterData.date"
+          :area="filterData.area"
+          :filter-text="filterText"
+        />
+        <CarteTable
+          :light="true"
+          :date="filterData.date"
+          :area="filterData.area"
+          :filter-text="filterText"
+        />
       </template>
     </div>
   </div>

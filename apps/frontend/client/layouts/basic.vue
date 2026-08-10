@@ -214,6 +214,7 @@ onBeforeUnmount(() => {
     <div class="fr-mb-8w">
       <div v-if="runTimeConfig.appEnv !== 'prod'" class="fr-container">
         <DsfrAlert
+          title="Plateforme de développement"
           description="Plateforme de développement, les données sont fictives. Si vous souhaitez accéder à la plateforme de production, allez sur https://vigieau.gouv.fr"
           type="warning"
           class="fr-my-2w"

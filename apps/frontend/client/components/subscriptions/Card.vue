@@ -2,7 +2,7 @@
 import { Profile } from '../../dto/profile.enum';
 import { Subscription } from '../../dto/subscription.dto';
 
-const props = defineProps<{
+defineProps<{
   subscription: Subscription,
   loading; boolean
 }>();
@@ -26,10 +26,13 @@ const typesEau = {
       </div>
       <div class="eau-card__desc">
         <DsfrTag :label="profiles[subscription.profil]" />
-        <DsfrTag v-for="typeEau in subscription.typesEau"
-                 class="fr-mx-1w fr-mb-1w"
-                 :aria-pressed="true"
-                 :label="typesEau[typeEau]" />
+        <DsfrTag
+          v-for="typeEau in subscription.typesEau"
+          :key="typeEau"
+          class="fr-mx-1w fr-mb-1w"
+          :aria-pressed="true"
+          :label="typesEau[typeEau]"
+        />
       </div>
       <div>
         <DsfrButton class="fr-mt-2w"

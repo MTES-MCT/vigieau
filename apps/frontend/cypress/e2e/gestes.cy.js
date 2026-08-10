@@ -1,3 +1,5 @@
+/* global beforeEach, cy, describe, it */
+
 describe(`Test de l'affichage des eco gestes`, () => {
   beforeEach(() => {
     cy.visit('/');

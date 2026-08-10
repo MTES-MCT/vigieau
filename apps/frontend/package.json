@@ -1,6 +1,10 @@
 {
   "name": "vigieau_frontend",
   "version": "1.0.0",
+  "engines": {
+    "node": "24.x",
+    "npm": "11.x"
+  },
   "scripts": {
     "build": "nuxi generate && purgecss --config ./purgecss.config.js",
     "start": "nuxi preview --host 0.0.0.0 --port ${PORT:-3000}",
@@ -82,9 +86,5 @@
         "pnpm": "10.34.4"
       }
     }
-  },
-  "engines": {
-    "node": "24.x",
-    "npm": "11.x"
   }
 }

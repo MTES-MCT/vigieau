@@ -28,7 +28,10 @@ import {
   shouldReplaceZoneLayers,
 } from '../../utils/zone-publication';
 import type { LocalDateRollover } from '../../utils/zone-publication';
-import { getFrenchMapLocale } from '../../utils/map-locale';
+import {
+  getFrenchMapLocale,
+  MAPLIBRE_FRENCH_LOCALE,
+} from '../../utils/map-locale';
 import {
   canRetainDisplayedZoneSource,
   captureDisplayedZonePublicationPin,
@@ -68,8 +71,6 @@ const map: Ref<any> = shallowRef(null);
 const isMapSupported: boolean = utils.isWebglSupported();
 const runtimeConfig = useRuntimeConfig();
 const zonesSelected = ref([]);
-const route = useRoute();
-const departementCode = route.query.depCode;
 const showRestrictionsBtn = ref(true);
 const showError = ref(false);
 const refDataStore = useRefDataStore();
@@ -115,6 +116,32 @@ interface PendingZoneSourceTransition {
   candidate: ZoneSourceState;
   previous: ZoneSourceState | null;
 }
+
+interface CypressMapWindow extends Window {
+  Cypress?: unknown;
+  __vigieauMapForTests?: {
+    enableRestrictionsButton: () => void;
+    map: maplibregl.Map;
+  };
+}
+
+const exposeMapForCypress = (mapInstance: maplibregl.Map | null) => {
+  const browserWindow = window as CypressMapWindow;
+  if (!browserWindow.Cypress) {
+    return;
+  }
+
+  if (mapInstance) {
+    browserWindow.__vigieauMapForTests = {
+      enableRestrictionsButton: () => {
+        showRestrictionsBtn.value = true;
+      },
+      map: mapInstance,
+    };
+  } else {
+    delete browserWindow.__vigieauMapForTests;
+  }
+};
 
 const getZoneSourceViewKey = (
   restrictionsAvailable: boolean,
@@ -290,6 +317,18 @@ const popup = new maplibregl.Popup({
   closeButton: true,
   closeOnClick: false,
 }).setMaxWidth('300px');
+let mapPopupReturnFocus: HTMLElement | null = null;
+
+popup.on('close', () => {
+  mapPopupRequestId += 1;
+  const returnFocusTarget = mapPopupReturnFocus;
+  mapPopupReturnFocus = null;
+  requestAnimationFrame(() => {
+    if (returnFocusTarget?.isConnected) {
+      returnFocusTarget.focus({ preventScroll: true });
+    }
+  });
+});
 
 const selectMapPoint = async (
   mapInstance: maplibregl.Map,
@@ -306,6 +345,10 @@ const selectMapPoint = async (
   });
   const properties = features.map((feature: any) => feature.properties);
   zonesSelected.value = properties.map((property: any) => property.id);
+
+  if (!popup.isOpen()) {
+    mapPopupReturnFocus = mapInstance.getCanvas();
+  }
 
   updateContourFilter();
   renderMapPopup(coordinates, properties);
@@ -359,6 +402,7 @@ const mapInitializer = createRetryableInitializer(() => {
     ),
   });
   map.value = mapInstance;
+  exposeMapForCypress(mapInstance);
 
   // Add zoom and rotation controls to the map.
   mapInstance.addControl(new maplibregl.NavigationControl(), 'bottom-right');
@@ -470,6 +514,7 @@ onBeforeUnmount(() => {
   unsubscribePmtilesStatus?.();
   popup.remove();
   map.value?.remove();
+  exposeMapForCypress(null);
   map.value = null;
   initialMapStyleLoaded = false;
   displayedZoneSource = null;
@@ -540,8 +585,6 @@ const typeEauTags: Ref<any[]> = ref([
 ]);
 const selectedTypeEau: Ref<string> = ref(props.typeEau ? props.typeEau : 'AEP');
 const router = useRouter();
-const expandedId = ref<string>();
-
 const getTypeEauText = computed(() => {
   return typeEauTags.value.find((t) => t.value === selectedTypeEau.value).text;
 });
@@ -586,6 +629,7 @@ function renderMapPopup(
   address?: any,
   geo?: any,
 ) {
+  const popupWasOpen = popup.isOpen();
   const popupContent = utils.generatePopupHtml(
     properties,
     showRestrictionsBtn.value,
@@ -593,7 +637,19 @@ function renderMapPopup(
     geo,
   );
 
-  popup.setLngLat(coordinates).setDOMContent(popupContent).addTo(map.value);
+  popup.setLngLat(coordinates).setDOMContent(popupContent);
+  if (!popupWasOpen) {
+    popup.addTo(map.value);
+  }
+  const popupElement = popup.getElement();
+  popupElement?.setAttribute('role', 'dialog');
+  popupElement?.setAttribute(
+    'aria-label',
+    'Informations sur le point sélectionné',
+  );
+  popupElement
+    ?.querySelector('.maplibregl-popup-close-button')
+    ?.setAttribute('aria-label', MAPLIBRE_FRENCH_LOCALE['Popup.Close']);
   bindMapPopupButton(coordinates, address, geo);
 }
 
@@ -1178,40 +1234,56 @@ watch(
     <div class="map-pre-actions" data-html2canvas-ignore="true">
       <div v-if="showError" class="map-pre-actions-card fr-p-1w fr-m-1w">
         <DsfrAlert
+          title="Carte indisponible"
           description="Une erreur est survenue lors du chargement de la carte"
           type="error"
           :closeable="false"
         />
       </div>
-      <div v-if="!hideTypeEau" class="map-pre-actions-card fr-p-1w fr-m-1w">
-        <h6 class="fr-mb-1w fr-mr-2w">Situation par ressource :</h6>
+      <fieldset
+        v-if="!hideTypeEau"
+        class="map-pre-actions-card map-resource-group fr-p-1w fr-m-1w"
+      >
+        <legend class="map-control-label fr-mb-1w fr-mr-2w">
+          Situation par ressource :
+        </legend>
         <DsfrRadioButton
           v-for="option of typeEauTags"
-          :modelValue="selectedTypeEau"
+          :key="option.value"
+          :model-value="selectedTypeEau"
           v-bind="option"
           :small="true"
           class="fr-mb-1w"
-          @update:modelValue="
+          @update:model-value="
             selectedTypeEau = $event;
             updateLayerFilter();
           "
         />
-      </div>
+      </fieldset>
       <div
         v-else
         class="map-pre-actions-card map-pre-actions-card--short fr-p-1w fr-m-1w"
       >
-        <h6 class="fr-mb-0">Situation pour l'eau {{ getTypeEauText }}</h6>
+        <p class="map-control-label fr-mb-0">
+          Situation pour l'eau {{ getTypeEauText }}
+        </p>
       </div>
-      <div class="map-pre-actions-card fr-p-1w fr-m-1w hide-sm">
-        <h6 class="fr-mb-1w fr-mr-2w">Raccourcis :</h6>
+      <div
+        class="map-pre-actions-card fr-p-1w fr-m-1w hide-sm"
+        role="group"
+        aria-label="Raccourcis de la carte"
+      >
+        <p class="map-control-label fr-mb-1w fr-mr-2w">
+          Raccourcis :
+        </p>
         <DsfrTag
           v-for="tag in mapTags"
+          :key="tag.label"
           :label="tag.label"
           class="fr-m-1w"
           small
-          @click="flyToLocation(tag.bounds)"
           tag-name="button"
+          @click="flyToLocation(tag.bounds)"
         />
       </div>
     </div>
@@ -1225,15 +1297,22 @@ watch(
       <div class="map" ref="mapContainer"></div>
     </div>
     <div class="map-post-actions show-sm" data-html2canvas-ignore="true">
-      <div class="map-post-actions-card fr-p-1w fr-m-1w">
-        <h6 class="fr-mb-1w fr-mr-2w">Raccourcis :</h6>
+      <div
+        class="map-post-actions-card fr-p-1w fr-m-1w"
+        role="group"
+        aria-label="Raccourcis de la carte"
+      >
+        <p class="map-control-label fr-mb-1w fr-mr-2w">
+          Raccourcis :
+        </p>
         <DsfrTag
           v-for="tag in mapTags"
+          :key="tag.label"
           :label="tag.label"
           class="fr-m-1w"
           small
-          @click="flyToLocation(tag.bounds)"
           tag-name="button"
+          @click="flyToLocation(tag.bounds)"
         />
       </div>
     </div>
@@ -1312,8 +1391,15 @@ watch(
   }
 }
 
-h6 {
+.map-control-label {
   font-size: 16px;
+  font-weight: 700;
+  line-height: 1.5rem;
+}
+
+.map-resource-group {
+  border: 0;
+  min-width: 0;
 }
 
 :deep(.maplibregl-map) {

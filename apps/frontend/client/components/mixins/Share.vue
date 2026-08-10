@@ -1,19 +1,9 @@
 <script setup lang="ts">
-
-import { Ref } from "vue";
-
-const props = defineProps<{
+defineProps<{
   situationLabel: string
   address: string
 }>();
 
-const socialMediaText: Ref<string> = computed(() => {
-  if (!props.situationLabel) {
-    return `Situation ${props.address}, pas de restrictions - ${useRuntimeConfig().public.appName}`;
-  } else {
-    return `Situation ${props.address}, en ${props.situationLabel}, des restrictions sont en cours - ${useRuntimeConfig().public.appName}`;
-  }
-});
 const urlToShare = encodeURIComponent(window.location.href);
 
 const networks = [

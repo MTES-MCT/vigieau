@@ -12,6 +12,46 @@ useHead({
 });
 
 const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Données personnelles' }]);
+
+const retentionTableRegion = ref<HTMLElement | null>(null);
+const processorsTableRegion = ref<HTMLElement | null>(null);
+const retentionTableScrollable = ref(false);
+const processorsTableScrollable = ref(false);
+let tableResizeObserver: ResizeObserver | null = null;
+
+const updateTableScrollableStates = () => {
+  retentionTableScrollable.value = Boolean(
+    retentionTableRegion.value
+    && retentionTableRegion.value.scrollWidth > retentionTableRegion.value.clientWidth,
+  );
+  processorsTableScrollable.value = Boolean(
+    processorsTableRegion.value
+    && processorsTableRegion.value.scrollWidth > processorsTableRegion.value.clientWidth,
+  );
+};
+
+onMounted(async () => {
+  await nextTick();
+  updateTableScrollableStates();
+
+  tableResizeObserver = new ResizeObserver(updateTableScrollableStates);
+  for (const region of [
+    retentionTableRegion.value,
+    processorsTableRegion.value,
+  ]) {
+    if (region) {
+      tableResizeObserver.observe(region);
+      const table = region.querySelector('table');
+      if (table) {
+        tableResizeObserver.observe(table);
+      }
+    }
+  }
+});
+
+onBeforeUnmount(() => {
+  tableResizeObserver?.disconnect();
+});
 </script>
 
 <template>
@@ -76,34 +116,46 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Donn
         </li>
       </ul>
       <h2>Pendant combien de temps conservons-nous ces données ?</h2>
-      <div class="fr-table">
-        <table>
-          <caption>Durée de conservation des données personnelles</caption>
-          <thead>
-            <tr>
-              <th scope="col">
-                Type de données
-              </th>
-              <th scope="col">
-                Durée de la conservation
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Données de contact : adresse e-mail</td>
-              <td>Jusqu’à ce que l’utilisateur se désinscrive de la lettre d’information</td>
-            </tr>
-            <tr>
-              <td>Adresse postale</td>
-              <td>2 ans à compter du dernier contact avec l’utilisateur</td>
-            </tr>
-            <tr>
-              <td>Type de profil</td>
-              <td>Jusqu’à ce que l’utilisateur se désinscrive de la lettre d’information</td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="fr-table personal-data-table">
+        <div class="fr-table__wrapper">
+          <div class="fr-table__container">
+            <div
+              ref="retentionTableRegion"
+              class="fr-table__content personal-data-table__scroll"
+              role="region"
+              aria-label="Durée de conservation des données personnelles"
+              :tabindex="retentionTableScrollable ? 0 : undefined"
+            >
+              <table>
+                <caption>Durée de conservation des données personnelles</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      Type de données
+                    </th>
+                    <th scope="col">
+                      Durée de la conservation
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Données de contact : adresse e-mail</td>
+                    <td>Jusqu’à ce que l’utilisateur se désinscrive de la lettre d’information</td>
+                  </tr>
+                  <tr>
+                    <td>Adresse postale</td>
+                    <td>2 ans à compter du dernier contact avec l’utilisateur</td>
+                  </tr>
+                  <tr>
+                    <td>Type de profil</td>
+                    <td>Jusqu’à ce que l’utilisateur se désinscrive de la lettre d’information</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
       <h2>Quels droits avez-vous ?</h2>
       <p>
@@ -181,68 +233,102 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Donn
         matière de
         sécurité.
       </p>
-      <div class="fr-table">
-        <table>
-          <caption>Sous-traitants de données</caption>
-          <thead>
-            <tr>
-              <th scope="col">
-                Partenaire
-              </th>
-              <th scope="col">
-                Pays destinataire
-              </th>
-              <th scope="col">
-                Traitement réalisé
-              </th>
-              <th scope="col">
-                Garanties
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Scalingo</td>
-              <td>France</td>
-              <td>Hébergement du site</td>
-              <td>
-                <a
-                  href="https://scalingo.com/fr/contrat-gestion-traitements-donnees-personnelles"
-                  title="https://scalingo.com/fr/contrat-gestion-traitements-donnees-personnelles (nouvelle fenêtre)"
-                  target="_blank"
-                  rel="external"
-                >https://scalingo.com/fr/contrat-gestion-traitements-donnees-personnelles</a>
-              </td>
-            </tr>
-            <tr>
-              <td>Brevo</td>
-              <td>France</td>
-              <td>Envoi des lettres d'information aux utilisateurs</td>
-              <td>
-                <a
-                  href="https://www.brevo.com/fr/legal/privacypolicy/"
-                  title="https://www.brevo.com/fr/legal/privacypolicy/ (nouvelle fenêtre)"
-                  target="_blank"
-                  rel="external"
-                >https://www.brevo.com/fr/legal/privacypolicy/</a>
-              </td>
-            </tr>
-            <tr>
-              <td>Tally</td>
-              <td>Belgique</td>
-              <td>Formulaire de retours utilisateurs</td>
-              <td>
-                <a
-                  href="https://tally.so/help/privacy-policy"
-                  title="https://tally.so/help/privacy-policy (nouvelle fenêtre)"
-                  target="_blank"
-                  rel="external"
-                >https://tally.so/help/privacy-policy</a>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="fr-table personal-data-table">
+        <div class="fr-table__wrapper">
+          <div class="fr-table__container">
+            <div
+              ref="processorsTableRegion"
+              class="fr-table__content personal-data-table__scroll"
+              role="region"
+              aria-label="Sous-traitants de données"
+              :tabindex="processorsTableScrollable ? 0 : undefined"
+            >
+              <table>
+                <caption>Sous-traitants de données</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      Partenaire
+                    </th>
+                    <th scope="col">
+                      Pays destinataire
+                    </th>
+                    <th scope="col">
+                      Traitement réalisé
+                    </th>
+                    <th scope="col">
+                      Garanties
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Scalingo</td>
+                    <td>France</td>
+                    <td>Hébergement du site</td>
+                    <td>
+                      <a
+                        href="https://scalingo.com/fr/contrat-gestion-traitements-donnees-personnelles"
+                        title="https://scalingo.com/fr/contrat-gestion-traitements-donnees-personnelles (nouvelle fenêtre)"
+                        target="_blank"
+                        rel="external"
+                      >https://scalingo.com/fr/contrat-gestion-traitements-donnees-personnelles</a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Brevo</td>
+                    <td>France</td>
+                    <td>Envoi des lettres d'information aux utilisateurs</td>
+                    <td>
+                      <a
+                        href="https://www.brevo.com/fr/legal/privacypolicy/"
+                        title="https://www.brevo.com/fr/legal/privacypolicy/ (nouvelle fenêtre)"
+                        target="_blank"
+                        rel="external"
+                      >https://www.brevo.com/fr/legal/privacypolicy/</a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Tally</td>
+                    <td>Belgique</td>
+                    <td>Formulaire de retours utilisateurs</td>
+                    <td>
+                      <a
+                        href="https://tally.so/help/privacy-policy"
+                        title="https://tally.so/help/privacy-policy (nouvelle fenêtre)"
+                        target="_blank"
+                        rel="external"
+                      >https://tally.so/help/privacy-policy</a>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped lang="scss">
+.personal-data-table {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+
+  &__scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    position: relative;
+  }
+
+  &__scroll table {
+    min-width: 36rem;
+  }
+
+  &__scroll a {
+    overflow-wrap: anywhere;
+  }
+}
+</style>

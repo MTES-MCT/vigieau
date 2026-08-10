@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import { Ref } from 'vue';
 import {
-  Chart as ChartJS,
-  Title,
-  Tooltip,
-  Legend,
+  ArcElement,
   CategoryScale,
+  Chart as ChartJS,
+  Colors,
+  Legend,
   LinearScale,
+  LineController,
   LineElement,
   PointElement,
-  LineController,
   TimeScale,
-  ArcElement,
-  Colors,
+  Title,
+  Tooltip,
 } from 'chart.js';
 import 'chartjs-adapter-luxon';
 import api from '../../api';
@@ -22,7 +22,6 @@ definePageMeta({
   layout: 'basic',
 });
 
-const appName = useRuntimeConfig().public.appName;
 useHead({
   title: `Statistiques - ${useRuntimeConfig().public.appName}`,
 });
@@ -32,7 +31,7 @@ const cumulativeVisits = ref(0);
 
 ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, LineController, TimeScale, ArcElement, Colors);
 
-const { data, error } = await api.getStats();
+const { data } = await api.getStats();
 if (data.value) {
   cumulativeVisits.value = data.value.statsByDay
     .reduce((acc, value) => {
@@ -57,13 +56,15 @@ if (data.value) {
           </div>
           <div class="fr-col-12 fr-col-md-6 fr-grid-row fr-grid-row--gutters">
             <div class="fr-col-12">
-              <DsfrCallout :title="utils.numberWithSpaces(data.subscriptions)"
-                           content="personnes abonnées aux alertes mail - qui informent l'usager sur un changement de niveau de gravité sur sa zone"
+              <DsfrCallout
+                :title="utils.numberWithSpaces(data.subscriptions)"
+                content="personnes abonnées aux alertes mail - qui informent l'usager sur un changement de niveau de gravité sur sa zone"
               />
             </div>
             <div class="fr-col-12">
-              <DsfrCallout :title="utils.numberWithSpaces(cumulativeVisits)"
-                           content="nombres de visites cumulées sur le site VigiEau"
+              <DsfrCallout
+                :title="utils.numberWithSpaces(cumulativeVisits)"
+                content="nombres de visites cumulées sur le site VigiEau"
               />
             </div>
           </div>

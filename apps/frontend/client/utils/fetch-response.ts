@@ -1,10 +1,10 @@
 import { ref } from 'vue';
 import type { Ref } from 'vue';
 
-export type RefFetchResponse<T> = {
+export interface RefFetchResponse<T> {
   data: Ref<T | null>;
   error: Ref<unknown | null>;
-};
+}
 
 export const fetchAsRefResponse = async <T>(
   request: () => Promise<T>,

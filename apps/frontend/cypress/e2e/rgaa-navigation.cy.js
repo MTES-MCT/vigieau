@@ -126,7 +126,7 @@ describe('Navigation accessible du site public', () => {
       .and('have.text', 'Page Déclaration d’accessibilité chargée');
   });
 
-  it("utilise le contenu principal et le titre de page lorsqu'il n'y a pas de h1", () => {
+  it('conserve un contenu principal unique et focalise le titre de la carte', () => {
     cy.visit('/mentions-legales');
 
     cy.get('main#main-content').then(($main) =>
@@ -137,12 +137,18 @@ describe('Navigation accessible du site public', () => {
 
     cy.location('pathname').should('equal', '/carte');
     cy.title().should('equal', 'Carte des restrictions - VigiEau');
-    cy.get('main#main-content').should('be.focused');
+    cy.get('main#main-content').should('have.length', 1);
+    cy.get('main#main-content h1:visible')
+      .should('have.length', 1)
+      .and('have.attr', 'tabindex', '-1')
+      .and('be.focused')
+      .invoke('text')
+      .then((text) => expect(text.trim()).to.equal('Carte des restrictions'));
     cy.get('[role="status"][aria-live="polite"]')
       .should('have.attr', 'aria-atomic', 'true')
       .and(
         'have.text',
-        'Page Carte des restrictions - VigiEau chargée',
+        'Page Carte des restrictions chargée',
       );
   });
 

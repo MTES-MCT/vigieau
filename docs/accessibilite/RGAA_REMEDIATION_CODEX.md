@@ -313,9 +313,12 @@ Preuves navigateur datées du 10 août 2026 : activation des liens d'évitement
 avec focus effectif sur l'unique `main` puis l'unique `footer`; ouverture du
 menu avec focus sur Fermer, bouclage Tab/Maj+Tab, fermeture par Échap et retour
 au déclencheur; absence de `nav` imbriqué; navigation SPA sans rechargement avec
-titre, focus et statut; fallback `/carte` sans `h1`; ouverture clavier du fil
-d'Ariane mobile avec focus sur Accueil. La validation avec lecteur d'écran
-reste réservée à WP10 et n'est pas déduite de Cypress.
+titre, focus et statut; fallback `/carte` alors dépourvu de `h1`; ouverture
+clavier du fil d'Ariane mobile avec focus sur Accueil. WP10 a ensuite donné à
+`/carte` un `main` et un `h1` uniques, puis confirmé leur focus. L'arbre
+d'accessibilité Chrome a été contrôlé; NVDA n'étant pas disponible dans
+l'environnement, une recette avec lecteur d'écran reste explicitement externe
+à ces preuves.
 
 ### Résultats WP2 - contrastes, images et nouvelles fenêtres
 
@@ -386,8 +389,9 @@ Le bouton « Donner mon avis » utilise le contrat `onClick` attendu par
 Vue-DSFR. L'intégration locale cible uniquement l'iframe du formulaire VigiEau,
 lui donne un titre français, retire les attributs de présentation obsolètes et
 gère le focus à l'ouverture comme à la fermeture. Le script Tally restant une
-ressource distante non versionnée, son comportement réel sera rejoué
-manuellement dans WP10.
+ressource distante non versionnée, WP10 ne requalifie pas son contenu tiers :
+l'insertion locale est testée, mais une recette de la ressource distante reste
+à réaliser lorsqu'elle est disponible.
 
 | Contrôle | Résultat WP5 | Preuve |
 |---|---|---|
@@ -417,9 +421,9 @@ seule région de statut annonce le résultat, la taille et la page courante.
 |---|---|---|
 | Tests unitaires publics | OK | 99/99 tests réussis, dont 18 contrôles sur la pagination partagée, les IDs, les cellules dynamiques, les onglets et la locale cartographique. |
 | Tableaux publics | OK | Les sept usages ont des IDs distincts; aucun `DsfrTable` paginé ne subsiste dans le client public. La page historique rend deux instances sans collision et conserve le lien PDF dynamique. |
-| Clavier et alternative de carte | OK CÔTÉ CODE | Onglets : flèches, Début et Fin déplacent sélection et focus; panneaux à `tabindex="-1"`. Le bouton vers Données focalise son onglet. MapLibre reçoit des noms français et Entrée/Espace appelle la même sélection que le clic. Le popup sur une vraie couche PMTiles reste à rejouer manuellement en WP10. |
+| Clavier et alternative de carte | OK | Onglets : flèches, Début et Fin déplacent sélection et focus; panneaux à `tabindex="-1"`. Le bouton vers Données focalise son onglet. WP10 injecte une couche GeoJSON rendue dans l'instance MapLibre réelle puis vérifie Entrée/Espace, la boîte d'information nommée, le focus, sa restitution et la navigation vers Situation. Le décodage d'une archive PMTiles distante reste hors de cette preuve déterministe. |
 | Pagination | OK | Label associé et automatisme annoncé, quatre boutons nommés et désactivés aux bornes, pagination hors tableau et statut stable. Cypress vérifie notamment dernière page puis taille 25 : retour en page 1 avec lignes 1 à 25. |
-| Responsive 320 px | OK AUTOMATISÉ | Chrome 151 vérifie l'absence de débordement global et le confinement du défilement dans les tableaux sur l'accueil, la situation, `/carte`, sept routes `/donnees/**` et `/stats`; contrôles, pagination et export restent dans le viewport. Le zoom navigateur réel à 400 % reste à WP10. |
+| Responsive 320 px | OK AUTOMATISÉ ET CONTRÔLÉ | Chrome 151 vérifie l'absence de débordement global et le confinement du défilement dans les tableaux sur l'accueil, la situation, `/carte`, sept routes `/donnees/**`, `/donnees-personnelles` et `/stats`; contrôles, pagination et export restent dans le viewport. WP10 complète par une simulation de texte à 200 % et une redistribution à 320 px équivalente au contrôle 400 %. |
 | Cypress WP6 | OK | Trois specs, 20/20 scénarios Chrome headless : tableau/filtre/pagination, onglets, MapLibre, multi-instance et balayage des routes publiques. |
 | ESLint, diff et build | OK SUR LE LOT | ESLint strict des onze nouveaux fichiers sans erreur ni avertissement; `git diff --check` réussi; génération Nuxt réussie avec 798 modules transformés et 23 routes pré-rendues. La dette ESLint des anciens composants reste distincte. |
 
@@ -518,8 +522,30 @@ l'échantillon exigés par le modèle officiel; ces éléments ne sont pas inven
 | Régression automatisée | OK | 134/134 tests unitaires publics; 12/12 scénarios Cypress sur navigation, FAQ et pages/documents institutionnels; ESLint ciblé et `git diff --check` verts. |
 | Génération statique | OK | Nuxt transforme 803 modules et pré-rend 23 routes; aucun avertissement d'imbrication HTML n'est émis. |
 
-Répartition consolidée après WP9 : 88 lignes, dont 62 `FIXED`, 22
-`ALREADY_OK`, 2 `N/A_CURRENT_UI`, 2 `BLOCKED_CONTENT` et aucun `TODO`.
+### Résultats WP10 - régression finale et preuves
+
+La recette du 11 août 2026 porte sur l'ensemble du frontend public, sans
+modification des applications d'administration. Elle a notamment réparé les
+derniers écarts découverts pendant le balayage : flux de désabonnement en
+erreur, titre et focus de la route `/carte`, popup MapLibre au clavier, titres
+d'alertes vides, titres de niveau 6 artificiels, fonds décoratifs débordants et
+tableaux de données personnelles. Ces derniers ne deviennent tabulables que
+lorsqu'un défilement horizontal est réellement nécessaire.
+
+| Contrôle | Résultat WP10 | Preuve |
+|---|---|---|
+| Cypress public complet | OK | 20/20 specs, 91/91 scénarios Electron, aucun échec, test ignoré ou en attente. Les quatre anciens specs ont été alignés sur les API et le DOM actuels; aucun serveur de test ne subsiste. |
+| Tests unitaires et structure | OK | 137/137 tests. L'analyse AST parcourt tous les SFC publics : aucun bloc dans un paragraphe, aucun `DsfrAlert` sans titre et aucun `h6`. Les 35 SFC modifiés compilent sans erreur. |
+| Génération statique | OK | `npm run build` réussit, génère `.output/public`, le service worker et 23 routes pré-rendues. Les avertissements sur l'URL locale et la taille de certains chunks ne bloquent pas la génération. |
+| ESLint et diff | OK AVEC DETTE DOCUMENTÉE | `npm run lint` sort avec le code 0 et aucune erreur; 402 avertissements historiques restent visibles. `git diff --check` réussit; aucun `.only`, débogueur ou log d'instrumentation n'est présent et aucun fichier admin n'est modifié. |
+| Redistribution et agrandissement | OK SUR LES PARCOURS CONTRÔLÉS | Chrome 151 à 320 px CSS, ainsi qu'une racine à 32 px pour simuler 200 % de texte, ne présente plus de débordement global ni de contrôle rogné. Le contrôle 320 px avec facteur 4 couvre la redistribution équivalente à 400 %; il ne remplace pas une recette de zoom natif sur chaque couple navigateur/système. |
+| Clavier et ordre du contenu | OK | Parcours adresse, formulaires, menu, fil d'Ariane, onglets, tableaux, modales, carte et popup sont exercés au clavier. Sans CSS auteur, accueil, carte, abonnement et pages institutionnelles gardent un ordre DOM intelligible, un contenu principal unique et des relations ARIA résolues. |
+| Accessibilité calculée et contrastes | OK CIBLÉ | L'arbre Accessibility de Chrome ne contient plus de titre vide sur les parcours contrôlés. Les mesures WP2 et le contrôle WP10 des textes/contrôles actifs respectent les seuils visés; les états désactivés ne sont pas utilisés comme preuve. |
+| Limites externes | À CONFIRMER HORS ENVIRONNEMENT | NVDA n'est pas disponible; l'arbre AX Chrome ne vaut pas recette lecteur d'écran. Le test MapLibre emploie une couche rendue déterministe, pas le décodage réussi d'une archive PMTiles distante. Le script Tally distant et les PDF dynamiques restent soumis à leurs propriétaires. `nuxi typecheck` n'est pas exécutable sans `vue-tsc`/checker installé. |
+
+Répartition consolidée après WP10, inchangée sur les qualifications primaires :
+88 lignes, dont 62 `FIXED`, 22 `ALREADY_OK`, 2 `N/A_CURRENT_UI`,
+2 `BLOCKED_CONTENT` et aucun `TODO`.
 
 Répartition des lignes sans lot explicite : `COOKIE-01` est qualifiée dans WP1,
 `HOME-03` dans WP1 (navigation et focus SPA) et `HOME-04` dans WP2 (image
@@ -666,9 +692,9 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
 |---|---:|---|---|---|---|---|---|
 | `G-01` | § 8.1, p. 12 | 3.2 | Majeur | Corriger les contrastes insuffisants des libellés de niveaux « Alerte » et « Alerte renforcée ». Vérifier tous les usages actuels des couleurs, pas seulement la capture de 2024. Seuils : 4,5:1 pour le texte courant, 3:1 pour le grand texte. | `apps/frontend/client/**` ; rechercher les classes `situation-level-*`, badges et variables de couleurs. | PROBABLEMENT OUVERT : `SituationHeader.vue` contient encore une couleur personnalisée `#A18E3A`; mesurer le rendu réel. | `FIXED` — WP2 : palette fond/texte séparée et override scoped supprimé. `a11y-colors.test.mjs` mesure chaque badge, le blanc et les surfaces teintées réelles; le pire ratio de texte est 4,932:1 et celui des badges 5,396:1. |
-| `G-02` | § 8.2, p. 13 | 10.11 | Bloquant | À 320 px de largeur, aucun contenu ni contrôle utile ne doit disparaître et aucun défilement horizontal global ne doit être requis. Couvrir notamment carte/données, tableaux, filtres et pagination. | `components/carte/**`, `components/donnees/**`, pages `/carte` et `/donnees`, styles globaux. | OUVERT À REVALIDER : les composants et l’architecture ont changé depuis 2024. | `FIXED` — WP6 : suppression des largeurs `100vw` qui débordaient, cartes et conteneurs contraints à leur parent, pagination hors des zones défilantes. Chrome à 320 px couvre l'accueil, la situation, `/carte`, sept routes de données et `/stats`; seuls les wrappers de tableaux défilent horizontalement. |
+| `G-02` | § 8.2, p. 13 | 10.11 | Bloquant | À 320 px de largeur, aucun contenu ni contrôle utile ne doit disparaître et aucun défilement horizontal global ne doit être requis. Couvrir notamment carte/données, tableaux, filtres et pagination. | `components/carte/**`, `components/donnees/**`, pages `/carte` et `/donnees`, styles globaux. | OUVERT À REVALIDER : les composants et l’architecture ont changé depuis 2024. | `FIXED` — WP6 supprime les largeurs `100vw`, contraint cartes et conteneurs, puis sort la pagination des zones défilantes. WP10 corrige les deux fonds décoratifs encore débordants à 200 % de texte et confine les deux tableaux RGPD. Chrome à 320 px couvre accueil, situation, `/carte`, routes de données, `/donnees-personnelles` et `/stats`; seuls les wrappers de tableaux qui débordent restent tabulables et défilent horizontalement. |
 | `G-03` | § 9.1, p. 13-14 | 9.2, 12.6 | Majeur / mineur | Une zone principale unique doit être exposée et atteignable/évitable. Vérifier le DOM rendu, le lien d’évitement, l’unicité de `main` et la cible `#main-content`. | `client/layouts/basic.vue`, composants DSFR de layout. | SEMBLE DÉJÀ CORRIGÉ : `<main role="main" id="main-content">` et liens d’évitement présents; ne pas modifier sans échec démontré. | `FIXED` — WP1 : suppression du wrapper qui dupliquait `#footer`, `tabindex="-1"` sur les cibles `main` et `footer`, et région principale ajoutée à `/carte`. Cypress active les deux liens d'évitement et vérifie l'unicité ainsi que le focus effectif des cibles. |
-| `G-04` | § 10.1, p. 14-16 | 6.1, 7.1, 8.5, 8.6, 12.8 | Majeur | Pour toute navigation SPA : employer lien ou bouton selon le comportement, mettre à jour le titre de page, annoncer le changement et placer le focus à un emplacement logique sans casser l’historique ni la navigation clavier. | `client/app.vue`, pages, middleware, router-links, utilitaires de navigation. | PROBABLEMENT OUVERT : les pages définissent souvent `useHead`, mais aucun gestionnaire global de focus de route n’est visible. | `FIXED` — WP1 : `app.vue` observe les changements de route hors fragments, attend le rendu, focalise le premier `h1` ou le `main`, et alimente une zone `role="status"`. Cypress prouve la navigation interne sans rechargement, le titre, le focus et l'annonce, y compris le fallback court de `/carte`. |
+| `G-04` | § 10.1, p. 14-16 | 6.1, 7.1, 8.5, 8.6, 12.8 | Majeur | Pour toute navigation SPA : employer lien ou bouton selon le comportement, mettre à jour le titre de page, annoncer le changement et placer le focus à un emplacement logique sans casser l’historique ni la navigation clavier. | `client/app.vue`, pages, middleware, router-links, utilitaires de navigation. | PROBABLEMENT OUVERT : les pages définissent souvent `useHead`, mais aucun gestionnaire global de focus de route n’est visible. | `FIXED` — WP1 : `app.vue` observe les changements de route hors fragments, attend le rendu, focalise le premier `h1` ou le `main`, et alimente une zone `role="status"`. WP10 ajoute à `/carte` un `main` et un `h1` uniques; Cypress prouve la navigation interne sans rechargement, le titre, le focus et l'annonce sur cette route comme sur les pages de layout. |
 | `HDR-01` | § 11.1, p. 16 | 1.3 | Mineur | L’alternative du logo opérateur doit être pertinente et ne pas contenir « logo du produit ». | `client/layouts/basic.vue` et rendu de `DsfrHeader`. | SEMBLE DÉJÀ CORRIGÉ : l’alternative vaut le nom de l’application. | `ALREADY_OK` — DOM hydraté WP0 : l’image opérateur du header expose `alt="VigiEau"`; `layouts/basic.vue` alimente cette valeur depuis `appName`. |
 | `HDR-02` | § 11.2, p. 16-17 | 10.2, 7.1 | Majeur | Le bouton du menu mobile doit avoir un nom accessible en contenu réel/masqué, et déclarer correctement qu’il ouvre une boîte de dialogue (`aria-haspopup="dialog"` si nécessaire). | `client/layouts/basic.vue`, `DsfrHeader`, version installée de `@gouvminint/vue-dsfr`. | À VÉRIFIER DANS LE DOM RENDU : ne pas patcher la dépendance si une prop suffit. | `FIXED` — WP1 : la version installée rendait un bouton vide malgré `aria-label`; le layout ajoute idempotemment un vrai texte `Menu` masqué. Cypress vérifie ce contenu, `aria-controls`, `aria-haspopup="dialog"` et le nom du dialogue. |
 | `HDR-03` | § 11.3, p. 17 | 7.1 | Majeur | La boîte de dialogue du menu mobile doit avoir un nom pertinent, sans terme technique tel que « modal ». | `client/layouts/basic.vue`, `DsfrHeader`. | SEMBLE PARTIELLEMENT CORRIGÉ : `menuModalLabel="Menu"`; vérifier le rendu. | `ALREADY_OK` — DOM hydraté à 320 px WP0 : `#header-navigation[role="dialog"][aria-modal="true"][aria-label="Menu"]`. Les autres exigences de focus restent dans `HDR-02`/`HDR-04`. |
@@ -738,7 +764,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | `SH-04` | § 15.45, p. 48 | 11.1 | Bloquant | Chaque `select` du choix de type/profil/zone doit avoir une étiquette accessible unique. Préférer `label`/`aria-labelledby` à un `title` seul quand possible. | `components/situation/Status.vue`. | OUVERT : props `titile` mal orthographiée, IDs `profile` dupliqués et labels visuels séparés. | `FIXED` — WP5 : les quatre listes de la page et de la modale ont un `select-id` stable et distinct ainsi qu'un libellé explicite relié. Cypress vérifie les associations dans le DOM, l'absence de `title`/`titile` et l'unicité des IDs à 1400 et 320 px. |
 | `SH-05` | § 15.46, p. 49 | 8.9, 11.5 | Majeur | Regrouper les sélecteurs liés dans un `fieldset`/`legend`; ne pas utiliser de titres pour la présentation; garder une phrase intelligible en lecture linéaire. | `components/situation/Status.vue` versions desktop/mobile. | PARTIEL : fieldsets présents, mais labels/IDs, texte intercalé et duplication doivent être corrigés. | `FIXED` — WP5 : les variantes desktop/mobile dupliquées sont remplacées par un seul `fieldset` responsive nommé « Adapter les restrictions affichées à votre situation ». Les contrôles restent contenus dans le viewport et la zone choisie en modale est synchronisée avec la page. |
 | `SH-06` | § 15.47, p. 50 | 12.8 | Majeur | Après activation de « Donner mon avis », placer le focus dans le panneau/formulaire Tally ou sur un conteneur de remplacement pertinent. | `client/layouts/basic.vue`, `utils.openTally`, intégration Tally. | À LOCALISER ET TESTER SUR MOBILE. | `FIXED` — WP5 : le quick-link Vue-DSFR utilise son vrai callback `onClick`; le helper cible et focalise l'iframe du formulaire, puis restitue le focus au bouton desktop ou au déclencheur visible du menu mobile. Cypress couvre les deux parcours, dont l'activation clavier à 320 px. |
-| `SH-07` | § 15.48, p. 51-52 | 2.2, 10.1 | Majeur / mineur | L’iframe Tally doit avoir un titre français explicite (« VigiEau - retours utilisateurs ») et aucun attribut HTML de présentation obsolète. | Intégration Tally dans utilitaires/scripts/runtime. | À LOCALISER; l’iframe tierce est exemptée pour son contenu, pas pour son titre et son insertion. | `FIXED` — WP5 côté intégration : l'iframe `.tally-form-w881YY` reçoit le titre français demandé et perd les cinq attributs obsolètes actuellement injectés, sans toucher aux autres iframes ni aux dimensions valides. Tests unitaires et Cypress verrouillent le DOM; le script distant sera revérifié manuellement en WP10. |
+| `SH-07` | § 15.48, p. 51-52 | 2.2, 10.1 | Majeur / mineur | L’iframe Tally doit avoir un titre français explicite (« VigiEau - retours utilisateurs ») et aucun attribut HTML de présentation obsolète. | Intégration Tally dans utilitaires/scripts/runtime. | À LOCALISER; l’iframe tierce est exemptée pour son contenu, pas pour son titre et son insertion. | `FIXED` — WP5 côté intégration : l'iframe `.tally-form-w881YY` reçoit le titre français demandé et perd les cinq attributs obsolètes actuellement injectés, sans toucher aux autres iframes ni aux dimensions valides. Tests unitaires et Cypress verrouillent le DOM; le script distant non versionné n'a pas été requalifié par WP10 et reste à contrôler lors d'une recette tierce disponible. |
 
 ### G. Page d’accueil, carte et données
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
@@ -750,7 +776,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | `HOME-05` | § 16.5, p. 55 | 8.9 | Mineur | Le sous-titre/date « Arrêtés publiés avant… » doit être un paragraphe. | `components/carte/Wrapper.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — `components/carte/Wrapper.vue` et DOM hydraté WP0 : la date est dans un `<p>` placé après le `h2`. |
 | `HOME-06` | § 16.6, p. 56 | 7.1 | Mineur | Chaque onglet doit référencer par `aria-controls` l’ID réel de son panneau. | `components/carte/Wrapper.vue`, rendu `DsfrTabs`. | SEMBLE CONFIGURÉ (`tab-0`/`tab-content-0`), À VÉRIFIER DANS LE DOM. | `FIXED` — WP6 : `AccessibleTabs` dérive les IDs de l'instance; chaque `aria-controls` et `aria-labelledby` résout exactement son onglet ou panneau dans le DOM hydraté. |
 | `HOME-07` | § 16.7, p. 56 | 12.8 | Majeur | Les panneaux d’onglets ne doivent pas ajouter d’arrêt de tabulation inutile; supprimer tout `tabindex=0` non justifié. | `DsfrTabContent` rendu. | À VÉRIFIER DANS LE DOM DE LA DÉPENDANCE. | `FIXED` — WP6 : panneaux à `tabindex="-1"`, un seul onglet à `tabindex="0"`; flèches, Début et Fin déplacent la sélection et le focus avec rebouclage. Cypress vérifie aussi le panneau masqué. |
-| `HOME-08` | § 16.8, p. 57 | 7.1, 12.8 | Majeur / amélioration | La carte étant exemptée, fournir une alternative textuelle/données pleinement utilisable. Ne pas laisser des contrôles cartographiques inaccessibles polluer le parcours clavier; ne pas masquer la solution alternative. | `components/carte/Map.vue`, `Wrapper.vue`, `Table.vue`, affichage embarqué sur l’accueil. | À RECONCEVOIR EN FONCTION DU DOM ACTUEL; l’accueil contient désormais une carte interactive avant le formulaire. | `FIXED` — WP6 côté interface : instructions visibles reliées au canvas, contrôles MapLibre nommés en français, sélection au point central par Entrée/Espace et bouton visible vers l'onglet Données avec focus logique. Le tableau reste entièrement utilisable sans la carte; le popup PMTiles réel sera rejoué en WP10. |
+| `HOME-08` | § 16.8, p. 57 | 7.1, 12.8 | Majeur / amélioration | La carte étant exemptée, fournir une alternative textuelle/données pleinement utilisable. Ne pas laisser des contrôles cartographiques inaccessibles polluer le parcours clavier; ne pas masquer la solution alternative. | `components/carte/Map.vue`, `Wrapper.vue`, `Table.vue`, affichage embarqué sur l’accueil. | À RECONCEVOIR EN FONCTION DU DOM ACTUEL; l’accueil contient désormais une carte interactive avant le formulaire. | `FIXED` — WP6 fournit instructions, noms français, sélection au point central par Entrée/Espace et accès visible à l'onglet Données. WP10 exerce une couche MapLibre rendue : popup nommé, focus initial et restitué, bouton atteignable puis navigation vers Situation; le tableau reste utilisable sans carte. La réussite du décodage PMTiles distant n'est pas déduite de cette fixture déterministe. |
 | `HOME-09` | § 16.9, p. 57-58 | 10.3, 8.9 | Majeur / mineur | Chaque niveau et son nombre de départements doivent rester associés sans CSS, idéalement dans le même item de liste/paragraphe. | `components/carte/Table.vue`. | PARTIEL : une liste est utilisée, mais chaque carte contient deux `li` séparés; restructurer en un item cohérent. | `FIXED` — WP6 : une unique liste contient cinq items; chaque `li` réunit le badge du niveau et son nombre de départements. Structure vérifiée statiquement et dans le DOM. |
 | `HOME-10` | § 16.10, p. 58 | 11.1 | Bloquant | Le champ de filtrage des départements doit avoir une étiquette accessible explicite, pas seulement un placeholder. | `components/carte/Table.vue`, rendu `DsfrSearchBar`. | PARTIEL : `title="Rechercher un département"`; préférer/valider un vrai label. | `FIXED` — WP6 : champ natif `type="search"` avec ID stable et libellé visible « Rechercher un département » associé par `for`. |
 | `HOME-11` | § 16.11, p. 58 | 11.9 | Majeur | Le bouton de recherche des départements doit être distingué du bouton d’adresse dans son nom accessible. | `components/carte/Table.vue`, `DsfrSearchBar`. | À VÉRIFIER : `buttonText="Rechercher"` générique malgré le title du champ. | `FIXED` — WP6 : le bouton de soumission porte le contenu réel « Rechercher un département », distinct de la recherche d'adresse. Entrée et clic utilisent le même formulaire. |
@@ -784,20 +810,25 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 
 ## 12. Matrice de validation manuelle
 
-Créer des preuves datées pour les routes réellement présentes sur `develop`.
+Preuves datées du 11 août 2026 sur les routes réellement présentes sur
+`develop`. « Zoom 400 % » désigne ici le contrôle de redistribution à 320 px
+CSS équivalent à un viewport de 1280 px agrandi à 400 %; le zoom natif de
+chaque navigateur n'a pas été rejoué. « Lecteur d'écran » reste non exécuté
+faute de NVDA dans l'environnement; les contrôles d'arbre AX Chrome ne sont pas
+présentés comme un remplacement.
 
 | Parcours / page | 320 px | Zoom 200 % texte | Zoom 400 % | Clavier seul | Lecteur d’écran | Sans CSS / ordre DOM | Contrastes | Résultat |
 |---|---|---|---|---|---|---|---|---|
-| Accueil - sélection profil/type + adresse | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| Accueil - carte et alternative données | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| Page données - filtre/tableau/pagination | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| Abonnement - tous les cas d’erreur | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| Situation sans restriction | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| Situation avec restrictions/crise | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| Modale « Je ne comprends pas… » | TODO | N/A | N/A | TODO | TODO | N/A | TODO | TODO |
-| Menu mobile | OK WP1 | TODO | TODO | OK WP1 | TODO | N/A | TODO | PARTIEL — DOM et clavier Chrome validés le 10/08/2026; zoom, contraste et lecteur d'écran restent à WP10. |
-| Fil d’Ariane mobile | OK WP1 | TODO | TODO | OK WP1 | TODO | TODO | TODO | PARTIEL — expansion et focus Chrome validés le 10/08/2026; contrôles manuels restants à WP10. |
-| Accessibilité / mentions légales | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| Accueil - sélection profil/type + adresse | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK combobox, erreurs, soumission | NON EXÉCUTÉ — AX Chrome contrôlé | OK Chrome sans CSS | OK mesures WP2/WP10 | OK technique; recette NVDA externe |
+| Accueil - carte et alternative données | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK onglets, carte, popup, alternative | NON EXÉCUTÉ — AX Chrome contrôlé | OK Chrome sans CSS | OK mesures WP2/WP10 | OK technique; PMTiles distant non qualifié |
+| Page données - filtre/tableau/pagination | OK Chrome, défilement interne seul | OK racine 32 px | OK redistribution 320 px | OK filtre, taille, pagination, régions défilantes | NON EXÉCUTÉ — AX Chrome contrôlé | OK ordre DOM/tableau | OK contrôle ciblé | OK technique; recette NVDA externe |
+| Abonnement - tous les cas d’erreur | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK validation, 409/500, succès, désabonnement | NON EXÉCUTÉ — AX Chrome contrôlé | OK Chrome sans CSS | OK contrôle ciblé | OK technique; recette NVDA externe |
+| Situation sans restriction | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK sélecteurs, annonces et navigation | NON EXÉCUTÉ — AX Chrome contrôlé | OK structure/ordre DOM | OK mesures WP2/WP10 | OK technique; recette NVDA externe |
+| Situation avec restrictions/crise | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK filtres, cartes, retours et erreurs API | NON EXÉCUTÉ — AX Chrome contrôlé | OK structure/ordre DOM | OK mesures WP2/WP10 | OK technique; PDF dynamiques bloqués |
+| Modale « Je ne comprends pas… » | OK à 320 px | OK dans la page agrandie | OK redistribution 320 px | OK Tab/Maj+Tab, Échap, inertie, restitution | NON EXÉCUTÉ — AX Chrome contrôlé | N/A, `dialog` natif contrôlé | OK DSFR/ciblé | OK technique; recette NVDA externe |
+| Menu mobile | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK focus, boucle et Échap | NON EXÉCUTÉ — AX Chrome contrôlé | N/A | OK DSFR/ciblé | OK technique; recette NVDA externe |
+| Fil d’Ariane mobile | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK expansion et focus Accueil | NON EXÉCUTÉ — AX Chrome contrôlé | OK ordre DOM | OK DSFR/ciblé | OK technique; recette NVDA externe |
+| Accessibilité / mentions légales | OK Chrome/Cypress | OK racine 32 px | OK redistribution 320 px | OK liens, fragment et focus ciblé | NON EXÉCUTÉ — AX Chrome contrôlé | OK Chrome sans CSS | OK contrôle ciblé | OK structure; contenu propriétaire à valider |
 
 ### Scénarios clavier minimaux
 

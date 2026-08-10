@@ -50,12 +50,20 @@ const downloadMap = () => {
       <div ref="screenshotZone">
         <CarteCommuneFilter :loading="loading"
                             @filterChange="setFilterData($event)" />
-        <DsfrAlert data-html2canvas-ignore="true" class="fr-my-2w" type="warning">
-          La carte nationale peut prendre du temps à se charger.
-          Si vous souhaitez ne visualiser qu'une partie du territoire, il est recommandé de restreindre l'affichage via
-          le filtre territoire ou en zoomant sur la carte.<br />
-          Pour plus de précisions sur la situation d'un département, n'hésitez pas à zoomer pour avoir les informations
-          à la maille de la commune.
+        <DsfrAlert
+          title="Chargement de la carte"
+          data-html2canvas-ignore="true"
+          class="fr-my-2w"
+          type="warning"
+        >
+          <p class="fr-mb-1w">
+            La carte nationale peut prendre du temps à se charger. Si vous souhaitez ne visualiser qu'une partie du
+            territoire, il est recommandé de restreindre l'affichage via le filtre territoire ou en zoomant sur la carte.
+          </p>
+          <p class="fr-mb-0">
+            Pour plus de précisions sur la situation d'un département, n'hésitez pas à zoomer pour avoir les informations
+            à la maille de la commune.
+          </p>
         </DsfrAlert>
         <div style="position: relative;">
           <CarteCommuneMap :embedded="false"

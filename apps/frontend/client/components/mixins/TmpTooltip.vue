@@ -43,7 +43,7 @@ watch(hover, () => {
           role="tooltip"
           aria-hidden="true"
     >
-    {{ content }}
+      {{ content }}
     </span>
   </div>
 
@@ -58,7 +58,7 @@ watch(hover, () => {
       role="tooltip"
       aria-hidden="true"
     >
-    {{ content }}
+      {{ content }}
     </span>
   </div>
 </template>
