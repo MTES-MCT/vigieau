@@ -40,7 +40,7 @@ const downloadMap = () => {
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <h1>Intensité des sécheresses passées</h1>
     <p>Durée et gravité des situations de sécheresse sur un territoire (département ou commune) et une période
       donnée</p>

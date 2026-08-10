@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import { useScheme } from '@gouvminint/vue-dsfr';
+import {
+  ensureButtonAccessibleText,
+  trapTabKey,
+} from '../utils/focus-management';
 
 const route = useRoute();
 
@@ -9,6 +13,8 @@ const operatorImgAlt: string = `${useRuntimeConfig().public.appName}`;
 const operatorImgStyle: any = {
   'max-width': '150px',
 };
+const serviceDescription =
+  "S'informer sur les restrictions d'eau en période de sécheresse";
 const a11yCompliance: string = 'Partiellement conforme';
 let quickLinks: any[] = [];
 const mandatoryLinks: any[] = [
@@ -64,8 +70,50 @@ const preferences = reactive({
 });
 const runTimeConfig = useRuntimeConfig().public;
 
+function trapMenuFocus(event: KeyboardEvent): void {
+  const menu = document.querySelector<HTMLElement>(
+    '#header-navigation.fr-modal--opened',
+  );
+  if (menu) {
+    trapTabKey(event, menu);
+  }
+}
+
+function focusMenuAfterOpening(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest('#button-menu')) {
+    return;
+  }
+
+  focusOpenedMenuCloseButton();
+}
+
+function focusOpenedMenuCloseButton(attemptsRemaining = 5): void {
+  requestAnimationFrame(() => {
+    const menu = document.querySelector<HTMLElement>(
+      '#header-navigation.fr-modal--opened',
+    );
+    const closeButton = menu?.querySelector<HTMLElement>('#close-button');
+    closeButton?.focus();
+
+    if (
+      document.activeElement !== closeButton &&
+      attemptsRemaining > 1
+    ) {
+      focusOpenedMenuCloseButton(attemptsRemaining - 1);
+    }
+  });
+}
+
+async function enhanceMenuButton(): Promise<void> {
+  await nextTick();
+  ensureButtonAccessibleText(document, 'button-menu', 'Menu');
+}
+
 onMounted(() => {
-  const { theme, scheme, setScheme } = useScheme();
+  document.addEventListener('keydown', trapMenuFocus);
+  document.addEventListener('click', focusMenuAfterOpening, true);
+  const { theme, setScheme } = useScheme();
   // preferences.scheme = 'dark';
   preferences.scheme = 'light';
 
@@ -106,9 +154,15 @@ onMounted(() => {
               },
             ];
       key.value++;
+      void enhanceMenuButton();
     },
     { immediate: true },
   );
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', trapMenuFocus);
+  document.removeEventListener('click', focusMenuAfterOpening, true);
 });
 </script>
 
@@ -116,24 +170,23 @@ onMounted(() => {
   <DsfrSkipLinks :links="skipLinks" />
 
   <DsfrHeader
-    :logo-text="logoText"
-    :operatorImgSrc="operatorImgSrc"
-    :operatorImgAlt="operatorImgAlt"
-    :operatorImgStyle="operatorImgStyle"
-    :quickLinks="quickLinks"
-    menuModalLabel="Menu"
     :key="key"
+    :logo-text="logoText"
+    :operator-img-src="operatorImgSrc"
+    :operator-img-alt="operatorImgAlt"
+    :operator-img-style="operatorImgStyle"
+    :quick-links="quickLinks"
+    menu-modal-label="Menu"
     :show-beta="
       runTimeConfig.domainName !== 'vigieau.gouv.fr' ||
-      runTimeConfig.domainProdNotActivated === 'true'
+        runTimeConfig.domainProdNotActivated === 'true'
     "
-    :serviceTitle="runTimeConfig.domainName"
-    serviceDescription="S'informer sur les restrictions d'eau en période de sécheresse"
-  >
-  </DsfrHeader>
-  <main role="main" id="main-content">
+    :service-title="runTimeConfig.domainName"
+    :service-description="serviceDescription"
+  />
+  <main id="main-content" role="main" tabindex="-1">
     <div class="fr-mb-8w">
-      <div class="fr-container" v-if="runTimeConfig.appEnv !== 'prod'">
+      <div v-if="runTimeConfig.appEnv !== 'prod'" class="fr-container">
         <DsfrAlert
           description="Plateforme de développement, les données sont fictives. Si vous souhaitez accéder à la plateforme de production, allez sur https://vigieau.gouv.fr"
           type="warning"
@@ -144,18 +197,17 @@ onMounted(() => {
       <slot />
     </div>
   </main>
-  <div id="footer">
-    <DsfrFooter
-      :logo-text="logoText"
-      :mandatoryLinks="mandatoryLinks"
-      :operatorImgSrc="operatorImgSrc"
-      :operatorImgAlt="operatorImgAlt"
-      :operatorImgStyle="operatorImgStyle"
-      :ecosystemLinks="ecosystemLinks"
-      homeTitle="Accueil VigiEau"
-    >
-    </DsfrFooter>
-  </div>
+  <DsfrFooter
+    :logo-text="logoText"
+    :mandatory-links="mandatoryLinks"
+    :operator-img-src="operatorImgSrc"
+    :operator-img-alt="operatorImgAlt"
+    :operator-img-style="operatorImgStyle"
+    :ecosystem-links="ecosystemLinks"
+    :desc-text="serviceDescription"
+    home-title="Accueil VigiEau"
+    tabindex="-1"
+  />
 </template>
 
 <style scoped lang="scss"></style>

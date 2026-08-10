@@ -18,7 +18,7 @@ const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessi
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links'/>
+    <AppBreadcrumb :links="links" />
     <div>
       <h1>Déclaration d’accessibilité</h1>
       <p>Établie le <span>22 mai 2024</span>.</p>

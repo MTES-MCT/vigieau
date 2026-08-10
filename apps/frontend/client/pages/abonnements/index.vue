@@ -62,7 +62,7 @@ const closeModal = () => {
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <div v-if="userSubscriptions">
       <h1>Abonnements</h1>
       <h2>{{ route.query.email }}</h2>

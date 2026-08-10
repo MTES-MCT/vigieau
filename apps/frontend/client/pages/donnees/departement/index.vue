@@ -17,7 +17,7 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, {
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <h1>Évolution journalière du nombre de départements soumis à restriction</h1>
   </div>
   <div class="background-blue fr-py-2w">

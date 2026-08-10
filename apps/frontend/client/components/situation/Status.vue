@@ -124,7 +124,7 @@ watch(
     v-if="addressToUse"
   >
     <div class="fr-col-12">
-      <DsfrBreadcrumb class="fr-mb-0" :links="links" />
+      <AppBreadcrumb class="fr-mb-0" :links="links" />
     </div>
     <fieldset
       class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w hide-sm"

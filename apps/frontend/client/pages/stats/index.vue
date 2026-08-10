@@ -44,7 +44,7 @@ if (data.value) {
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <div>
       <h1>Statistiques depuis le 10 Juillet 2023</h1>
       <template v-if="data">

@@ -17,7 +17,7 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, {
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <h1>Évolution journalière du pourcentage de la surface concernée par des niveaux de gravité</h1>
   </div>
   <div class="background-blue fr-py-2w">

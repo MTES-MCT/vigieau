@@ -1,24 +1,18 @@
-<template>
-  <div>
-    <VitePwaManifest />
-    <NuxtLoadingIndicator />
-    <NuxtLayout>
-      <NuxtPage />
-    </NuxtLayout>
-  </div>
-</template>
-
 <script setup lang="ts">
 import {
   useZonePublicationStore,
   ZONE_PUBLICATION_ERROR_RETRY_MS,
 } from './store/zonePublication';
+import { focusRouteContent } from './utils/focus-management';
 import { createRetryScheduler } from './utils/retryable-task';
 
+const route = useRoute();
+const routeAnnouncement = ref('');
 const zonePublicationStore = useZonePublicationStore();
 const ZONE_PUBLICATION_REFRESH_MS = 60_000;
 let publicationRefreshInterval: ReturnType<typeof setInterval> | null = null;
 let publicationRefreshActive = false;
+let routeChangeSequence = 0;
 
 function refreshPublication(force = false): void {
   void zonePublicationStore
@@ -40,6 +34,33 @@ const publicationRetry = createRetryScheduler(
   ZONE_PUBLICATION_ERROR_RETRY_MS,
 );
 
+watch(
+  () => route.fullPath.split('#', 1)[0],
+  async () => {
+    if (!import.meta.client) {
+      return;
+    }
+
+    routeAnnouncement.value = '';
+    const currentSequence = ++routeChangeSequence;
+    await nextTick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    if (currentSequence !== routeChangeSequence) {
+      return;
+    }
+
+    const target = focusRouteContent(document);
+    if (target) {
+      const pageName =
+        target.tagName === 'H1'
+          ? target.textContent?.trim() || document.title
+          : document.title;
+      routeAnnouncement.value = `Page ${pageName} chargée`;
+    }
+  },
+  { flush: 'post' },
+);
+
 onMounted(() => {
   publicationRefreshActive = true;
   refreshPublication();
@@ -58,3 +79,21 @@ onUnmounted(() => {
   }
 });
 </script>
+
+<template>
+  <div>
+    <VitePwaManifest />
+    <NuxtLoadingIndicator />
+    <div
+      role="status"
+      class="fr-sr-only"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ routeAnnouncement }}
+    </div>
+    <NuxtLayout>
+      <NuxtPage />
+    </NuxtLayout>
+  </div>
+</template>

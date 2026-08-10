@@ -16,7 +16,7 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Donn
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <div>
       <h1>Politique de confidentialité</h1>
       <h2>Qui est responsable ?</h2>

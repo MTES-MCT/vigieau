@@ -45,7 +45,7 @@ const downloadMap = (typeEau) => {
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <h1>Carte et historique des restrictions</h1>
   </div>
   <div class="background-blue fr-py-2w">

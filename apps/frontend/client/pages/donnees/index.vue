@@ -15,7 +15,7 @@ const email = useRuntimeConfig().public.email;
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <h1>Données sécheresse</h1>
     <DsfrHighlight class="fr-mb-2w">
       Retrouvez les données brutes sur <a href="https://www.data.gouv.fr/fr/datasets/donnee-secheresse-vigieau/"

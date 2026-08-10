@@ -19,7 +19,7 @@ const links: Ref<any[]> = ref([
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links="links" />
+    <AppBreadcrumb :links="links" />
     <div>
       <h1>Mentions légales</h1>
       <h2>Éditeur</h2>
