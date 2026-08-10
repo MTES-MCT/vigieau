@@ -86,7 +86,7 @@ const subscribe = async (form: any) => {
       @subscribe="subscribe($event)"
     />
   </div>
-  <DsfrModal
+  <AccessibleModal
     :modal-id="resultModalId"
     :opened="resultModalOpened"
     :origin="mailForm ?? undefined"
@@ -95,5 +95,5 @@ const subscribe = async (form: any) => {
     @close="closeResultModal"
   >
     <p>{{ resultModalDescription }}</p>
-  </DsfrModal>
+  </AccessibleModal>
 </template>

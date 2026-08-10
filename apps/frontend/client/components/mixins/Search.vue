@@ -61,6 +61,7 @@ const modalTitle: Ref<string> = ref('');
 const modalText: Ref<string> = ref('');
 const modalIcon: Ref<string> = ref('');
 const modalActions: Ref<any[]> = ref([]);
+const searchSubmit = ref<{ focus: () => void } | null>(null);
 const loading = ref(false);
 const query = ref('');
 const address = typeof route.query.adresse === 'string'
@@ -139,6 +140,7 @@ const searchZone = async () => {
     modalOpened,
     loading,
     props.publicationPin,
+    closeModalAndFocusAddress,
   );
 };
 
@@ -146,6 +148,15 @@ const setAddress = (address: Address | null, geo: Geo | null) => {
   formData.address = address;
   formData.geo = geo;
 };
+
+function closeModalAndFocusAddress(): void {
+  modalOpened.value = false;
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      document.getElementById('main-search-address')?.focus();
+    });
+  });
+}
 
 const closeModal = (): void => {
   modalOpened.value = false;
@@ -235,6 +246,7 @@ const closeModal = (): void => {
     </div>
     <div class="fr-mt-2w">
       <DsfrButton
+        ref="searchSubmit"
         type="submit"
         data-cy="MainRestrictionSearchSubmit"
         :disabled="loading"
@@ -245,13 +257,14 @@ const closeModal = (): void => {
     </div>
   </form>
 
-  <DsfrModal
+  <AccessibleModal
     :opened="modalOpened"
+    :origin="searchSubmit ?? undefined"
     :title="modalTitle"
     :icon="modalIcon"
     :actions="modalActions"
     @close="closeModal"
   >
     <p>{{ modalText }}</p>
-  </DsfrModal>
+  </AccessibleModal>
 </template>

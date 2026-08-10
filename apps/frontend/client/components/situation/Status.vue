@@ -17,6 +17,7 @@ const links: Ref<any[]> = ref([
 ]);
 const zone = ref();
 const zoneModal = ref();
+const zoneModalError = ref('');
 const modalOpened: Ref<boolean> = ref(false);
 const router = useRouter();
 
@@ -54,6 +55,24 @@ const profileOptions = [
     text: 'exploitation agricole',
   },
 ];
+const situationUpdateAnnouncement = ref('');
+const announcementsEnabled = ref(false);
+
+const optionText = (
+  options: Array<{ text: string; value: string }>,
+  value: string,
+) => options.find((option) => option.value === value)?.text ?? value;
+
+const announceSituationUpdate = async (message: string) => {
+  if (!announcementsEnabled.value) {
+    return;
+  }
+
+  situationUpdateAnnouncement.value = '';
+  await nextTick();
+  situationUpdateAnnouncement.value = message;
+};
+
 const zonesOptions = computed(() => {
   return zones.value
     .filter((z) => z.type === typeEau.value)
@@ -88,10 +107,43 @@ const situationLabel = computed<string>(() => {
   );
 });
 
-const selectZone = () => {
-  zone.value = zones.value.find((z) => z.id === zoneModal.value);
+const zoneModalOrigin = {
+  focus: () => {
+    const zoneSelect = document.getElementById('situation-alert-zone');
+    const typeSelect = document.getElementById('situation-water-type');
+    (zoneSelect || typeSelect)?.focus({ preventScroll: true });
+  },
+};
+
+const selectZone = async () => {
+  if (!zoneModal.value) {
+    zoneModalError.value = 'Sélectionnez une zone d’alerte.';
+    await nextTick();
+    document.getElementById('situation-alert-zone-modal')?.focus();
+    return;
+  }
+
+  const selectedZone = zones.value.find((z) => z.id === zoneModal.value);
+  if (!selectedZone) {
+    zoneModalError.value = 'La zone sélectionnée n’est plus disponible.';
+    await nextTick();
+    document.getElementById('situation-alert-zone-modal')?.focus();
+    return;
+  }
+
+  zone.value = selectedZone;
+  zoneModalError.value = '';
   zoneModal.value = null;
   modalOpened.value = false;
+};
+
+const closeZoneModal = () => {
+  if (!modalOpened.value) {
+    return;
+  }
+
+  modalOpened.value = false;
+  router.push('/');
 };
 
 const updateZone = ($event) => {
@@ -107,16 +159,51 @@ onBeforeUnmount(() => {
   resetZones();
 });
 
+onMounted(() => {
+  announcementsEnabled.value = true;
+});
+
 watch(
   () => typeEau.value,
   () => {
     if (zonesOptions.value.length <= 1) {
       zone.value = zones.value.find((z) => z.type === typeEau.value);
     } else {
+      zone.value = undefined;
+      zoneModal.value = null;
+      zoneModalError.value = '';
       modalOpened.value = true;
     }
   },
   { immediate: true },
+);
+
+watch(
+  [profile, typeEau, () => zone.value?.id],
+  ([nextProfile, nextTypeEau, nextZoneId], [previousProfile, previousTypeEau, previousZoneId]) => {
+    if (nextTypeEau !== previousTypeEau) {
+      const waterType = optionText(typesEauOptions, nextTypeEau);
+      const message = zonesOptions.value.length > 1
+        ? `Sélectionnez une zone d’alerte pour l’eau ${waterType}.`
+        : `Restrictions mises à jour pour l’eau ${waterType}.`;
+      void announceSituationUpdate(message);
+      return;
+    }
+
+    if (nextZoneId !== previousZoneId && zone.value) {
+      void announceSituationUpdate(
+        `Restrictions mises à jour pour la zone d’alerte « ${zone.value.nom} ».`,
+      );
+      return;
+    }
+
+    if (nextProfile !== previousProfile) {
+      void announceSituationUpdate(
+        `Restrictions mises à jour pour le profil ${optionText(profileOptions, nextProfile)}.`,
+      );
+    }
+  },
+  { flush: 'post' },
 );
 </script>
 
@@ -156,6 +243,15 @@ watch(
         :options="profileOptions"
       />
     </fieldset>
+    <p
+      id="situation-update-status"
+      class="fr-sr-only"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ situationUpdateAnnouncement }}
+    </p>
 
     <SituationHeader :address="addressToUse" :type-eau="typeEau" :zone="zone" />
 
@@ -170,9 +266,13 @@ watch(
       <div class="fr-col-12">
         <div class="fr-grid-row fr-grid-row--center">
           <DsfrHighlight class="fr-my-2w">
-            <b>Besoin de précision sur les restrictions ?</b>
-            <br>
-            Votre mairie a pu renforcer ces restrictions, pensez à la consulter.
+            <h3 class="fr-h3 fr-mb-1w">
+              Besoin de précision sur les restrictions ?
+            </h3>
+            <p class="fr-mb-0">
+              Votre mairie a pu renforcer ces restrictions, pensez à la
+              consulter.
+            </p>
           </DsfrHighlight>
         </div>
       </div>
@@ -181,11 +281,13 @@ watch(
       <MixinsShare :situation-label="situationLabel" :address="addressToUse" />
     </div>
   </div>
-  <DsfrModal
+  <AccessibleModal
     :opened="modalOpened"
     :actions="modalActions"
+    :origin="zoneModalOrigin"
+    initial-focus="#situation-alert-zone-modal"
     title="Pour consulter les restrictions, veuillez sélectionner la ressource dans laquelle vous prélevez de l’eau."
-    @close="router.push('/')"
+    @close="closeZoneModal"
   >
     <div>
       <p class="fr-mx-1w fr-mb-0">
@@ -196,9 +298,24 @@ watch(
         label="Zone d’alerte à consulter"
         select-id="situation-alert-zone-modal"
         :options="zonesOptions"
-      />
+        required
+        :aria-invalid="zoneModalError ? 'true' : undefined"
+        :aria-describedby="zoneModalError ? 'situation-alert-zone-modal-error' : undefined"
+        @update:model-value="zoneModalError = ''"
+      >
+        <template #required-tip>
+          <span class="required"> (obligatoire)</span>
+        </template>
+      </DsfrSelect>
+      <p
+        v-if="zoneModalError"
+        id="situation-alert-zone-modal-error"
+        class="fr-error-text"
+      >
+        {{ zoneModalError }}
+      </p>
     </div>
-  </DsfrModal>
+  </AccessibleModal>
 </template>
 
 <style lang="scss">

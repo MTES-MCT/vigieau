@@ -65,25 +65,31 @@ const closeModal = () => {
       <h1>Abonnements</h1>
       <h2>{{ route.query.email }}</h2>
       <div class="fr-grid-row fr-grid-row--gutters">
-        <SubscriptionsCard v-for="subscription in userSubscriptions"
-                           :key="subscription.id"
-                           :loading="loading"
-                           :subscription="subscription"
-                           @unsubscribe="askUnsubscribe([subscription])" />
+        <SubscriptionsCard
+          v-for="subscription in userSubscriptions"
+          :key="subscription.id"
+          :loading="loading"
+          :subscription="subscription"
+          @unsubscribe="askUnsubscribe([subscription])"
+        />
       </div>
       <div v-if="userSubscriptions.length > 1">
-        <DsfrButton class="fr-mt-2w"
-                    label="Me désabonner de toutes les adresses"
-                    :disabled="loading"
-                    @click="askUnsubscribe(userSubscriptions)" />
+        <DsfrButton
+          class="fr-mt-2w"
+          label="Me désabonner de toutes les adresses"
+          :disabled="loading"
+          @click="askUnsubscribe(userSubscriptions)"
+        />
       </div>
     </div>
   </div>
-  <DsfrModal :opened="modalOpened"
-             :title="modalTitle"
-             :icon="modalIcon"
-             :actions="modalActions"
-             @close="closeModal">
+  <AccessibleModal
+    :opened="modalOpened"
+    :title="modalTitle"
+    :icon="modalIcon"
+    :actions="modalActions"
+    @close="closeModal"
+  >
     <p v-if="subscriptionsToUnsubscribe.length > 1">
       Voulez-vous vous désabonner de toutes les notifications de changement de
       restrictions pour vos
@@ -95,5 +101,5 @@ const closeModal = () => {
       <strong>{{ subscriptionsToUnsubscribe[0].libelleLocalisation }}</strong>
       ?
     </p>
-  </DsfrModal>
+  </AccessibleModal>
 </template>

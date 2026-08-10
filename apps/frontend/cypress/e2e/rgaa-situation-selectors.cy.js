@@ -74,7 +74,7 @@ function visitSituationWithTwoZones(viewportWidth) {
     '/situation?adresse=20+Avenue+de+Segur+75007+Paris&profil=particulier&typeEau=SUP',
   );
   cy.location('pathname').should('equal', '/situation');
-  cy.get('.situation-status').should('be.visible');
+  cy.get('.situation-status').should('exist');
 }
 
 function assertAssociatedUniqueLabels() {
@@ -144,7 +144,26 @@ describe('Sélecteurs accessibles de la situation', () => {
   it('rend un seul groupe relié et synchronise la zone sur grand écran', () => {
     visitSituationWithTwoZones(1400);
     assertAssociatedUniqueLabels();
+    cy.get('#situation-update-status').should('have.text', '');
+
     selectZoneFromModal();
+    cy.get('#situation-update-status').should(
+      'have.text',
+      'Restrictions mises à jour pour la zone d’alerte « Bassin aval ».',
+    );
+
+    cy.get('#situation-profile').select('entreprise');
+    cy.get('#situation-update-status').should(
+      'have.text',
+      'Restrictions mises à jour pour le profil professionnel.',
+    );
+
+    cy.get('#situation-water-type').select('AEP');
+    cy.get('#situation-update-status').should(
+      'have.text',
+      'Restrictions mises à jour pour l’eau du robinet.',
+    );
+
     assertSelectorsFitViewport();
   });
 

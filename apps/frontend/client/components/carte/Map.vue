@@ -1258,7 +1258,7 @@ watch(
     />
   </template>
 
-  <DsfrModal
+  <AccessibleModal
     :opened="modalOpened"
     :title="modalTitle"
     :icon="modalIcon"
@@ -1266,7 +1266,7 @@ watch(
     @close="closeModal"
   >
     <p>{{ modalText }}</p>
-  </DsfrModal>
+  </AccessibleModal>
 </template>
 
 <style lang="scss" scoped>

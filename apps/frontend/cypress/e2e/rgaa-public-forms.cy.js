@@ -298,7 +298,10 @@ describe('Formulaire public d’abonnement accessible', () => {
     );
 
     cy.press(Cypress.Keyboard.Keys.ESC);
-    cy.get('[aria-labelledby="subscription-error-title"]').should('not.exist');
+    cy.get('dialog[aria-labelledby="subscription-error-title"]')
+      .should('not.have.attr', 'open');
+    cy.get('dialog[aria-labelledby="subscription-error-title"]')
+      .should('not.be.visible');
     subscriptionSubmit().should('have.focus');
   });
 });

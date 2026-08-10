@@ -125,7 +125,9 @@ watch(
 
 <template>
   <div class="fr-container fr-grid-row fr-grid-row--center fr-pt-4w">
-    <h2 class="text-align-center">Détails des restrictions</h2>
+    <h2 class="text-align-center">
+      Détails des restrictions
+    </h2>
     <div
       v-if="thematiqueTagsFiltered.length > 0"
       class="fr-col-12 text-align-center"
@@ -141,9 +143,9 @@ watch(
         :key="thematique.label"
       >
         <DsfrAccordion
-          :title="thematique.label"
-          titleTag="h4"
           :id="index.toString()"
+          :title="thematique.label"
+          title-tag="h3"
         >
           <template v-if="usagesFiltered(thematique).length > 0">
             <div class="fr-grid-row fr-grid-row--gutters">
@@ -163,7 +165,9 @@ watch(
           <template v-else>
             <div class="fr-col-12 fr-col-md-4">
               <div class="eau-card fr-p-2w">
-                <div class="eau-card__desc">Aucune restriction</div>
+                <p class="eau-card__desc">
+                  Aucune restriction
+                </p>
               </div>
             </div>
           </template>
@@ -185,8 +189,8 @@ watch(
           class="fr-m-1w no-checkmark tag-lg"
           aria-controls="restriction-theme-results"
           :aria-pressed="selectedTagIndex === index"
-          @click="selectedTagIndex = index"
           tag-name="button"
+          @click="selectedTagIndex = index"
         >
           <Icon
             :icon="`vigieau:${thematique.icon}`"
@@ -221,7 +225,9 @@ watch(
           <template v-else>
             <div class="fr-col-12 fr-col-md-4">
               <div class="eau-card fr-p-2w">
-                <p class="eau-card__desc">Aucune restriction</p>
+                <p class="eau-card__desc">
+                  Aucune restriction
+                </p>
               </div>
             </div>
           </template>
@@ -235,14 +241,18 @@ watch(
     >
       <div class="fr-col-12 fr-col-md-4">
         <div class="eau-card fr-p-2w">
-          <div class="eau-card__desc">Aucune restriction</div>
+          <p class="eau-card__desc">
+            Aucune restriction
+          </p>
         </div>
       </div>
     </div>
     <div class="fr-grid-row fr-grid-row--center">
       <div class="fr-my-2w">
         <DsfrCallout>
-          <h3 class="h6">Besoin de précision sur les restrictions ?</h3>
+          <h3 class="h6">
+            Besoin de précision sur les restrictions ?
+          </h3>
           <p>
             Arrêté en vigueur depuis le
             {{ formatDate(zone.arrete.dateDebutValidite) }}. Cette décision a
@@ -258,8 +268,8 @@ watch(
               title="Consulter l'arrêté de restriction PDF (nouvelle fenêtre)"
               rel="noopener"
             >
-              arrêté de restriction</a
-            >
+              arrêté de restriction
+            </a>
             et l'<a
               class="fr-link"
               :href="zone.arrete.cheminFichierArreteCadre"
@@ -268,8 +278,8 @@ watch(
               title="Consulter l'arrêté cadre PDF (nouvelle fenêtre)"
               rel="noopener"
             >
-              arrêté cadre préfectoral</a
-            >.
+              arrêté cadre préfectoral
+            </a>.
           </p>
           <template v-if="getCommuneCode()">
             <p class="fr-mt-1w">

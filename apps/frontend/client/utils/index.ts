@@ -153,6 +153,7 @@ const index = {
     modalOpened?: Ref<boolean>,
     loadingRestrictions?: Ref<boolean>,
     publicationPin?: ZonePublicationPin,
+    onRequestAddressPrecision?: () => void,
   ) {
     const addressStore = useAddressStore();
     const restrictionStore = useZoneStore();
@@ -198,6 +199,7 @@ const index = {
           data?.value,
           profile,
           modalOpened,
+          onRequestAddressPrecision,
         );
         modalTitle.value = title;
         modalText.value = text;
@@ -226,6 +228,7 @@ const index = {
     data: Zone[],
     profile: string,
     modalOpened: Ref<boolean>,
+    onRequestAddressPrecision?: () => void,
   ): {
     title: string;
     text: string;
@@ -254,7 +257,7 @@ const index = {
           actions: [
             {
               label: 'Entrer une adresse plus précise',
-              onClick: _closeModal,
+              onClick: onRequestAddressPrecision || _closeModal,
             },
             { label: 'Fermer', onClick: _closeModal, secondary: true },
           ],

@@ -79,6 +79,29 @@ function trapMenuFocus(event: KeyboardEvent): void {
   }
 }
 
+function preserveFocusOnClosedHeaderEscape(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') {
+    return;
+  }
+
+  const openedHeaderMenu = document.querySelector(
+    '#header-navigation.fr-modal--opened',
+  );
+  const previousFocus = document.activeElement;
+  if (openedHeaderMenu || !(previousFocus instanceof HTMLElement)) {
+    return;
+  }
+
+  queueMicrotask(() => {
+    if (
+      document.activeElement?.id === 'button-menu'
+      && previousFocus.isConnected
+    ) {
+      previousFocus.focus({ preventScroll: true });
+    }
+  });
+}
+
 function focusMenuAfterOpening(event: MouseEvent): void {
   const target = event.target;
   if (!(target instanceof Element) || !target.closest('#button-menu')) {
@@ -111,6 +134,7 @@ async function enhanceMenuButton(): Promise<void> {
 }
 
 onMounted(() => {
+  document.addEventListener('keydown', preserveFocusOnClosedHeaderEscape, true);
   document.addEventListener('keydown', trapMenuFocus);
   document.addEventListener('click', focusMenuAfterOpening, true);
   const { theme, setScheme } = useScheme();
@@ -162,6 +186,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  document.removeEventListener('keydown', preserveFocusOnClosedHeaderEscape, true);
   document.removeEventListener('keydown', trapMenuFocus);
   document.removeEventListener('click', focusMenuAfterOpening, true);
 });

@@ -8,12 +8,7 @@ const focusableSelector = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-function canReceiveFocus(element: HTMLElement): boolean {
-  const tabIndex = element.getAttribute('tabindex');
-  if (tabIndex !== null && Number.parseInt(tabIndex, 10) < 0) {
-    return false;
-  }
-
+function isElementRendered(element: HTMLElement): boolean {
   if (element.closest('[hidden], [aria-hidden="true"], [inert]')) {
     return false;
   }
@@ -35,6 +30,15 @@ function canReceiveFocus(element: HTMLElement): boolean {
   }
 
   return true;
+}
+
+function canReceiveFocus(element: HTMLElement): boolean {
+  const tabIndex = element.getAttribute('tabindex');
+  if (tabIndex !== null && Number.parseInt(tabIndex, 10) < 0) {
+    return false;
+  }
+
+  return isElementRendered(element);
 }
 
 export function getFocusableElements(container: ParentNode): HTMLElement[] {
@@ -87,7 +91,9 @@ export function focusRouteContent(document: Document): HTMLElement | null {
     return null;
   }
 
-  const target = main.querySelector<HTMLElement>('h1') || main;
+  const target = Array.from(
+    main.querySelectorAll<HTMLElement>('h1'),
+  ).find(isElementRendered) || main;
   target.setAttribute('tabindex', '-1');
   target.focus();
   return target;

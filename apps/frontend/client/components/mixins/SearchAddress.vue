@@ -67,18 +67,12 @@ const emit = defineEmits<{
 
 const attrs = useAttrs();
 
-const _closeModal = (): void => {
-  modalOpened.value = false;
-};
-
 const addressQuery: Ref<string> = ref('');
 const addresses: Ref<Address[]> = ref([]);
 const loadAddresses: Ref<boolean> = ref(true);
 const loadingAdresses: Ref<boolean> = ref(false);
 const autoSelectAddress: Ref<boolean> = ref(false);
 const addressSearchStatus: Ref<string> = ref('');
-const modalOpened: Ref<boolean> = ref(false);
-const modalActions: Ref<any[]> = ref([{ label: 'Recommencer', onClick: _closeModal }]);
 const fdrAutocomplete: Ref<any> = ref(null);
 const addressRequestGuard = createLatestRequestGuard();
 const forwardedInputAttrs = computed(() => Object.fromEntries(
@@ -324,18 +318,6 @@ if (props.query && !props.address && !props.geo) {
     title="Nous ne conservons pas vos données et votre adresse"
     class="notice-light fr-mt-1w"
   />
-  <DsfrModal
-    :opened="modalOpened"
-    title="Cela n'a pas fonctionné comme prévu !"
-    icon="ri-arrow-right-line"
-    :actions="modalActions"
-    @close="_closeModal"
-  >
-    <div>
-      Nous sommes désolés, une erreur s’est glissée dans notre système et nous n’avons pas pu traiter correctement votre
-      requête
-    </div>
-  </DsfrModal>
 </template>
 
 <style scoped lang="scss">

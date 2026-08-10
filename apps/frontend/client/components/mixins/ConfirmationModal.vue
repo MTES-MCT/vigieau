@@ -2,7 +2,7 @@
 import type { Ref } from 'vue';
 
 defineProps<{
-  opened: string;
+  opened: boolean;
   title: string;
   description: string;
 }>();
@@ -15,14 +15,14 @@ const emit = defineEmits<{
 const modalActions: Ref<any[]> = ref([
   {
     label: 'Confirmer',
-    onclick: () => {
+    onClick: () => {
       emit('confirm');
     },
   },
   {
     label: 'Annuler',
     secondary: true,
-    onclick: () => {
+    onClick: () => {
       emit('close');
     },
   },
@@ -30,7 +30,7 @@ const modalActions: Ref<any[]> = ref([
 </script>
 
 <template>
-  <DsfrModal
+  <AccessibleModal
     :opened="opened"
     icon="ri-arrow-right-line"
     :title="title"
@@ -38,5 +38,5 @@ const modalActions: Ref<any[]> = ref([
     @close="emit('close')"
   >
     <p>{{ description }}</p>
-  </DsfrModal>
+  </AccessibleModal>
 </template>

@@ -42,6 +42,22 @@ test('falls back to the main landmark when a page has no heading', () => {
   assert.equal(dom.window.document.activeElement, target);
 });
 
+test('ignores a heading that belongs to a closed dialog during route focus', () => {
+  const dom = new JSDOM(`
+    <main id="main-content">
+      <p>Contenu de la page</p>
+      <dialog>
+        <h1>Titre de modale fermée</h1>
+      </dialog>
+    </main>
+  `);
+
+  const target = focusRouteContent(dom.window.document);
+
+  assert.equal(target?.id, 'main-content');
+  assert.equal(dom.window.document.activeElement, target);
+});
+
 test('wraps focus inside an open dialog in both directions', () => {
   const dom = new JSDOM(`
     <div id="dialog">
