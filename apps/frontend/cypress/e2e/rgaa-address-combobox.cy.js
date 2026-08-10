@@ -260,15 +260,35 @@ describe('Combobox d’adresse accessible', () => {
     });
     cy.visit('/');
 
-    cy.contains('button', 'Je consulte les restrictions').should('be.disabled');
+    cy.get('[data-cy="MainRestrictionSearchSubmit"]')
+      .should('not.be.disabled')
+      .click();
+    combobox()
+      .should('have.focus')
+      .and('have.attr', 'aria-invalid', 'true');
+    combobox()
+      .invoke('attr', 'aria-describedby')
+      .then((describedBy) => {
+        const describedIds = describedBy.split(/\s+/);
+        expect(describedIds).to.include('main-search-address-error');
+      });
+    cy.get('#main-search-address-error')
+      .should('be.visible')
+      .and('contain.text', 'obligatoire');
+
     combobox().focus().type('Ségur');
     cy.wait('@addressSearch');
     cy.get('[role="listbox"] [role="option"]').first().click();
-    cy.contains('button', 'Je consulte les restrictions')
-      .should('not.be.disabled');
+    combobox().should('not.have.attr', 'aria-invalid', 'true');
+    cy.get('#main-search-address-error').should('not.exist');
 
     combobox().type(' modifiée');
-    cy.contains('button', 'Je consulte les restrictions').should('be.disabled');
+    cy.get('[data-cy="MainRestrictionSearchSubmit"]')
+      .should('not.be.disabled');
+    combobox().should('have.attr', 'aria-invalid', 'true');
+    cy.get('#main-search-address-error')
+      .should('be.visible')
+      .and('contain.text', 'obligatoire');
   });
 
   it('conserve les mêmes garanties dans le formulaire d’abonnement', () => {

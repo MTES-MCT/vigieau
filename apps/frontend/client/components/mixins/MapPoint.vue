@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import { Ref } from 'vue';
+import type { Ref } from 'vue';
 import * as maplibregl from 'maplibre-gl';
 import api from '../../api';
+
+const props = defineProps({
+  disabled: {
+    type: Boolean,
+    default: false,
+  },
+});
 
 const emit = defineEmits<{
   selectPoint: any;
@@ -22,7 +29,7 @@ const popup = new maplibregl.Popup({
 const marker = new maplibregl.Marker();
 
 const popupHtml = `<div>
-<button class="fr-btn btn-map-popup">
+<button class="fr-btn btn-map-popup" type="button">
 Sélectionner ce point
 </button>
 </div>`;
@@ -53,7 +60,7 @@ onMounted(() => {
   );
 
   map.value?.on('click', async (e: any) => {
-    if (loading.value) {
+    if (loading.value || props.disabled) {
       return;
     }
     loading.value = true;
@@ -113,38 +120,53 @@ const mapTags: Ref<any[]> = ref([{
 }]);
 
 const flyToLocation = (bounds: any) => {
+  if (props.disabled) {
+    return;
+  }
   map.value?.fitBounds(bounds);
 };
 
 </script>
 
 <template>
-
-  <div class="full-width" v-if="isMapSupported">
+  <div
+    v-if="isMapSupported"
+    class="full-width"
+  >
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 overall-wrapper">
         <div class="map-pre-actions">
           <div class="map-pre-actions-card fr-p-1w fr-m-1w">
-            <h6 class="fr-mb-1w fr-mr-2w">Raccourcis&nbsp;:</h6>
-            <DsfrTag v-for="tag in mapTags"
-                     :label="tag.label"
-                     class="fr-m-1w"
-                     small
-                     @click="flyToLocation(tag.bounds)"
-                     tag-name="button" />
+            <h6 class="fr-mb-1w fr-mr-2w">
+              Raccourcis&nbsp;:
+            </h6>
+            <button
+              v-for="tag in mapTags"
+              :key="tag.label"
+              type="button"
+              class="fr-tag fr-tag--sm fr-m-1w"
+              :disabled="disabled"
+              @click="flyToLocation(tag.bounds)"
+            >
+              {{ tag.label }}
+            </button>
           </div>
         </div>
         <div class="map-wrap" :class="{'map-wrap--loading': loading}">
-          <div class="map" ref="mapContainer"></div>
+          <div
+            ref="mapContainer"
+            class="map"
+          />
         </div>
       </div>
     </div>
   </div>
   <template v-else>
-    <DsfrAlert title="Votre navigateur ne supporte pas les cartographies"
-               description="Impossible d'afficher la carte de la situation de la sécheresse en France"
-               type="error"
-               :closeable="false"
+    <DsfrAlert
+      title="Votre navigateur ne supporte pas les cartographies"
+      description="Impossible d'afficher la carte de la situation de la sécheresse en France"
+      type="error"
+      :closeable="false"
     />
   </template>
 </template>

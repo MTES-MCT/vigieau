@@ -357,6 +357,24 @@ une description persistante distincte du nom accessible.
 | Formulaire d'abonnement | OK | Même champ et mêmes relations; Cypress vérifie en plus la requête `type=housenumber` du mode adresse exacte. |
 | ESLint, diff et build | OK | ESLint ciblé sans erreur ni avertissement; `git diff --check` réussi; génération Nuxt réussie avec 23 routes pré-rendues. |
 
+### Résultats WP4 - formulaires publics et abonnement
+
+Les deux parcours publics sont désormais de vrais formulaires soumis par le
+clavier. Les indications obligatoires sont lisibles avant interaction et les
+erreurs apparaissent uniquement après validation, nomment le champ, sont
+reliées au contrôle concerné et disparaissent avec `aria-invalid` lors de la
+correction. Le premier contrôle invalide reçoit le focus.
+
+| Contrôle | Résultat WP4 | Preuve |
+|---|---|---|
+| Tests unitaires publics | OK | `npm@11.17.0 --prefix apps/frontend run test:unit` : 72/72 tests réussis, dont quatre sur le focus et les contrats du formulaire principal. |
+| Sémantique des formulaires | OK | Les parcours accueil et abonnement rendent un `<form novalidate>` et un bouton `type="submit"`; Cypress vérifie la soumission par Entrée et l'absence de double requête. |
+| Groupes et obligations | OK | Profil et types d'eau sont des `fieldset` nommés; les mentions « (obligatoire) » sont dans les légendes/libellés et les champs natifs pertinents portent `required`. |
+| E-mail et erreurs | OK | `type="email"`, `autocomplete="email"`, exemple persistant hors du libellé et relations `aria-describedby`; erreurs adresse, types d'eau, e-mail et consentement testées avant et après correction. |
+| Modale de résultat | OK | Une modale DSFR dynamique possède un titre réel, rend `dialog` ou `alertdialog`, prend le focus et le restitue au bouton après une erreur, une fois le piège de focus démonté. |
+| Cypress formulaires | OK | `rgaa-public-forms.cy.js` : 6/6; régression combobox adaptée : 14/14, soit 20/20 scénarios Chrome headless. |
+| ESLint, diff et build | OK | ESLint ciblé sans erreur ni avertissement; `git diff --check` réussi; génération Nuxt réussie avec 23 routes pré-rendues. |
+
 Répartition des lignes sans lot explicite : `COOKIE-01` est qualifiée dans WP1,
 `HOME-03` dans WP1 (navigation et focus SPA) et `HOME-04` dans WP2 (image
 décorative). `SH-02` appartient à WP1; WP5 ne réouvrira que les interactions
@@ -535,11 +553,11 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 |---|---:|---|---|---|---|---|---|
 | `NEWS-01` | § 15.11, p. 30 | 1.2 | Mineur | L’illustration de la newsletter, si décorative, doit avoir `alt=""` et aucun `title` redondant. | `components/mixins/Email.vue`. | PROBABLEMENT OUVERT : alt actuel « Newsletter email ». | `FIXED` — WP2 : `/newsletter_img.png` porte `alt=""` sans `title`; le test exhaustif des images publiques verrouille cette alternative décorative. |
 | `NEWS-02` | § 15.12, p. 31 | 7.1 | Majeur | Si l’inscription utilise encore une modale : nom valide, `aria-modal=true`, arrière-plan non exposé et focus géré. Si le flux est désormais une page, classer l’ancien ticket `N/A_CURRENT_UI` et auditer la page équivalente. | `pages/abonnements/**`, `components/mail/MailForm.vue`, anciennes modales éventuelles. | FLUX 2024 SEMBLE REMPLACÉ PAR UNE PAGE : ne pas appliquer une correction de modale inexistante. | `N/A_CURRENT_UI` — le déclencheur ouvre la route `/abonnements/nouveau`, confirmée dans le DOM hydraté WP0; les modales de résultat et le formulaire équivalent restent audités par `NEWS-03` à `NEWS-07`. |
-| `NEWS-03` | § 15.13, p. 32 | 7.1, 8.9, 11.5-11.7 | Majeur / mineur | Regrouper les choix de profil sous un `fieldset`/`legend` explicite ou un composant natif équivalent; chaque contrôle doit être compréhensible isolément. | `components/mixins/Profile.vue`, `components/mail/MailForm.vue`. | À VÉRIFIER DANS LE DOM GÉNÉRÉ. | `TODO` |
-| `NEWS-04` | § 15.14, p. 32-33 | 11.10, 11.11, 11.13 | Majeur | Pour l’e-mail : aide persistante, exemple de format, message de correction utile, `autocomplete=email`, type de champ approprié et association des erreurs. | `components/mail/MailForm.vue`. | PARTIELLEMENT CORRIGÉ : hint et autocomplete présents; le champ est encore `type=text`, et les associations d’erreurs doivent être vérifiées. | `TODO` |
+| `NEWS-03` | § 15.13, p. 32 | 7.1, 8.9, 11.5-11.7 | Majeur / mineur | Regrouper les choix de profil sous un `fieldset`/`legend` explicite ou un composant natif équivalent; chaque contrôle doit être compréhensible isolément. | `components/mixins/Profile.vue`, `components/mail/MailForm.vue`. | À VÉRIFIER DANS LE DOM GÉNÉRÉ. | `FIXED` — WP4 : `Profile.vue` rend un `fieldset` avec légende explicite et quatre boutons `type="button"` nommés, dont un seul expose `aria-pressed="true"`; DOM vérifié par Cypress. |
+| `NEWS-04` | § 15.14, p. 32-33 | 11.10, 11.11, 11.13 | Majeur | Pour l’e-mail : aide persistante, exemple de format, message de correction utile, `autocomplete=email`, type de champ approprié et association des erreurs. | `components/mail/MailForm.vue`. | PARTIELLEMENT CORRIGÉ : hint et autocomplete présents; le champ est encore `type=text`, et les associations d’erreurs doivent être vérifiées. | `FIXED` — WP4 : entrée native `type="email"`, `autocomplete="email"`, aide « nom@exemple.fr » visible hors du libellé et reliée; le message de format est ajouté à `aria-describedby` puis retiré après correction. |
 | `NEWS-05` | § 15.15, p. 33 | 6.1, 10.2 | Majeur | Le lien vers les données personnelles ouvert dans une nouvelle fenêtre doit l’annoncer de manière accessible. | `components/mail/MailForm.vue`. | SEMBLE CORRIGÉ PAR `title`; vérifier nom accessible. | `FIXED` — WP2 : la règle globale conserve « données collectées » dans le nom et y ajoute « nouvelle fenêtre » en contenu masqué; le `title` n'est plus la seule information. Test jsdom et audit exhaustif des `target="_blank"`. |
-| `NEWS-06` | § 15.16, p. 34 | 11.10 | Majeur | Tous les champs obligatoires (profil, type d’eau, adresse/point, e-mail, consentement) doivent être annoncés avant interaction et porter les attributs pertinents. | `MailForm.vue`, `Profile.vue`, `SearchAddress.vue`, composants DSFR. | PARTIELLEMENT CORRIGÉ; vérifier le rendu et les groupes. | `TODO` |
-| `NEWS-07` | § 15.17, p. 35 | 11.10, 11.11 | Majeur | Chaque erreur doit nommer le champ, être liée au contrôle (`aria-describedby` ou mécanisme équivalent), activer `aria-invalid=true`, être retirée/corrigée ensuite et être annoncée au bon moment. | `MailForm.vue`, utilitaire `showInputError`, `DsfrInputGroup` rendu. | OUVERT À TESTER : les props d’erreur existent, mais la relation DOM n’est pas démontrée. | `TODO` |
+| `NEWS-06` | § 15.16, p. 34 | 11.10 | Majeur | Tous les champs obligatoires (profil, type d’eau, adresse/point, e-mail, consentement) doivent être annoncés avant interaction et porter les attributs pertinents. | `MailForm.vue`, `Profile.vue`, `SearchAddress.vue`, composants DSFR. | PARTIELLEMENT CORRIGÉ; vérifier le rendu et les groupes. | `FIXED` — WP4 : profil, types d'eau, adresse/point, e-mail et consentement indiquent visiblement « (obligatoire) » dans leur légende ou libellé; adresse, e-mail, consentement et sélecteurs natifs portent aussi `required`. |
+| `NEWS-07` | § 15.17, p. 35 | 11.10, 11.11 | Majeur | Chaque erreur doit nommer le champ, être liée au contrôle (`aria-describedby` ou mécanisme équivalent), activer `aria-invalid=true`, être retirée/corrigée ensuite et être annoncée au bon moment. | `MailForm.vue`, utilitaire `showInputError`, `DsfrInputGroup` rendu. | OUVERT À TESTER : les props d’erreur existent, mais la relation DOM n’est pas démontrée. | `FIXED` — WP4 : IDs d'erreur stables, `aria-describedby`, `aria-invalid`, régions d'alerte et focus du premier invalide. Cypress provoque puis corrige les erreurs types d'eau, adresse, e-mail et consentement, et vérifie la disparition des relations obsolètes. |
 
 ### E. Consommation, gestes, liens utiles et FAQ
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |

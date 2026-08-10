@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Ref } from 'vue';
+import { nextTick, type Ref } from 'vue';
 import type { ZonePublicationPin } from '../../api';
 import utils from '../../utils';
-import { Address } from '../../dto/address.dto';
-import { Geo } from '~/client/dto/geo.dto';
+import type { Address } from '../../dto/address.dto';
+import type { Geo } from '~/client/dto/geo.dto';
+import { focusFirstInvalidField } from '../../utils/form-validation';
 import { storeToRefs } from 'pinia';
 import { useAddressStore } from '../../store/address';
 import { helpers, required, requiredIf } from '@vuelidate/validators';
@@ -62,9 +63,11 @@ const modalIcon: Ref<string> = ref('');
 const modalActions: Ref<any[]> = ref([]);
 const loading = ref(false);
 const query = ref('');
-let address: string | null = route.query.adresse ? route.query.adresse : null;
+const address = typeof route.query.adresse === 'string'
+  ? route.query.adresse
+  : null;
 if (address) {
-  query.value = address ? address : '';
+  query.value = address;
 }
 
 const formData = reactive({
@@ -92,12 +95,38 @@ const rules = computed(() => {
 
 const v$ = useVuelidate(rules, formData);
 
+const profileErrorMessage = computed(() => (
+  v$.value.profil.$errors[0]?.$message?.toString() ?? ''
+));
+const typeEauErrorMessage = computed(() => (
+  v$.value.typeEau.$errors[0]?.$message?.toString() ?? ''
+));
+const addressErrorMessage = computed(() => (
+  v$.value.address.$dirty
+  && v$.value.geo.$dirty
+  && !formData.address
+  && !formData.geo
+    ? 'L’adresse ou la géolocalisation est obligatoire.'
+    : ''
+));
+
 const searchZone = async () => {
-  await v$.value.$validate();
-  if (v$.value.$error) {
+  if (loading.value) {
     return;
   }
-  utils.searchZones(
+
+  await v$.value.$validate();
+  if (v$.value.$error) {
+    await nextTick();
+    focusFirstInvalidField(document, [
+      ...(v$.value.profil.$invalid ? ['main-search-profile'] : []),
+      ...(v$.value.typeEau.$invalid ? ['main-search-water-type'] : []),
+      ...(addressErrorMessage.value ? ['main-search-address'] : []),
+    ]);
+    return;
+  }
+
+  await utils.searchZones(
     formData.address,
     formData.geo,
     formData.profil,
@@ -108,7 +137,7 @@ const searchZone = async () => {
     modalIcon,
     modalActions,
     modalOpened,
-    loading.value,
+    loading,
     props.publicationPin,
   );
 };
@@ -124,27 +153,55 @@ const closeModal = (): void => {
 </script>
 
 <template>
-  <div class="search">
+  <form
+    class="search"
+    data-cy="MainRestrictionSearchForm"
+    novalidate
+    :aria-busy="loading"
+    @submit.prevent="searchZone"
+  >
     <div>
-      <DsfrInputGroup>
+      <DsfrInputGroup
+        description-id="main-search-profile-error"
+        :error-message="profileErrorMessage"
+      >
         <DsfrSelect
-          label="Choisissez votre profil de consommateur d’eau"
-          :options="profileOptions"
           v-model="formData.profil"
-          @update:modelValue="emit('formData', formData)"
+          label="Choisissez votre profil de consommateur d’eau"
+          select-id="main-search-profile"
+          data-cy="MainSearchProfile"
+          :options="profileOptions"
           required
-        />
+          :aria-invalid="profileErrorMessage ? 'true' : undefined"
+          :aria-describedby="profileErrorMessage ? 'main-search-profile-error' : undefined"
+          @update:model-value="emit('formData', formData)"
+        >
+          <template #required-tip>
+            <span class="required-marker"> (obligatoire)</span>
+          </template>
+        </DsfrSelect>
       </DsfrInputGroup>
     </div>
     <div>
-      <DsfrInputGroup>
+      <DsfrInputGroup
+        description-id="main-search-water-type-error"
+        :error-message="typeEauErrorMessage"
+      >
         <DsfrSelect
-          label="Choisissez le type d’eau que vous consommez"
-          :options="typeEauOptions"
           v-model="formData.typeEau"
-          @update:modelValue="emit('formData', formData)"
+          label="Choisissez le type d’eau que vous consommez"
+          select-id="main-search-water-type"
+          data-cy="MainSearchWaterType"
+          :options="typeEauOptions"
           required
-        />
+          :aria-invalid="typeEauErrorMessage ? 'true' : undefined"
+          :aria-describedby="typeEauErrorMessage ? 'main-search-water-type-error' : undefined"
+          @update:model-value="emit('formData', formData)"
+        >
+          <template #required-tip>
+            <span class="required-marker"> (obligatoire)</span>
+          </template>
+        </DsfrSelect>
       </DsfrInputGroup>
     </div>
     <div>
@@ -155,23 +212,38 @@ const closeModal = (): void => {
         }}
       </p>
     </div>
-    <div class="divider fr-my-1w">ou</div>
+    <div class="divider fr-my-1w">
+      ou
+    </div>
     <div>
-      <MixinsSearchAddress
-        @search="setAddress($event.address, $event.geo)"
-        :required="true"
-        :query="query"
-        :light="true"
-        :showGeoloc="true"
-        :loading="loading"
-      />
+      <DsfrInputGroup
+        description-id="main-search-address-error"
+        :error-message="addressErrorMessage"
+      >
+        <MixinsSearchAddress
+          id="main-search-address"
+          :required="true"
+          :query="query"
+          :light="true"
+          :show-geoloc="true"
+          :loading="loading"
+          :aria-invalid="addressErrorMessage ? 'true' : undefined"
+          :aria-describedby="addressErrorMessage ? 'main-search-address-error' : undefined"
+          @search="setAddress($event.address, $event.geo)"
+        />
+      </DsfrInputGroup>
     </div>
     <div class="fr-mt-2w">
-      <DsfrButton @click="searchZone()" :disabled="loading || v$.$invalid">
+      <DsfrButton
+        type="submit"
+        data-cy="MainRestrictionSearchSubmit"
+        :disabled="loading"
+        :aria-disabled="loading"
+      >
         Je consulte les restrictions
       </DsfrButton>
     </div>
-  </div>
+  </form>
 
   <DsfrModal
     :opened="modalOpened"
@@ -180,6 +252,6 @@ const closeModal = (): void => {
     :actions="modalActions"
     @close="closeModal"
   >
-    <div v-html="modalText"></div>
+    <div v-html="modalText" />
   </DsfrModal>
 </template>
