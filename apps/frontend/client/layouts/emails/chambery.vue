@@ -1,7 +1,7 @@
 <script setup lang="ts">
 const logoText = ['Ministère', 'de la transition', 'écologique', 'et de la cohésion', 'des territoires'];
 const operatorImgSrc: string = '/logo_grand_chambery.svg'
-const operatorImgAlt: string = `Logo grand chambéry`
+const operatorImgAlt: string = 'Grand Chambéry'
 const operatorImgStyle: any = {
   'max-width': '100px'
 };

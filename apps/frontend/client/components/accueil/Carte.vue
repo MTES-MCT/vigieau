@@ -79,8 +79,7 @@ const date = computed(() => {
           <h3 class="h6 text-align-center">{{ territoires[0].name }}</h3>
           <img :src="territoires[0].image"
                style="max-width: 100%"
-               :alt="territoires[0].name"
-               :title="territoires[0].name"
+               :alt="`Carte des niveaux de gravité de la sécheresse - ${territoires[0].name}`"
           />
         </div>
       </div>
@@ -90,8 +89,7 @@ const date = computed(() => {
                class="fr-col-6 carte-drom text-align-center">
             <h3 class="h6">{{ territoire.name }}</h3>
             <img :src="territoire.image"
-                 :alt="territoire.name"
-                 :title="territoire.name"
+                 :alt="`Carte des niveaux de gravité de la sécheresse - ${territoire.name}`"
             />
           </div>
         </template>

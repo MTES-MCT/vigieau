@@ -4,6 +4,7 @@ import {
   ZONE_PUBLICATION_ERROR_RETRY_MS,
 } from './store/zonePublication';
 import { focusRouteContent } from './utils/focus-management';
+import { observeNewWindowLinks } from './utils/new-window-links';
 import { createRetryScheduler } from './utils/retryable-task';
 
 const route = useRoute();
@@ -13,6 +14,7 @@ const ZONE_PUBLICATION_REFRESH_MS = 60_000;
 let publicationRefreshInterval: ReturnType<typeof setInterval> | null = null;
 let publicationRefreshActive = false;
 let routeChangeSequence = 0;
+let stopNewWindowLinkObserver: (() => void) | null = null;
 
 function refreshPublication(force = false): void {
   void zonePublicationStore
@@ -62,6 +64,7 @@ watch(
 );
 
 onMounted(() => {
+  stopNewWindowLinkObserver = observeNewWindowLinks(document);
   publicationRefreshActive = true;
   refreshPublication();
   publicationRefreshInterval = setInterval(
@@ -71,6 +74,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  stopNewWindowLinkObserver?.();
+  stopNewWindowLinkObserver = null;
   publicationRefreshActive = false;
   publicationRetry.clear();
   if (publicationRefreshInterval !== null) {

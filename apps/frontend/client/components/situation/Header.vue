@@ -136,10 +136,6 @@ const niveauGravite = computed(() => {
     }
   }
 
-  .situation-level-c-1 {
-    color: #A18E3A;
-  }
-
   .situation-disabled {
     background-color: var(--grey-1000-50);
   }

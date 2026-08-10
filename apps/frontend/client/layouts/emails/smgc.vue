@@ -1,7 +1,7 @@
 <script setup lang="ts">
 const logoText = ['Ministère', 'de la transition', 'écologique', 'et de la cohésion', 'des territoires'];
 const operatorImgSrc: string = '/logo_smgc_veolia.png'
-const operatorImgAlt: string = `Logo SMGC et Veolia`
+const operatorImgAlt: string = 'SMGC et Veolia'
 const operatorImgStyle: any = {
   'max-width': '300px'
 };
