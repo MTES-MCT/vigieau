@@ -103,6 +103,8 @@ watch(() => props, () => {
         table-class="fr-table--sm"
       />
 
+      <DocumentAccessibilityNotice />
+
       <div class="text-align-right fr-mt-1w">
         <DsfrButton @click="downloadCsv()">
           Télécharger les données (CSV)

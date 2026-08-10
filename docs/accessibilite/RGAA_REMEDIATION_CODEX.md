@@ -471,6 +471,56 @@ initiale multi-zone est obligatoire, décrite et focalisée en cas d'erreur.
 | Régression intégrée | OK | Cinq specs, 31/31 scénarios Electron : modales, Situation, navigation SPA, formulaires et combobox. Le focus `/carte` ignore les titres des dialogues fermés; navigation complète réussie trois fois de suite à 5/5. |
 | ESLint, diff et build | OK SUR LE LOT | ESLint ciblé sans erreur ni avertissement; `git diff --check` réussi; génération Nuxt réussie avec 802 modules transformés et 23 routes pré-rendues. La dette historique de `Map.vue` et `utils/index.ts` reste distincte des lignes modifiées. |
 
+### Résultats WP9 - pages institutionnelles et documents
+
+Les trois PDF statiques obsolètes de la FAQ ne sont plus proposés. La réponse
+sur les usages domestiques renvoie vers la page HTML officielle consacrée à
+l'[origine et la gestion de la sécheresse](https://www.ecologie.gouv.fr/politiques-publiques/origine-gestion-secheresse).
+Les deux réponses relatives à l'eau potable conservent leur explication HTML
+et renvoient vers la
+[fiche officielle de l'instruction ORSEC sur Légifrance](https://www.legifrance.gouv.fr/circulaire/id/42547),
+sans qualifier cette fiche d'équivalent intégral des annexes.
+
+Les arrêtés préfectoraux et municipaux restent fournis dynamiquement par les
+services locaux de l'État et les collectivités. Leur modèle API ne transporte
+actuellement que le nom, l'URL et la taille du fichier : ni statut
+d'accessibilité, ni alternative, ni preuve de contrôle, ni contact émetteur.
+VigiEau affiche donc près de chaque surface de téléchargement un avertissement
+qui distingue les informations opérationnelles de l'arrêté officiel et oriente
+vers le contact accessibilité. La préfecture ou la DDT(M) reste propriétaire
+des arrêtés préfectoraux, la commune de l'arrêté municipal et VigiEau/DGALN du
+contrat d'ingestion ainsi que du mécanisme de repli. `DOC-01` et `CRISIS-12`
+restent explicitement bloqués sur ce contenu externe; aucun attribut de lien
+n'est présenté comme une correction du document lui-même.
+
+Les pages institutionnelles ont aussi été réparées sans modifier le taux ni le
+statut issus de l'audit de janvier 2025 : paragraphes séparés des listes et
+tableaux, légendes des deux tableaux de données personnelles, coordonnées
+actionnables, plan d'action 2026, nom du service corrigé et directeur de la
+publication actualisé. Une navigation SPA vers le contact focalise désormais
+le titre ciblé par le fragment au lieu de laisser le focus hors écran.
+Cette correction de la politique de confidentialité est structurelle : le DPO
+ou responsable de traitement doit encore valider l'exhaustivité des données
+collectées, des droits et des modalités de contact. Ce fond juridique n'est pas
+requalifié par les preuves RGAA du présent lot.
+La déclaration d'accessibilité attribue désormais explicitement les constats à
+l'audit de janvier 2025. Son propriétaire doit encore fournir ou valider la
+date de mise à jour, les technologies, l'environnement de test, les outils et
+l'échantillon exigés par le modèle officiel; ces éléments ne sont pas inventés
+à partir de la seule régression technique.
+
+| Contrôle | Résultat WP9 | Preuve |
+|---|---|---|
+| FAQ statique | OK | Les anciennes URL et tout lien PDF direct sont absents; les destinations HTML Ecologie et Légifrance, leurs libellés et l'annonce de nouvelle fenêtre sont contrôlés en unitaire et dans le DOM. |
+| Arrêtés dynamiques | BLOCAGE DOCUMENTÉ | Les trois familles d'arrêtés affichent le repli vers `/accessibilite#amelioration-contact`. La conformité intrinsèque reste `BLOCKED_CONTENT` jusqu'à fourniture d'un statut, d'une alternative et d'une preuve par l'émetteur. |
+| Pages institutionnelles | OK CÔTÉ STRUCTURE | Les templates Vue et le DOM vérifient l'absence de bloc dans un paragraphe, de paragraphe vide et de tableau sans légende; les libellés obsolètes ont disparu. Le fond RGPD reste à valider par le propriétaire juridique. |
+| Focus du contact | OK | La cible `#amelioration-contact` reçoit `tabindex="-1"` et le focus après une navigation SPA avec fragment; le comportement des liens d'évitement est conservé. |
+| Régression automatisée | OK | 134/134 tests unitaires publics; 12/12 scénarios Cypress sur navigation, FAQ et pages/documents institutionnels; ESLint ciblé et `git diff --check` verts. |
+| Génération statique | OK | Nuxt transforme 803 modules et pré-rend 23 routes; aucun avertissement d'imbrication HTML n'est émis. |
+
+Répartition consolidée après WP9 : 88 lignes, dont 62 `FIXED`, 22
+`ALREADY_OK`, 2 `N/A_CURRENT_UI`, 2 `BLOCKED_CONTENT` et aucun `TODO`.
+
 Répartition des lignes sans lot explicite : `COOKIE-01` est qualifiée dans WP1,
 `HOME-03` dans WP1 (navigation et focus SPA) et `HOME-04` dans WP2 (image
 décorative). `SH-02` appartient à WP1; WP5 ne réouvrira que les interactions
@@ -630,7 +680,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 ### B. Documents téléchargeables
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
 |---|---:|---|---|---|---|---|---|
-| `DOC-01` | § 14.1, p. 20-21 | 13.3 | Bloquant | Les PDF cités doivent être accessibles ou disposer d’une alternative accessible équivalente en HTML/DOCX. Documenter précisément toute exemption applicable; ne pas la présumer. | `client/data/faq.json`, liens vers Guide circulaire, synthèse usages, instruction ORSEC et autres PDF; fichiers éventuellement hors dépôt. | BLOCAGE CONTENU POSSIBLE : si le PDF est externe et non maîtrisé, créer une alternative HTML utile ou consigner le propriétaire/la décision. Ne jamais marquer « corrigé » avec un simple changement de `title`. | `TODO` |
+| `DOC-01` | § 14.1, p. 20-21 | 13.3 | Bloquant | Les PDF cités doivent être accessibles ou disposer d’une alternative accessible équivalente en HTML/DOCX. Documenter précisément toute exemption applicable; ne pas la présumer. | `client/data/faq.json`, liens vers Guide circulaire, synthèse usages, instruction ORSEC et autres PDF; fichiers éventuellement hors dépôt. | BLOCAGE CONTENU POSSIBLE : si le PDF est externe et non maîtrisé, créer une alternative HTML utile ou consigner le propriétaire/la décision. Ne jamais marquer « corrigé » avec un simple changement de `title`. | `BLOCKED_CONTENT` — WP9 supprime les trois PDF statiques de la FAQ au profit de sources HTML officielles. Les arrêtés issus de l'API restent non qualifiables : préfecture/DDT(M) ou commune propriétaire du document, VigiEau/DGALN propriétaire du contrat d'ingestion et du repli. Un avis visible renvoie au contact accessibilité, mais ne prétend pas remplacer juridiquement l'arrêté. Le contrat devra porter statut, URL d'alternative, émetteur, contact public, date et preuve de contrôle. |
 
 ### C. Combobox de recherche d’adresse
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
@@ -673,10 +723,10 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | `FAQ-05` | § 15.34, p. 44 | 9.3 | Majeur | Les axes du plan d’action doivent être une liste; les flèches purement décoratives doivent être masquées aux TA. | `client/data/faq.json`. | SEMBLE DÉJÀ CORRIGÉ, à valider. | `ALREADY_OK` — contenu et DOM hydraté WP0 : trois items dans un `<ul>`; chaque flèche est dans un `<span aria-hidden="true">`. |
 | `FAQ-06` | § 15.35, p. 44 | 6.1, 10.2 | Majeur | Les liens externes de la réponse sur le plan d’action doivent annoncer la nouvelle fenêtre. | `client/data/faq.json`. | PARTIELLEMENT CORRIGÉ; vérifier tous les liens injectés par `v-html`. | `FIXED` — WP2 : l'observer traite les ancres de `faq.json` après leur insertion par `v-html`; le nom conserve l'URL/libellé visible et annonce la nouvelle fenêtre. Cypress contrôle les 22 liens externes de l'accueil. |
 | `FAQ-07` | § 15.36, p. 45 | 9.3 | Majeur | L’énumération de la réponse sur les pouvoirs du maire doit être structurée en liste. Conserver le type de liste conforme au sens; le rapport proposait `ol`, le contenu actuel utilise `ul`, à arbitrer selon l’ordre sémantique. | `client/data/faq.json`. | À REQUALIFIER : ne pas transformer en `ol` sans justification sémantique. | `ALREADY_OK` — contenu et DOM hydraté WP0 : les trois compétences indépendantes sont dans un `<ul>`; l’ordre n’exprime ni procédure ni classement, donc une liste non ordonnée est sémantiquement correcte. |
-| `FAQ-08` | § 15.37, p. 45 | 6.1, 10.2, 13.3 | Majeur / bloquant contenu | Les liens de la réponse sur l’arrosage doivent annoncer la nouvelle fenêtre; traiter aussi l’accessibilité des PDF liés. | `client/data/faq.json`. | PARTIELLEMENT CORRIGÉ POUR LES LIENS, DOCUMENTS ENCORE À TRAITER. | `BLOCKED_CONTENT` — WP2 corrige et teste les noms des deux liens injectés. La conformité ou l'alternative des PDF externes reste à établir dans WP9; aucune conformité documentaire n'est déduite de l'annonce du lien. |
+| `FAQ-08` | § 15.37, p. 45 | 6.1, 10.2, 13.3 | Majeur / bloquant contenu | Les liens de la réponse sur l’arrosage doivent annoncer la nouvelle fenêtre; traiter aussi l’accessibilité des PDF liés. | `client/data/faq.json`. | PARTIELLEMENT CORRIGÉ POUR LES LIENS, DOCUMENTS ENCORE À TRAITER. | `FIXED` — WP9 remplace les deux PDF 404 par une page HTML officielle détaillant la gestion et les mesures de restriction. Le lien conserve son libellé, est sécurisé et annonce la nouvelle fenêtre; absence des anciennes URL et de tout PDF direct testée. |
 | `FAQ-09` | § 15.38, p. 45 | 6.1, 10.2 | Majeur | Le lien vers la qualité de l’eau doit annoncer la nouvelle fenêtre. | `client/data/faq.json`. | SEMBLE CORRIGÉ. | `FIXED` — WP2 : l'ancre injectée « eaupotable.sante.gouv.fr » conserve ce libellé et inclut l'annonce masquée; vérifiée dans le parcours accueil. |
-| `FAQ-10` | § 15.39, p. 45 | 6.1, 10.2, 13.3 | Majeur / contenu | Le lien/PDF de la réponse hôpitaux-EHPAD doit annoncer la nouvelle fenêtre et offrir une version accessible si nécessaire. | `client/data/faq.json`. | À VÉRIFIER ET TRAITER CÔTÉ DOCUMENT. | `BLOCKED_CONTENT` — WP2 corrige et teste le nom du lien vers l'instruction ORSEC. L'accessibilité du PDF externe ou son alternative reste à établir dans WP9. |
-| `FAQ-11` | § 15.40, p. 46 | 6.1, 10.2, 13.3 | Majeur / contenu | Le lien/PDF sur l’approvisionnement en cas de coupure doit annoncer la nouvelle fenêtre et offrir une alternative accessible. | `client/data/faq.json`. | À VÉRIFIER ET TRAITER CÔTÉ DOCUMENT. | `BLOCKED_CONTENT` — WP2 corrige et teste le nom du lien vers l'instruction ORSEC. L'accessibilité du PDF externe ou son alternative reste à établir dans WP9. |
+| `FAQ-10` | § 15.39, p. 45 | 6.1, 10.2, 13.3 | Majeur / contenu | Le lien/PDF de la réponse hôpitaux-EHPAD doit annoncer la nouvelle fenêtre et offrir une version accessible si nécessaire. | `client/data/faq.json`. | À VÉRIFIER ET TRAITER CÔTÉ DOCUMENT. | `FIXED` — le contenu utile reste présenté en HTML dans VigiEau et le PDF direct est remplacé par la fiche HTML officielle de l'instruction ORSEC sur Légifrance. Le nom du lien et l'annonce de nouvelle fenêtre sont testés. |
+| `FAQ-11` | § 15.40, p. 46 | 6.1, 10.2, 13.3 | Majeur / contenu | Le lien/PDF sur l’approvisionnement en cas de coupure doit annoncer la nouvelle fenêtre et offrir une alternative accessible. | `client/data/faq.json`. | À VÉRIFIER ET TRAITER CÔTÉ DOCUMENT. | `FIXED` — les trois moyens de substitution sont structurés en HTML et le PDF direct est remplacé par la fiche HTML officielle de l'instruction ORSEC sur Légifrance. Le nom du lien et l'annonce de nouvelle fenêtre sont testés. |
 | `FAQ-12` | § 15.41, p. 46 | 9.3 | Majeur | Les solutions d’approvisionnement doivent être structurées en liste; masquer les flèches décoratives si présentes. | `client/data/faq.json`. | À VÉRIFIER. | `FIXED` — WP7 : les trois puces textuelles deviennent les trois items d'un `<ul>`, encadré par des paragraphes; le lien ORSEC et son annonce de nouvelle fenêtre sont préservés. |
 
 ### F. Composants partagés hors contenu éditorial
@@ -715,9 +765,9 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 ### H. Pages institutionnelles et situation
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
 |---|---:|---|---|---|---|---|---|
-| `ACC-01` | § 17.1, p. 63-64 | 6.1, 10.2 | Majeur | Tous les liens externes de la déclaration d’accessibilité doivent annoncer la nouvelle fenêtre. | `pages/accessibilite/index.vue`. | À AUDITER EXHAUSTIVEMENT. | `FIXED` — WP2 : les 11 liens `target="_blank"` rendus sur `/accessibilite` conservent leur texte et annoncent la nouvelle fenêtre; tokens `rel` et unicité du suffixe contrôlés par Cypress. |
-| `LEG-01` | § 18.1, p. 64 | 6.1, 10.2 | Majeur | Tous les liens externes des mentions légales doivent annoncer la nouvelle fenêtre. | `pages/mentions-legales/index.vue`. | SEMBLE CORRIGÉ POUR beta.gouv; vérifier tout le fichier et le rendu. | `FIXED` — WP2 : contrôle exhaustif du DOM de `/mentions-legales`; chaque nouvelle fenêtre conserve son libellé, porte l'annonce masquée et un `rel` sécurisé. |
-| `LEG-02` | § 18.2, p. 65 | 8.9 | Mineur | Supprimer tout paragraphe vide utilisé pour espacer les sections; utiliser CSS. | `pages/mentions-legales/index.vue`. | SEMBLE DÉJÀ CORRIGÉ; vérifier le DOM rendu. | `ALREADY_OK` — source et DOM hydraté de `/mentions-legales` WP0 : aucun paragraphe vide dans le contenu de la page. Le paragraphe vide distinct généré par le footer partagé reste suivi comme écart complémentaire WP1. |
+| `ACC-01` | § 17.1, p. 63-64 | 6.1, 10.2 | Majeur | Tous les liens externes de la déclaration d’accessibilité doivent annoncer la nouvelle fenêtre. | `pages/accessibilite/index.vue`. | À AUDITER EXHAUSTIVEMENT. | `FIXED` — WP2 : les 11 liens `target="_blank"` rendus sur `/accessibilite` conservent leur texte et annoncent la nouvelle fenêtre; tokens `rel` et unicité du suffixe contrôlés par Cypress. WP9 sépare en complément listes et paragraphes, actualise le plan 2026 et rend le contact e-mail/téléphone actionnable sans modifier les résultats de l'audit 2025. |
+| `LEG-01` | § 18.1, p. 64 | 6.1, 10.2 | Majeur | Tous les liens externes des mentions légales doivent annoncer la nouvelle fenêtre. | `pages/mentions-legales/index.vue`. | SEMBLE CORRIGÉ POUR beta.gouv; vérifier tout le fichier et le rendu. | `FIXED` — WP2 : contrôle exhaustif du DOM de `/mentions-legales`; chaque nouvelle fenêtre conserve son libellé, porte l'annonce masquée et un `rel` sécurisé. WP9 retire la mention obsolète « par intérim » du directeur de la publication et corrige les libellés institutionnels adjacents. |
+| `LEG-02` | § 18.2, p. 65 | 8.9 | Mineur | Supprimer tout paragraphe vide utilisé pour espacer les sections; utiliser CSS. | `pages/mentions-legales/index.vue`. | SEMBLE DÉJÀ CORRIGÉ; vérifier le DOM rendu. | `ALREADY_OK` — source et DOM hydraté de `/mentions-legales` WP0 : aucun paragraphe vide dans le contenu de la page. WP9 confirme cette structure après actualisation du contenu; le paragraphe vide distinct généré par le footer partagé a été traité en WP1. |
 | `SIT-01` | § 19.1, p. 66 | 8.9 | Mineur | Les messages de situation sans restriction et le conseil d’éco-gestes doivent être de vrais paragraphes. | `components/situation/Header.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — WP8 confirme que les deux messages ciblés dans `Header.vue` sont déjà des paragraphes; les branches « Aucune restriction » de `Restrictions.vue` ont aussi été uniformisées en `<p>`. |
 | `CRISIS-01` | § 20.1, p. 67-68 | 8.9 | Mineur | La description du niveau de crise doit être un paragraphe. | `components/situation/Header.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — source, test statique et DOM WP8 : la description du niveau est portée par un paragraphe. |
 | `CRISIS-02` | § 20.2.1.1, p. 69 | 9.1 | Majeur | Chaque restriction doit avoir un vrai titre de niveau 3 cohérent. | `components/situation/RestrictionCard.vue`. | DÉJÀ/PARTIELLEMENT CORRIGÉ avec `<h3>`; vérifier la hiérarchie autour. | `ALREADY_OK` — chaque carte conserve son vrai `<h3>`; les accordéons mobiles utilisent également un niveau 3 au lieu de créer le saut `h2` vers `h4`. La hiérarchie desktop/mobile est testée. |
@@ -730,7 +780,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | `CRISIS-09` | § 20.2.3, p. 73 | 8.9 | Mineur | Le texte sur l’amende doit être un paragraphe, pas une balise de mise en forme. | `components/situation/Restrictions.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — le texte ciblé est déjà un paragraphe dans la source et le DOM vérifiés en WP8. |
 | `CRISIS-10` | § 20.2.4.1, p. 73-74 | 9.1 | Majeur | « Besoin de précision sur les restrictions ? » doit être un vrai `h3` cohérent. | `components/situation/Restrictions.vue` et fallback dans `Status.vue`. | PARTIEL : `Restrictions.vue` utilise `<h3>`, mais `Status.vue` utilise encore `<b>` dans `DsfrHighlight`. | `FIXED` — le fallback de `Status.vue` utilise désormais un vrai `<h3>` comme la branche de `Restrictions.vue`; le test couvre les deux composants. |
 | `CRISIS-11` | § 20.2.4.2, p. 74 | 8.9 | Mineur | Remplacer les doubles `<br>` de mise en forme par des paragraphes séparés. | `components/situation/Status.vue`, `Restrictions.vue`. | OUVERT DANS LE FALLBACK `Status.vue` (`<b>` + `<br>`). | `FIXED` — le fallback est restructuré en titre et paragraphe frères, sans `<br>` de mise en forme; les messages « Aucune restriction » sont également des paragraphes. |
-| `CRISIS-12` | § 20.2.4.3, p. 74 | 6.1, 10.2, 13.3 | Majeur / contenu | Les liens vers arrêtés PDF doivent annoncer la nouvelle fenêtre; vérifier l’accessibilité des documents ou fournir une alternative. | `components/situation/Header.vue`, `Restrictions.vue`, documents fournis par API. | PARTIEL : certains liens ont un title, celui de l’arrêté municipal n’en a pas; documents dynamiques à traiter/documenter. | `BLOCKED_CONTENT` — WP2 traite automatiquement les liens d'arrêtés présents ou injectés et conserve leur intitulé dans le nom accessible. Les PDF proviennent de l'API et leur conformité/alternative reste une responsabilité documentaire à établir dans WP9. |
+| `CRISIS-12` | § 20.2.4.3, p. 74 | 6.1, 10.2, 13.3 | Majeur / contenu | Les liens vers arrêtés PDF doivent annoncer la nouvelle fenêtre; vérifier l’accessibilité des documents ou fournir une alternative. | `components/situation/Header.vue`, `Restrictions.vue`, documents fournis par API. | PARTIEL : certains liens ont un title, celui de l’arrêté municipal n’en a pas; documents dynamiques à traiter/documenter. | `BLOCKED_CONTENT` — WP2 sécurise et annonce les liens d'arrêtés présents ou injectés. WP9 ajoute sur Situation et dans le tableau public un avis visible : les informations HTML sont une aide opérationnelle, l'arrêté signé reste la référence et le contact accessibilité peut orienter vers une autre forme. La conformité des PDF API reste à fournir par la préfecture/DDT(M) ou la commune; le contrat VigiEau ne porte encore ni statut ni alternative vérifiée. |
 
 ## 12. Matrice de validation manuelle
 

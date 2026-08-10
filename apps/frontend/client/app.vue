@@ -37,13 +37,19 @@ const publicationRetry = createRetryScheduler(
 );
 
 watch(
-  () => route.fullPath.split('#', 1)[0],
-  async () => {
+  () => [route.fullPath.split('#', 1)[0], route.hash] as const,
+  async ([pagePath, hash], [previousPagePath]) => {
     if (!import.meta.client) {
       return;
     }
 
-    routeAnnouncement.value = '';
+    const pageChanged = pagePath !== previousPagePath;
+    if (!pageChanged && !hash) {
+      return;
+    }
+    if (pageChanged) {
+      routeAnnouncement.value = '';
+    }
     const currentSequence = ++routeChangeSequence;
     await nextTick();
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -51,8 +57,8 @@ watch(
       return;
     }
 
-    const target = focusRouteContent(document);
-    if (target) {
+    const target = focusRouteContent(document, hash);
+    if (target && pageChanged) {
       const pageName =
         target.tagName === 'H1'
           ? target.textContent?.trim() || document.title

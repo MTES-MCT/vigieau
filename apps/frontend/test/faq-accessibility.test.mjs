@@ -101,7 +101,7 @@ test('préserve les niveaux ordonnés et masque les flèches du Plan Eau', () =>
   }
 });
 
-test('structure les solutions de substitution et préserve le lien ORSEC', () => {
+test('structure les solutions de substitution et préserve une source ORSEC HTML', () => {
   const document = findAnswer('Comment serai-je approvisionné en eau potable');
   const solutions = document.querySelectorAll('ul > li');
 
@@ -111,8 +111,28 @@ test('structure les solutions de substitution et préserve le lien ORSEC', () =>
   assert.match(solutions[2].textContent, /camions citernes/);
   assert.equal(document.querySelectorAll('body > p').length, 3);
 
-  const link = document.querySelector('a[href*="ste_20170009_0000_0109.pdf"]');
+  const link = document.querySelector(
+    'a[href="https://www.legifrance.gouv.fr/circulaire/id/42547"]',
+  );
   assert.ok(link);
   assert.equal(link.getAttribute('target'), '_blank');
-  assert.match(link.textContent, /instruction interministérielle ORSEC/);
+  assert.match(link.textContent, /instruction ORSEC Eau potable/);
+});
+
+test('remplace les PDF statiques de la FAQ par des pages HTML officielles', () => {
+  assert.doesNotMatch(JSON.stringify(faq), /\.pdf(?:[?'"\\]|$)/i);
+
+  const domesticUses = findAnswer('Puis-je arroser mon jardin');
+  const restrictionsLink = domesticUses.querySelector(
+    'a[href="https://www.ecologie.gouv.fr/politiques-publiques/origine-gestion-secheresse"]',
+  );
+  assert.ok(restrictionsLink);
+  assert.equal(restrictionsLink.getAttribute('target'), '_blank');
+
+  const priorityUsers = findAnswer('En cas de sécheresse, est-ce que les hôpitaux');
+  const priorityLink = priorityUsers.querySelector(
+    'a[href="https://www.legifrance.gouv.fr/circulaire/id/42547"]',
+  );
+  assert.ok(priorityLink);
+  assert.equal(priorityLink.getAttribute('target'), '_blank');
 });

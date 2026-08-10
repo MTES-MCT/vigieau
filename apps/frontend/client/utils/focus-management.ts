@@ -85,16 +85,45 @@ export function trapTabKey(
   return false;
 }
 
-export function focusRouteContent(document: Document): HTMLElement | null {
+function findRenderedHashTarget(
+  document: Document,
+  hash: string,
+): HTMLElement | null {
+  if (!hash.startsWith('#') || hash.length === 1) {
+    return null;
+  }
+
+  let targetId: string;
+  try {
+    targetId = decodeURIComponent(hash.slice(1));
+  }
+  catch {
+    return null;
+  }
+
+  const target = document.getElementById(targetId);
+  return target && isElementRendered(target) ? target : null;
+}
+
+export function focusRouteContent(
+  document: Document,
+  hash = '',
+): HTMLElement | null {
   const main = document.getElementById('main-content');
   if (!main) {
     return null;
   }
 
-  const target = Array.from(
-    main.querySelectorAll<HTMLElement>('h1'),
-  ).find(isElementRendered) || main;
-  target.setAttribute('tabindex', '-1');
+  const hashTarget = findRenderedHashTarget(document, hash);
+  const target = hashTarget
+    ? hashTarget
+    : Array.from(
+      main.querySelectorAll<HTMLElement>('h1'),
+    ).find(isElementRendered) || main;
+
+  if (!target.matches(focusableSelector)) {
+    target.setAttribute('tabindex', '-1');
+  }
   target.focus();
   return target;
 }

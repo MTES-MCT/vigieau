@@ -105,7 +105,7 @@ describe('FAQ publique accessible', () => {
           expect($solutions.eq(2).text()).to.contain('camions citernes');
         });
       cy.root().should('not.contain.text', '•');
-      cy.get('a[href*="ste_20170009_0000_0109.pdf"]')
+      cy.get('a[href="https://www.legifrance.gouv.fr/circulaire/id/42547"]')
         .should('have.attr', 'target', '_blank')
         .and('have.attr', 'rel')
         .then((rel) => {
@@ -114,11 +114,18 @@ describe('FAQ publique accessible', () => {
           expect(tokens.has('noopener')).to.equal(true);
           expect(tokens.has('noreferrer')).to.equal(true);
         });
-      cy.get('a[href*="ste_20170009_0000_0109.pdf"]')
-        .should('contain.text', 'instruction interministérielle ORSEC')
+      cy.get('a[href="https://www.legifrance.gouv.fr/circulaire/id/42547"]')
+        .should('contain.text', 'instruction ORSEC Eau potable')
         .and('contain.text', 'nouvelle fenêtre')
         .find('[data-vigieau-new-window-suffix]')
         .should('have.length', 1);
     });
+
+    cy.get('.faq a[href*=".pdf" i]').should('not.exist');
+    cy.get(
+      '.faq a[href="https://www.ecologie.gouv.fr/politiques-publiques/origine-gestion-secheresse"]',
+    )
+      .should('have.length', 1)
+      .and('contain.text', 'nouvelle fenêtre');
   });
 });

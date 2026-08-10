@@ -58,6 +58,39 @@ test('ignores a heading that belongs to a closed dialog during route focus', () 
   assert.equal(dom.window.document.activeElement, target);
 });
 
+test('focuses a rendered fragment target after cross-page navigation', () => {
+  const dom = new JSDOM(`
+    <main id="main-content">
+      <h1>Déclaration d’accessibilité</h1>
+      <h2 id="amelioration-contact">Amélioration et contact</h2>
+    </main>
+  `);
+
+  const target = focusRouteContent(
+    dom.window.document,
+    '#amelioration-contact',
+  );
+
+  assert.equal(target?.id, 'amelioration-contact');
+  assert.equal(target?.getAttribute('tabindex'), '-1');
+  assert.equal(dom.window.document.activeElement, target);
+});
+
+test('focuses rendered landmarks outside main and falls back on invalid fragments', () => {
+  const dom = new JSDOM(`
+    <header id="outside">Navigation</header>
+    <main id="main-content"><h1>Page courante</h1></main>
+  `);
+
+  const outside = focusRouteContent(dom.window.document, '#outside');
+  assert.equal(outside?.id, 'outside');
+  assert.equal(dom.window.document.activeElement, outside);
+  assert.equal(
+    focusRouteContent(dom.window.document, '#%E0%A4%A')?.textContent,
+    'Page courante',
+  );
+});
+
 test('wraps focus inside an open dialog in both directions', () => {
   const dom = new JSDOM(`
     <div id="dialog">

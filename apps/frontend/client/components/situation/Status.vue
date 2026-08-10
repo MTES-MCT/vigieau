@@ -255,6 +255,15 @@ watch(
 
     <SituationHeader :address="addressToUse" :type-eau="typeEau" :zone="zone" />
 
+    <div
+      v-if="zone?.arreteMunicipalCheminFichier
+        || zone?.arrete?.cheminFichier
+        || zone?.arrete?.cheminFichierArreteCadre"
+      class="fr-col-12"
+    >
+      <DocumentAccessibilityNotice />
+    </div>
+
     <template v-if="utils.showRestrictions(zone)">
       <SituationRestrictions
         :profile="profile"

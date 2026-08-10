@@ -41,7 +41,7 @@ const links: Ref<any[]> = ref([
       <h2>Directeur de la publication</h2>
       <ul>
         <li>
-          Monsieur Philippe MAZENC, directeur général par intérim de
+          Monsieur Philippe MAZENC, directeur général de
           l'aménagement, du logement et de la nature (DGALN)
         </li>
         <li>Adresse : Tour Séquoïa 1, place Carpeaux 92055 La Défense Cedex</li>
@@ -51,27 +51,27 @@ const links: Ref<any[]> = ref([
         Le site {{ appName }} ({{ domainName }}) est hébergé par la société
         Scalingo SAS, inscrite au RCS (Strasbourg B 808 665 483) et dont les
         serveurs se situent en France.
-        <br />
+        <br>
         SIREN : 808665483
-        <br />
-        Siège social :15 avenue du Rhin, 67100 Strasbourg, France.
+        <br>
+        Siège social : 15 avenue du Rhin, 67100 Strasbourg, France.
       </p>
       <p>
         Le formulaire de retours utilisateurs est géré par la société Tally.
-        <br />
+        <br>
         Siège social : Muidepoort 19A, 9000 Gand, Belgique.
       </p>
       <p>
-        La newsletter est géré par la société Brevo.
-        <br />
+        La newsletter est gérée par la société Brevo.
+        <br>
         Siège social : 106 boulevard Haussmann, 75008 Paris, France.
       </p>
       <h2>Accessibilité</h2>
       <p>
         Voir la page
-        <router-link to="/accessibilite"
-          >Déclaration d'accessibilité</router-link
-        >
+        <router-link to="/accessibilite">
+          Déclaration d'accessibilité
+        </router-link>
       </p>
     </div>
   </div>
