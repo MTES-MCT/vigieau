@@ -143,7 +143,8 @@ onMounted(() => {
                 label: 'Donner mon avis',
                 icon: 'ri-survey-line',
                 button: true,
-                onclick: utils.openTally,
+                'data-cy': 'OpenFeedbackForm',
+                onClick: utils.openTally,
               },
             ]
           : [

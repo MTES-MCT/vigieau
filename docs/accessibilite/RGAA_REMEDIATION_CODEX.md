@@ -375,6 +375,29 @@ correction. Le premier contrôle invalide reçoit le focus.
 | Cypress formulaires | OK | `rgaa-public-forms.cy.js` : 6/6; régression combobox adaptée : 14/14, soit 20/20 scénarios Chrome headless. |
 | ESLint, diff et build | OK | ESLint ciblé sans erreur ni avertissement; `git diff --check` réussi; génération Nuxt réussie avec 23 routes pré-rendues. |
 
+### Résultats WP5 - sélecteurs de situation et formulaire Tally
+
+Les choix de type d'eau, zone d'alerte et profil forment désormais un unique
+groupe responsive. Chaque liste possède un libellé explicite associé par
+`label[for]` et un identifiant stable, y compris la liste présentée dans la
+modale lorsqu'une adresse correspond à plusieurs zones.
+
+Le bouton « Donner mon avis » utilise le contrat `onClick` attendu par
+Vue-DSFR. L'intégration locale cible uniquement l'iframe du formulaire VigiEau,
+lui donne un titre français, retire les attributs de présentation obsolètes et
+gère le focus à l'ouverture comme à la fermeture. Le script Tally restant une
+ressource distante non versionnée, son comportement réel sera rejoué
+manuellement dans WP10.
+
+| Contrôle | Résultat WP5 | Preuve |
+|---|---|---|
+| Tests unitaires publics | OK | `npm@11.17.0 --prefix apps/frontend run test:unit` : 81/81 tests réussis, dont trois sur la structure des sélecteurs et six sur l'intégration Tally. |
+| Sélecteurs de situation | OK | `rgaa-situation-selectors.cy.js` : 2/2 scénarios. DOM hydraté à 1400 et 320 px, un seul `fieldset`, quatre associations label/ID uniques, sélection de zone synchronisée et contrôles contenus dans le viewport. |
+| Formulaire de retour | OK | `rgaa-tally-feedback.cy.js` : 2/2 scénarios. Le vrai bouton du header est activé sur desktop et au clavier dans le menu mobile; l'iframe prend le focus puis le restitue au déclencheur visible. Deux exécutions consécutives dédiées et une exécution combinée réussies. |
+| Iframe tierce | OK CÔTÉ CODE | Le DOM actuellement produit par le script officiel a été reproduit dans les tests : titre remplacé par « VigiEau - retours utilisateurs », retrait de `align`, `frameborder`, `marginheight`, `marginwidth` et `scrolling`, conservation des dimensions valides. L'observer et l'attente du script sont bornés. |
+| ESLint et diff | OK | ESLint du composant, du layout, du nouvel utilitaire et des quatre tests sans erreur ni avertissement; `utils/index.ts` conserve sa dette historique hors lignes modifiées. `git diff --check` réussi. |
+| Build public | OK | `npm@11.17.0 --prefix apps/frontend run build` : génération Nuxt réussie, 794 modules transformés et 23 routes pré-rendues. |
+
 Répartition des lignes sans lot explicite : `COOKIE-01` est qualifiée dans WP1,
 `HOME-03` dans WP1 (navigation et focus SPA) et `HOME-04` dans WP2 (image
 décorative). `SH-02` appartient à WP1; WP5 ne réouvrira que les interactions
@@ -589,10 +612,10 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | `SH-01` | § 15.42, p. 46 | 8.9 | Mineur | Le texte « Vous souhaitez nous poser… » doit être un paragraphe. | `components/accueil/Faq.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — template et DOM hydraté WP0 : le texte et son lien de contact sont contenus dans un `<p>`. |
 | `SH-02` | § 15.43, p. 47 | 7.1, 12.8 | Majeur | Sur mobile, le bouton d’affichage du fil d’Ariane ne doit pas exposer d’état/relations inadaptés; après activation, déplacer le focus vers le fil ou le lien Accueil. | `DsfrBreadcrumb` sur pages accessibilité, mentions légales et situation. | À TESTER DANS LE DOM/COMPORTEMENT DE LA VERSION DSFR INSTALLÉE. | `FIXED` — WP1 : les 13 occurrences publiques passent par `AppBreadcrumb`, qui attend l'expansion DSFR puis focalise le premier lien. Les tests à 320 px activent le bouton au clavier et vérifient la disparition du déclencheur ainsi que le focus sur Accueil. |
 | `SH-03` | § 15.44, p. 47-48 | 12.8 | Majeur | Après activation d’un lien interne qui remplace le contenu sans rechargement, appliquer la stratégie SPA de titre et focus. | Footer, header, quick links, FAQ/CTA et router-links. | PROBABLEMENT OUVERT GLOBAL. | `FIXED` — WP1 : stratégie centralisée dans `app.vue`, indépendante de l'origine du `RouterLink`. Cypress suit un lien du footer sans rechargement, puis vérifie le nouveau titre, le focus du `h1` et l'annonce de page. |
-| `SH-04` | § 15.45, p. 48 | 11.1 | Bloquant | Chaque `select` du choix de type/profil/zone doit avoir une étiquette accessible unique. Préférer `label`/`aria-labelledby` à un `title` seul quand possible. | `components/situation/Status.vue`. | OUVERT : props `titile` mal orthographiée, IDs `profile` dupliqués et labels visuels séparés. | `TODO` |
-| `SH-05` | § 15.46, p. 49 | 8.9, 11.5 | Majeur | Regrouper les sélecteurs liés dans un `fieldset`/`legend`; ne pas utiliser de titres pour la présentation; garder une phrase intelligible en lecture linéaire. | `components/situation/Status.vue` versions desktop/mobile. | PARTIEL : fieldsets présents, mais labels/IDs, texte intercalé et duplication doivent être corrigés. | `TODO` |
-| `SH-06` | § 15.47, p. 50 | 12.8 | Majeur | Après activation de « Donner mon avis », placer le focus dans le panneau/formulaire Tally ou sur un conteneur de remplacement pertinent. | `client/layouts/basic.vue`, `utils.openTally`, intégration Tally. | À LOCALISER ET TESTER SUR MOBILE. | `TODO` |
-| `SH-07` | § 15.48, p. 51-52 | 2.2, 10.1 | Majeur / mineur | L’iframe Tally doit avoir un titre français explicite (« VigiEau - retours utilisateurs ») et aucun attribut HTML de présentation obsolète. | Intégration Tally dans utilitaires/scripts/runtime. | À LOCALISER; l’iframe tierce est exemptée pour son contenu, pas pour son titre et son insertion. | `TODO` |
+| `SH-04` | § 15.45, p. 48 | 11.1 | Bloquant | Chaque `select` du choix de type/profil/zone doit avoir une étiquette accessible unique. Préférer `label`/`aria-labelledby` à un `title` seul quand possible. | `components/situation/Status.vue`. | OUVERT : props `titile` mal orthographiée, IDs `profile` dupliqués et labels visuels séparés. | `FIXED` — WP5 : les quatre listes de la page et de la modale ont un `select-id` stable et distinct ainsi qu'un libellé explicite relié. Cypress vérifie les associations dans le DOM, l'absence de `title`/`titile` et l'unicité des IDs à 1400 et 320 px. |
+| `SH-05` | § 15.46, p. 49 | 8.9, 11.5 | Majeur | Regrouper les sélecteurs liés dans un `fieldset`/`legend`; ne pas utiliser de titres pour la présentation; garder une phrase intelligible en lecture linéaire. | `components/situation/Status.vue` versions desktop/mobile. | PARTIEL : fieldsets présents, mais labels/IDs, texte intercalé et duplication doivent être corrigés. | `FIXED` — WP5 : les variantes desktop/mobile dupliquées sont remplacées par un seul `fieldset` responsive nommé « Adapter les restrictions affichées à votre situation ». Les contrôles restent contenus dans le viewport et la zone choisie en modale est synchronisée avec la page. |
+| `SH-06` | § 15.47, p. 50 | 12.8 | Majeur | Après activation de « Donner mon avis », placer le focus dans le panneau/formulaire Tally ou sur un conteneur de remplacement pertinent. | `client/layouts/basic.vue`, `utils.openTally`, intégration Tally. | À LOCALISER ET TESTER SUR MOBILE. | `FIXED` — WP5 : le quick-link Vue-DSFR utilise son vrai callback `onClick`; le helper cible et focalise l'iframe du formulaire, puis restitue le focus au bouton desktop ou au déclencheur visible du menu mobile. Cypress couvre les deux parcours, dont l'activation clavier à 320 px. |
+| `SH-07` | § 15.48, p. 51-52 | 2.2, 10.1 | Majeur / mineur | L’iframe Tally doit avoir un titre français explicite (« VigiEau - retours utilisateurs ») et aucun attribut HTML de présentation obsolète. | Intégration Tally dans utilitaires/scripts/runtime. | À LOCALISER; l’iframe tierce est exemptée pour son contenu, pas pour son titre et son insertion. | `FIXED` — WP5 côté intégration : l'iframe `.tally-form-w881YY` reçoit le titre français demandé et perd les cinq attributs obsolètes actuellement injectés, sans toucher aux autres iframes ni aux dimensions valides. Tests unitaires et Cypress verrouillent le DOM; le script distant sera revérifié manuellement en WP10. |
 
 ### G. Page d’accueil, carte et données
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |

@@ -8,6 +8,7 @@ import niveauxGravite from '../dto/niveauGravite';
 import { Zone } from '../dto/zone.dto';
 import { useAddressStore } from '../store/address';
 import { useZoneStore } from '../store/zone';
+import { openAccessibleTallyPopup } from './tally-popup';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 // We need to duplicate the base string to have a longer string
@@ -264,18 +265,8 @@ const index = {
     }
   },
 
-  openTally() {
-    window.Tally.openPopup('w881YY', {
-      width: 376,
-      autoClose: 2000,
-      emoji: {
-        text: '👋',
-        animation: 'wave',
-      },
-      onOpen: () => {
-        document.getElementsByTagName('iframe')[0]?.focus();
-      },
-    });
+  openTally(): boolean {
+    return openAccessibleTallyPopup(window);
   },
 
   generatePopupHtml(

@@ -9,7 +9,7 @@ const addressStore = useAddressStore();
 const zoneStore = useZoneStore();
 const { profile, typeEau } = storeToRefs(addressStore);
 const { zones } = storeToRefs(zoneStore);
-const { resetAddress, adressString, getCodeDepartement } = addressStore;
+const { resetAddress, adressString } = addressStore;
 const { resetZones } = zoneStore;
 const links: Ref<any[]> = ref([
   { to: '/', text: 'Accueil' },
@@ -76,6 +76,8 @@ const usagesByProfile = computed(() => {
         return u.concerneCollectivite;
       case 'exploitation':
         return u.concerneExploitation;
+      default:
+        return false;
     }
   });
 });
@@ -87,13 +89,13 @@ const situationLabel = computed<string>(() => {
 });
 
 const selectZone = () => {
-  zone.value = zones.value.find((z) => z.id == zoneModal.value);
+  zone.value = zones.value.find((z) => z.id === zoneModal.value);
   zoneModal.value = null;
   modalOpened.value = false;
 };
 
 const updateZone = ($event) => {
-  zone.value = zones.value.find((z) => z.id == $event);
+  zone.value = zones.value.find((z) => z.id === $event);
 };
 
 const modalActions: Ref<any[]> = ref([
@@ -120,75 +122,42 @@ watch(
 
 <template>
   <div
-    class="situation-status fr-grid-row fr-grid-row--center fr-container"
     v-if="addressToUse"
+    class="situation-status fr-grid-row fr-grid-row--center fr-container"
   >
     <div class="fr-col-12">
       <AppBreadcrumb class="fr-mb-0" :links="links" />
     </div>
     <fieldset
-      class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w hide-sm"
+      class="situation-status__selectors fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mb-1w"
     >
-      <legend>
-        <p class="fr-mr-1w fr-mb-0">Les restrictions concernent l'eau</p>
+      <legend class="situation-status__selectors-legend fr-mb-1w">
+        Adapter les restrictions affichées à votre situation
       </legend>
       <DsfrSelect
-        id="type_eau"
-        titile="Choisissez le type d’eau que vous consommez"
         v-model="typeEau"
+        label="Type d’eau concerné"
+        select-id="situation-water-type"
         :options="typesEauOptions"
       />
       <template v-if="zonesOptions.length > 1">
-        <p class="fr-mx-1w fr-mb-0">issue de</p>
         <DsfrSelect
-          id="profile"
-          title="Choisissez la zone d'alerte"
-          :value="zone?.id"
+          label="Zone d’alerte concernée"
+          select-id="situation-alert-zone"
+          :model-value="zone?.id"
           :options="zonesOptions"
-          @update:modelValue="updateZone($event)"
+          @update:model-value="updateZone($event)"
         />
       </template>
-      <p class="fr-mx-1w fr-mb-0">en tant que</p>
       <DsfrSelect
-        id="profile"
-        title="Choisissez votre profil de consommateur d’eau"
         v-model="profile"
+        label="Profil concerné"
+        select-id="situation-profile"
         :options="profileOptions"
       />
     </fieldset>
 
-    <SituationHeader :address="addressToUse" :typeEau="typeEau" :zone="zone" />
-
-    <fieldset
-      class="fr-col-12 fr-grid-row fr-grid-row--center fr-grid-row--middle fr-mt-1w show-sm"
-    >
-      <legend>
-        <p class="fr-mr-1w fr-mb-0">Les restrictions concernent l'eau</p>
-      </legend>
-      <DsfrSelect
-        id="type_eau"
-        titile="Choisissez le type d’eau que vous consommez"
-        v-model="typeEau"
-        :options="typesEauOptions"
-      />
-      <template v-if="zonesOptions.length > 1">
-        <p class="fr-mx-1w fr-mb-0">issue de</p>
-        <DsfrSelect
-          id="profile"
-          title="Choisissez la zone d'alerte"
-          :value="zone?.id"
-          :options="zonesOptions"
-          @update:modelValue="updateZone($event)"
-        />
-      </template>
-      <p class="fr-mx-1w fr-mb-0">en tant que</p>
-      <DsfrSelect
-        id="profile"
-        title="Choisissez votre profil de consommateur d’eau"
-        v-model="profile"
-        :options="profileOptions"
-      />
-    </fieldset>
+    <SituationHeader :address="addressToUse" :type-eau="typeEau" :zone="zone" />
 
     <template v-if="utils.showRestrictions(zone)">
       <SituationRestrictions
@@ -202,30 +171,30 @@ watch(
         <div class="fr-grid-row fr-grid-row--center">
           <DsfrHighlight class="fr-my-2w">
             <b>Besoin de précision sur les restrictions ?</b>
-            <br />
+            <br>
             Votre mairie a pu renforcer ces restrictions, pensez à la consulter.
           </DsfrHighlight>
         </div>
       </div>
     </template>
     <div class="fr-col-12 fr-grid-row fr-grid-row--center fr-mt-2w">
-      <MixinsShare :situationLabel="situationLabel" :address="addressToUse" />
+      <MixinsShare :situation-label="situationLabel" :address="addressToUse" />
     </div>
   </div>
   <DsfrModal
     :opened="modalOpened"
+    :actions="modalActions"
     title="Pour consulter les restrictions, veuillez sélectionner la ressource dans laquelle vous prélevez de l’eau."
     @close="router.push('/')"
-    :actions="modalActions"
   >
     <div>
       <p class="fr-mx-1w fr-mb-0">
         Plusieurs cours d'eau sont référencés à cette adresse.
       </p>
       <DsfrSelect
-        id="profile"
-        title="Choisissez la zone d'alerte"
         v-model="zoneModal"
+        label="Zone d’alerte à consulter"
+        select-id="situation-alert-zone-modal"
         :options="zonesOptions"
       />
     </div>
@@ -234,11 +203,36 @@ watch(
 
 <style lang="scss">
 .situation-status {
+  &__selectors {
+    column-gap: 1rem;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+
+    &-legend {
+      width: 100%;
+      font-weight: 700;
+      text-align: center;
+    }
+  }
+
   .fr-select {
     width: fit-content;
+    max-width: 100%;
 
     &-group {
       margin-bottom: 0;
+    }
+  }
+}
+
+@media screen and (max-width: 767px) {
+  .situation-status__selectors {
+    row-gap: 1rem;
+
+    .fr-select-group,
+    .fr-select {
+      width: 100%;
     }
   }
 }
