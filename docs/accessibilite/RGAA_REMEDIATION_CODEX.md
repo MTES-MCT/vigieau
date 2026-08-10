@@ -230,6 +230,75 @@ Constats utiles avant démarrage, à confirmer par Codex :
 
 Ces observations ne remplacent pas la matrice : elles servent à éviter les corrections aveugles.
 
+### Suivi d'exécution — baseline WP0 du 10/08/2026
+
+Référence de départ : branche `develop`, commit `9aa6472`, worktree propre. La
+baseline a été exécutée avec Node `24.16.0` et npm `11.17.0` via `npx`, car le
+`npm` installé globalement avec cette version de Node est désormais en version
+12. Aucun fichier admin n'a été modifié.
+
+Convention de preuve retenue : chaque état fermé de la matrice renvoie à un
+fichier ou à une zone du DOM, à une commande automatisée et, lorsque le critère
+l'exige, à la ligne correspondante de la matrice manuelle. Un scan axe seul
+n'est jamais utilisé pour fermer un ticket.
+
+Routes publiques inventoriées :
+
+```text
+/
+/abonnements
+/abonnements/nouveau
+/accessibilite
+/carte
+/cookies
+/donnees
+/donnees/carte-commune
+/donnees/carte-historique
+/donnees/commune/:code_insee
+/donnees/departement
+/donnees/surface
+/donnees-personnelles
+/emails
+/emails/smgc
+/mentions-legales
+/situation
+/stats
+```
+
+Résultats de référence :
+
+| Contrôle | Résultat WP0 | Preuve |
+|---|---|---|
+| Installation publique verrouillée | OK | `npx npm@11.17.0 --prefix apps/frontend ci` : 1 721 paquets installés, lockfile inchangé. |
+| Tests unitaires publics | OK | `npm@11.17.0 --prefix apps/frontend run test:unit` : 40/40 tests réussis. |
+| Build public | OK | `npm@11.17.0 --prefix apps/frontend run build` : génération Nuxt réussie, 23 routes pré-rendues. |
+| Lint public | ÉCHEC PRÉEXISTANT | 353 erreurs et 778 avertissements avant remédiation; dette mesurée, à ne pas confondre avec les régressions des lots. |
+| Cypress historique `accueil.cy.js` | ÉCHEC PRÉEXISTANT | 2/6 tests réussis; quatre sélecteurs/assertions sont obsolètes alors que l'interface est rendue. Les scénarios seront remplacés par des assertions métier et RGAA stables. |
+| Scan axe WCAG A/AA des routes statiques critiques | OK INSUFFISANT SEUL | 7/7 pages sans violation automatique (`/`, accessibilité, cookies, mentions légales, abonnement, données, carte), mais le contrôle manuel et le DOM démontrent des écarts non détectés. |
+| DOM hydraté | CONTRÔLÉ | Chrome Headless sur le serveur Nuxt local : `main`, liens d'évitement, header/footer, images, FAQ, combobox, tabs et liens externes inspectés. |
+
+Écarts actuels complémentaires découverts pendant WP0 et à traiter dans les
+lots correspondants :
+
+- HTML invalide produisant des paragraphes vides ou une réorganisation du DOM
+  (`pages/accessibilite`, `pages/cookies`, `pages/donnees-personnelles`, carte
+  communale et légendes de sélecteurs) ;
+- paragraphe de description vide généré par le footer DSFR sur toutes les
+  routes ;
+- routes actuelles non présentes dans l'échantillon 2024 (`/stats`,
+  `/emails/**`, plusieurs routes `/donnees/**` et `/donnees-personnelles`) à
+  inclure dans la régression finale ;
+- déclaration publique fondée sur un audit Temesis de janvier 2025 (65,38 %),
+  plus récent que le rapport 2024 à l'origine de cette matrice. Les constats
+  affichés par cette déclaration restent ouverts tant qu'ils ne sont pas
+  démontrés corrigés.
+
+Répartition des lignes sans lot explicite : `COOKIE-01` est qualifiée dans WP1,
+`HOME-03` dans WP1 (navigation et focus SPA) et `HOME-04` dans WP2 (image
+décorative). `SH-02` appartient à WP1; WP5 ne réouvrira que les interactions
+spécifiques au flux situation. WP9 reste propriétaire de la conformité des
+documents, même lorsque leur lien est corrigé dans un lot antérieur.
+
 ## 10. Lots de travail et commits
 
 ### WP0 - Baseline et matrice
@@ -370,15 +439,15 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 |---|---:|---|---|---|---|---|---|
 | `G-01` | § 8.1, p. 12 | 3.2 | Majeur | Corriger les contrastes insuffisants des libellés de niveaux « Alerte » et « Alerte renforcée ». Vérifier tous les usages actuels des couleurs, pas seulement la capture de 2024. Seuils : 4,5:1 pour le texte courant, 3:1 pour le grand texte. | `apps/frontend/client/**` ; rechercher les classes `situation-level-*`, badges et variables de couleurs. | PROBABLEMENT OUVERT : `SituationHeader.vue` contient encore une couleur personnalisée `#A18E3A`; mesurer le rendu réel. | `TODO` |
 | `G-02` | § 8.2, p. 13 | 10.11 | Bloquant | À 320 px de largeur, aucun contenu ni contrôle utile ne doit disparaître et aucun défilement horizontal global ne doit être requis. Couvrir notamment carte/données, tableaux, filtres et pagination. | `components/carte/**`, `components/donnees/**`, pages `/carte` et `/donnees`, styles globaux. | OUVERT À REVALIDER : les composants et l’architecture ont changé depuis 2024. | `TODO` |
-| `G-03` | § 9.1, p. 13-14 | 9.2, 12.6 | Majeur / mineur | Une zone principale unique doit être exposée et atteignable/évitable. Vérifier le DOM rendu, le lien d’évitement, l’unicité de `main` et la cible `#main-content`. | `client/layouts/basic.vue`, composants DSFR de layout. | SEMBLE DÉJÀ CORRIGÉ : `<main role="main" id="main-content">` et liens d’évitement présents; ne pas modifier sans échec démontré. | `TODO` |
+| `G-03` | § 9.1, p. 13-14 | 9.2, 12.6 | Majeur / mineur | Une zone principale unique doit être exposée et atteignable/évitable. Vérifier le DOM rendu, le lien d’évitement, l’unicité de `main` et la cible `#main-content`. | `client/layouts/basic.vue`, composants DSFR de layout. | SEMBLE DÉJÀ CORRIGÉ : `<main role="main" id="main-content">` et liens d’évitement présents; ne pas modifier sans échec démontré. | `ALREADY_OK` — DOM hydraté WP0 : une seule cible `<main role="main" id="main-content">`; les deux liens d’évitement ciblent le contenu et le footer. Le CSS DSFR public importé rend `.fr-skiplinks:focus-within` relatif, opaque et sans translation. |
 | `G-04` | § 10.1, p. 14-16 | 6.1, 7.1, 8.5, 8.6, 12.8 | Majeur | Pour toute navigation SPA : employer lien ou bouton selon le comportement, mettre à jour le titre de page, annoncer le changement et placer le focus à un emplacement logique sans casser l’historique ni la navigation clavier. | `client/app.vue`, pages, middleware, router-links, utilitaires de navigation. | PROBABLEMENT OUVERT : les pages définissent souvent `useHead`, mais aucun gestionnaire global de focus de route n’est visible. | `TODO` |
-| `HDR-01` | § 11.1, p. 16 | 1.3 | Mineur | L’alternative du logo opérateur doit être pertinente et ne pas contenir « logo du produit ». | `client/layouts/basic.vue` et rendu de `DsfrHeader`. | SEMBLE DÉJÀ CORRIGÉ : l’alternative vaut le nom de l’application. | `TODO` |
-| `HDR-02` | § 11.2, p. 16-17 | 10.2, 7.1 | Majeur | Le bouton du menu mobile doit avoir un nom accessible en contenu réel/masqué, et déclarer correctement qu’il ouvre une boîte de dialogue (`aria-haspopup="dialog"` si nécessaire). | `client/layouts/basic.vue`, `DsfrHeader`, version installée de `@gouvminint/vue-dsfr`. | À VÉRIFIER DANS LE DOM RENDU : ne pas patcher la dépendance si une prop suffit. | `TODO` |
-| `HDR-03` | § 11.3, p. 17 | 7.1 | Majeur | La boîte de dialogue du menu mobile doit avoir un nom pertinent, sans terme technique tel que « modal ». | `client/layouts/basic.vue`, `DsfrHeader`. | SEMBLE PARTIELLEMENT CORRIGÉ : `menuModalLabel="Menu"`; vérifier le rendu. | `TODO` |
+| `HDR-01` | § 11.1, p. 16 | 1.3 | Mineur | L’alternative du logo opérateur doit être pertinente et ne pas contenir « logo du produit ». | `client/layouts/basic.vue` et rendu de `DsfrHeader`. | SEMBLE DÉJÀ CORRIGÉ : l’alternative vaut le nom de l’application. | `ALREADY_OK` — DOM hydraté WP0 : l’image opérateur du header expose `alt="VigiEau"`; `layouts/basic.vue` alimente cette valeur depuis `appName`. |
+| `HDR-02` | § 11.2, p. 16-17 | 10.2, 7.1 | Majeur | Le bouton du menu mobile doit avoir un nom accessible en contenu réel/masqué, et déclarer correctement qu’il ouvre une boîte de dialogue (`aria-haspopup="dialog"` si nécessaire). | `client/layouts/basic.vue`, `DsfrHeader`, version installée de `@gouvminint/vue-dsfr`. | À VÉRIFIER DANS LE DOM RENDU : ne pas patcher la dépendance si une prop suffit. | `ALREADY_OK` — DOM hydraté à 320 px WP0 : `#button-menu` expose `aria-label="Menu"`, `title="Menu"`, `aria-controls="header-navigation"` et `aria-haspopup="dialog"`; l’icône CSS est décorative. Le comportement de focus reste dans `HDR-04`. |
+| `HDR-03` | § 11.3, p. 17 | 7.1 | Majeur | La boîte de dialogue du menu mobile doit avoir un nom pertinent, sans terme technique tel que « modal ». | `client/layouts/basic.vue`, `DsfrHeader`. | SEMBLE PARTIELLEMENT CORRIGÉ : `menuModalLabel="Menu"`; vérifier le rendu. | `ALREADY_OK` — DOM hydraté à 320 px WP0 : `#header-navigation[role="dialog"][aria-modal="true"][aria-label="Menu"]`. Les autres exigences de focus restent dans `HDR-02`/`HDR-04`. |
 | `HDR-04` | § 11.4, p. 17-18 | 12.8 | Majeur | À l’ouverture du menu mobile, positionner le focus dans la boîte de dialogue, le contenir jusqu’à fermeture, restaurer le focus sur le déclencheur et supprimer toute imbrication de `nav` inutile. | `DsfrHeader` rendu et éventuels overrides locaux. | À TESTER MANUELLEMENT AU CLAVIER ET SOUS LECTEUR D’ÉCRAN. | `TODO` |
-| `FTR-01` | § 12.1, p. 18-19 | 6.1 | Majeur | Les liens de retour à l’accueil et leurs images doivent avoir un intitulé cohérent avec le contenu visible. Éviter deux liens concurrents et conserver une alternative « VigiEau » pertinente. | `client/layouts/basic.vue`, rendu de `DsfrFooter`. | SEMBLE DÉJÀ CORRIGÉ : `homeTitle="Accueil VigiEau"` et alt opérateur; vérifier le DOM. | `TODO` |
+| `FTR-01` | § 12.1, p. 18-19 | 6.1 | Majeur | Les liens de retour à l’accueil et leurs images doivent avoir un intitulé cohérent avec le contenu visible. Éviter deux liens concurrents et conserver une alternative « VigiEau » pertinente. | `client/layouts/basic.vue`, rendu de `DsfrFooter`. | SEMBLE DÉJÀ CORRIGÉ : `homeTitle="Accueil VigiEau"` et alt opérateur; vérifier le DOM. | `ALREADY_OK` — DOM hydraté WP0 : un lien de marque footer `title="Accueil VigiEau"` contient l’unique image opérateur `alt="VigiEau"`. |
 | `FTR-02` | § 12.2, p. 19 | 6.1, 10.2 | Majeur | Tout lien ouvrant une nouvelle fenêtre doit l’annoncer de façon accessible. Centraliser la règle si possible; l’icône CSS seule ne suffit pas. Le nom accessible doit conserver le libellé visible. | Tous les `target="_blank"` dans `apps/frontend/client/**`, données HTML/JSON et composants DSFR. | PARTIELLEMENT CORRIGÉ : plusieurs liens ont un `title`, mais des liens dynamiques et ceux de `SituationHeader.vue` restent à vérifier. | `TODO` |
-| `COOKIE-01` | § 13, p. 19 | À requalifier | À vérifier | Le rapport n’observait aucun bandeau/modale de cookies. Si un mécanisme existe désormais, l’auditer comme toute boîte de dialogue : nom, focus, fermeture, arrière-plan inerte et restitution des choix. | `client/pages/cookies/**`, configuration Matomo/consentement et composants chargés au runtime. | NOUVEAU PÉRIMÈTRE POSSIBLE : ne pas conclure N/A sans inspection. | `TODO` |
+| `COOKIE-01` | § 13, p. 19 | À requalifier | À vérifier | Le rapport n’observait aucun bandeau/modale de cookies. Si un mécanisme existe désormais, l’auditer comme toute boîte de dialogue : nom, focus, fermeture, arrière-plan inerte et restitution des choix. | `client/pages/cookies/**`, configuration Matomo/consentement et composants chargés au runtime. | NOUVEAU PÉRIMÈTRE POSSIBLE : ne pas conclure N/A sans inspection. | `N/A_CURRENT_UI` — recherche source WP0 et DOM des routes publiques : aucun bandeau/dialogue de consentement; `matomo.client.ts` déclare `requireConsent: false` et `requireCookieConsent: false`, la page `/cookies` documentant l’exemption. Le HTML invalide de cette page reste un écart complémentaire WP7/WP9. |
 
 ### B. Documents téléchargeables
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
@@ -401,7 +470,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
 |---|---:|---|---|---|---|---|---|
 | `NEWS-01` | § 15.11, p. 30 | 1.2 | Mineur | L’illustration de la newsletter, si décorative, doit avoir `alt=""` et aucun `title` redondant. | `components/mixins/Email.vue`. | PROBABLEMENT OUVERT : alt actuel « Newsletter email ». | `TODO` |
-| `NEWS-02` | § 15.12, p. 31 | 7.1 | Majeur | Si l’inscription utilise encore une modale : nom valide, `aria-modal=true`, arrière-plan non exposé et focus géré. Si le flux est désormais une page, classer l’ancien ticket `N/A_CURRENT_UI` et auditer la page équivalente. | `pages/abonnements/**`, `components/mail/MailForm.vue`, anciennes modales éventuelles. | FLUX 2024 SEMBLE REMPLACÉ PAR UNE PAGE : ne pas appliquer une correction de modale inexistante. | `TODO` |
+| `NEWS-02` | § 15.12, p. 31 | 7.1 | Majeur | Si l’inscription utilise encore une modale : nom valide, `aria-modal=true`, arrière-plan non exposé et focus géré. Si le flux est désormais une page, classer l’ancien ticket `N/A_CURRENT_UI` et auditer la page équivalente. | `pages/abonnements/**`, `components/mail/MailForm.vue`, anciennes modales éventuelles. | FLUX 2024 SEMBLE REMPLACÉ PAR UNE PAGE : ne pas appliquer une correction de modale inexistante. | `N/A_CURRENT_UI` — le déclencheur ouvre la route `/abonnements/nouveau`, confirmée dans le DOM hydraté WP0; les modales de résultat et le formulaire équivalent restent audités par `NEWS-03` à `NEWS-07`. |
 | `NEWS-03` | § 15.13, p. 32 | 7.1, 8.9, 11.5-11.7 | Majeur / mineur | Regrouper les choix de profil sous un `fieldset`/`legend` explicite ou un composant natif équivalent; chaque contrôle doit être compréhensible isolément. | `components/mixins/Profile.vue`, `components/mail/MailForm.vue`. | À VÉRIFIER DANS LE DOM GÉNÉRÉ. | `TODO` |
 | `NEWS-04` | § 15.14, p. 32-33 | 11.10, 11.11, 11.13 | Majeur | Pour l’e-mail : aide persistante, exemple de format, message de correction utile, `autocomplete=email`, type de champ approprié et association des erreurs. | `components/mail/MailForm.vue`. | PARTIELLEMENT CORRIGÉ : hint et autocomplete présents; le champ est encore `type=text`, et les associations d’erreurs doivent être vérifiées. | `TODO` |
 | `NEWS-05` | § 15.15, p. 33 | 6.1, 10.2 | Majeur | Le lien vers les données personnelles ouvert dans une nouvelle fenêtre doit l’annoncer de manière accessible. | `components/mail/MailForm.vue`. | SEMBLE CORRIGÉ PAR `title`; vérifier nom accessible. | `TODO` |
@@ -411,21 +480,21 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 ### E. Consommation, gestes, liens utiles et FAQ
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
 |---|---:|---|---|---|---|---|---|
-| `CONS-01` | § 15.19, p. 36 | 1.3 | Bloquant | L’alternative du graphique doit restituer toutes les données utiles et inclure « Source : Ademe »; supprimer tout `title` contradictoire. | `components/accueil/Gestes.vue`, ressource `/repartition_consommation.svg`. | SEMBLE DÉJÀ CORRIGÉ : alt détaillé avec source; vérifier le DOM de `DsfrPicture`. | `TODO` |
-| `CONS-02` | § 15.20, p. 37 | 1.2 | Mineur | L’illustration du calculateur, si décorative, doit être ignorée (`alt=""`) et sans `title`. | `components/gestes/Callout.vue` et composants associés. | À VÉRIFIER. | `TODO` |
+| `CONS-01` | § 15.19, p. 36 | 1.3 | Bloquant | L’alternative du graphique doit restituer toutes les données utiles et inclure « Source : Ademe »; supprimer tout `title` contradictoire. | `components/accueil/Gestes.vue`, ressource `/repartition_consommation.svg`. | SEMBLE DÉJÀ CORRIGÉ : alt détaillé avec source; vérifier le DOM de `DsfrPicture`. | `ALREADY_OK` — DOM hydraté WP0 : `DsfrPicture` rend les neuf parts, leurs pourcentages et « Source : Ademe » dans `alt`, avec `title=""`; la légende visible donne aussi la source. |
+| `CONS-02` | § 15.20, p. 37 | 1.2 | Mineur | L’illustration du calculateur, si décorative, doit être ignorée (`alt=""`) et sans `title`. | `components/gestes/Callout.vue` et composants associés. | À VÉRIFIER. | `ALREADY_OK` — DOM hydraté WP0 et `components/gestes/Callout.vue` : `/callout_simulateur.svg` rend `alt=""` sans attribut `title`. |
 | `CONS-03` | § 15.21, p. 37 | 6.1, 10.2 | Majeur | Le lien vers le calculateur externe doit annoncer la nouvelle fenêtre. | `components/gestes/Callout.vue`. | À VÉRIFIER. | `TODO` |
-| `GEST-01` | § 15.23, p. 38 | 8.9 | Mineur | Le texte introductif « En plus des restrictions… » doit être un vrai paragraphe. | `components/accueil/Gestes.vue`. | SEMBLE DÉJÀ CORRIGÉ. | `TODO` |
+| `GEST-01` | § 15.23, p. 38 | 8.9 | Mineur | Le texte introductif « En plus des restrictions… » doit être un vrai paragraphe. | `components/accueil/Gestes.vue`. | SEMBLE DÉJÀ CORRIGÉ. | `ALREADY_OK` — template et DOM hydraté WP0 : le texte complet est porté par un élément `<p>`. |
 | `GEST-02` | § 15.24, p. 38 | 7.1 | Majeur | Ne pas exposer une tablist vide ni des rôles `tabpanel` sans onglets valides. Si l’interface actuelle utilise des boutons/tags pour filtrer, choisir un pattern unique et conforme; ne pas neutraliser les rôles avec `role=""` sans vérifier le DOM final. | `components/accueil/Gestes.vue`, `components/situation/Restrictions.vue`, `DsfrTabs`. | PROBABLEMENT OUVERT/PARTIEL : `DsfrTabs` est utilisé avec des tags externes et `role=""`. | `TODO` |
 | `GEST-03` | § 15.25, p. 39 | 8.9, 9.3 | Mineur | Structurer chaque éco-geste en paragraphe cohérent ou l’ensemble en liste; le sens doit rester clair sans CSS. | `components/gestes/Card.vue`, `data/gestes.json`. | À VÉRIFIER. | `TODO` |
-| `LINK-01` | § 15.27, p. 40 | 8.9 | Mineur | Le texte introductif « Toutes les ressources… » doit être un paragraphe. | `components/accueil/Liens.vue`. | DÉJÀ CORRIGÉ. | `TODO` |
+| `LINK-01` | § 15.27, p. 40 | 8.9 | Mineur | Le texte introductif « Toutes les ressources… » doit être un paragraphe. | `components/accueil/Liens.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — template et DOM hydraté WP0 : l’introduction est un élément `<p>` précédant la liste de ressources. |
 | `LINK-02` | § 15.28, p. 40 | 6.1, 10.2 | Majeur | Tous les liens utiles externes doivent annoncer la nouvelle fenêtre et conserver un intitulé explicite. | `components/accueil/Liens.vue`, `data/liens.json`. | SEMBLE CORRIGÉ PAR `title`; vérifier le DOM et `rel=noopener`/`external`. | `TODO` |
 | `FAQ-01` | § 15.30, p. 41 | 9.3 | Majeur | Les titres de catégories ne doivent pas être enfants directs d’une liste d’accordéons si la structure HTML l’interdit. Vérifier le DOM rendu par `DsfrAccordionsGroup`. | `components/accueil/Faq.vue`. | PARTIELLEMENT CORRIGÉ VISUELLEMENT; le DOM du composant DSFR doit être inspecté. | `TODO` |
-| `FAQ-02` | § 15.31, p. 41-42 | 9.1 | Majeur | Les questions doivent avoir le niveau de titre attendu (`h4` dans la hiérarchie actuelle). | `components/accueil/Faq.vue`. | SEMBLE DÉJÀ CORRIGÉ avec `titleTag="h4"`. | `TODO` |
+| `FAQ-02` | § 15.31, p. 41-42 | 9.1 | Majeur | Les questions doivent avoir le niveau de titre attendu (`h4` dans la hiérarchie actuelle). | `components/accueil/Faq.vue`. | SEMBLE DÉJÀ CORRIGÉ avec `titleTag="h4"`. | `ALREADY_OK` — DOM hydraté WP0 : chaque catégorie est un `h3` et chaque `fr-accordion__title` rendu est un `h4`. |
 | `FAQ-03` | § 15.32, p. 42 | 9.3 | Majeur | La liste des causes de sécheresse doit être une vraie liste non ordonnée. | `client/data/faq.json`. | SEMBLE CORRIGÉ, mais corriger le HTML malformé/typos (`&nbps;`) et tester le rendu `v-html`. | `TODO` |
-| `FAQ-04` | § 15.33, p. 43 | 9.3 | Majeur | Les quatre niveaux d’alerte doivent être une liste ordonnée. | `client/data/faq.json`. | SEMBLE DÉJÀ CORRIGÉ. | `TODO` |
-| `FAQ-05` | § 15.34, p. 44 | 9.3 | Majeur | Les axes du plan d’action doivent être une liste; les flèches purement décoratives doivent être masquées aux TA. | `client/data/faq.json`. | SEMBLE DÉJÀ CORRIGÉ, à valider. | `TODO` |
+| `FAQ-04` | § 15.33, p. 43 | 9.3 | Majeur | Les quatre niveaux d’alerte doivent être une liste ordonnée. | `client/data/faq.json`. | SEMBLE DÉJÀ CORRIGÉ. | `ALREADY_OK` — contenu et DOM hydraté WP0 : les quatre niveaux sont les quatre items d’un `<ol>`. |
+| `FAQ-05` | § 15.34, p. 44 | 9.3 | Majeur | Les axes du plan d’action doivent être une liste; les flèches purement décoratives doivent être masquées aux TA. | `client/data/faq.json`. | SEMBLE DÉJÀ CORRIGÉ, à valider. | `ALREADY_OK` — contenu et DOM hydraté WP0 : trois items dans un `<ul>`; chaque flèche est dans un `<span aria-hidden="true">`. |
 | `FAQ-06` | § 15.35, p. 44 | 6.1, 10.2 | Majeur | Les liens externes de la réponse sur le plan d’action doivent annoncer la nouvelle fenêtre. | `client/data/faq.json`. | PARTIELLEMENT CORRIGÉ; vérifier tous les liens injectés par `v-html`. | `TODO` |
-| `FAQ-07` | § 15.36, p. 45 | 9.3 | Majeur | L’énumération de la réponse sur les pouvoirs du maire doit être structurée en liste. Conserver le type de liste conforme au sens; le rapport proposait `ol`, le contenu actuel utilise `ul`, à arbitrer selon l’ordre sémantique. | `client/data/faq.json`. | À REQUALIFIER : ne pas transformer en `ol` sans justification sémantique. | `TODO` |
+| `FAQ-07` | § 15.36, p. 45 | 9.3 | Majeur | L’énumération de la réponse sur les pouvoirs du maire doit être structurée en liste. Conserver le type de liste conforme au sens; le rapport proposait `ol`, le contenu actuel utilise `ul`, à arbitrer selon l’ordre sémantique. | `client/data/faq.json`. | À REQUALIFIER : ne pas transformer en `ol` sans justification sémantique. | `ALREADY_OK` — contenu et DOM hydraté WP0 : les trois compétences indépendantes sont dans un `<ul>`; l’ordre n’exprime ni procédure ni classement, donc une liste non ordonnée est sémantiquement correcte. |
 | `FAQ-08` | § 15.37, p. 45 | 6.1, 10.2, 13.3 | Majeur / bloquant contenu | Les liens de la réponse sur l’arrosage doivent annoncer la nouvelle fenêtre; traiter aussi l’accessibilité des PDF liés. | `client/data/faq.json`. | PARTIELLEMENT CORRIGÉ POUR LES LIENS, DOCUMENTS ENCORE À TRAITER. | `TODO` |
 | `FAQ-09` | § 15.38, p. 45 | 6.1, 10.2 | Majeur | Le lien vers la qualité de l’eau doit annoncer la nouvelle fenêtre. | `client/data/faq.json`. | SEMBLE CORRIGÉ. | `TODO` |
 | `FAQ-10` | § 15.39, p. 45 | 6.1, 10.2, 13.3 | Majeur / contenu | Le lien/PDF de la réponse hôpitaux-EHPAD doit annoncer la nouvelle fenêtre et offrir une version accessible si nécessaire. | `client/data/faq.json`. | À VÉRIFIER ET TRAITER CÔTÉ DOCUMENT. | `TODO` |
@@ -435,7 +504,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 ### F. Composants partagés hors contenu éditorial
 | ID | Rapport | Critère(s) | Sévérité | Exigence | Cibles probables | Pré-analyse | État / preuve |
 |---|---:|---|---|---|---|---|---|
-| `SH-01` | § 15.42, p. 46 | 8.9 | Mineur | Le texte « Vous souhaitez nous poser… » doit être un paragraphe. | `components/accueil/Faq.vue`. | DÉJÀ CORRIGÉ. | `TODO` |
+| `SH-01` | § 15.42, p. 46 | 8.9 | Mineur | Le texte « Vous souhaitez nous poser… » doit être un paragraphe. | `components/accueil/Faq.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — template et DOM hydraté WP0 : le texte et son lien de contact sont contenus dans un `<p>`. |
 | `SH-02` | § 15.43, p. 47 | 7.1, 12.8 | Majeur | Sur mobile, le bouton d’affichage du fil d’Ariane ne doit pas exposer d’état/relations inadaptés; après activation, déplacer le focus vers le fil ou le lien Accueil. | `DsfrBreadcrumb` sur pages accessibilité, mentions légales et situation. | À TESTER DANS LE DOM/COMPORTEMENT DE LA VERSION DSFR INSTALLÉE. | `TODO` |
 | `SH-03` | § 15.44, p. 47-48 | 12.8 | Majeur | Après activation d’un lien interne qui remplace le contenu sans rechargement, appliquer la stratégie SPA de titre et focus. | Footer, header, quick links, FAQ/CTA et router-links. | PROBABLEMENT OUVERT GLOBAL. | `TODO` |
 | `SH-04` | § 15.45, p. 48 | 11.1 | Bloquant | Chaque `select` du choix de type/profil/zone doit avoir une étiquette accessible unique. Préférer `label`/`aria-labelledby` à un `title` seul quand possible. | `components/situation/Status.vue`. | OUVERT : props `titile` mal orthographiée, IDs `profile` dupliqués et labels visuels séparés. | `TODO` |
@@ -449,8 +518,8 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 | `HOME-01` | § 16.1, p. 53 | 12.8 | Majeur | Après activation du bouton de recherche de la combobox, conserver/replacer le focus dans le champ selon le comportement prévu. | `FdrAutoComplete.vue`, `SearchAddress.vue`. | PARTIEL : la sélection refocalise l’input, mais tester tous les chemins. | `TODO` |
 | `HOME-02` | § 16.2, p. 54 | 12.8 | Majeur | Après géolocalisation réussie ou échouée, gérer le focus et annoncer le résultat/erreur. | `components/mixins/SearchAddress.vue`. | PARTIEL : succès refocalise l’input; erreur silencieuse et statut non annoncé. | `TODO` |
 | `HOME-03` | § 16.3, p. 54 | 12.8 | Majeur | Après soumission « Je consulte les restrictions », gérer le titre et le focus de la route/du résultat; le contrôle reste un bouton de soumission/action pertinent. | `components/mixins/Search.vue`, utilitaire `searchZones`, route `/situation`. | PROBABLEMENT OUVERT. | `TODO` |
-| `HOME-04` | § 16.4, p. 55 | 1.2 | Mineur | Les illustrations des types d’eau doivent être décoratives si le texte adjacent porte déjà l’information. | `components/accueil/TypesEau.vue`. | DÉJÀ CORRIGÉ avec `alt-img=""`. | `TODO` |
-| `HOME-05` | § 16.5, p. 55 | 8.9 | Mineur | Le sous-titre/date « Arrêtés publiés avant… » doit être un paragraphe. | `components/carte/Wrapper.vue`. | DÉJÀ CORRIGÉ. | `TODO` |
+| `HOME-04` | § 16.4, p. 55 | 1.2 | Mineur | Les illustrations des types d’eau doivent être décoratives si le texte adjacent porte déjà l’information. | `components/accueil/TypesEau.vue`. | DÉJÀ CORRIGÉ avec `alt-img=""`. | `ALREADY_OK` — DOM hydraté WP0 : les trois images `/type_eau_*.svg` rendent `alt=""`; les intitulés sont portés par les titres de cartes adjacents. |
+| `HOME-05` | § 16.5, p. 55 | 8.9 | Mineur | Le sous-titre/date « Arrêtés publiés avant… » doit être un paragraphe. | `components/carte/Wrapper.vue`. | DÉJÀ CORRIGÉ. | `ALREADY_OK` — `components/carte/Wrapper.vue` et DOM hydraté WP0 : la date est dans un `<p>` placé après le `h2`. |
 | `HOME-06` | § 16.6, p. 56 | 7.1 | Mineur | Chaque onglet doit référencer par `aria-controls` l’ID réel de son panneau. | `components/carte/Wrapper.vue`, rendu `DsfrTabs`. | SEMBLE CONFIGURÉ (`tab-0`/`tab-content-0`), À VÉRIFIER DANS LE DOM. | `TODO` |
 | `HOME-07` | § 16.7, p. 56 | 12.8 | Majeur | Les panneaux d’onglets ne doivent pas ajouter d’arrêt de tabulation inutile; supprimer tout `tabindex=0` non justifié. | `DsfrTabContent` rendu. | À VÉRIFIER DANS LE DOM DE LA DÉPENDANCE. | `TODO` |
 | `HOME-08` | § 16.8, p. 57 | 7.1, 12.8 | Majeur / amélioration | La carte étant exemptée, fournir une alternative textuelle/données pleinement utilisable. Ne pas laisser des contrôles cartographiques inaccessibles polluer le parcours clavier; ne pas masquer la solution alternative. | `components/carte/Map.vue`, `Wrapper.vue`, `Table.vue`, affichage embarqué sur l’accueil. | À RECONCEVOIR EN FONCTION DU DOM ACTUEL; l’accueil contient désormais une carte interactive avant le formulaire. | `TODO` |
@@ -470,7 +539,7 @@ Dans la colonne **État / preuve**, remplacer `TODO` et ajouter les preuves au f
 |---|---:|---|---|---|---|---|---|
 | `ACC-01` | § 17.1, p. 63-64 | 6.1, 10.2 | Majeur | Tous les liens externes de la déclaration d’accessibilité doivent annoncer la nouvelle fenêtre. | `pages/accessibilite/index.vue`. | À AUDITER EXHAUSTIVEMENT. | `TODO` |
 | `LEG-01` | § 18.1, p. 64 | 6.1, 10.2 | Majeur | Tous les liens externes des mentions légales doivent annoncer la nouvelle fenêtre. | `pages/mentions-legales/index.vue`. | SEMBLE CORRIGÉ POUR beta.gouv; vérifier tout le fichier et le rendu. | `TODO` |
-| `LEG-02` | § 18.2, p. 65 | 8.9 | Mineur | Supprimer tout paragraphe vide utilisé pour espacer les sections; utiliser CSS. | `pages/mentions-legales/index.vue`. | SEMBLE DÉJÀ CORRIGÉ; vérifier le DOM rendu. | `TODO` |
+| `LEG-02` | § 18.2, p. 65 | 8.9 | Mineur | Supprimer tout paragraphe vide utilisé pour espacer les sections; utiliser CSS. | `pages/mentions-legales/index.vue`. | SEMBLE DÉJÀ CORRIGÉ; vérifier le DOM rendu. | `ALREADY_OK` — source et DOM hydraté de `/mentions-legales` WP0 : aucun paragraphe vide dans le contenu de la page. Le paragraphe vide distinct généré par le footer partagé reste suivi comme écart complémentaire WP1. |
 | `SIT-01` | § 19.1, p. 66 | 8.9 | Mineur | Les messages de situation sans restriction et le conseil d’éco-gestes doivent être de vrais paragraphes. | `components/situation/Header.vue`. | DÉJÀ CORRIGÉ. | `TODO` |
 | `CRISIS-01` | § 20.1, p. 67-68 | 8.9 | Mineur | La description du niveau de crise doit être un paragraphe. | `components/situation/Header.vue`. | DÉJÀ CORRIGÉ. | `TODO` |
 | `CRISIS-02` | § 20.2.1.1, p. 69 | 9.1 | Majeur | Chaque restriction doit avoir un vrai titre de niveau 3 cohérent. | `components/situation/RestrictionCard.vue`. | DÉJÀ/PARTIELLEMENT CORRIGÉ avec `<h3>`; vérifier la hiérarchie autour. | `TODO` |
