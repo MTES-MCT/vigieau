@@ -153,6 +153,13 @@ const niveauGravite = computed(() => {
 
 @media screen and (max-width: 767px) {
   .situation-status-header {
+    &:before {
+      width: 100%;
+      left: 0;
+      -webkit-transform: none;
+      transform: none;
+    }
+
     &__btn-wrapper, &__info-wrapper {
       text-align: center;
     }

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import moment from 'moment';
 import { json2csv } from 'json-2-csv';
 
 const props = defineProps<{
@@ -12,7 +11,6 @@ const props = defineProps<{
 
 const headers = ['Commune', 'Pourcentage', 'Pondération'];
 const rows = ref([]);
-const componentKey = ref(0);
 
 async function downloadCsv() {
   const formatData = rows.value
@@ -28,10 +26,10 @@ async function downloadCsv() {
   });
 
   // Create a CSV file and allow the user to download it
-  let blob = new Blob([csv], { type: 'text/csv' });
-  let url = window.URL.createObjectURL(blob);
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
 
-  let a = document.createElement('a');
+  const a = document.createElement('a');
   a.href = url;
   a.download = `tableau_ponderation_commune_${props.dateDebut}_${props.dateFin}.csv`;
   a.click();
@@ -48,17 +46,17 @@ watch(() => [props.dataCommune], () => {
       c.ponderation,
     ];
   });
-  componentKey.value++;
 }, { immediate: true });
 </script>
 
 <template>
-  <DsfrTable title="Intensité des sécheresses passées"
-             :headers="headers"
-             :rows="rows"
-             :pagination="true"
-             :key="componentKey"
-             class="fr-table--layout-fixed fr-table--no-title" />
+  <AccessibleDataTable
+    table-id="commune-drought-intensity-table"
+    title="Intensité des sécheresses passées"
+    :headers="headers"
+    :rows="rows"
+    fixed-layout
+  />
 
   <div class="text-align-right fr-mt-1w">
     <DsfrButton @click="downloadCsv()">

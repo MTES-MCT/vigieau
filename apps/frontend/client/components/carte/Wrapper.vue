@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Ref } from 'vue';
+import { nextTick, Ref } from 'vue';
 import {
   createLocalDateRollover,
   formatLocalCivilDate,
@@ -11,9 +11,9 @@ defineProps<{
   embedded: any;
 }>();
 
-const tabTitles = [
-  { title: 'Carte', tabId: 'tab-0', panelId: 'tab-content-0' },
-  { title: 'Données', tabId: 'tab-1', panelId: 'tab-content-1' },
+const tabs = [
+  { id: 'map', label: 'Carte' },
+  { id: 'data', label: 'Données' },
 ];
 const selectedTabIndex: Ref<number> = ref(0);
 const dateCarte = ref(formatLocalCivilDate());
@@ -24,6 +24,12 @@ const updateDisplayedPublicationPin = (
   publicationPin: ZonePublicationPin | null,
 ) => {
   displayedPublicationPin.value = publicationPin;
+};
+
+const showDataAlternative = async () => {
+  selectedTabIndex.value = 1;
+  await nextTick();
+  document.getElementById('restrictions-tab-data')?.focus();
 };
 
 onMounted(() => {
@@ -44,24 +50,39 @@ onBeforeUnmount(() => {
       <div class="fr-mb-4w">
         <h2 class="fr-mb-0">Carte des restrictions</h2>
         <p>Arrêtés publiés avant le {{ dateCarte }}</p>
+        <p id="restrictions-map-instructions" class="fr-mb-2w">
+          La carte interactive se déplace avec les flèches et se zoome avec
+          les touches + et −. Appuyez sur Entrée ou Espace pour sélectionner
+          le point situé au centre. Une alternative accessible est disponible
+          sous forme de tableau.
+        </p>
+        <DsfrButton secondary type="button" @click="showDataAlternative">
+          Consulter les données sous forme de tableau
+        </DsfrButton>
       </div>
-      <DsfrTabs :tab-titles="tabTitles" v-model="selectedTabIndex">
-        <DsfrTabContent panel-id="tab-content-0" tab-id="tab-0">
+      <AccessibleTabs
+        v-model="selectedTabIndex"
+        id-prefix="restrictions"
+        label="Présentation des restrictions"
+        :tabs="tabs"
+      >
+        <template #map>
           <div class="wrap-map">
             <CarteMap
               :embedded="embedded"
               :date="dateCarte"
+              accessible-description-id="restrictions-map-instructions"
               @displayedPublicationPin="updateDisplayedPublicationPin"
             />
           </div>
-        </DsfrTabContent>
-        <DsfrTabContent panel-id="tab-content-1" tab-id="tab-1">
+        </template>
+        <template #data>
           <CarteTable
             :date="dateCarte"
             :publicationPin="displayedPublicationPin"
           />
-        </DsfrTabContent>
-      </DsfrTabs>
+        </template>
+      </AccessibleTabs>
     </div>
   </div>
 </template>
@@ -75,7 +96,7 @@ onBeforeUnmount(() => {
     box-shadow: none;
   }
 
-  &__panel {
+  :deep(.fr-tabs__panel) {
     padding: 0;
     z-index: 1;
     overflow: visible;

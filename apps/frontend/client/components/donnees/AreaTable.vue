@@ -13,7 +13,6 @@ const props = defineProps<{
 
 const headers = ['Date', 'Vigilance', 'Alerte', 'Alerte renforcée', 'Crise'];
 const rows = ref([]);
-const componentKey = ref(0);
 
 async function downloadCsv() {
   const formatData = sortByDateDesc(props.dataArea)
@@ -31,10 +30,10 @@ async function downloadCsv() {
   });
 
   // Create a CSV file and allow the user to download it
-  let blob = new Blob([csv], { type: 'text/csv' });
-  let url = window.URL.createObjectURL(blob);
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
 
-  let a = document.createElement('a');
+  const a = document.createElement('a');
   a.href = url;
   a.download = `tableau_surface_${props.territoire}_${props.dateDebut}_${props.dateFin}_${props.typeEau}.csv`;
   a.click();
@@ -53,17 +52,18 @@ watch(() => [props.typeEau, props.dataArea], () => {
       s[props.typeEau].crise + '%',
     ];
   });
-  componentKey.value++;
 }, { immediate: true });
 </script>
 
 <template>
-  <DsfrTable title="Évolution journalière du pourcentage de la surface concernée par des niveaux de gravité"
-             :headers="headers"
-             :rows="rows"
-             :pagination="true"
-             :key="componentKey"
-             class="fr-table--sm fr-table--no-title" />
+  <AccessibleDataTable
+    table-id="area-restrictions-history-table"
+    title="Évolution journalière du pourcentage de la surface concernée par des niveaux de gravité"
+    :headers="headers"
+    :rows="rows"
+    table-class="fr-table--sm"
+    fixed-layout
+  />
 
   <div class="text-align-right fr-mt-1w">
     <DsfrButton @click="downloadCsv()">
@@ -71,16 +71,3 @@ watch(() => [props.typeEau, props.dataArea], () => {
     </DsfrButton>
   </div>
 </template>
-
-<style lang="scss" scoped>
-.fr-table {
-  overflow: auto;
-}
-
-@media screen and (min-width: 768px) {
-  .fr-table > :deep(table) {
-    display: table;
-    table-layout: fixed;
-  }
-}
-</style>

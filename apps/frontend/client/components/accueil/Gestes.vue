@@ -94,4 +94,13 @@ const selectedTagIndex: Ref<number> = ref(0);
     aspect-ratio: auto !important;
   }
 }
+
+@media screen and (max-width: 767px) {
+  .gestes:before {
+    width: 100%;
+    left: 0;
+    -webkit-transform: none;
+    transform: none;
+  }
+}
 </style>

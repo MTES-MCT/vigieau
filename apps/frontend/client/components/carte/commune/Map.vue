@@ -5,6 +5,7 @@ import moment, { Moment } from 'moment';
 import { Ref } from 'vue';
 import api from '../../../api';
 import { useRefDataStore } from '../../../store/refData';
+import { getFrenchMapLocale } from '../../../utils/map-locale';
 
 const props = defineProps<{
   embedded: any,
@@ -68,6 +69,9 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
+    locale: getFrenchMapLocale(
+      'Carte interactive de l’intensité des sécheresses passées',
+    ),
   });
 
 
@@ -643,9 +647,9 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
 
   &-embedded {
     position: absolute;
-    width: calc(100vw + 32px);
-    max-width: calc(100% + 32px);
-    left: -32px;
+    width: 100%;
+    max-width: 100%;
+    left: 0;
     height: calc(100vh - 125px - 12px);
   }
 

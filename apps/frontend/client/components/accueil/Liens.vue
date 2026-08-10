@@ -42,4 +42,13 @@ import liens from '../../data/liens.json'
     z-index: -1;
   }
 }
+
+@media screen and (max-width: 767px) {
+  .liens:before {
+    width: 100%;
+    left: 0;
+    -webkit-transform: none;
+    transform: none;
+  }
+}
 </style>

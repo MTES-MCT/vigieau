@@ -3,8 +3,10 @@ import api from '../../api';
 import type { ZonePublicationPin } from '../../api';
 import utils from '../../utils';
 import { createLatestTaskRunner } from '../../utils/retryable-task';
-import { Ref } from 'vue';
+import type { Ref } from 'vue';
 import { json2csv } from 'json-2-csv';
+
+type DepartmentRow = [string, string, string];
 
 const props = defineProps<{
   date: string;
@@ -15,7 +17,7 @@ const props = defineProps<{
 }>();
 
 const headers = ['N° Département', 'Département', 'Niveau de gravité'];
-const dataResume = [
+const dataResume = reactive([
   {
     label: 'Pas de restrictions',
     niveauGravite: 'pas_de_restrictions',
@@ -41,14 +43,18 @@ const dataResume = [
     niveauGravite: 'crise',
     number: 0,
   },
-];
-const query: Ref<string> = ref('');
-const rows = ref([]);
-const rowsFiltered: Ref<any[]> = ref([]);
-const componentKey = ref(0);
+]);
+const query = ref('');
+const rows: Ref<DepartmentRow[]> = ref([]);
+const rowsFiltered: Ref<DepartmentRow[]> = ref([]);
 const loading = ref(false);
-const departementsData = ref([]);
+const departementsData: Ref<any[]> = ref([]);
+const filterStatus = ref('');
 const dataTaskRunner = createLatestTaskRunner();
+
+const formatDepartmentCount = (count: number): string => {
+  return `${count} département${count === 1 ? '' : 's'}`;
+};
 
 async function loadData() {
   rows.value = [];
@@ -70,51 +76,57 @@ async function loadData() {
       }
     },
     (result) => {
-      dataResume.forEach((r) => (r.number = 0));
+      dataResume.forEach((resume) => (resume.number = 0));
       if ('error' in result || result.response.error.value) {
         departementsData.value = [];
         rows.value = [];
         rowsFiltered.value = [];
+        filterStatus.value = '';
         loading.value = false;
         return;
       }
 
-      const nextRows: any[] = [];
+      const nextRows: DepartmentRow[] = [];
       departementsData.value = result.response.data.value || [];
-      result.response.data.value?.forEach((d: any) => {
-        const dr = dataResume.find(
-          (r) =>
-            r.niveauGravite ===
-            (d.niveauGraviteMax ? d.niveauGraviteMax : 'pas_de_restrictions'),
+      result.response.data.value?.forEach((department: any) => {
+        const resume = dataResume.find(
+          (item) =>
+            item.niveauGravite ===
+            (department.niveauGraviteMax || 'pas_de_restrictions'),
         );
-        nextRows.push([d.code, d.nom, dr ? dr.label : 'Pas de restrictions']);
-        if (dr) dr.number++;
+        nextRows.push([
+          String(department.code),
+          String(department.nom),
+          resume?.label || 'Pas de restrictions',
+        ]);
+        if (resume) resume.number++;
       });
+      query.value = '';
       rows.value = nextRows;
       rowsFiltered.value = [...nextRows];
+      filterStatus.value = `${formatDepartmentCount(nextRows.length)} affiché${nextRows.length === 1 ? '' : 's'}.`;
       loading.value = false;
     },
   );
 }
 
-const classObject = (rank: number | undefined): any => {
+const classObject = (rank: number | undefined): string[] => {
   return [`situation-level-bg-${rank}`];
 };
 
-function checkKeyboardNav($event) {
-  if (['search', 'Enter'].includes($event.key)) {
-    filterDepartments();
-  }
-}
-
 function filterDepartments() {
-  rowsFiltered.value = rows.value.filter((r) => {
-    return (
-      r.findIndex((x) => x.toLowerCase().includes(query.value.toLowerCase())) >=
-      0
-    );
-  });
-  componentKey.value += 1;
+  const normalizedQuery = query.value.trim().toLocaleLowerCase('fr');
+  rowsFiltered.value = normalizedQuery
+    ? rows.value.filter((row) =>
+        row.some((cell) =>
+          cell.toLocaleLowerCase('fr').includes(normalizedQuery),
+        ),
+      )
+    : [...rows.value];
+  const count = rowsFiltered.value.length;
+  filterStatus.value = normalizedQuery
+    ? `${formatDepartmentCount(count)} trouvé${count === 1 ? '' : 's'} pour « ${query.value.trim()} ».`
+    : `${formatDepartmentCount(count)} affiché${count === 1 ? '' : 's'}.`;
 }
 
 async function downloadCsv() {
@@ -130,14 +142,15 @@ async function downloadCsv() {
     expandArrayObjects: true,
   });
 
-  // Create a CSV file and allow the user to download it
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `situation_departement_${props.date}.csv`;
-  document.body.appendChild(a);
-  a.click();
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `situation_departement_${props.date}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
 }
 
 const tableTitle = computed(() => {
@@ -145,8 +158,7 @@ const tableTitle = computed(() => {
 });
 
 const pageTitle = computed(() => {
-  return `Situation de la sécheresse en France (niveau de gravité maximum contasté par
-          département) ${props.filterText ? ' - ' + props.filterText : ''}`;
+  return `Situation de la sécheresse en France (niveau de gravité maximum constaté par département) ${props.filterText ? ' - ' + props.filterText : ''}`;
 });
 
 watch(
@@ -168,59 +180,69 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="carte-table" :class="light ? 'carte-table__light' : ''">
-    <template v-if="rows?.length > 0">
+    <template v-if="rows.length > 0">
       <div class="carte-table-header">
-        <h3 class="fr-mt-2w fr-mb-1w fr-h4">{{ pageTitle }}</h3>
-        <div
-          class="fr-grid-row fr-grid-row--center departement-card-wrapper fr-mb-2w"
-        >
-          <div
+        <h3 class="fr-mt-2w fr-mb-1w fr-h4">
+          {{ pageTitle }}
+        </h3>
+        <ul class="departement-card-list fr-mb-2w">
+          <li
             v-for="resume of dataResume"
             :key="resume.niveauGravite"
-            class="fr-col-lg fr-p-2w fr-m-1w departement-card"
+            class="departement-card"
           >
-            <ul>
-              <li>
-                <DsfrBadge
-                  small
-                  no-icon
-                  :class="
-                    classObject(utils.getRestrictionRank(resume.niveauGravite))
-                  "
-                  :label="resume.label"
-                />
-              </li>
-              <li class="departement-card__number fr-mt-1w">
-                {{ resume.number }} départements
-              </li>
-            </ul>
-          </div>
-        </div>
+            <DsfrBadge
+              small
+              no-icon
+              :class="
+                classObject(utils.getRestrictionRank(resume.niveauGravite))
+              "
+              :label="resume.label"
+            />
+            <span class="departement-card__number fr-mt-1w">
+              {{ formatDepartmentCount(resume.number) }}
+            </span>
+          </li>
+        </ul>
       </div>
+
       <div class="carte-table-body">
-        <h3 v-if="!light" class="fr-pt-2w fr-mb-1w">
-          {{ tableTitle }}
-        </h3>
-        <DsfrSearchBar
-          v-model="query"
+        <form
           v-if="!light"
-          placeholder="Rechercher"
-          large
-          buttonText="Rechercher"
-          title="Rechercher un département"
-          @search="checkKeyboardNav({ key: 'search' })"
-        />
-        <DsfrTable
+          class="department-filter fr-mb-2w"
+          role="search"
+          @submit.prevent="filterDepartments"
+        >
+          <div class="fr-input-group department-filter__field">
+            <label class="fr-label" for="department-filter">
+              Rechercher un département
+            </label>
+            <input
+              id="department-filter"
+              v-model="query"
+              class="fr-input"
+              type="search"
+              autocomplete="off"
+            >
+          </div>
+          <button class="fr-btn department-filter__submit" type="submit">
+            Rechercher un département
+          </button>
+        </form>
+
+        <AccessibleDataTable
+          table-id="departments-table"
           :title="tableTitle"
           :headers="headers"
           :rows="rowsFiltered"
-          :pagination="true"
-          :key="componentKey"
-          class="fr-table--sm fr-table--no-title"
+          :status-prefix="filterStatus"
+          pagination-context="du tableau des départements"
+          table-class="fr-table--sm"
+          fixed-layout
         />
       </div>
 
-      <div class="text-align-right fr-mt-1w">
+      <div class="carte-table__download text-align-right fr-mt-1w">
         <DsfrButton @click="downloadCsv()">
           Télécharger les données (CSV)
         </DsfrButton>
@@ -242,6 +264,9 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .carte-table {
+  max-width: 100%;
+  min-width: 0;
+
   &-header,
   &-body {
     padding: 0 2rem;
@@ -251,13 +276,18 @@ onBeforeUnmount(() => {
     .carte-table {
       &-header,
       &-body {
-        padding: 0rem;
+        padding: 0;
       }
     }
   }
 
   &-body {
+    min-width: 0;
     padding-bottom: 1rem;
+  }
+
+  &__download {
+    max-width: 100%;
   }
 
   .loader {
@@ -265,39 +295,70 @@ onBeforeUnmount(() => {
   }
 }
 
+.departement-card-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+  gap: 1rem;
+  padding: 0;
+  list-style: none;
+}
+
 .departement-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 1rem;
+  border: 1px solid var(--border-default-grey);
   border-radius: 4px;
   background-color: var(--grey-1000-50);
-  border: 1px solid var(--border-default-grey);
 
   &__number {
     color: var(--background-action-high-blue-france);
     font-weight: bold;
   }
+}
 
-  &-wrapper {
-    margin: 0 -0.5rem;
+.department-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+
+  &__field {
+    min-width: min(18rem, 100%);
+    flex: 1 1 18rem;
+    margin-bottom: 0;
   }
 
-  ul {
-    margin: 0;
-    padding: 0;
-  }
-
-  li {
-    padding: 0;
-    list-style-type: none;
+  &__submit {
+    flex: 0 1 auto;
   }
 }
 
-.fr-table {
-  overflow: auto;
-}
+@media screen and (max-width: 767px) {
+  .carte-table {
+    &-header,
+    &-body {
+      padding-right: 1rem;
+      padding-left: 1rem;
+    }
 
-@media screen and (min-width: 768px) {
-  .fr-table > :deep(table) {
-    display: table;
-    table-layout: fixed;
+    &__download {
+      padding-right: 1rem;
+      padding-left: 1rem;
+    }
+
+    &__download :deep(.fr-btn) {
+      max-width: 100%;
+      white-space: normal;
+    }
   }
+
+  .department-filter__submit {
+    width: 100%;
+    justify-content: center;
+  }
+
 }
 </style>

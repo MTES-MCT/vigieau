@@ -64,6 +64,12 @@ onBeforeUnmount(() => {
       >
         <div class="fr-col-12 text-align-center">
           <h1>Suis-je concerné par les restrictions ?</h1>
+          <p id="home-map-instructions">
+            Vous pouvez saisir directement votre adresse dans le formulaire.
+            La carte facultative se déplace avec les flèches et se zoome avec
+            les touches + et −&nbsp;; Entrée ou Espace sélectionne son point
+            central.
+          </p>
         </div>
         <div class="fr-col-lg-7 fr-hidden fr-unhidden-lg wrap-map">
           <CarteMap
@@ -73,6 +79,7 @@ onBeforeUnmount(() => {
             :hideTypeEau="true"
             :typeEau="typeEau"
             :profil="profil"
+            accessible-description-id="home-map-instructions"
             @displayedPublicationPin="updateDesktopPublicationPin"
             @selectPoint="selectPointOnMap($event)"
           />
@@ -95,6 +102,7 @@ onBeforeUnmount(() => {
             :hideDownloadBtn="true"
             :hideTypeEau="true"
             :typeEau="typeEau"
+            accessible-description-id="home-map-instructions"
             class="wrap-map"
             @displayedPublicationPin="updateMobilePublicationPin"
             @selectPoint="selectPointOnMap($event)"

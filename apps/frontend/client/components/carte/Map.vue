@@ -28,6 +28,7 @@ import {
   shouldReplaceZoneLayers,
 } from '../../utils/zone-publication';
 import type { LocalDateRollover } from '../../utils/zone-publication';
+import { getFrenchMapLocale } from '../../utils/map-locale';
 import {
   canRetainDisplayedZoneSource,
   captureDisplayedZonePublicationPin,
@@ -45,6 +46,7 @@ const props = defineProps<{
   hideTypeEau: boolean;
   typeEau: string;
   profil: string;
+  accessibleDescriptionId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -289,6 +291,51 @@ const popup = new maplibregl.Popup({
   closeOnClick: false,
 }).setMaxWidth('300px');
 
+const selectMapPoint = async (
+  mapInstance: maplibregl.Map,
+  point: maplibregl.PointLike,
+  coordinates: maplibregl.LngLat,
+) => {
+  if (!mapInstance.getLayer('zones-data')) {
+    return;
+  }
+
+  const requestId = ++mapPopupRequestId;
+  const features = mapInstance.queryRenderedFeatures(point, {
+    layers: ['zones-data'],
+  });
+  const properties = features.map((feature: any) => feature.properties);
+  zonesSelected.value = properties.map((property: any) => property.id);
+
+  updateContourFilter();
+  renderMapPopup(coordinates, properties);
+  mapInstance.flyTo({
+    center: [
+      coordinates.lng - 0.5 / mapInstance.getZoom(),
+      coordinates.lat - 0.7 / (mapInstance.getZoom() + 5),
+    ],
+    essential: true,
+    speed: 0.2,
+  });
+
+  const [addressResult, geoResult] = await Promise.allSettled([
+    api.searchAddressByLatlon(coordinates.lng, coordinates.lat),
+    api.searchGeoByLatlon(coordinates.lng, coordinates.lat),
+  ]);
+  if (requestId !== mapPopupRequestId) {
+    return;
+  }
+  const address =
+    addressResult.status === 'fulfilled'
+      ? addressResult.value.data.value?.features?.[0]
+      : null;
+  const geo =
+    geoResult.status === 'fulfilled'
+      ? geoResult.value.data.value?.[0]
+      : null;
+  renderMapPopup(coordinates, properties, address, geo);
+};
+
 const mapInitializer = createRetryableInitializer(() => {
   const initialPmtilesUrl = getRequestedZoneSource()?.pmtilesUrl;
   if (
@@ -307,6 +354,9 @@ const mapInitializer = createRetryableInitializer(() => {
     preserveDrawingBuffer: true,
     minZoom: 4,
     maxZoom: 14,
+    locale: getFrenchMapLocale(
+      'Carte interactive des restrictions d’usage de l’eau en France',
+    ),
   });
   map.value = mapInstance;
 
@@ -327,6 +377,24 @@ const mapInitializer = createRetryableInitializer(() => {
   // Add fullscreen control to the map.
   mapInstance.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
 
+  const canvas = mapInstance.getCanvas();
+  if (props.accessibleDescriptionId) {
+    canvas.setAttribute('aria-describedby', props.accessibleDescriptionId);
+  }
+  canvas.addEventListener('keydown', (event) => {
+    if (!['Enter', ' ', 'Spacebar'].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    const coordinates = mapInstance.getCenter();
+    void selectMapPoint(
+      mapInstance,
+      mapInstance.project(coordinates),
+      coordinates,
+    );
+  });
+
   mapInstance.on('load', () => {
     initialMapStyleLoaded = true;
     const layers = mapInstance.getStyle().layers;
@@ -345,40 +413,8 @@ const mapInitializer = createRetryableInitializer(() => {
     void synchronizeMapView();
   });
 
-  mapInstance.on('click', 'departements-overlay', async (e: any) => {
-    const requestId = ++mapPopupRequestId;
-    const features = map.value?.queryRenderedFeatures(e.point, {
-      layers: ['zones-data'],
-    });
-    const coordinates = e.lngLat;
-    const properties = features ? features.map((f: any) => f.properties) : [];
-    zonesSelected.value = properties ? properties.map((p: any) => p.id) : [];
-
-    updateContourFilter();
-    renderMapPopup(coordinates, properties);
-    map.value.flyTo({
-      center: [
-        e.lngLat.lng - 0.5 / map.value.getZoom(),
-        e.lngLat.lat - 0.7 / (map.value.getZoom() + 5),
-      ],
-      essential: true,
-      speed: 0.2,
-    });
-
-    const [addressResult, geoResult] = await Promise.allSettled([
-      api.searchAddressByLatlon(coordinates.lng, coordinates.lat),
-      api.searchGeoByLatlon(coordinates.lng, coordinates.lat),
-    ]);
-    if (requestId !== mapPopupRequestId) {
-      return;
-    }
-    const address =
-      addressResult.status === 'fulfilled'
-        ? addressResult.value.data.value?.features?.[0]
-        : null;
-    const geo =
-      geoResult.status === 'fulfilled' ? geoResult.value.data.value?.[0] : null;
-    renderMapPopup(coordinates, properties, address, geo);
+  mapInstance.on('click', 'departements-overlay', (event: any) => {
+    void selectMapPoint(mapInstance, event.point, event.lngLat);
   });
 
   mapInstance.on('mouseenter', 'zones-data', () => {
@@ -1241,8 +1277,8 @@ watch(
   left: 0;
 
   &-embedded {
-    width: calc(100vw + 32px);
-    left: -32px;
+    width: 100%;
+    left: 0;
     height: calc(100vh - 125px - 12px);
   }
 

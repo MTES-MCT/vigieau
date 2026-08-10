@@ -2,6 +2,7 @@
 import type { Ref } from 'vue';
 import * as maplibregl from 'maplibre-gl';
 import api from '../../api';
+import { getFrenchMapLocale } from '../../utils/map-locale';
 
 const props = defineProps({
   disabled: {
@@ -44,6 +45,9 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
+    locale: getFrenchMapLocale(
+      'Carte interactive de sélection d’un point géographique',
+    ),
   });
 
   // Add zoom and rotation controls to the map.

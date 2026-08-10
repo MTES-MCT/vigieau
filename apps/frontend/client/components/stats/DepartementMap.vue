@@ -2,6 +2,7 @@
 import * as maplibregl from 'maplibre-gl';
 import { Ref } from "vue";
 import utils from "../../utils";
+import { getFrenchMapLocale } from '../../utils/map-locale';
 
 const props = defineProps<{
   stats: any
@@ -27,7 +28,10 @@ onMounted(() => {
   map.value = new maplibregl.Map({
     container: mapContainer.value,
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
-    bounds: initialState
+    bounds: initialState,
+    locale: getFrenchMapLocale(
+      'Carte interactive de la répartition géographique des recherches',
+    ),
   });
 
 
@@ -243,8 +247,8 @@ const updateLayerFilter = () => {
 <style scoped lang="scss">
 .map-wrap {
   position: absolute;
-  width: calc(100vw);
-  max-width: calc(100% - 2px);
+  width: 100%;
+  max-width: 100%;
   height: calc(75vh + 3px);
   left: 1px;
 

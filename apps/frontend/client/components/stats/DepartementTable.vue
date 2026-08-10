@@ -1,65 +1,118 @@
 <script setup lang="ts">
-import { Ref } from "vue/dist/vue";
-import utils from "../../utils";
+import type { Ref } from 'vue';
+import utils from '../../utils';
 
 const props = defineProps<{
-  stats: any
+  stats: any;
 }>();
 
 const headers = ['N° Département', 'Nombre recherches', '% recherches'];
-let rows: any[] = [];
-const query: Ref<string> = ref('');
-const rowsFiltered: Ref<any[]> = ref([]);
-const componentKey = ref(0);
-const sumSearches = Object.values(props.stats.departementRepartition).reduce((a: number, b: number) => {
-  return a + b;
-});
-Object.keys(props.stats.departementRepartition).forEach((d: any) => {
-  rows.push([d, `${utils.numberWithSpaces(props.stats.departementRepartition[d])}`, `${(props.stats.departementRepartition[d] * 100 / sumSearches).toFixed(2)}%`]);
-});
-rows = rows.sort(new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'}).compare)
+const query = ref('');
+const rowsFiltered: Ref<string[][]> = ref([]);
+const filterStatus = ref('');
+const sumSearches = Object.values(
+  props.stats.departementRepartition,
+).reduce((total: number, count: unknown) => total + Number(count), 0);
+const rows = Object.keys(props.stats.departementRepartition)
+  .map((departmentCode): string[] => {
+    const searchCount = props.stats.departementRepartition[departmentCode];
 
-function checkKeyboardNav($event) {
-  if (['search', 'Enter'].includes($event.key)) {
-    filterDepartments();
-  }
-}
+    return [
+      departmentCode,
+      utils.numberWithSpaces(searchCount),
+      `${((searchCount * 100) / sumSearches).toFixed(2)}%`,
+    ];
+  })
+  .sort((firstRow, secondRow) =>
+    new Intl.Collator(undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    }).compare(firstRow[0], secondRow[0]),
+  );
+
+const formatDepartmentCount = (count: number): string => {
+  return `${count} département${count === 1 ? '' : 's'}`;
+};
 
 function filterDepartments() {
-  rowsFiltered.value = rows.filter(r => {
-    return r.findIndex(x => x.toLowerCase().includes(query.value.toLowerCase())) >= 0;
-  });
-  componentKey.value += 1;
+  const normalizedQuery = query.value.trim().toLocaleLowerCase('fr');
+  rowsFiltered.value = normalizedQuery
+    ? rows.filter((row) =>
+        row.some((cell) =>
+          cell.toLocaleLowerCase('fr').includes(normalizedQuery),
+        ),
+      )
+    : [...rows];
+
+  const count = rowsFiltered.value.length;
+  filterStatus.value = normalizedQuery
+    ? `${formatDepartmentCount(count)} trouvé${count === 1 ? '' : 's'} pour « ${query.value.trim()} ».`
+    : `${formatDepartmentCount(count)} affiché${count === 1 ? '' : 's'}.`;
 }
 
-filterDepartments()
+filterDepartments();
 </script>
 
 <template>
-  <template v-if="rows?.length > 0">
-    <DsfrSearchBar v-model="query"
-                   placeholder="Rechercher"
-                   large
-                   buttonText="Rechercher"
-                   ref="input"
-                   @search="checkKeyboardNav({key: 'search'})"/>
-    <DsfrTable title=""
-               :headers="headers"
-               :rows="rowsFiltered"
-               :pagination="true"
-               :key="componentKey"
-               class="fr-table--layout-fixed"/>
+  <template v-if="rows.length > 0">
+    <form
+      class="department-stats-filter fr-mb-2w"
+      role="search"
+      @submit.prevent="filterDepartments"
+    >
+      <div class="fr-input-group department-stats-filter__field">
+        <label class="fr-label" for="department-stats-filter">
+          Rechercher un département dans les statistiques
+        </label>
+        <input
+          id="department-stats-filter"
+          v-model="query"
+          class="fr-input"
+          type="search"
+          autocomplete="off"
+        >
+      </div>
+      <button class="fr-btn department-stats-filter__submit" type="submit">
+        Rechercher un département dans les statistiques
+      </button>
+    </form>
+
+    <AccessibleDataTable
+      table-id="department-search-statistics-table"
+      title="Répartition des recherches par département"
+      :headers="headers"
+      :rows="rowsFiltered"
+      :status-prefix="filterStatus"
+      pagination-context="du tableau des statistiques par département"
+      fixed-layout
+    />
   </template>
   <template v-else>
-    <p class="fr-mt-4w">Une erreur est survenue dans la récupération des données. Veuillez ré-essayer dans quelques
-      instants.</p>
+    <p class="fr-mt-4w">
+      Une erreur est survenue dans la récupération des données. Veuillez
+      ré-essayer dans quelques instants.
+    </p>
   </template>
 </template>
 
 <style scoped lang="scss">
-.fr-search-bar {
-  :deep(.fr-btn) {
-    margin-top: 0;
+.department-stats-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+
+  &__field {
+    min-width: min(18rem, 100%);
+    flex: 1 1 18rem;
+    margin-bottom: 0;
+  }
+}
+
+@media screen and (max-width: 767px) {
+  .department-stats-filter__submit {
+    width: 100%;
+    justify-content: center;
   }
 }
 </style>
