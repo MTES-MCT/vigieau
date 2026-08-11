@@ -16,6 +16,10 @@ type SnapshotFinalizer = {
     preserveBootstrapBarrier: boolean,
     sourceRevision?: string,
     historicComputeEpoch?: string,
+    certificationOptions?: {
+      requireNationalCoverage?: boolean;
+      publishCurrentDate?: boolean;
+    },
   ): Promise<void>;
 };
 
@@ -255,6 +259,197 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     expect(await readStatus()).toBe('completed');
   });
 
+  it('atomically publishes a fully covered legacy current snapshot without clearing the dirty range', async () => {
+    const snapshotDate = '2026-08-11';
+    await queryRunner.query(`
+      CREATE TEMP TABLE "config" (
+        "id" integer PRIMARY KEY,
+        "historicComputeEpoch" bigint NOT NULL
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "zone_publication_source_state" (
+        "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "departement" (
+        "id" integer PRIMARY KEY,
+        "code" varchar NOT NULL UNIQUE
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_departement" (
+        "id" serial PRIMARY KEY,
+        "departementId" integer NOT NULL UNIQUE,
+        "restrictions" jsonb
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic" (
+        "id" serial PRIMARY KEY,
+        "date" date NOT NULL UNIQUE,
+        "departementSituation" json
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_commune_snapshot" (
+        "snapshotDate" date NOT NULL,
+        "scope" varchar NOT NULL,
+        "status" varchar NOT NULL,
+        "processedCommuneCount" integer NOT NULL DEFAULT 0,
+        "expectedCommuneCount" integer NOT NULL DEFAULT 0,
+        "sourceRevision" bigint,
+        "completedAt" timestamptz,
+        "lastError" text,
+        "updatedAt" timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY ("snapshotDate", "scope")
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_publication_state" (
+        "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL,
+        "currentPublishedDate" date,
+        "historicPublishedThrough" date,
+        "historicDirtyFrom" date,
+        "historicDirtyThrough" date,
+        "updatedAt" timestamptz NOT NULL DEFAULT now()
+      ) ON COMMIT DROP;
+
+      INSERT INTO "config" VALUES (1, 9);
+      INSERT INTO "zone_publication_source_state" VALUES (1, 42);
+      INSERT INTO "departement" ("id", "code")
+      SELECT value, lpad(value::text, 3, '0')
+      FROM generate_series(1, 101) value;
+      INSERT INTO "statistic_departement" (
+        "departementId", "restrictions"
+      )
+      SELECT
+        "id",
+        jsonb_build_array(jsonb_build_object('date', '${snapshotDate}'))
+      FROM "departement";
+      INSERT INTO "statistic" ("date", "departementSituation")
+      SELECT
+        date '${snapshotDate}',
+        jsonb_object_agg(
+          "code",
+          jsonb_build_object('max', NULL, 'sup', NULL, 'sou', NULL, 'aep', NULL)
+        )::json
+      FROM "departement";
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "expectedCommuneCount",
+        "processedCommuneCount", "sourceRevision"
+      ) VALUES ('${snapshotDate}', 'national', 'running', 34943, 34943, 42);
+      INSERT INTO "statistic_publication_state" VALUES (
+        1, 7, date '2026-08-05', date '2025-05-12',
+        date '2025-05-13', date '2026-08-10', now()
+      );
+    `);
+
+    const certify = () =>
+      service.markSnapshotCompleted(
+        queryRunner,
+        snapshotDate,
+        'national',
+        34943,
+        false,
+        false,
+        true,
+        '42',
+        '9',
+        { requireNationalCoverage: true, publishCurrentDate: true },
+      );
+    const readState = async () => {
+      const [state] = await queryRunner.query(`
+        SELECT
+          "revision"::text AS "revision",
+          "currentPublishedDate"::text AS "currentPublishedDate",
+          "historicPublishedThrough"::text AS "historicPublishedThrough",
+          "historicDirtyFrom"::text AS "historicDirtyFrom",
+          "historicDirtyThrough"::text AS "historicDirtyThrough"
+        FROM "statistic_publication_state"
+        WHERE "id" = 1
+      `);
+      return state;
+    };
+
+    await queryRunner.query(`
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "expectedCommuneCount",
+        "processedCommuneCount", "sourceRevision"
+      ) VALUES (
+        '${snapshotDate}', 'departements:65', 'partial', 469, 469, 42
+      );
+      CREATE OR REPLACE FUNCTION pg_temp.fail_scoped_snapshot_completion()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF OLD."scope" = 'departements:65'
+          AND NEW."status" = 'completed' THEN
+          RAISE EXCEPTION 'forced daily snapshot finalization failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER fail_scoped_snapshot_completion
+      BEFORE UPDATE ON "statistic_commune_snapshot"
+      FOR EACH ROW
+      EXECUTE FUNCTION pg_temp.fail_scoped_snapshot_completion();
+    `);
+    await queryRunner.startTransaction();
+    await expect(certify()).rejects.toThrow(
+      'forced daily snapshot finalization failure',
+    );
+    await queryRunner.rollbackTransaction();
+    expect(await readState()).toEqual({
+      revision: '7',
+      currentPublishedDate: '2026-08-05',
+      historicPublishedThrough: '2025-05-12',
+      historicDirtyFrom: '2025-05-13',
+      historicDirtyThrough: '2026-08-10',
+    });
+    expect(
+      await queryRunner.query(`
+        SELECT "scope", "status"
+        FROM "statistic_commune_snapshot"
+        WHERE "snapshotDate" = date '${snapshotDate}'
+        ORDER BY "scope"
+      `),
+    ).toEqual([
+      { scope: 'departements:65', status: 'partial' },
+      { scope: 'national', status: 'running' },
+    ]);
+    await queryRunner.query(`
+      DROP TRIGGER fail_scoped_snapshot_completion
+      ON "statistic_commune_snapshot";
+      DELETE FROM "statistic_commune_snapshot"
+      WHERE "scope" = 'departements:65';
+    `);
+
+    await expect(certify()).resolves.toBeUndefined();
+    expect(await readState()).toEqual({
+      revision: '8',
+      currentPublishedDate: snapshotDate,
+      historicPublishedThrough: '2025-05-12',
+      historicDirtyFrom: '2025-05-13',
+      historicDirtyThrough: '2026-08-10',
+    });
+
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "status" = 'running', "completedAt" = NULL
+      WHERE "snapshotDate" = date '${snapshotDate}'
+        AND "scope" = 'national'
+    `);
+    await expect(certify()).resolves.toBeUndefined();
+    expect((await readState()).revision).toBe('8');
+
+    await queryRunner.query(`
+      UPDATE "statistic_departement"
+      SET "restrictions" = '[]'::jsonb
+      WHERE "departementId" = 101;
+      UPDATE "statistic_commune_snapshot"
+      SET "status" = 'running', "completedAt" = NULL
+      WHERE "snapshotDate" = date '${snapshotDate}'
+        AND "scope" = 'national'
+    `);
+    await expect(certify()).rejects.toThrow(
+      'Couverture statistique departementale incomplete',
+    );
+    expect((await readState()).revision).toBe('8');
+  });
+
   it('compares export bounds as PostgreSQL dates', async () => {
     await queryRunner.query(`
       CREATE TEMP TABLE "statistic_commune_snapshot" (
@@ -376,8 +571,8 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       `);
 
     const date = '2025-07-13';
-    const previousRestriction = {
-      date: '2025-07-12',
+    const followingRestriction = {
+      date: '2025-07-14',
       SOU: null,
       SUP: 'vigilance' as const,
       AEP: null,
@@ -393,7 +588,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
           INSERT INTO "statistic_commune" ("communeId", "restrictions")
           VALUES (1, $1::jsonb)
         `,
-      [JSON.stringify([previousRestriction])],
+      [JSON.stringify([followingRestriction])],
     );
     await queryRunner.query(
       `
@@ -433,7 +628,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
 
     await persist(restriction);
     const appended = await readStatistic();
-    expect(appended.restrictions).toEqual([previousRestriction, restriction]);
+    expect(appended.restrictions).toEqual([restriction, followingRestriction]);
 
     await persist(restriction);
     const unchanged = await readStatistic();
@@ -445,7 +640,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         INSERT INTO "statistic_commune" ("communeId", "restrictions")
         VALUES (2, $1::jsonb)
       `,
-      [JSON.stringify([previousRestriction])],
+      [JSON.stringify([followingRestriction])],
     );
     const secondBeforeMixedBatch = await readStatistic(2);
     await persistBatch([
@@ -457,8 +652,8 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     expect(firstAfterMixedBatch.ctid).toBe(unchanged.ctid);
     expect(secondAfterMixedBatch.ctid).not.toBe(secondBeforeMixedBatch.ctid);
     expect(secondAfterMixedBatch.restrictions).toEqual([
-      previousRestriction,
       restriction,
+      followingRestriction,
     ]);
 
     const replacement = {
@@ -468,10 +663,10 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     await persist(replacement);
     const replaced = await readStatistic();
     expect(replaced.ctid).not.toBe(unchanged.ctid);
-    expect(replaced.restrictions).toEqual([previousRestriction, replacement]);
+    expect(replaced.restrictions).toEqual([replacement, followingRestriction]);
 
     const nextRestriction = {
-      date: '2025-07-14',
+      date: '2025-07-15',
       SOU: null,
       SUP: null,
       AEP: 'vigilance' as const,
@@ -484,7 +679,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         `,
       [
         JSON.stringify([
-          previousRestriction,
+          followingRestriction,
           replacement,
           restriction,
           nextRestriction,
@@ -495,8 +690,8 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     await persist(replacement);
     const normalized = await readStatistic();
     expect(normalized.restrictions).toEqual([
-      previousRestriction,
       replacement,
+      followingRestriction,
       nextRestriction,
     ]);
     expect(
@@ -695,7 +890,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       INSERT INTO "departement" VALUES (1, '65');
       INSERT INTO "commune" VALUES (1, 1);
       INSERT INTO "statistic_commune" (
-        "id", "communeId", "restrictions"
+        "id", "communeId", "restrictions", "restrictionsByMonth"
       ) VALUES (
         1,
         1,
@@ -703,6 +898,10 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
           {"date":"9998-02-01","SOU":"vigilance","SUP":null,"AEP":null},
           {"date":"9998-02-02","SOU":"crise","SUP":null,"AEP":null},
           {"date":"9998-02-03","SOU":"alerte","SUP":null,"AEP":null}
+        ]'::jsonb,
+        '[
+          {"date":"9998-03","ponderation":3},
+          {"date":"9998-01","ponderation":1}
         ]'::jsonb
       );
       INSERT INTO "statistic_commune_snapshot" (
@@ -738,6 +937,16 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
 
     await expect(computeMonth()).resolves.toBeUndefined();
     await expect(readWeight()).resolves.toBe('2.5');
+    await expect(
+      queryRunner.query(`
+        SELECT jsonb_path_query_array(
+          "restrictionsByMonth",
+          '$[*].date'
+        ) AS dates
+        FROM "statistic_commune"
+        WHERE "id" = 1
+      `),
+    ).resolves.toEqual([{ dates: ['9998-01', '9998-02', '9998-03'] }]);
 
     await queryRunner.query(`
       INSERT INTO "statistic_commune_snapshot" (

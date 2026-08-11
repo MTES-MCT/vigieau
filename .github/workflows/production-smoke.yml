@@ -13,6 +13,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  statistics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify statistics smoke deadline policy
+        run: npm run test:smoke-statistics
+      - name: Public statistics consistency
+        run: node scripts/smoke-statistics.mjs
+
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20

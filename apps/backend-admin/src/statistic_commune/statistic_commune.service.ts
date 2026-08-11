@@ -100,8 +100,15 @@ interface StatisticSnapshotHooks {
   beforeCertification?: () => Promise<void>;
   deferCertificationUntilPublication?: boolean;
   preserveBootstrapBarrier?: boolean;
+  requireNationalCoverage?: boolean;
+  publishCurrentDate?: boolean;
   sourceRevision?: string;
   historicComputeEpoch?: string;
+}
+
+interface StatisticSnapshotCertificationOptions {
+  requireNationalCoverage?: boolean;
+  publishCurrentDate?: boolean;
 }
 
 export interface EmptyHistoricStatisticDay {
@@ -353,6 +360,10 @@ export class StatisticCommuneService {
         hooks?.preserveBootstrapBarrier === true,
         hooks?.sourceRevision,
         hooks?.historicComputeEpoch,
+        {
+          requireNationalCoverage: hooks?.requireNationalCoverage === true,
+          publishCurrentDate: hooks?.publishCurrentDate === true,
+        },
       );
     } catch (error) {
       if (snapshotStarted) {
@@ -845,37 +856,63 @@ export class StatisticCommuneService {
                 COALESCE(statistic."restrictions", '[]'::jsonb)
               ) WITH ORDINALITY AS item(value, ordinality)
             ) existing
-          ), updated AS (
-            UPDATE "statistic_commune" statistic
-            SET "restrictions" =
-              COALESCE(
-                (
-                  SELECT jsonb_agg(
+          ), candidate AS MATERIALIZED (
+            SELECT
+              matched.id,
+              normalized."nextRestrictions"
+            FROM matched
+            CROSS JOIN LATERAL (
+              SELECT COALESCE(
+                jsonb_agg(
+                  item.value
+                  ORDER BY
                     CASE
-                      WHEN item.ordinality = matched."firstDateOrdinality"
-                        THEN matched.restriction
-                      ELSE item.value
-                    END
-                    ORDER BY item.ordinality
-                  )
-                  FROM jsonb_array_elements(
-                    COALESCE(matched."restrictions", '[]'::jsonb)
-                  ) WITH ORDINALITY AS item(value, ordinality)
-                  WHERE item.value ->> 'date' IS DISTINCT FROM $2
-                    OR item.ordinality = matched."firstDateOrdinality"
+                      WHEN item.value ->> 'date'
+                        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
+                      ELSE 1
+                    END,
+                    CASE
+                      WHEN item.value ->> 'date'
+                        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                        THEN item.value ->> 'date'
+                      ELSE NULL
+                    END,
+                    item.phase,
+                    item.ordinality
                 ),
                 '[]'::jsonb
-              ) || CASE
-                WHEN matched."dateCount" = 0
-                THEN jsonb_build_array(matched.restriction)
-                ELSE '[]'::jsonb
-              END
-            FROM matched
-            WHERE statistic.id = matched.id
-              AND NOT (
-                matched."dateCount" = 1
-                AND matched."identicalCount" = 1
-              )
+              ) AS "nextRestrictions"
+              FROM (
+                SELECT
+                  CASE
+                    WHEN existing.ordinality = matched."firstDateOrdinality"
+                      THEN matched.restriction
+                    ELSE existing.value
+                  END AS value,
+                  0 AS phase,
+                  existing.ordinality
+                FROM jsonb_array_elements(
+                  COALESCE(matched."restrictions", '[]'::jsonb)
+                ) WITH ORDINALITY AS existing(value, ordinality)
+                WHERE existing.value ->> 'date' IS DISTINCT FROM $2
+                  OR existing.ordinality = matched."firstDateOrdinality"
+                UNION ALL
+                SELECT
+                  matched.restriction,
+                  1 AS phase,
+                  1::bigint AS ordinality
+                WHERE matched."dateCount" = 0
+              ) item
+            ) normalized
+            WHERE NOT (
+              matched."dateCount" = 1
+              AND matched."identicalCount" = 1
+            )
+          ), updated AS (
+            UPDATE "statistic_commune" statistic
+            SET "restrictions" = candidate."nextRestrictions"
+            FROM candidate
+            WHERE statistic.id = candidate.id
             RETURNING statistic.id
           )
           SELECT
@@ -1217,6 +1254,7 @@ export class StatisticCommuneService {
         false,
         options.sourceRevision,
         options.historicComputeEpoch,
+        { requireNationalCoverage: true },
       );
       await queryRunner.commitTransaction();
       transactionStarted = false;
@@ -1408,6 +1446,7 @@ export class StatisticCommuneService {
     preserveBootstrapBarrier: boolean,
     sourceRevision?: string,
     historicComputeEpoch?: string,
+    certificationOptions: StatisticSnapshotCertificationOptions = {},
   ): Promise<void> {
     if (deferCertificationUntilPublication && snapshotScope !== 'national') {
       throw new Error(
@@ -1427,9 +1466,144 @@ export class StatisticCommuneService {
       throw new Error('Invalid statistic snapshot certification context');
     }
     const guardedCertification = sourceRevision !== undefined;
-    const [result] = await queryRunner.query(
-      guardedCertification
-        ? `
+    const requireNationalCoverage =
+      certificationOptions.requireNationalCoverage === true;
+    const publishCurrentDate = certificationOptions.publishCurrentDate === true;
+    if (
+      (requireNationalCoverage || publishCurrentDate) &&
+      snapshotScope !== 'national'
+    ) {
+      throw new Error(
+        'Seul un snapshot national peut etre certifie avec une couverture nationale',
+      );
+    }
+    if (
+      (requireNationalCoverage || publishCurrentDate) &&
+      (!guardedCertification || historicComputeEpoch === undefined)
+    ) {
+      throw new Error(
+        'La certification nationale exige une revision source et un epoch historique',
+      );
+    }
+
+    const coverageCte = requireNationalCoverage
+      ? `,
+        national_coverage AS MATERIALIZED (
+          SELECT
+            (SELECT COUNT(*)::integer FROM "departement")
+              AS "expectedDepartementCount",
+            (
+              SELECT COUNT(*)::integer
+              FROM "departement" departement
+              JOIN "statistic_departement" statistic_departement
+                ON statistic_departement."departementId" = departement."id"
+              WHERE (
+                SELECT COUNT(*)
+                FROM jsonb_array_elements(
+                  COALESCE(
+                    statistic_departement."restrictions",
+                    '[]'::jsonb
+                  )
+                ) AS restriction(value)
+                WHERE restriction.value ->> 'date' = $1::text
+              ) = 1
+            ) AS "departementRestrictionCount",
+            (
+              SELECT COUNT(*)::integer
+              FROM "departement" departement
+              WHERE COALESCE(
+                (
+                  SELECT statistic."departementSituation"::jsonb
+                  FROM "statistic" statistic
+                  WHERE statistic."date" = $1::date
+                ),
+                '{}'::jsonb
+              ) ? departement."code"
+            ) AS "departementSituationCount",
+            (
+              SELECT COUNT(*)::integer
+              FROM jsonb_object_keys(
+                COALESCE(
+                  (
+                    SELECT statistic."departementSituation"::jsonb
+                    FROM "statistic" statistic
+                    WHERE statistic."date" = $1::date
+                  ),
+                  '{}'::jsonb
+                )
+              ) AS situation_key
+            ) AS "departementSituationKeyCount"
+        )`
+      : '';
+    const publicationContextCte = publishCurrentDate
+      ? `,
+        publication_context AS MATERIALIZED (
+          SELECT statistic_state."id"
+          FROM "statistic_publication_state" statistic_state
+          WHERE statistic_state."id" = 1
+            AND (
+              statistic_state."currentPublishedDate" IS NULL
+              OR statistic_state."currentPublishedDate" <= $1::date
+            )
+          FOR UPDATE OF statistic_state
+        )`
+      : '';
+    const coveragePredicate = requireNationalCoverage
+      ? `
+            AND EXISTS (
+              SELECT 1
+              FROM national_coverage coverage
+              WHERE coverage."expectedDepartementCount" = 101
+                AND coverage."departementRestrictionCount" = 101
+                AND coverage."departementSituationCount" = 101
+                AND coverage."departementSituationKeyCount" = 101
+            )`
+      : '';
+    const publicationPredicate = publishCurrentDate
+      ? `
+            AND EXISTS (SELECT 1 FROM publication_context)`
+      : '';
+    const publishedStateCte = publishCurrentDate
+      ? `,
+        published_state AS (
+          UPDATE "statistic_publication_state" statistic_state
+          SET "revision" = statistic_state."revision" + CASE
+                WHEN statistic_state."currentPublishedDate"
+                    IS DISTINCT FROM $1::date THEN 1
+                ELSE 0
+              END,
+              "currentPublishedDate" = $1::date,
+              "updatedAt" = now()
+          FROM completed_snapshot
+          WHERE statistic_state."id" = 1
+            AND EXISTS (SELECT 1 FROM publication_context)
+          RETURNING statistic_state."revision"
+        )`
+      : '';
+    const resultProjection = `
+          (SELECT COUNT(*)::integer FROM completed_snapshot) AS affected${
+            publishCurrentDate
+              ? ', (SELECT COUNT(*)::integer FROM published_state) AS "publishedStateCount"'
+              : ''
+          }${
+            requireNationalCoverage
+              ? `,
+          coverage."expectedDepartementCount",
+          coverage."departementRestrictionCount",
+          coverage."departementSituationCount",
+          coverage."departementSituationKeyCount"`
+              : ''
+          }`;
+    const ownsCertificationTransaction = !queryRunner.isTransactionActive;
+    let certificationTransactionStarted = false;
+    try {
+      if (ownsCertificationTransaction) {
+        await queryRunner.startTransaction();
+        certificationTransactionStarted = true;
+      }
+      const [result] = await queryRunner.query(
+        guardedCertification
+          ? `
         WITH current_context AS MATERIALIZED (
           SELECT
             source_state."revision" AS "sourceRevision",
@@ -1439,7 +1613,7 @@ export class StatisticCommuneService {
           WHERE source_state."id" = 1
             AND config."id" = 1
           FOR SHARE OF source_state, config
-        ),
+        )${coverageCte}${publicationContextCte},
         completed_snapshot AS (
           UPDATE "statistic_commune_snapshot" snapshot
           SET "status" = $3::varchar,
@@ -1451,7 +1625,7 @@ export class StatisticCommuneService {
               "lastError" = NULL,
               "updatedAt" = now()
           FROM current_context
-          WHERE snapshot."snapshotDate" = $1
+          WHERE snapshot."snapshotDate" = $1::date
             AND snapshot."scope" = $2
             AND snapshot."status" = 'running'
             AND snapshot."expectedCommuneCount" = $4
@@ -1460,12 +1634,13 @@ export class StatisticCommuneService {
             AND (
               $6::bigint IS NULL
               OR current_context."historicComputeEpoch" = $6::bigint
-            )
+            )${coveragePredicate}${publicationPredicate}
           RETURNING 1
-        )
-        SELECT COUNT(*)::integer AS affected FROM completed_snapshot
+        )${publishedStateCte}
+        SELECT ${resultProjection}
+        ${requireNationalCoverage ? 'FROM national_coverage coverage' : ''}
       `
-        : `
+          : `
         WITH completed_snapshot AS (
           UPDATE "statistic_commune_snapshot"
           SET "status" = $3::varchar,
@@ -1484,25 +1659,52 @@ export class StatisticCommuneService {
         )
         SELECT COUNT(*)::integer AS affected FROM completed_snapshot
       `,
-      guardedCertification
-        ? [
-            snapshotDate,
-            snapshotScope,
-            completedStatus,
-            processedCommuneCount,
-            sourceRevision,
-            historicComputeEpoch ?? null,
-          ]
-        : [snapshotDate, snapshotScope, completedStatus, processedCommuneCount],
-    );
-    if (Number(result?.affected ?? 0) !== 1) {
-      throw new Error(
-        `Le snapshot communal ${snapshotDate} ne couvre pas toutes les communes attendues`,
+        guardedCertification
+          ? [
+              snapshotDate,
+              snapshotScope,
+              completedStatus,
+              processedCommuneCount,
+              sourceRevision,
+              historicComputeEpoch ?? null,
+            ]
+          : [
+              snapshotDate,
+              snapshotScope,
+              completedStatus,
+              processedCommuneCount,
+            ],
       );
-    }
-    if (snapshotScope === 'national' && !deferCertificationUntilPublication) {
-      await queryRunner.query(
-        `
+      if (
+        requireNationalCoverage &&
+        (Number(result?.expectedDepartementCount ?? 0) !== 101 ||
+          Number(result?.departementRestrictionCount ?? 0) !== 101 ||
+          Number(result?.departementSituationCount ?? 0) !== 101 ||
+          Number(result?.departementSituationKeyCount ?? 0) !== 101)
+      ) {
+        throw new Error(
+          `Couverture statistique departementale incomplete pour ${snapshotDate}: ` +
+            `${Number(result?.departementRestrictionCount ?? 0)}/101 restrictions, ` +
+            `${Number(result?.departementSituationCount ?? 0)}/101 situations, ` +
+            `${Number(result?.departementSituationKeyCount ?? 0)}/101 cles`,
+        );
+      }
+      if (Number(result?.affected ?? 0) !== 1) {
+        throw new Error(
+          `Le snapshot communal ${snapshotDate} ne couvre pas toutes les communes attendues`,
+        );
+      }
+      if (
+        publishCurrentDate &&
+        Number(result?.publishedStateCount ?? 0) !== 1
+      ) {
+        throw new Error(
+          `La publication statistique courante ${snapshotDate} n'a pas ete certifiee`,
+        );
+      }
+      if (snapshotScope === 'national' && !deferCertificationUntilPublication) {
+        await queryRunner.query(
+          `
           UPDATE "statistic_commune_snapshot"
           SET "status" = 'completed',
               "completedAt" = now(),
@@ -1510,16 +1712,33 @@ export class StatisticCommuneService {
               "updatedAt" = now()
           WHERE "snapshotDate" = $1
         `,
-        [snapshotDate],
-      );
-      if (!preserveBootstrapBarrier) {
-        await queryRunner.query(
-          `
+          [snapshotDate],
+        );
+        if (!preserveBootstrapBarrier) {
+          await queryRunner.query(
+            `
             DELETE FROM "statistic_commune_snapshot"
             WHERE "scope" = 'bootstrap'
           `,
-        );
+          );
+        }
       }
+      if (ownsCertificationTransaction) {
+        await queryRunner.commitTransaction();
+        certificationTransactionStarted = false;
+      }
+    } catch (error) {
+      if (certificationTransactionStarted) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (rollbackError) {
+          this.logger.error(
+            'ERREUR LORS DU ROLLBACK DE LA CERTIFICATION DU SNAPSHOT COMMUNAL',
+            rollbackError,
+          );
+        }
+      }
+      throw error;
     }
   }
 
@@ -1779,40 +1998,69 @@ export class StatisticCommuneService {
           ), updated AS (
             UPDATE "statistic_commune" statistic
             SET "restrictionsByMonth" =
-              COALESCE(
-                (
-                  SELECT jsonb_agg(
-                    CASE
-                      WHEN item.value ->> 'date' = $2
-                        THEN jsonb_build_object(
-                          'date', $2::text,
-                          'ponderation', monthly.ponderation
+              (
+                SELECT COALESCE(
+                  jsonb_agg(
+                    sorted.value
+                    ORDER BY
+                      CASE
+                        WHEN sorted.value ->> 'date'
+                          ~ '^[0-9]{4}-[0-9]{2}$' THEN 0
+                        ELSE 1
+                      END,
+                      CASE
+                        WHEN sorted.value ->> 'date'
+                          ~ '^[0-9]{4}-[0-9]{2}$'
+                          THEN sorted.value ->> 'date'
+                        ELSE NULL
+                      END,
+                      sorted.ordinality
+                  ),
+                  '[]'::jsonb
+                )
+                FROM jsonb_array_elements(
+                  COALESCE(
+                    (
+                      SELECT jsonb_agg(
+                        CASE
+                          WHEN item.value ->> 'date' = $2
+                            THEN jsonb_build_object(
+                              'date', $2::text,
+                              'ponderation', monthly.ponderation
+                            )
+                          ELSE item.value
+                        END
+                        ORDER BY item.ordinality
+                      )
+                      FROM jsonb_array_elements(
+                        COALESCE(
+                          statistic."restrictionsByMonth",
+                          '[]'::jsonb
                         )
-                      ELSE item.value
-                    END
-                    ORDER BY item.ordinality
-                  )
-                  FROM jsonb_array_elements(
-                    COALESCE(statistic."restrictionsByMonth", '[]'::jsonb)
-                  ) WITH ORDINALITY AS item(value, ordinality)
-                ),
-                '[]'::jsonb
-              ) || CASE
-                WHEN NOT EXISTS (
-                  SELECT 1
-                  FROM jsonb_array_elements(
-                    COALESCE(statistic."restrictionsByMonth", '[]'::jsonb)
-                  ) AS existing(value)
-                  WHERE existing.value ->> 'date' = $2
-                )
-                THEN jsonb_build_array(
-                  jsonb_build_object(
-                    'date', $2::text,
-                    'ponderation', monthly.ponderation
-                  )
-                )
-                ELSE '[]'::jsonb
-              END
+                      ) WITH ORDINALITY AS item(value, ordinality)
+                    ),
+                    '[]'::jsonb
+                  ) || CASE
+                    WHEN NOT EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(
+                        COALESCE(
+                          statistic."restrictionsByMonth",
+                          '[]'::jsonb
+                        )
+                      ) AS existing(value)
+                      WHERE existing.value ->> 'date' = $2
+                    )
+                    THEN jsonb_build_array(
+                      jsonb_build_object(
+                        'date', $2::text,
+                        'ponderation', monthly.ponderation
+                      )
+                    )
+                    ELSE '[]'::jsonb
+                  END
+                ) WITH ORDINALITY AS sorted(value, ordinality)
+              )
             FROM monthly
             WHERE statistic.id = monthly.id
             RETURNING statistic.id
@@ -1852,14 +2100,26 @@ export class StatisticCommuneService {
       .update()
       .set({
         restrictions: () => `
-              (
-        SELECT jsonb_agg(r)
-    FROM (
-      SELECT r
-      FROM jsonb_array_elements(restrictions) AS r
-      ORDER BY (r->>'date')::date
-    ) as sorted
-              )`,
+          (
+            SELECT jsonb_agg(
+              item.value
+              ORDER BY
+                CASE
+                  WHEN item.value ->> 'date'
+                    ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
+                  ELSE 1
+                END,
+                CASE
+                  WHEN item.value ->> 'date'
+                    ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                    THEN item.value ->> 'date'
+                  ELSE NULL
+                END,
+                item.ordinality
+            )
+            FROM jsonb_array_elements(restrictions)
+              WITH ORDINALITY AS item(value, ordinality)
+          )`,
       })
       .where(`"restrictions" is not null`);
     if (departementCodes?.length > 0) {
@@ -1880,14 +2140,26 @@ export class StatisticCommuneService {
       .update()
       .set({
         restrictionsByMonth: () => `
-              (
-        SELECT jsonb_agg(r)
-    FROM (
-      SELECT r
-      FROM jsonb_array_elements(restrictionsByMonth) AS r
-      ORDER BY TO_DATE((r->>'date'), 'YYYY-MM')
-    ) as sorted
-              )`,
+          (
+            SELECT jsonb_agg(
+              item.value
+              ORDER BY
+                CASE
+                  WHEN item.value ->> 'date'
+                    ~ '^[0-9]{4}-[0-9]{2}$' THEN 0
+                  ELSE 1
+                END,
+                CASE
+                  WHEN item.value ->> 'date'
+                    ~ '^[0-9]{4}-[0-9]{2}$'
+                    THEN item.value ->> 'date'
+                  ELSE NULL
+                END,
+                item.ordinality
+            )
+            FROM jsonb_array_elements(restrictionsByMonth)
+              WITH ORDINALITY AS item(value, ordinality)
+          )`,
       })
       .where(`"restrictionsByMonth" is not null`);
     if (departementCodes?.length > 0) {

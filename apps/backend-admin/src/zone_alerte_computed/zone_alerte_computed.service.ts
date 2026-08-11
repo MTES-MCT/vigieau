@@ -45,11 +45,11 @@ import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
 import {
   getCivilDateAtUtcNoon,
   getScheduledCivilDate,
+  NATIONAL_COMPUTE_START_HOUR,
 } from '../core/scheduling/daily-job-schedule';
 
 export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
 const ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS = 30 * 1000;
-const NATIONAL_COMPUTE_START_HOUR = 2;
 const HISTORIC_COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 export const HISTORIC_COMPUTE_WORKER_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 export const HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT = 7;
@@ -480,18 +480,31 @@ export class ZoneAlerteComputedService {
     scheduledFor?: string,
   ) {
     this.logger.log(`COMPUTING ZONES D'ALERTES - BEGIN`);
-    const isNationalVersionedCompute =
-      !depsId?.length && isZonePublicationEnabled();
-    const publicationScheduledFor = isNationalVersionedCompute
+    const isNationalCompute = !depsId?.length;
+    const requiresStatisticCertificationContext =
+      isNationalCompute || !isZonePublicationEnabled();
+    const publicationScheduledFor = requiresStatisticCertificationContext
       ? (scheduledFor ??
         getScheduledCivilDate(new Date(), NATIONAL_COMPUTE_START_HOUR))
       : undefined;
     if (publicationScheduledFor !== undefined) {
       getCivilDateAtUtcNoon(publicationScheduledFor);
     }
-    const sourceRevision = isNationalVersionedCompute
+    const sourceRevision = requiresStatisticCertificationContext
       ? await this.zonePublicationService.getSourceRevision()
       : undefined;
+    const historicComputeEpoch = requiresStatisticCertificationContext
+      ? String(
+          (await this.configService.getConfig())?.historicComputeEpoch ?? '',
+        )
+      : undefined;
+    if (
+      requiresStatisticCertificationContext &&
+      (historicComputeEpoch === undefined ||
+        !/^\d+$/.test(historicComputeEpoch))
+    ) {
+      throw new Error('National computation is missing its historic epoch');
+    }
     this.departementsToUpdate = [];
     let departements = await this.departementService.findAllLight();
     if (depsId && depsId.length > 0) {
@@ -538,6 +551,8 @@ export class ZoneAlerteComputedService {
       computeHistoric,
       sourceRevision,
       publicationScheduledFor,
+      historicComputeEpoch,
+      isNationalCompute,
     );
   }
 
@@ -1160,10 +1175,12 @@ DELETE FROM zone_alerte_computed
     computeHistoric?: boolean,
     sourceRevision?: string,
     scheduledFor?: string,
+    historicComputeEpoch?: string,
+    isNationalCompute = sourceRevision !== undefined,
   ) {
     const publicationEnabled = isZonePublicationEnabled();
     const isNationalVersionedCompute =
-      publicationEnabled && sourceRevision !== undefined;
+      isNationalCompute && publicationEnabled && sourceRevision !== undefined;
     if (isNationalVersionedCompute && scheduledFor === undefined) {
       throw new Error(
         'National versioned computation is missing its scheduled civil date',
@@ -1239,9 +1256,10 @@ DELETE FROM zone_alerte_computed
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
-    const date = isNationalVersionedCompute
-      ? getCivilDateAtUtcNoon(scheduledFor)
-      : new Date();
+    const date =
+      sourceRevision !== undefined && scheduledFor !== undefined
+        ? getCivilDateAtUtcNoon(scheduledFor)
+        : new Date();
     await writeFile(
       `${path}/zones_arretes_en_vigueur.geojson`,
       JSON.stringify(geojson),
@@ -1313,10 +1331,14 @@ DELETE FROM zone_alerte_computed
       date,
       Boolean(computeHistoric),
       publicationEnabled,
-      sourceRevision,
+      isNationalCompute || !publicationEnabled ? sourceRevision : undefined,
+      isNationalCompute || !publicationEnabled
+        ? historicComputeEpoch
+        : undefined,
+      isNationalCompute,
     );
     const publicationId = await this.buildVersionedPublicationIfNational({
-      sourceRevision,
+      sourceRevision: isNationalCompute ? sourceRevision : undefined,
       sourceComputedAt: date,
       artifactZoneCount: allZones.length,
       geojsonUrl: immutableArtifacts.geojsonUrl,
@@ -1333,6 +1355,8 @@ DELETE FROM zone_alerte_computed
     computeHistoric: boolean,
     publicationEnabled: boolean,
     sourceRevision?: string,
+    historicComputeEpoch?: string,
+    certifyCurrentPublication = true,
   ): Promise<void> {
     if (publicationEnabled && sourceRevision === undefined) {
       return;
@@ -1357,10 +1381,21 @@ DELETE FROM zone_alerte_computed
           );
           await this.statisticService.computeDepartementsSituation(
             allZonesComputed,
+            date.toISOString().slice(0, 10),
           );
         },
         deferCertificationUntilPublication: publicationEnabled,
         sourceRevision,
+        historicComputeEpoch,
+        requireNationalCoverage:
+          certifyCurrentPublication &&
+          sourceRevision !== undefined &&
+          historicComputeEpoch !== undefined,
+        publishCurrentDate:
+          certifyCurrentPublication &&
+          !publicationEnabled &&
+          sourceRevision !== undefined &&
+          historicComputeEpoch !== undefined,
       },
     );
     if (computeHistoric && publicationEnabled) {

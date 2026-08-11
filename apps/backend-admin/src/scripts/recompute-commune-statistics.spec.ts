@@ -1,11 +1,9 @@
 import {
   applyOneOffSafetyFlags,
-  collectMonthStarts,
   parseMoment,
   parseOptions,
   runRecomputeCommuneStatistics,
   withHistoricRecomputeLock,
-  withStatisticCommuneMaintenanceLock,
 } from './recompute-commune-statistics';
 
 describe('recompute-commune-statistics safeguards', () => {
@@ -22,7 +20,7 @@ describe('recompute-commune-statistics safeguards', () => {
           DATE_FROM: '2026-03-29',
           DATE_TO: '2026-03-30',
           DEP_CODES: '2b, 65,2B',
-          RECOMPUTE_MONTHS: ' FALSE ',
+          RECOMPUTE_MONTHS: ' true ',
           SORT_AT_END: 'true',
           HISTORIC_RECOMPUTE_LOCK_TIMEOUT_MS: '120000',
           HISTORIC_RECOMPUTE_LOCK_RETRY_MS: '250',
@@ -33,7 +31,8 @@ describe('recompute-commune-statistics safeguards', () => {
       dates: ['2026-03-28', '2026-03-29', '2026-03-30', '2026-06-20'],
       departementCodes: ['2B', '65'],
       confirmNationalRecompute: false,
-      recomputeMonths: false,
+      publishThrough: null,
+      recomputeMonths: true,
       sortAtEnd: true,
       historicLockTimeoutMs: 120000,
       historicLockRetryMs: 250,
@@ -84,6 +83,69 @@ describe('recompute-commune-statistics safeguards', () => {
         HISTORIC_RECOMPUTE_MAX_DATES: '3661',
       }),
     ).toThrow('Invalid HISTORIC_RECOMPUTE_MAX_DATES');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-03-28',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+          RECOMPUTE_MONTHS: 'false',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('Statistic recomputation requires RECOMPUTE_MONTHS=true');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-03-28',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+          SORT_AT_END: 'false',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('Statistic recomputation requires SORT_AT_END=true');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-08-09',
+          PUBLISH_THROUGH: '2026-08-10',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('PUBLISH_THROUGH must be included in DATES');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-08-10',
+          DEP_CODES: '65',
+          PUBLISH_THROUGH: '2026-08-10',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('PUBLISH_THROUGH requires a national recomputation');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-08-10,2026-08-11',
+          PUBLISH_THROUGH: '2026-08-10',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('PUBLISH_THROUGH must be the last recomputation date');
+  });
+
+  it('accepts an explicit national publication target from the previous day', () => {
+    expect(
+      parseOptions(
+        {
+          DATES: '2026-08-09,2026-08-10',
+          PUBLISH_THROUGH: '2026-08-10',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+        },
+        parseMoment('2026-08-11'),
+      ).publishThrough,
+    ).toBe('2026-08-10');
   });
 
   it('requires an explicit confirmation for a national recomputation', () => {
@@ -115,6 +177,70 @@ describe('recompute-commune-statistics safeguards', () => {
     ).toEqual(['2026-08-06']);
   });
 
+  it('rejects publication beyond the 02:00 Europe/Paris scheduler boundary', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-10T22:30:00.000Z'));
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const dataSource = { query: jest.fn() };
+
+    try {
+      await expect(
+        runRecomputeCommuneStatistics({ dataSource } as any, {
+          dates: ['2026-08-11'],
+          departementCodes: [],
+          confirmNationalRecompute: true,
+          publishThrough: '2026-08-11',
+          recomputeMonths: true,
+          sortAtEnd: true,
+          historicLockTimeoutMs: 1000,
+          historicLockRetryMs: 1,
+          maxDates: 100,
+        }),
+      ).rejects.toThrow(
+        'PUBLISH_THROUGH cannot exceed the scheduled civil date 2026-08-10',
+      );
+      expect(dataSource.query).not.toHaveBeenCalled();
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+  });
+
+  it('rejects legacy watermark publication when versioned publication is enabled', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-11T10:00:00.000Z'));
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const dataSource = { query: jest.fn() };
+
+    try {
+      await expect(
+        runRecomputeCommuneStatistics({ dataSource } as any, {
+          dates: ['2026-08-10'],
+          departementCodes: [],
+          confirmNationalRecompute: true,
+          publishThrough: '2026-08-10',
+          recomputeMonths: true,
+          sortAtEnd: true,
+          historicLockTimeoutMs: 1000,
+          historicLockRetryMs: 1,
+          maxDates: 100,
+        }),
+      ).rejects.toThrow(
+        'PUBLISH_THROUGH is only supported while ZONE_PUBLICATION_ENABLED=false',
+      );
+      expect(dataSource.query).not.toHaveBeenCalled();
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+  });
+
   it('sets all one-off process safeguards before application bootstrap', () => {
     const environment: NodeJS.ProcessEnv = {};
 
@@ -138,17 +264,6 @@ describe('recompute-commune-statistics safeguards', () => {
     applyOneOffSafetyFlags(environment);
 
     expect(environment.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED).toBe('true');
-  });
-
-  it('collects each affected month once', () => {
-    expect(
-      collectMonthStarts([
-        '2026-06-22',
-        '2026-03-28',
-        '2026-06-20',
-        '2026-04-01',
-      ]),
-    ).toEqual(['2026-03-01', '2026-04-01', '2026-06-01']);
   });
 
   it('holds and releases the historic session lock around the whole task', async () => {
@@ -186,34 +301,6 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(queryRunner.query.mock.calls[1][0]).toBe(
       "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
     );
-  });
-
-  it('uses the exact commune statistic lock key', async () => {
-    const queryRunner = {
-      connect: jest.fn().mockResolvedValue(undefined),
-      query: jest
-        .fn()
-        .mockResolvedValueOnce([{ locked: true }])
-        .mockResolvedValueOnce([{ unlocked: true }]),
-      release: jest.fn().mockResolvedValue(undefined),
-    };
-
-    await withStatisticCommuneMaintenanceLock(
-      { createQueryRunner: () => queryRunner } as any,
-      async () => undefined,
-      { timeoutMs: 1000, retryMs: 1 },
-    );
-
-    expect(queryRunner.query.mock.calls).toEqual([
-      [
-        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-        ['vigieau:statistic-commune:snapshot-computation'],
-      ],
-      [
-        'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
-        ['vigieau:statistic-commune:snapshot-computation'],
-      ],
-    ]);
   });
 
   it('releases the historic lock when recomputation fails', async () => {
@@ -293,16 +380,24 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
-  it('reuses checkpoints only across contiguous dates and aggregates months once', async () => {
+  it('reuses checkpoints only across contiguous dates and aggregates each snapshot month before certification', async () => {
     const computeZonesForDate = jest.fn().mockResolvedValue(undefined);
     const findZonesForStatistics = jest.fn().mockResolvedValue([{ id: 1 }]);
     const computeCommuneStatisticsRestrictions = jest.fn(
-      async (...args: any[]) => args[5].beforeCertification(),
+      async (...args: any[]) => {
+        await args[5].beforeCommuneStatistics();
+        await args[5].beforeCertification();
+      },
     );
     const computeCommuneStatisticsRestrictionsByMonth = jest
       .fn()
       .mockResolvedValue(undefined);
     const sortStatCommune = jest.fn().mockResolvedValue(undefined);
+    const computeDepartementStatisticsRestrictions = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    const sortStatDepartement = jest.fn().mockResolvedValue(undefined);
+    const computeDepartementsSituation = jest.fn().mockResolvedValue(undefined);
     const statisticLockRunner = {
       connect: jest.fn().mockResolvedValue(undefined),
       query: jest.fn(async (sql: string) =>
@@ -328,6 +423,11 @@ describe('recompute-commune-statistics safeguards', () => {
         computeCommuneStatisticsRestrictionsByMonth,
         sortStatCommune,
       },
+      statisticDepartementService: {
+        computeDepartementStatisticsRestrictions,
+        sortStatDepartement,
+      },
+      statisticService: { computeDepartementsSituation },
       configService: {
         getConfig: jest.fn().mockResolvedValue({ historicComputeEpoch: '17' }),
       },
@@ -345,6 +445,7 @@ describe('recompute-commune-statistics safeguards', () => {
       dates: ['2026-03-28', '2026-03-29', '2026-06-20'],
       departementCodes: [],
       confirmNationalRecompute: true,
+      publishThrough: null,
       recomputeMonths: true,
       sortAtEnd: true,
       historicLockTimeoutMs: 1000,
@@ -372,11 +473,25 @@ describe('recompute-commune-statistics safeguards', () => {
     ]);
     expect(computeCommuneStatisticsRestrictions).toHaveBeenCalledTimes(3);
     expect(computeCommuneStatisticsRestrictions.mock.calls[0][5]).toEqual({
+      beforeCommuneStatistics: expect.any(Function),
       beforeCertification: expect.any(Function),
       sourceRevision: '42',
       historicComputeEpoch: '17',
       preserveBootstrapBarrier: true,
+      requireNationalCoverage: true,
+      publishCurrentDate: false,
     });
+    expect(computeDepartementStatisticsRestrictions).toHaveBeenCalledTimes(3);
+    expect(
+      computeDepartementStatisticsRestrictions.mock.calls[0].slice(1),
+    ).toEqual([new Date('2026-03-28T00:00:00.000Z'), true, false, undefined]);
+    expect(computeDepartementsSituation).toHaveBeenCalledTimes(3);
+    expect(computeDepartementsSituation).toHaveBeenNthCalledWith(
+      1,
+      [{ id: 1 }],
+      '2026-03-28',
+      undefined,
+    );
     expect(
       computeCommuneStatisticsRestrictions.mock.calls.map((call) =>
         call[1].toISOString().slice(0, 10),
@@ -386,21 +501,116 @@ describe('recompute-commune-statistics safeguards', () => {
       computeCommuneStatisticsRestrictionsByMonth.mock.calls.map((call) =>
         call[0].toISOString().slice(0, 10),
       ),
-    ).toEqual(['2026-03-01', '2026-06-01']);
-    expect(sortStatCommune).toHaveBeenCalledTimes(1);
-    expect(statisticLockRunner.query.mock.calls).toEqual([
-      [
-        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-        ['vigieau:statistic-commune:snapshot-computation'],
-      ],
-      [
-        'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
-        ['vigieau:statistic-commune:snapshot-computation'],
-      ],
-    ]);
+    ).toEqual(['2026-03-28', '2026-03-29', '2026-06-20']);
     expect(
-      computeCommuneStatisticsRestrictions.mock.invocationCallOrder[2],
-    ).toBeLessThan(statisticLockRunner.query.mock.invocationCallOrder[0]);
+      computeCommuneStatisticsRestrictionsByMonth.mock.calls.every(
+        (call) => call[2] === true,
+      ),
+    ).toBe(true);
+    expect(sortStatCommune).toHaveBeenCalledTimes(1);
+    expect(sortStatDepartement).toHaveBeenCalledTimes(1);
+    expect(statisticLockRunner.query).not.toHaveBeenCalled();
+    expect(statisticLockRunner.release).not.toHaveBeenCalled();
+  });
+
+  it('repairs and publishes a previous-day target only after monthly aggregation and sorting', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-11T10:00:00.000Z'));
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const events: string[] = [];
+    let certificationHooks: any;
+    const dependencies = {
+      departementService: {
+        findAllLight: jest.fn().mockResolvedValue([{ id: 1, code: '01' }]),
+      },
+      historicService: {
+        computeZonesForDate: jest.fn().mockResolvedValue(undefined),
+        findZonesForStatistics: jest.fn().mockResolvedValue([{ id: 1 }]),
+      },
+      statisticCommuneService: {
+        computeCommuneStatisticsRestrictions: jest.fn(
+          async (...args: any[]) => {
+            certificationHooks = args[5];
+            await args[5].beforeCommuneStatistics();
+            await args[5].beforeCertification();
+            events.push('certification');
+          },
+        ),
+        computeCommuneStatisticsRestrictionsByMonth: jest.fn(async () => {
+          events.push('monthly');
+        }),
+        sortStatCommune: jest.fn(async () => {
+          events.push('sort-commune');
+        }),
+      },
+      statisticDepartementService: {
+        computeDepartementStatisticsRestrictions: jest
+          .fn()
+          .mockResolvedValue(undefined),
+        sortStatDepartement: jest.fn(async () => {
+          events.push('sort-departement');
+        }),
+      },
+      statisticService: {
+        computeDepartementsSituation: jest.fn(async () => {
+          events.push('situation');
+        }),
+      },
+      configService: {
+        getConfig: jest.fn().mockResolvedValue({ historicComputeEpoch: '17' }),
+      },
+      zonePublicationService: {
+        getSourceRevision: jest.fn().mockResolvedValue('42'),
+      },
+      dataSource: {
+        query: jest.fn().mockResolvedValue([]),
+        createQueryRunner: jest.fn(),
+      } as any,
+    };
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      await runRecomputeCommuneStatistics(dependencies, {
+        dates: ['2026-08-10'],
+        departementCodes: [],
+        confirmNationalRecompute: true,
+        publishThrough: '2026-08-10',
+        recomputeMonths: true,
+        sortAtEnd: true,
+        historicLockTimeoutMs: 1000,
+        historicLockRetryMs: 1,
+        maxDates: 100,
+      });
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+
+    expect(events).toEqual([
+      'monthly',
+      'sort-commune',
+      'sort-departement',
+      'situation',
+      'certification',
+    ]);
+    expect(certificationHooks).toMatchObject({
+      requireNationalCoverage: true,
+      publishCurrentDate: true,
+      sourceRevision: '42',
+      historicComputeEpoch: '17',
+    });
+    expect(
+      dependencies.statisticCommuneService
+        .computeCommuneStatisticsRestrictionsByMonth,
+    ).toHaveBeenCalledWith(
+      new Date('2026-08-10T00:00:00.000Z'),
+      undefined,
+      true,
+    );
+    expect(dependencies.dataSource.createQueryRunner).not.toHaveBeenCalled();
   });
 
   it('aborts before certification when the source context changes', async () => {
@@ -425,6 +635,15 @@ describe('recompute-commune-statistics safeguards', () => {
         computeCommuneStatisticsRestrictionsByMonth: jest.fn(),
         sortStatCommune: jest.fn(),
       },
+      statisticDepartementService: {
+        computeDepartementStatisticsRestrictions: jest
+          .fn()
+          .mockResolvedValue(undefined),
+        sortStatDepartement: jest.fn(),
+      },
+      statisticService: {
+        computeDepartementsSituation: jest.fn().mockResolvedValue(undefined),
+      },
       configService: {
         getConfig: jest.fn().mockResolvedValue({ historicComputeEpoch: '17' }),
       },
@@ -441,6 +660,7 @@ describe('recompute-commune-statistics safeguards', () => {
         dates: ['2026-03-28'],
         departementCodes: [],
         confirmNationalRecompute: true,
+        publishThrough: null,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,
@@ -453,7 +673,7 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(
       dependencies.statisticCommuneService
         .computeCommuneStatisticsRestrictionsByMonth,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledTimes(1);
     expect(
       dependencies.statisticCommuneService.sortStatCommune,
     ).not.toHaveBeenCalled();
@@ -481,6 +701,15 @@ describe('recompute-commune-statistics safeguards', () => {
         computeCommuneStatisticsRestrictionsByMonth: jest.fn(),
         sortStatCommune: jest.fn(),
       },
+      statisticDepartementService: {
+        computeDepartementStatisticsRestrictions: jest
+          .fn()
+          .mockResolvedValue(undefined),
+        sortStatDepartement: jest.fn(),
+      },
+      statisticService: {
+        computeDepartementsSituation: jest.fn().mockResolvedValue(undefined),
+      },
       configService: { getConfig },
       zonePublicationService: {
         getSourceRevision: jest.fn().mockResolvedValue('42'),
@@ -497,6 +726,7 @@ describe('recompute-commune-statistics safeguards', () => {
         dates: ['2026-03-28'],
         departementCodes: [],
         confirmNationalRecompute: true,
+        publishThrough: null,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,
@@ -509,7 +739,7 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(
       dependencies.statisticCommuneService
         .computeCommuneStatisticsRestrictionsByMonth,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledTimes(1);
     expect(
       dependencies.statisticCommuneService.sortStatCommune,
     ).not.toHaveBeenCalled();
@@ -518,33 +748,21 @@ describe('recompute-commune-statistics safeguards', () => {
   it.each([
     {
       operation: 'monthly',
-      recomputeMonths: true,
-      sortAtEnd: false,
     },
     {
       operation: 'sort',
-      recomputeMonths: false,
-      sortAtEnd: true,
     },
   ])(
     'detects a source change after the $operation operation',
-    async ({ operation, recomputeMonths, sortAtEnd }) => {
-      const getSourceRevision = jest
-        .fn()
-        .mockResolvedValueOnce('42')
-        .mockResolvedValueOnce('42')
-        .mockResolvedValueOnce('42')
-        .mockResolvedValueOnce('43');
+    async ({ operation }) => {
+      let sourceRevisionReadCount = 0;
+      const getSourceRevision = jest.fn(async () => {
+        sourceRevisionReadCount += 1;
+        const failingRead = operation === 'monthly' ? 3 : 4;
+        return sourceRevisionReadCount === failingRead ? '43' : '42';
+      });
       const monthly = jest.fn().mockResolvedValue(undefined);
       const sort = jest.fn().mockResolvedValue(undefined);
-      const statisticLockRunner = {
-        connect: jest.fn().mockResolvedValue(undefined),
-        query: jest
-          .fn()
-          .mockResolvedValueOnce([{ locked: true }])
-          .mockResolvedValueOnce([{ unlocked: true }]),
-        release: jest.fn().mockResolvedValue(undefined),
-      };
       const dependencies = {
         departementService: {
           findAllLight: jest.fn().mockResolvedValue([{ id: 1, code: '01' }]),
@@ -554,11 +772,22 @@ describe('recompute-commune-statistics safeguards', () => {
           findZonesForStatistics: jest.fn().mockResolvedValue([]),
         },
         statisticCommuneService: {
-          computeCommuneStatisticsRestrictions: jest
-            .fn()
-            .mockResolvedValue(undefined),
+          computeCommuneStatisticsRestrictions: jest.fn(
+            async (...args: any[]) => {
+              await args[5].beforeCertification();
+            },
+          ),
           computeCommuneStatisticsRestrictionsByMonth: monthly,
           sortStatCommune: sort,
+        },
+        statisticDepartementService: {
+          computeDepartementStatisticsRestrictions: jest
+            .fn()
+            .mockResolvedValue(undefined),
+          sortStatDepartement: jest.fn().mockResolvedValue(undefined),
+        },
+        statisticService: {
+          computeDepartementsSituation: jest.fn().mockResolvedValue(undefined),
         },
         configService: {
           getConfig: jest
@@ -568,7 +797,7 @@ describe('recompute-commune-statistics safeguards', () => {
         zonePublicationService: { getSourceRevision },
         dataSource: {
           query: jest.fn().mockResolvedValue([]),
-          createQueryRunner: jest.fn(() => statisticLockRunner),
+          createQueryRunner: jest.fn(),
         } as any,
       };
       jest.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -576,10 +805,11 @@ describe('recompute-commune-statistics safeguards', () => {
       await expect(
         runRecomputeCommuneStatistics(dependencies, {
           dates: ['2026-03-28'],
-          departementCodes: [],
+          departementCodes: ['01'],
           confirmNationalRecompute: true,
-          recomputeMonths,
-          sortAtEnd,
+          publishThrough: null,
+          recomputeMonths: true,
+          sortAtEnd: true,
           historicLockTimeoutMs: 1000,
           historicLockRetryMs: 1,
           maxDates: 100,
@@ -587,9 +817,9 @@ describe('recompute-commune-statistics safeguards', () => {
       ).rejects.toThrow(
         'Zone publication source revision changed during recomputation (42 -> 43)',
       );
-      expect(operation === 'monthly' ? monthly : sort).toHaveBeenCalledTimes(1);
-      expect(statisticLockRunner.query).toHaveBeenCalledTimes(2);
-      expect(statisticLockRunner.release).toHaveBeenCalledTimes(1);
+      expect(monthly).toHaveBeenCalledTimes(1);
+      expect(sort).toHaveBeenCalledTimes(operation === 'sort' ? 1 : 0);
+      expect(dependencies.dataSource.createQueryRunner).not.toHaveBeenCalled();
     },
   );
 
@@ -606,6 +836,13 @@ describe('recompute-commune-statistics safeguards', () => {
         computeCommuneStatisticsRestrictions: jest.fn(),
         computeCommuneStatisticsRestrictionsByMonth: jest.fn(),
         sortStatCommune: jest.fn(),
+      },
+      statisticDepartementService: {
+        computeDepartementStatisticsRestrictions: jest.fn(),
+        sortStatDepartement: jest.fn(),
+      },
+      statisticService: {
+        computeDepartementsSituation: jest.fn(),
       },
       configService: {
         getConfig: jest.fn(),
@@ -628,6 +865,7 @@ describe('recompute-commune-statistics safeguards', () => {
         dates: ['2026-03-28'],
         departementCodes: [],
         confirmNationalRecompute: true,
+        publishThrough: null,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,
@@ -651,6 +889,13 @@ describe('recompute-commune-statistics safeguards', () => {
     ).not.toHaveBeenCalled();
     expect(
       dependencies.statisticCommuneService.sortStatCommune,
+    ).not.toHaveBeenCalled();
+    expect(
+      dependencies.statisticDepartementService
+        .computeDepartementStatisticsRestrictions,
+    ).not.toHaveBeenCalled();
+    expect(
+      dependencies.statisticService.computeDepartementsSituation,
     ).not.toHaveBeenCalled();
     expect(dependencies.configService.getConfig).not.toHaveBeenCalled();
     expect(

@@ -27,6 +27,8 @@
     "lint:changed": "node scripts/lint-changed.mjs",
     "audit:production": "npm audit --omit=dev --audit-level=low && npm --prefix apps/backend audit --omit=dev --audit-level=low && npm --prefix apps/backend-admin audit --omit=dev --audit-level=low && npm --prefix apps/frontend audit --omit=dev --audit-level=low && npm --prefix apps/frontend-admin audit --omit=dev --audit-level=low",
     "smoke:public": "node scripts/smoke-public.mjs",
+    "smoke:statistics": "node scripts/smoke-statistics.mjs",
+    "test:smoke-statistics": "node --test scripts/smoke-statistics.test.mjs",
     "smoke:admin": "node scripts/smoke-admin.mjs",
     "smoke:datagouv": "node scripts/smoke-datagouv.mjs"
   },

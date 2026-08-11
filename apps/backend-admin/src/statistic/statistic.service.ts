@@ -22,9 +22,16 @@ export class StatisticService {
   async computeDepartementsSituation(
     zonesComputed: ZoneAlerteComputed[],
     date?: string,
+    departementCodes?: string[],
   ) {
     this.logger.log(`COMPUTING DEPARTEMENT SITUATION - ${date}`);
-    const departements = await this.departementService.findAllLight();
+    let departements = await this.departementService.findAllLight();
+    if (departementCodes?.length) {
+      const requestedCodes = new Set(departementCodes);
+      departements = departements.filter((departement) =>
+        requestedCodes.has(departement.code),
+      );
+    }
     const dateString = date ? date : new Date().toISOString().split('T')[0];
     let statistic: Statistic = await this.statisticRepository.findOne({
       where: {
@@ -36,8 +43,10 @@ export class StatisticService {
         date: dateString,
         departementSituation: {},
       };
-    } else {
+    } else if (!departementCodes?.length) {
       statistic['departementSituation'] = {};
+    } else {
+      statistic.departementSituation ??= {};
     }
     departements.forEach((d) => {
       const depZones = zonesComputed.filter(

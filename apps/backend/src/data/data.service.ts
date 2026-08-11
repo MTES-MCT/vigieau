@@ -1,8 +1,15 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  OnModuleInit,
+} from '@nestjs/common';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
+  EntityManager,
   FindManyOptions,
   FindOneOptions,
   Repository,
@@ -17,11 +24,15 @@ import { Departement } from '@shared/entities/departement.entity';
 
 interface StatisticPublicationState {
   revision: string;
+  activePublicationId: string | null;
   currentPublishedDate: string | null;
   historicPublishedThrough: string | null;
   historicDirtyFrom: string | null;
   historicDirtyThrough: string | null;
+  snapshotStateToken: string;
 }
+
+type StatisticCacheMode = 'legacy-bootstrap' | 'versioned';
 
 interface ReferenceDataCache {
   departements: any[];
@@ -34,13 +45,44 @@ interface ReferenceDataCache {
 interface CertifiedDataCache extends ReferenceDataCache {
   revision: string;
   publicationState: StatisticPublicationState;
+  mode: StatisticCacheMode;
   dataArea: any[];
   dataCommune: any[];
   dataDepartement: any[];
+  firstDate: string;
+  latestDate: string;
+  dateCount: number;
+  departmentCount: number;
+  communeCount: number;
+  fingerprint: string;
+  loadedAt: Date;
 }
 
+export type StatisticCacheStatus = {
+  status: 'ready' | 'degraded' | 'unavailable';
+  usable: boolean;
+  fresh: boolean;
+  mode: StatisticCacheMode;
+  currentPublishedDate: string | null;
+  firstDate: string | null;
+  latestDate: string | null;
+  dateCount: number;
+  departmentCount: number;
+  communeCount: number;
+  fingerprint: string | null;
+  loadedAt: string | null;
+  lastError: {
+    at: string;
+    phase: string;
+  } | null;
+};
+
+type DepartmentDataLoad = {
+  coverageByDate: Map<string, Set<string>>;
+};
+
 @Injectable()
-export class DataService {
+export class DataService implements OnModuleInit {
   private readonly logger = new VigieauLogger('DataService');
 
   private data: any[] = [];
@@ -67,6 +109,7 @@ export class DataService {
   private dataLoading: Promise<void> | null = null;
   private failedPublicationStateToken: string | null = null;
   private failedPublicationAt = 0;
+  private lastDataCacheError: { at: Date; phase: string } | null = null;
 
   private readonly publicationStateCheckIntervalMs = 5_000;
   private readonly publicationRefreshRetryIntervalMs = 5_000;
@@ -75,6 +118,7 @@ export class DataService {
 
   private readonly releaseDate = '2023-07-11';
   private readonly beginDate = '2013-01-01';
+  private readonly expectedDepartmentCount = 101;
 
   constructor(
     @InjectRepository(StatisticDepartement)
@@ -90,12 +134,17 @@ export class DataService {
     private dataSource: DataSource,
   ) {}
 
+  onModuleInit(): void {
+    this.startColdDataLoad();
+  }
+
   /**
    * Retourne les données de référence pour les filtres (bassins versants, régions, départements).
    * Ces données sont structurées pour faciliter leur utilisation dans des interfaces utilisateur.
    */
   async getRefData() {
-    const referenceData = await this.ensureReferenceDataCache();
+    const refreshedReferenceData = await this.ensureReferenceDataCache();
+    const referenceData = this.certifiedDataCache ?? refreshedReferenceData;
     return {
       bassinsVersants: this.formatEntities(
         referenceData.bassinsVersants,
@@ -338,20 +387,41 @@ export class DataService {
    * Calcule les données de surface (area) et les restrictions associées pour différents niveaux géographiques.
    * Cette méthode est utilisée pour préparer les données avant leur exposition via des API.
    */
-  computeDataArea() {
+  computeDataArea(referenceData = this.getInstanceReferenceData()) {
     this.logger.log('COMPUTE DATA AREA');
     this.dataArea = this.data.map((data) => {
       return {
         date: data.date,
-        ESO: this.computeRestriction(data.departements, 'SOU', this.fullArea),
-        ESU: this.computeRestriction(data.departements, 'SUP', this.fullArea),
-        AEP: this.computeRestriction(data.departements, 'AEP', this.fullArea),
+        ESO: this.computeRestriction(
+          data.departements,
+          'SOU',
+          referenceData.fullArea,
+        ),
+        ESU: this.computeRestriction(
+          data.departements,
+          'SUP',
+          referenceData.fullArea,
+        ),
+        AEP: this.computeRestriction(
+          data.departements,
+          'AEP',
+          referenceData.fullArea,
+        ),
         bassinsVersants: this.computeEntityRestrictions(
           data,
-          this.bassinsVersants,
+          referenceData.bassinsVersants,
+          referenceData.departements,
         ),
-        regions: this.computeEntityRestrictions(data, this.regions),
-        departements: this.computeEntityRestrictions(data, this.departements),
+        regions: this.computeEntityRestrictions(
+          data,
+          referenceData.regions,
+          referenceData.departements,
+        ),
+        departements: this.computeEntityRestrictions(
+          data,
+          referenceData.departements,
+          referenceData.departements,
+        ),
       };
     });
   }
@@ -359,9 +429,13 @@ export class DataService {
   /**
    * Calcule les restrictions pour un ensemble d'entités (bassins versants, régions, départements).
    */
-  private computeEntityRestrictions(data: any, entities: any[]) {
+  private computeEntityRestrictions(
+    data: any,
+    entities: any[],
+    departements: any[],
+  ) {
     return entities.map((entity) => {
-      const filteredDeps = this.departements.filter((dep) =>
+      const filteredDeps = departements.filter((dep) =>
         entity.departements?.some((d) => d.id === dep.id),
       );
       const area = filteredDeps.reduce((acc, dep) => acc + dep.area, 0);
@@ -375,6 +449,16 @@ export class DataService {
         AEP: this.computeRestriction(restrictions, 'AEP', area),
       };
     });
+  }
+
+  private getInstanceReferenceData(): ReferenceDataCache {
+    return {
+      departements: this.departements,
+      regions: this.regions,
+      bassinsVersants: this.bassinsVersants,
+      fullArea: this.fullArea,
+      metropoleArea: this.metropoleArea,
+    };
   }
 
   /**
@@ -465,7 +549,12 @@ export class DataService {
           SELECT
             "currentPublishedDate",
             "historicDirtyFrom",
-            "historicDirtyThrough"
+            "historicDirtyThrough",
+            (
+              SELECT "activePublicationId"
+              FROM zone_publication_state
+              WHERE id = 1
+            ) AS "activePublicationId"
           FROM statistic_publication_state
           WHERE id = 1
         ), filtered_restrictions AS MATERIALIZED (
@@ -480,7 +569,11 @@ export class DataService {
             AND state."currentPublishedDate" IS NOT NULL
             AND (restriction.value->>'date')::date <= state."currentPublishedDate"
             AND (
-              state."historicDirtyFrom" IS NULL
+              (
+                $4::varchar = 'legacy-bootstrap'
+                AND state."activePublicationId" IS NULL
+              )
+              OR state."historicDirtyFrom" IS NULL
               OR (restriction.value->>'date')::date < state."historicDirtyFrom"
               OR (restriction.value->>'date')::date > COALESCE(
                 state."historicDirtyThrough",
@@ -506,6 +599,7 @@ export class DataService {
         stat.id,
         dateBegin?.format('YYYY-MM-DD') ?? null,
         dateEnd?.format('YYYY-MM-DD') ?? null,
+        this.getConfiguredStatisticCacheMode(),
       ],
     );
     if (result?.stateAvailable !== true) {
@@ -552,6 +646,7 @@ export class DataService {
             this.publicationStateCheckedAt = Date.now();
             this.failedPublicationStateToken = null;
             this.failedPublicationAt = 0;
+            this.lastDataCacheError = null;
             return;
           }
           if (
@@ -567,15 +662,17 @@ export class DataService {
           const candidateCache = await this.loadDataOnce(publicationState);
           const stateAfter = await this.getPublicationState(true);
           if (this.isSamePublicationState(publicationState, stateAfter)) {
-            this.certifiedDataCache = {
+            const certifiedDataCache = {
               ...candidateCache,
               revision: stateAfter.revision,
               publicationState: stateAfter,
             };
+            this.publishCertifiedDataCache(certifiedDataCache);
             this.snapshotStateToken = stateAfter.revision;
             this.publicationState = stateAfter;
             this.failedPublicationStateToken = null;
             this.failedPublicationAt = 0;
+            this.lastDataCacheError = null;
             return;
           }
           this.logger.warn(
@@ -587,6 +684,10 @@ export class DataService {
           'Publication state kept changing while refreshing the public data cache',
         );
       } catch (error) {
+        this.lastDataCacheError = {
+          at: new Date(),
+          phase: hadInitializedCache ? 'refresh' : 'load',
+        };
         if (hadInitializedCache) {
           if (attemptedPublicationStateToken) {
             this.failedPublicationStateToken = attemptedPublicationStateToken;
@@ -627,24 +728,61 @@ export class DataService {
     ) {
       throw new Error('No valid current publication date is available');
     }
-    this.logger.log('LOAD DATA');
-    const referenceData = await this.loadRefData();
-    this.logMemoryUsage();
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let transactionStarted = false;
+    try {
+      await queryRunner.connect();
+      connected = true;
+      await queryRunner.startTransaction('REPEATABLE READ');
+      transactionStarted = true;
+      await queryRunner.query('SET TRANSACTION READ ONLY');
 
-    this.data = this.generateDateRange(this.beginDate, currentPublishedDate);
+      this.logger.log('LOAD DATA');
+      const referenceData = await this.loadRefData(queryRunner.manager);
+      this.logMemoryUsage();
 
-    await this.loadDepartementData(publicationState);
-    this.data = [];
+      this.data = this.generateDateRange(this.beginDate, currentPublishedDate);
+      const expectedCommuneCount = await this.assertSnapshotCoverage(
+        publicationState,
+        queryRunner.manager,
+      );
+      const departmentData = await this.loadDepartementData(
+        publicationState,
+        queryRunner.manager,
+        referenceData,
+      );
+      this.data = [];
 
-    await this.loadCommuneData(publicationState);
-    return {
-      ...referenceData,
-      revision: publicationState.revision,
-      publicationState,
-      dataArea: this.dataArea,
-      dataCommune: this.dataCommune,
-      dataDepartement: this.dataDepartement,
-    };
+      const loadedCommuneCount = await this.loadCommuneData(
+        publicationState,
+        queryRunner.manager,
+      );
+      if (loadedCommuneCount !== expectedCommuneCount) {
+        throw new Error(
+          `The commune statistic repository contains ${loadedCommuneCount}/${expectedCommuneCount} certified communes`,
+        );
+      }
+      const candidate = this.createCertifiedDataCandidate(
+        referenceData,
+        publicationState,
+        departmentData,
+        expectedCommuneCount,
+      );
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
+      return candidate;
+    } catch (error) {
+      if (transactionStarted) {
+        await queryRunner.rollbackTransaction();
+      }
+      throw error;
+    } finally {
+      this.data = [];
+      if (connected) {
+        await queryRunner.release();
+      }
+    }
   }
 
   private async ensureCertifiedDataCache(): Promise<CertifiedDataCache> {
@@ -654,9 +792,28 @@ export class DataService {
       return currentCache;
     }
 
-    await this.loadData();
+    try {
+      await this.loadData();
+    } catch (error) {
+      throw new HttpException(
+        {
+          status: 'unavailable',
+          message:
+            'Les statistiques publiques sont temporairement indisponibles.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+        { cause: error },
+      );
+    }
     if (!this.certifiedDataCache) {
-      throw new Error('Unable to load the latest public data revision');
+      throw new HttpException(
+        {
+          status: 'unavailable',
+          message:
+            'Les statistiques publiques sont temporairement indisponibles.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
     return this.certifiedDataCache;
   }
@@ -674,6 +831,7 @@ export class DataService {
           publicationState,
         )
       ) {
+        this.lastDataCacheError = null;
         return;
       }
       const publicationStateToken =
@@ -703,6 +861,351 @@ export class DataService {
       });
   }
 
+  async getStatisticCacheStatus(
+    checkPublicationState = false,
+  ): Promise<StatisticCacheStatus> {
+    let availableState = this.publicationState;
+    let stateCheckFailed = false;
+    if (checkPublicationState) {
+      try {
+        availableState = await this.getPublicationState(true);
+      } catch {
+        stateCheckFailed = true;
+      }
+    }
+
+    const cache = this.certifiedDataCache;
+    const usable = Boolean(cache);
+    let mode: StatisticCacheMode = cache?.mode ?? 'versioned';
+    try {
+      mode = this.getStatisticCacheMode(availableState);
+    } catch {
+      stateCheckFailed = true;
+    }
+    const stateMatches = Boolean(
+      cache &&
+      availableState &&
+      this.isSamePublicationState(cache.publicationState, availableState),
+    );
+    const historicCoverageIsComplete =
+      mode === 'legacy-bootstrap' || !availableState?.historicDirtyFrom;
+    const fresh = Boolean(
+      cache &&
+      stateMatches &&
+      cache.latestDate === availableState?.currentPublishedDate &&
+      historicCoverageIsComplete &&
+      !stateCheckFailed &&
+      !this.lastDataCacheError,
+    );
+    const status = !usable ? 'unavailable' : fresh ? 'ready' : 'degraded';
+
+    const result: StatisticCacheStatus = {
+      status: stateCheckFailed && status === 'ready' ? 'degraded' : status,
+      usable,
+      fresh: fresh && !stateCheckFailed,
+      mode,
+      currentPublishedDate: availableState?.currentPublishedDate ?? null,
+      firstDate: cache?.firstDate ?? null,
+      latestDate: cache?.latestDate ?? null,
+      dateCount: cache?.dateCount ?? 0,
+      departmentCount: cache?.departmentCount ?? 0,
+      communeCount: cache?.communeCount ?? 0,
+      fingerprint: cache?.fingerprint ?? null,
+      loadedAt: cache?.loadedAt.toISOString() ?? null,
+      lastError: this.lastDataCacheError
+        ? {
+            at: this.lastDataCacheError.at.toISOString(),
+            phase: this.lastDataCacheError.phase,
+          }
+        : stateCheckFailed
+          ? { at: new Date().toISOString(), phase: 'publication-state-check' }
+          : null,
+    };
+    if (!cache) {
+      this.startColdDataLoad(stateCheckFailed ? undefined : availableState);
+    }
+    return result;
+  }
+
+  private startColdDataLoad(
+    publicationState?: StatisticPublicationState | null,
+  ): void {
+    if (this.certifiedDataCache || this.dataLoading) {
+      return;
+    }
+    void this.loadData(publicationState ?? undefined).catch((error) => {
+      this.logger.warn(
+        `PUBLIC DATA CACHE WARM-UP FAILED: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  private getStatisticCacheMode(
+    publicationState: StatisticPublicationState | null,
+  ): StatisticCacheMode {
+    if (publicationState?.activePublicationId) {
+      return 'versioned';
+    }
+    return this.getConfiguredStatisticCacheMode();
+  }
+
+  private getConfiguredStatisticCacheMode(): StatisticCacheMode {
+    const configuredMode =
+      process.env.STATISTIC_CACHE_MODE?.trim() || 'versioned';
+    if (
+      configuredMode !== 'versioned' &&
+      configuredMode !== 'legacy-bootstrap'
+    ) {
+      throw new Error(`Unsupported STATISTIC_CACHE_MODE: ${configuredMode}`);
+    }
+    return configuredMode;
+  }
+
+  private async assertSnapshotCoverage(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<number> {
+    const currentPublishedDate = publicationState.currentPublishedDate!;
+    const snapshots: Array<{
+      snapshotDate: string | Date;
+      scope: string;
+      status: string;
+      expectedCommuneCount: string | number;
+      processedCommuneCount: string | number;
+    }> = await manager.query(
+      `
+        SELECT
+          "snapshotDate", "scope", "status",
+          "expectedCommuneCount", "processedCommuneCount"
+        FROM "statistic_commune_snapshot"
+        WHERE "snapshotDate" BETWEEN $1::date AND $2::date
+        ORDER BY "snapshotDate" ASC, "scope" ASC
+      `,
+      [this.releaseDate, currentPublishedDate],
+    );
+    const isIncomplete = (snapshot: (typeof snapshots)[number]) =>
+      snapshot.status !== 'completed' ||
+      Number(snapshot.processedCommuneCount) !==
+        Number(snapshot.expectedCommuneCount);
+    const incomplete = snapshots.find(isIncomplete);
+    if (
+      this.getStatisticCacheMode(publicationState) === 'legacy-bootstrap' &&
+      incomplete
+    ) {
+      throw new Error(
+        `Statistic snapshot ${this.normalizeDate(incomplete.snapshotDate)} (${incomplete.scope}) is incomplete`,
+      );
+    }
+    const currentNationalSnapshot = snapshots.find(
+      (snapshot) =>
+        this.normalizeDate(snapshot.snapshotDate) === currentPublishedDate &&
+        snapshot.scope === 'national',
+    );
+    if (!currentNationalSnapshot || isIncomplete(currentNationalSnapshot)) {
+      throw new Error(
+        `No completed national statistic snapshot is available for ${currentPublishedDate}`,
+      );
+    }
+    const expectedCommuneCount = Number(
+      currentNationalSnapshot.expectedCommuneCount,
+    );
+    if (
+      !Number.isSafeInteger(expectedCommuneCount) ||
+      expectedCommuneCount <= 0
+    ) {
+      throw new Error(
+        `The national statistic snapshot for ${currentPublishedDate} has an invalid expected commune count`,
+      );
+    }
+    return expectedCommuneCount;
+  }
+
+  private createCertifiedDataCandidate(
+    referenceData: ReferenceDataCache,
+    publicationState: StatisticPublicationState,
+    departmentData: DepartmentDataLoad,
+    expectedCommuneCount: number,
+  ): CertifiedDataCache {
+    const mode = this.getStatisticCacheMode(publicationState);
+    const areaDates = this.dataArea.map(({ date }) => String(date));
+    const departmentDates = this.dataDepartement.map(({ date }) =>
+      String(date),
+    );
+    if (
+      areaDates.length === 0 ||
+      departmentDates.length === 0 ||
+      this.dataCommune.length === 0
+    ) {
+      throw new Error('The public statistic cache candidate is empty');
+    }
+    const communeCodes = new Set(
+      this.dataCommune.map(({ code }) => String(code)),
+    );
+    if (
+      this.dataCommune.length !== expectedCommuneCount ||
+      communeCodes.size !== expectedCommuneCount
+    ) {
+      throw new Error(
+        `The public statistic cache candidate contains ${this.dataCommune.length}/${expectedCommuneCount} communes (${communeCodes.size} unique)`,
+      );
+    }
+    if (
+      areaDates.length !== departmentDates.length ||
+      areaDates.some((date, index) => date !== departmentDates[index])
+    ) {
+      throw new Error(
+        'Area and department statistic cache candidates have different dates',
+      );
+    }
+    if (new Set(areaDates).size !== areaDates.length) {
+      throw new Error(
+        'The public statistic cache candidate contains duplicate dates',
+      );
+    }
+    if (
+      areaDates.some((date, index) => index > 0 && date <= areaDates[index - 1])
+    ) {
+      throw new Error(
+        'The public statistic cache candidate dates are not strictly ordered',
+      );
+    }
+
+    const currentPublishedDate = publicationState.currentPublishedDate!;
+    const firstDate = areaDates[0];
+    const latestDate = areaDates[areaDates.length - 1];
+    if (latestDate !== currentPublishedDate) {
+      throw new Error(
+        `The public statistic cache candidate ends on ${latestDate} instead of ${currentPublishedDate}`,
+      );
+    }
+    const previousLatestDate = this.certifiedDataCache?.latestDate;
+    if (previousLatestDate && latestDate < previousLatestDate) {
+      throw new Error(
+        `The public statistic cache candidate regresses from ${previousLatestDate} to ${latestDate}`,
+      );
+    }
+
+    const expectedDepartmentCodes = new Set(
+      referenceData.departements.map(({ code }) => String(code)),
+    );
+    if (expectedDepartmentCodes.size !== this.expectedDepartmentCount) {
+      throw new Error(
+        `The department reference contains ${expectedDepartmentCodes.size}/${this.expectedDepartmentCount} departments`,
+      );
+    }
+    for (const entry of this.dataDepartement) {
+      const codes = new Set(entry.departements.map(({ code }) => String(code)));
+      if (
+        codes.size !== expectedDepartmentCodes.size ||
+        [...expectedDepartmentCodes].some((code) => !codes.has(code))
+      ) {
+        throw new Error(
+          `Department statistics for ${entry.date} contain ${codes.size}/${expectedDepartmentCodes.size} departments`,
+        );
+      }
+    }
+
+    const candidateDates = new Set(areaDates);
+    const coverageEnd = moment(currentPublishedDate, 'YYYY-MM-DD');
+    const coverageStart = coverageEnd.isBefore(this.releaseDate, 'day')
+      ? moment(firstDate, 'YYYY-MM-DD')
+      : moment(this.releaseDate, 'YYYY-MM-DD');
+    for (
+      const date = coverageStart.clone();
+      date.isSameOrBefore(coverageEnd, 'day');
+      date.add(1, 'day')
+    ) {
+      const dateString = date.format('YYYY-MM-DD');
+      if (mode === 'legacy-bootstrap' && !candidateDates.has(dateString)) {
+        throw new Error(
+          `Legacy statistic coverage is missing candidate date ${dateString}`,
+        );
+      }
+      if (!candidateDates.has(dateString)) {
+        continue;
+      }
+      const coveredDepartments = departmentData.coverageByDate.get(dateString);
+      if (
+        !coveredDepartments ||
+        coveredDepartments.size !== expectedDepartmentCodes.size ||
+        [...expectedDepartmentCodes].some(
+          (code) => !coveredDepartments.has(code),
+        )
+      ) {
+        throw new Error(
+          `Raw department statistics for ${dateString} contain ${coveredDepartments?.size ?? 0}/${expectedDepartmentCodes.size} departments`,
+        );
+      }
+    }
+
+    const candidateWithoutFingerprint = {
+      ...referenceData,
+      revision: publicationState.revision,
+      publicationState,
+      mode,
+      dataArea: this.dataArea,
+      dataCommune: this.dataCommune,
+      dataDepartement: this.dataDepartement,
+      firstDate,
+      latestDate,
+      dateCount: areaDates.length,
+      departmentCount: expectedDepartmentCodes.size,
+      communeCount: this.dataCommune.length,
+      loadedAt: new Date(),
+    };
+    return {
+      ...candidateWithoutFingerprint,
+      fingerprint: this.computeStatisticCacheFingerprint(
+        candidateWithoutFingerprint,
+      ),
+    };
+  }
+
+  private computeStatisticCacheFingerprint(
+    cache: Omit<CertifiedDataCache, 'fingerprint'>,
+  ): string {
+    const hash = createHash('sha256');
+    hash.update(
+      JSON.stringify({
+        revision: cache.revision,
+        mode: cache.mode,
+        currentPublishedDate: cache.publicationState.currentPublishedDate,
+        dateCount: cache.dateCount,
+        departmentCount: cache.departmentCount,
+        communeCount: cache.communeCount,
+      }),
+    );
+    for (const collection of [
+      cache.dataArea,
+      cache.dataDepartement,
+      cache.dataCommune,
+    ]) {
+      for (const entry of collection) {
+        hash.update(JSON.stringify(entry));
+        hash.update('\n');
+      }
+    }
+    return hash.digest('hex');
+  }
+
+  private publishCertifiedDataCache(cache: CertifiedDataCache): void {
+    this.certifiedDataCache = cache;
+    this.publishReferenceData(cache);
+  }
+
+  private publishReferenceData(referenceData: ReferenceDataCache): void {
+    this.referenceDataCache = referenceData;
+    this.referenceDataLoadedAt = Date.now();
+    this.referenceDataRefreshFailedAt = 0;
+    this.departements = referenceData.departements;
+    this.regions = referenceData.regions;
+    this.bassinsVersants = referenceData.bassinsVersants;
+    this.fullArea = referenceData.fullArea;
+    this.metropoleArea = referenceData.metropoleArea;
+  }
+
   private async getPublicationState(
     force = false,
   ): Promise<StatisticPublicationState> {
@@ -726,26 +1229,54 @@ export class DataService {
       try {
         const rows: Array<{
           revision: string | number;
+          activePublicationId: string | null;
           currentPublishedDate: string | Date | null;
           historicPublishedThrough: string | Date | null;
           historicDirtyFrom: string | Date | null;
           historicDirtyThrough: string | Date | null;
-        }> = await this.dataSource.query(`
+          snapshotStateToken: string | null;
+        }> = await this.dataSource.query(
+          `
         SELECT
-          revision::text AS revision,
-          "currentPublishedDate"::text AS "currentPublishedDate",
-          "historicPublishedThrough"::text AS "historicPublishedThrough",
-          "historicDirtyFrom"::text AS "historicDirtyFrom",
-          "historicDirtyThrough"::text AS "historicDirtyThrough"
-        FROM statistic_publication_state
-        WHERE id = 1
+          statistic_state.revision::text AS revision,
+          zone_state."activePublicationId"::text AS "activePublicationId",
+          statistic_state."currentPublishedDate"::text AS "currentPublishedDate",
+          statistic_state."historicPublishedThrough"::text AS "historicPublishedThrough",
+          statistic_state."historicDirtyFrom"::text AS "historicDirtyFrom",
+          statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough",
+          JSONB_BUILD_ARRAY(
+            snapshot_state."snapshotCount",
+            snapshot_state."incompleteCount",
+            snapshot_state."latestUpdatedAt"
+          )::text AS "snapshotStateToken"
+        FROM statistic_publication_state statistic_state
+        LEFT JOIN zone_publication_state zone_state ON zone_state.id = 1
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::integer AS "snapshotCount",
+            COUNT(*) FILTER (
+              WHERE snapshot.status <> 'completed'
+                 OR snapshot."processedCommuneCount" <>
+                    snapshot."expectedCommuneCount"
+            )::integer AS "incompleteCount",
+            MAX(snapshot."updatedAt") AS "latestUpdatedAt"
+          FROM statistic_commune_snapshot snapshot
+          WHERE snapshot."snapshotDate" BETWEEN $1::date
+            AND statistic_state."currentPublishedDate"
+        ) snapshot_state ON true
+        WHERE statistic_state.id = 1
         LIMIT 1
-      `);
+      `,
+          [this.beginDate],
+        );
         if (rows.length !== 1 || rows[0].revision === null) {
           throw new Error('Statistic publication state is unavailable');
         }
         const state: StatisticPublicationState = {
           revision: String(rows[0].revision),
+          activePublicationId: rows[0].activePublicationId
+            ? String(rows[0].activePublicationId)
+            : null,
           currentPublishedDate: this.normalizeDate(
             rows[0].currentPublishedDate,
           ),
@@ -756,6 +1287,7 @@ export class DataService {
           historicDirtyThrough: this.normalizeDate(
             rows[0].historicDirtyThrough,
           ),
+          snapshotStateToken: String(rows[0].snapshotStateToken ?? '0:0:'),
         };
         this.publicationState = state;
         this.publicationStateCheckError = null;
@@ -796,20 +1328,24 @@ export class DataService {
   ): boolean {
     return (
       left.revision === right.revision &&
+      left.activePublicationId === right.activePublicationId &&
       left.currentPublishedDate === right.currentPublishedDate &&
       left.historicPublishedThrough === right.historicPublishedThrough &&
       left.historicDirtyFrom === right.historicDirtyFrom &&
-      left.historicDirtyThrough === right.historicDirtyThrough
+      left.historicDirtyThrough === right.historicDirtyThrough &&
+      left.snapshotStateToken === right.snapshotStateToken
     );
   }
 
   private getPublicationStateToken(state: StatisticPublicationState): string {
     return JSON.stringify([
       state.revision,
+      state.activePublicationId,
       state.currentPublishedDate,
       state.historicPublishedThrough,
       state.historicDirtyFrom,
       state.historicDirtyThrough,
+      state.snapshotStateToken,
     ]);
   }
 
@@ -840,14 +1376,23 @@ export class DataService {
    * Charge les données de référence nécessaires aux réponses publiques.
    * Ces données servent de base à d'autres traitements ou filtrages dans le service.
    */
-  async loadRefData(): Promise<ReferenceDataCache> {
-    if (this.referenceDataLoading) {
+  async loadRefData(manager?: EntityManager): Promise<ReferenceDataCache> {
+    if (!manager && this.referenceDataLoading) {
       return this.referenceDataLoading;
     }
 
     const loading = (async () => {
+      const departementRepository = manager
+        ? manager.getRepository(Departement)
+        : this.departementRepository;
+      const regionRepository = manager
+        ? manager.getRepository(Region)
+        : this.regionRepository;
+      const bassinVersantRepository = manager
+        ? manager.getRepository(BassinVersant)
+        : this.bassinVersantRepository;
       const departements = (
-        await this.departementRepository
+        await departementRepository
           .createQueryBuilder('departement')
           .select('departement.id', 'id')
           .addSelect('departement.code', 'code')
@@ -866,13 +1411,13 @@ export class DataService {
           maxLong: departement.bounds.split(' ')[2].split(')')[0],
         },
       }));
-      const regions = await this.regionRepository.find({
+      const regions = await regionRepository.find({
         relations: ['departements'],
         order: {
           nom: 'ASC',
         },
       });
-      const bassinsVersants = await this.bassinVersantRepository.find({
+      const bassinsVersants = await bassinVersantRepository.find({
         relations: ['departements'],
         order: {
           nom: 'ASC',
@@ -893,23 +1438,15 @@ export class DataService {
         metropoleArea,
       };
 
-      // One synchronous pointer swap makes partial reference loads invisible.
-      this.referenceDataCache = referenceData;
-      if (this.certifiedDataCache) {
-        this.certifiedDataCache = {
-          ...this.certifiedDataCache,
-          ...referenceData,
-        };
+      if (!manager) {
+        // One synchronous pointer swap makes partial reference loads invisible.
+        this.publishReferenceData(referenceData);
       }
-      this.referenceDataLoadedAt = Date.now();
-      this.referenceDataRefreshFailedAt = 0;
-      this.departements = departements;
-      this.regions = regions;
-      this.bassinsVersants = bassinsVersants;
-      this.fullArea = fullArea;
-      this.metropoleArea = metropoleArea;
       return referenceData;
     })();
+    if (manager) {
+      return loading;
+    }
     this.referenceDataLoading = loading;
     try {
       return await loading;
@@ -978,18 +1515,28 @@ export class DataService {
   /**
    * Charge les données départementales à partir de la base de données et les associe aux dates correspondantes.
    */
-  async loadDepartementData(publicationState = this.publicationState) {
+  async loadDepartementData(
+    publicationState = this.publicationState,
+    manager?: EntityManager,
+    referenceData = this.getInstanceReferenceData(),
+  ): Promise<DepartmentDataLoad> {
     if (!publicationState || this.data.length === 0) {
       throw new Error('Publication state is required to load department data');
     }
-    const statisticsDepartement =
-      await this.statisticDepartementRepository.find({
-        relations: ['departement'],
-      });
+    const statisticDepartementRepository = manager
+      ? manager.getRepository(StatisticDepartement)
+      : this.statisticDepartementRepository;
+    const statisticsDepartement = await statisticDepartementRepository.find({
+      relations: ['departement'],
+      order: { departement: { code: 'ASC' } },
+    });
     const firstDate = this.data[0].date;
     const lastDate = this.data[this.data.length - 1].date;
+    const query = manager
+      ? manager.query.bind(manager)
+      : this.dataSource.query.bind(this.dataSource);
     const incompleteSnapshots: Array<{ snapshotDate: string | Date }> =
-      await this.dataSource.query(
+      await query(
         `
           SELECT "snapshotDate"
           FROM statistic_commune_snapshot
@@ -1005,7 +1552,10 @@ export class DataService {
       ),
     );
 
-    if (publicationState.historicDirtyFrom) {
+    if (
+      this.getStatisticCacheMode(publicationState) === 'versioned' &&
+      publicationState.historicDirtyFrom
+    ) {
       const dirtyThrough =
         publicationState.historicDirtyThrough ??
         publicationState.currentPublishedDate;
@@ -1021,46 +1571,81 @@ export class DataService {
     }
     this.data = this.data.filter((entry) => !unavailableDates.has(entry.date));
 
+    const dataByDate = new Map(this.data.map((entry) => [entry.date, entry]));
+    const coverageByDate = new Map<string, Set<string>>();
     for (const statisticDepartement of statisticsDepartement) {
-      for (const restriction of statisticDepartement.restrictions) {
-        if (unavailableDates.has(restriction.date)) {
+      const departmentCode = String(statisticDepartement.departement.code);
+      for (const restriction of statisticDepartement.restrictions ?? []) {
+        const restrictionDate = this.normalizeDate(restriction.date);
+        if (
+          !restrictionDate ||
+          restrictionDate < this.beginDate ||
+          unavailableDates.has(restrictionDate)
+        ) {
           continue;
         }
-        const d = this.data.find((x) => x.date === restriction.date);
-        d?.departements.push({
-          ...{ departement: statisticDepartement.departement.code },
+        const dateEntry = dataByDate.get(restrictionDate);
+        if (!dateEntry) {
+          continue;
+        }
+        let coveredDepartments = coverageByDate.get(restrictionDate);
+        if (!coveredDepartments) {
+          coveredDepartments = new Set();
+          coverageByDate.set(restrictionDate, coveredDepartments);
+        }
+        if (coveredDepartments.has(departmentCode)) {
+          throw new Error(
+            `Duplicate raw department statistic for ${departmentCode} on ${restrictionDate}`,
+          );
+        }
+        coveredDepartments.add(departmentCode);
+        dateEntry.departements.push({
+          ...{ departement: departmentCode },
           ...restriction,
+          date: restrictionDate,
         });
       }
     }
 
-    this.computeDataArea();
+    this.computeDataArea(referenceData);
     this.logMemoryUsage();
 
-    this.computeDataDepartement();
+    this.computeDataDepartement(referenceData);
     this.logMemoryUsage();
 
     for (const d of this.data) {
       d.departements = [];
     }
+    return { coverageByDate };
   }
 
   /**
    * Charge les données communales en utilisant un traitement paginé pour limiter l'utilisation de la mémoire.
    */
-  async loadCommuneData(publicationState = this.publicationState) {
+  async loadCommuneData(
+    publicationState = this.publicationState,
+    manager?: EntityManager,
+  ): Promise<number> {
     if (!publicationState?.currentPublishedDate) {
       throw new Error('Publication state is required to load commune data');
     }
     this.logger.log('COMPUTE DATA COMMUNE - BEGIN');
     this.dataCommune = [];
-    const unavailableMonths = await this.findUnavailableSnapshotMonths();
-    const currentPublishedMonth =
-      publicationState.currentPublishedDate?.slice(0, 7) ?? null;
-    const communesCount = await this.statisticCommuneRepository.count();
+    const statisticCommuneRepository = manager
+      ? manager.getRepository(StatisticCommune)
+      : this.statisticCommuneRepository;
+    const unavailableMonths = await this.findUnavailableSnapshotMonths(
+      publicationState,
+      manager,
+    );
+    const currentPublishedMonth = publicationState.currentPublishedDate.slice(
+      0,
+      7,
+    );
+    const communesCount = await statisticCommuneRepository.count();
 
     for (let i = 0; i < communesCount; i = i + 1000) {
-      const statisticsCommune = await this.statisticCommuneRepository.find(<
+      const statisticsCommune = await statisticCommuneRepository.find(<
         FindManyOptions
       >{
         select: {
@@ -1074,8 +1659,14 @@ export class DataService {
         relations: ['commune'],
         take: 1000,
         skip: i,
+        order: { commune: { code: 'ASC' } },
       });
 
+      this.assertMonthlyStatisticCoverage(
+        statisticsCommune,
+        currentPublishedMonth,
+        !unavailableMonths.has(currentPublishedMonth),
+      );
       this.computeDataCommune(
         statisticsCommune,
         unavailableMonths,
@@ -1083,8 +1674,10 @@ export class DataService {
       );
     }
 
-    const unavailableMonthsAfterLoad =
-      await this.findUnavailableSnapshotMonths();
+    const unavailableMonthsAfterLoad = await this.findUnavailableSnapshotMonths(
+      publicationState,
+      manager,
+    );
     for (const month of unavailableMonthsAfterLoad) {
       unavailableMonths.add(month);
     }
@@ -1096,6 +1689,7 @@ export class DataService {
 
     this.logger.log('COMPUTE DATA COMMUNE - END');
     this.logMemoryUsage();
+    return communesCount;
   }
 
   /**
@@ -1103,7 +1697,7 @@ export class DataService {
    *
    * @param statisticsCommune - Les données statistiques des communes.
    */
-  computeDataDepartement() {
+  computeDataDepartement(referenceData = this.getInstanceReferenceData()) {
     this.logger.log('COMPUTE DATA DEPARTEMENT');
     this.dataDepartement = [];
     for (const d of this.data) {
@@ -1111,7 +1705,7 @@ export class DataService {
         date: d.date,
         departements: [],
       };
-      this.departements.forEach((departement) => {
+      referenceData.departements.forEach((departement) => {
         tmp.departements.push({
           code: departement.code,
           niveauGravite: this.findMaxNiveauGravite(
@@ -1170,8 +1764,49 @@ export class DataService {
     }
   }
 
-  private async findUnavailableSnapshotMonths(): Promise<Set<string>> {
-    const rows: Array<{ month: string }> = await this.dataSource.query(`
+  private assertMonthlyStatisticCoverage(
+    statisticsCommune: any[],
+    currentPublishedMonth: string,
+    requireCurrentMonth: boolean,
+  ): void {
+    for (const statistic of statisticsCommune) {
+      const dates = (statistic.restrictionsByMonth ?? []).map(
+        ({ date }) => date,
+      );
+      let previousDate: string | null = null;
+      for (const date of dates) {
+        if (
+          typeof date !== 'string' ||
+          !/^\d{4}-(0[1-9]|1[0-2])$/.test(date) ||
+          date > currentPublishedMonth ||
+          (previousDate !== null && date <= previousDate)
+        ) {
+          throw new Error(
+            `Invalid monthly statistic sequence for commune ${statistic.commune?.code ?? 'unknown'}`,
+          );
+        }
+        previousDate = date;
+      }
+      if (requireCurrentMonth && !dates.includes(currentPublishedMonth)) {
+        throw new Error(
+          `Monthly statistics for commune ${statistic.commune?.code ?? 'unknown'} do not include ${currentPublishedMonth}`,
+        );
+      }
+    }
+  }
+
+  private async findUnavailableSnapshotMonths(
+    publicationState = this.publicationState,
+    manager?: EntityManager,
+  ): Promise<Set<string>> {
+    if (!publicationState) {
+      throw new Error('Publication state is required to filter commune data');
+    }
+    const query = manager
+      ? manager.query.bind(manager)
+      : this.dataSource.query.bind(this.dataSource);
+    const rows: Array<{ month: string }> = await query(
+      `
       SELECT DISTINCT unavailable.month
       FROM (
         SELECT to_char("snapshotDate", 'YYYY-MM') AS month
@@ -1195,13 +1830,16 @@ export class DataService {
           interval '1 month'
         ) AS dirty_month(value)
         WHERE state.id = 1
+          AND $1::boolean
           AND state."historicDirtyFrom" IS NOT NULL
           AND COALESCE(
             state."historicDirtyThrough",
             state."currentPublishedDate"
           ) IS NOT NULL
       ) unavailable
-    `);
+    `,
+      [this.getStatisticCacheMode(publicationState) === 'versioned'],
+    );
     return new Set(rows.map(({ month }) => month));
   }
 

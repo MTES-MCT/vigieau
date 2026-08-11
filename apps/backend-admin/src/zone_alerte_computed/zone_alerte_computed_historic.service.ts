@@ -443,6 +443,7 @@ export class ZoneAlerteComputedHistoricService {
               },
               sourceRevision: expectedSourceRevision,
               historicComputeEpoch,
+              requireNationalCoverage: true,
             },
           );
         } catch (error) {
@@ -762,6 +763,7 @@ export class ZoneAlerteComputedHistoricService {
               },
               sourceRevision: expectedSourceRevision,
               historicComputeEpoch: checkpointContext.historicComputeEpoch,
+              requireNationalCoverage: true,
             },
           );
         } catch (error) {

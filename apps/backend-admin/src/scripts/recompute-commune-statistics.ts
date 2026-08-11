@@ -5,19 +5,23 @@ import { NestFactory } from '@nestjs/core';
 import moment = require('moment');
 import { Moment } from 'moment';
 import { DataSource, QueryRunner } from 'typeorm';
-import { getParisSchedule } from '../core/scheduling/daily-job-schedule';
+import {
+  getParisSchedule,
+  getScheduledCivilDate,
+  NATIONAL_COMPUTE_START_HOUR,
+} from '../core/scheduling/daily-job-schedule';
+import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
 
 const HISTORIC_LOCK_TIMEOUT_MS_DEFAULT = 60 * 60 * 1000;
 const HISTORIC_LOCK_RETRY_MS_DEFAULT = 1000;
 const HISTORIC_RECOMPUTE_MAX_DATES_DEFAULT = 100;
 const HISTORIC_RECOMPUTE_MAX_DATES_LIMIT = 3660;
-const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
-  'vigieau:statistic-commune:snapshot-computation';
 
 interface RecomputeOptions {
   dates: string[];
   departementCodes: string[];
   confirmNationalRecompute: boolean;
+  publishThrough: string | null;
   recomputeMonths: boolean;
   sortAtEnd: boolean;
   historicLockTimeoutMs: number;
@@ -59,17 +63,38 @@ interface RecomputeDependencies {
       historicNotComputed: boolean,
       departementCodes: string[] | undefined,
       hooks: {
+        beforeCommuneStatistics: () => Promise<void>;
         beforeCertification: () => Promise<void>;
         sourceRevision: string;
         historicComputeEpoch: string;
         preserveBootstrapBarrier: boolean;
+        requireNationalCoverage: boolean;
+        publishCurrentDate: boolean;
       },
     ) => Promise<void>;
     computeCommuneStatisticsRestrictionsByMonth: (
       date: Date,
       departementCodes?: string[],
+      allowCurrentSnapshot?: boolean,
     ) => Promise<void>;
     sortStatCommune: (departementCodes?: string[]) => Promise<void>;
+  };
+  statisticDepartementService: {
+    computeDepartementStatisticsRestrictions: (
+      zones: any[],
+      date: Date,
+      historic?: boolean,
+      historicNotComputed?: boolean,
+      departementCodes?: string[],
+    ) => Promise<void>;
+    sortStatDepartement: () => Promise<void>;
+  };
+  statisticService: {
+    computeDepartementsSituation: (
+      zones: any[],
+      date?: string,
+      departementCodes?: string[],
+    ) => Promise<void>;
   };
   configService: {
     getConfig: () => Promise<{ historicComputeEpoch?: string | number } | null>;
@@ -219,20 +244,48 @@ export function parseOptions(
     HISTORIC_RECOMPUTE_MAX_DATES_DEFAULT,
     HISTORIC_RECOMPUTE_MAX_DATES_LIMIT,
   );
+  const dates = parseDates(environment, maxDates, today);
+  const departementCodes = parseDepartementCodes(environment);
+  const rawPublishThrough = environment.PUBLISH_THROUGH?.trim();
+  const publishThrough = rawPublishThrough
+    ? parseMoment(rawPublishThrough).format('YYYY-MM-DD')
+    : null;
+  if (publishThrough !== null && !dates.includes(publishThrough)) {
+    throw new Error('PUBLISH_THROUGH must be included in DATES');
+  }
+  if (publishThrough !== null && departementCodes.length > 0) {
+    throw new Error('PUBLISH_THROUGH requires a national recomputation');
+  }
+  if (publishThrough !== null && dates.at(-1) !== publishThrough) {
+    throw new Error('PUBLISH_THROUGH must be the last recomputation date');
+  }
+  const recomputeMonths = parseBooleanOption(
+    'RECOMPUTE_MONTHS',
+    environment.RECOMPUTE_MONTHS,
+    true,
+  );
+  const sortAtEnd = parseBooleanOption(
+    'SORT_AT_END',
+    environment.SORT_AT_END,
+    true,
+  );
+  if (!recomputeMonths) {
+    throw new Error('Statistic recomputation requires RECOMPUTE_MONTHS=true');
+  }
+  if (!sortAtEnd) {
+    throw new Error('Statistic recomputation requires SORT_AT_END=true');
+  }
   const options = {
-    dates: parseDates(environment, maxDates, today),
-    departementCodes: parseDepartementCodes(environment),
+    dates,
+    departementCodes,
     confirmNationalRecompute: parseBooleanOption(
       'CONFIRM_NATIONAL_RECOMPUTE',
       environment.CONFIRM_NATIONAL_RECOMPUTE,
       false,
     ),
-    recomputeMonths: parseBooleanOption(
-      'RECOMPUTE_MONTHS',
-      environment.RECOMPUTE_MONTHS,
-      true,
-    ),
-    sortAtEnd: parseBooleanOption('SORT_AT_END', environment.SORT_AT_END, true),
+    publishThrough,
+    recomputeMonths,
+    sortAtEnd,
     historicLockTimeoutMs: parsePositiveIntegerOption(
       'HISTORIC_RECOMPUTE_LOCK_TIMEOUT_MS',
       environment.HISTORIC_RECOMPUTE_LOCK_TIMEOUT_MS,
@@ -273,10 +326,6 @@ export function applyOneOffSafetyFlags(
   environment.SKIP_STARTUP_DATA_LOADS = 'true';
   environment.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
   environment.SANDRE_ZONE_SYNC_MODE = 'paused';
-}
-
-export function collectMonthStarts(dates: string[]): string[] {
-  return [...new Set(dates.map((date) => `${date.slice(0, 7)}-01`))].sort();
 }
 
 function normalizeContextInteger(name: string, value: unknown): string {
@@ -454,21 +503,6 @@ export async function withHistoricRecomputeLock<T>(
   });
 }
 
-export async function withStatisticCommuneMaintenanceLock<T>(
-  dataSource: DataSource,
-  task: () => Promise<T>,
-  options: { timeoutMs: number; retryMs: number },
-): Promise<T> {
-  return withSessionAdvisoryLock(dataSource, task, options, {
-    tryLockSql: 'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-    unlockSql: 'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
-    parameters: [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
-    timeoutMessage:
-      'Timed out waiting for the commune statistic maintenance lock',
-    unlockMessage: 'Unable to release the commune statistic maintenance lock',
-  });
-}
-
 function isPreviousDay(previousDate: string | null, date: string): boolean {
   return (
     previousDate !== null &&
@@ -481,6 +515,28 @@ export async function runRecomputeCommuneStatistics(
   options: RecomputeOptions,
 ): Promise<void> {
   assertNationalScopeIsConfirmed(options);
+  if (!options.recomputeMonths) {
+    throw new Error('Statistic recomputation requires RECOMPUTE_MONTHS=true');
+  }
+  if (!options.sortAtEnd) {
+    throw new Error('Statistic recomputation requires SORT_AT_END=true');
+  }
+  const businessDate = getScheduledCivilDate(
+    new Date(),
+    NATIONAL_COMPUTE_START_HOUR,
+  );
+  if (options.publishThrough !== null) {
+    if (isZonePublicationEnabled()) {
+      throw new Error(
+        'PUBLISH_THROUGH is only supported while ZONE_PUBLICATION_ENABLED=false',
+      );
+    }
+    if (options.publishThrough > businessDate) {
+      throw new Error(
+        `PUBLISH_THROUGH cannot exceed the scheduled civil date ${businessDate}`,
+      );
+    }
+  }
   await assertNoBootstrapBarrier(dependencies.dataSource);
   let departements = await dependencies.departementService.findAllLight();
   if (options.departementCodes.length > 0) {
@@ -503,6 +559,8 @@ export async function runRecomputeCommuneStatistics(
   }
 
   const historicContext = await readHistoricContext(dependencies);
+  const isNationalRecompute = statisticScopeCodes === undefined;
+  const lastSelectedDate = options.dates.at(-1);
   console.log(
     `[recompute-commune-statistics] dates=${options.dates.length} departements=${foundCodes.join(',')} epoch=${historicContext.historicComputeEpoch} sourceRevision=${historicContext.sourceRevision}`,
   );
@@ -527,6 +585,8 @@ export async function runRecomputeCommuneStatistics(
     const zones =
       await dependencies.historicService.findZonesForStatistics(foundCodes);
     console.log(`[recompute-commune-statistics] ${date} zones=${zones.length}`);
+    const publishCurrentDate =
+      isNationalRecompute && options.publishThrough === date;
 
     await dependencies.statisticCommuneService.computeCommuneStatisticsRestrictions(
       zones,
@@ -535,50 +595,56 @@ export async function runRecomputeCommuneStatistics(
       false,
       statisticScopeCodes,
       {
-        beforeCertification: () =>
-          assertHistoricContext(dependencies, historicContext),
+        beforeCommuneStatistics: async () => {
+          await dependencies.statisticDepartementService.computeDepartementStatisticsRestrictions(
+            zones,
+            dateMoment.toDate(),
+            true,
+            false,
+            statisticScopeCodes,
+          );
+          await assertHistoricContext(dependencies, historicContext);
+        },
+        beforeCertification: async () => {
+          await dependencies.statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
+            dateMoment.toDate(),
+            statisticScopeCodes,
+            true,
+          );
+          await assertHistoricContext(dependencies, historicContext);
+          console.log(
+            `[recompute-commune-statistics] ${date.slice(0, 7)} monthly done`,
+          );
+
+          if (date === lastSelectedDate) {
+            await dependencies.statisticCommuneService.sortStatCommune(
+              statisticScopeCodes,
+            );
+            await assertHistoricContext(dependencies, historicContext);
+            await dependencies.statisticDepartementService.sortStatDepartement();
+            await assertHistoricContext(dependencies, historicContext);
+            console.log(
+              '[recompute-commune-statistics] statistics sorted before certification',
+            );
+          }
+
+          await dependencies.statisticService.computeDepartementsSituation(
+            zones,
+            date,
+            statisticScopeCodes,
+          );
+          await assertHistoricContext(dependencies, historicContext);
+        },
         sourceRevision: historicContext.sourceRevision,
         historicComputeEpoch: historicContext.historicComputeEpoch,
         preserveBootstrapBarrier: true,
+        requireNationalCoverage: isNationalRecompute,
+        publishCurrentDate,
       },
     );
 
     previousDate = date;
     console.log(`[recompute-commune-statistics] ${date} done`);
-  }
-
-  if (options.recomputeMonths || options.sortAtEnd) {
-    await withStatisticCommuneMaintenanceLock(
-      dependencies.dataSource,
-      async () => {
-        if (options.recomputeMonths) {
-          for (const monthStart of collectMonthStarts(options.dates)) {
-            await assertHistoricContext(dependencies, historicContext);
-            await dependencies.statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
-              parseMoment(monthStart).toDate(),
-              statisticScopeCodes,
-            );
-            await assertHistoricContext(dependencies, historicContext);
-            console.log(
-              `[recompute-commune-statistics] ${monthStart.slice(0, 7)} monthly done`,
-            );
-          }
-        }
-
-        if (options.sortAtEnd) {
-          await assertHistoricContext(dependencies, historicContext);
-          await dependencies.statisticCommuneService.sortStatCommune(
-            statisticScopeCodes,
-          );
-          await assertHistoricContext(dependencies, historicContext);
-          console.log('[recompute-commune-statistics] sorted');
-        }
-      },
-      {
-        timeoutMs: options.historicLockTimeoutMs,
-        retryMs: options.historicLockRetryMs,
-      },
-    );
   }
 }
 
@@ -590,6 +656,8 @@ export async function main(): Promise<void> {
     { AppModule },
     { DepartementService },
     { StatisticCommuneService },
+    { StatisticDepartementService },
+    { StatisticService },
     { ZoneAlerteComputedHistoricService },
     { ConfigService },
     { ZonePublicationService },
@@ -597,6 +665,8 @@ export async function main(): Promise<void> {
     import('../app.module.js'),
     import('../departement/departement.service.js'),
     import('../statistic_commune/statistic_commune.service.js'),
+    import('../statistic_departement/statistic_departement.service.js'),
+    import('../statistic/statistic.service.js'),
     import('../zone_alerte_computed/zone_alerte_computed_historic.service.js'),
     import('../config/config.service.js'),
     import('../zone_publication/zone_publication.service.js'),
@@ -611,6 +681,8 @@ export async function main(): Promise<void> {
       departementService: app.get(DepartementService),
       historicService: app.get(ZoneAlerteComputedHistoricService),
       statisticCommuneService: app.get(StatisticCommuneService),
+      statisticDepartementService: app.get(StatisticDepartementService),
+      statisticService: app.get(StatisticService),
       configService: app.get(ConfigService),
       zonePublicationService: app.get(ZonePublicationService),
       dataSource,

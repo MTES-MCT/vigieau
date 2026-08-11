@@ -393,6 +393,8 @@ describe('StatisticDepartementService restriction computation', () => {
     });
     expect(updateSql).toContain('inserted AS');
     expect(updateSql).toContain('ON CONFLICT ("departementId") DO NOTHING');
+    expect(updateSql).toContain('raw_merged_values AS');
+    expect(updateSql).toContain("item.value ->> 'date'");
     expect(harness.statisticDepartementRepository.query).toHaveBeenCalledTimes(
       2,
     );
@@ -449,5 +451,46 @@ describe('StatisticDepartementService restriction computation', () => {
         String(sql).includes('WITH updates AS'),
       ),
     ).toBe(false);
+  });
+
+  it('updates only the requested departments during a targeted repair', async () => {
+    const harness = createHarness();
+
+    await harness.service.computeDepartementStatisticsRestrictions(
+      [],
+      new Date('2023-06-01T00:00:00.000Z'),
+      true,
+      false,
+      ['65'],
+    );
+
+    const [, parameters] = getSqlCall(
+      harness.statisticDepartementRepository.query,
+      'WITH updates AS',
+    );
+    expect(JSON.parse(parameters[0] as string)).toEqual([
+      expect.objectContaining({ departementId: 65, date: '2023-06-01' }),
+    ]);
+  });
+
+  it('sorts legacy restrictions without casting malformed dates', async () => {
+    const queryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const harness = createHarness();
+    (harness.statisticDepartementRepository as any).createQueryBuilder = jest
+      .fn()
+      .mockReturnValue(queryBuilder);
+
+    await harness.service.sortStatDepartement();
+
+    const sql = queryBuilder.set.mock.calls[0][0].restrictions();
+    expect(sql).toContain("~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'");
+    expect(sql).toContain('item.ordinality');
+    expect(sql).not.toContain('::date');
+    expect(queryBuilder.execute).toHaveBeenCalledTimes(1);
   });
 });

@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { ClockHeartbeatService } from '../core/scheduling/clock-heartbeat.service';
 import {
   getScheduledCivilDate,
+  NATIONAL_COMPUTE_START_HOUR,
   shiftCivilDate,
 } from '../core/scheduling/daily-job-schedule';
 import {
@@ -12,7 +13,6 @@ import {
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
 } from '../zone_publication/zone_publication.config';
 
-const NATIONAL_COMPUTE_START_HOUR = 2;
 const DEFAULT_INSTANCE_LEASE_SECONDS = 30;
 const DEFAULT_MINIMUM_READY_INSTANCES = 2;
 const DEFAULT_PROGRESS_STALE_AFTER_SECONDS = 30 * 60;

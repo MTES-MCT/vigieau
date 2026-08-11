@@ -7,6 +7,7 @@ import {
 } from '../core/scheduling/business-cron';
 import {
   getScheduledCivilDate,
+  NATIONAL_COMPUTE_START_HOUR,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
   shiftCivilDate,
@@ -27,8 +28,6 @@ import {
 } from '../zone_publication/zone_publication.config';
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
 import { ArreteCadreService } from './arrete_cadre.service';
-
-const NATIONAL_COMPUTE_START_HOUR = 2;
 
 @Injectable()
 export class ArreteCadreScheduler implements OnApplicationBootstrap {

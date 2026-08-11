@@ -1,5 +1,6 @@
 export const NATIONAL_DAILY_COMPUTE_JOB_KEY = 'compute:national-daily';
 export const NATIONAL_HISTORIC_CATCHUP_JOB_KEY = 'compute:historic-catchup';
+export const NATIONAL_COMPUTE_START_HOUR = 2;
 
 export interface ParisSchedule {
   date: string;

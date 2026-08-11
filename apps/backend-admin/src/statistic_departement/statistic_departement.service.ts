@@ -220,12 +220,19 @@ export class StatisticDepartementService {
     date: Date,
     historic?: boolean,
     historicNotComputed?: boolean,
+    departementCodes?: string[],
   ) {
     this.logger.log(
       `COMPUTING DEPARTEMENT STATISTICS RESTRICTIONS - ${date.toISOString().split('T')[0]}`,
     );
     const dateString = date.toISOString().split('T')[0];
-    const departements = await this.departementService.findAllLight();
+    let departements = await this.departementService.findAllLight();
+    if (departementCodes?.length) {
+      const requestedCodes = new Set(departementCodes);
+      departements = departements.filter((departement) =>
+        requestedCodes.has(departement.code),
+      );
+    }
     const areaRequests = this.buildZoneAreaRequests(zones);
     const areaRows = await this.computeZoneAreas(
       areaRequests,
@@ -321,7 +328,7 @@ export class StatisticDepartementService {
             FROM "statistic_departement" statistic
             JOIN updates
               ON updates."departementId" = statistic."departementId"
-          ), merged_values AS (
+          ), raw_merged_values AS (
             SELECT
               current_values."id",
               COALESCE(
@@ -350,6 +357,34 @@ export class StatisticDepartementService {
                 ELSE '[]'::jsonb
               END AS "restrictions"
             FROM current_values
+          ), merged_values AS (
+            SELECT
+              raw_merged_values."id",
+              COALESCE(
+                (
+                  SELECT jsonb_agg(
+                    item.value
+                    ORDER BY
+                      CASE
+                        WHEN item.value ->> 'date'
+                          ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
+                        ELSE 1
+                      END,
+                      CASE
+                        WHEN item.value ->> 'date'
+                          ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                          THEN item.value ->> 'date'
+                        ELSE NULL
+                      END,
+                      item.ordinality
+                  )
+                  FROM jsonb_array_elements(
+                    raw_merged_values."restrictions"
+                  ) WITH ORDINALITY AS item(value, ordinality)
+                ),
+                '[]'::jsonb
+              ) AS "restrictions"
+            FROM raw_merged_values
           ), updated AS (
             UPDATE "statistic_departement" statistic
             SET "restrictions" = merged_values."restrictions"
@@ -486,14 +521,26 @@ export class StatisticDepartementService {
       .update()
       .set({
         restrictions: () => `
-              (
-        SELECT jsonb_agg(r)
-    FROM (
-      SELECT r
-      FROM jsonb_array_elements(restrictions) AS r
-      ORDER BY (r->>'date')::date
-    ) as sorted
-              )`,
+          (
+            SELECT jsonb_agg(
+              item.value
+              ORDER BY
+                CASE
+                  WHEN item.value ->> 'date'
+                    ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 0
+                  ELSE 1
+                END,
+                CASE
+                  WHEN item.value ->> 'date'
+                    ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                    THEN item.value ->> 'date'
+                  ELSE NULL
+                END,
+                item.ordinality
+            )
+            FROM jsonb_array_elements(restrictions)
+              WITH ORDINALITY AS item(value, ordinality)
+          )`,
       })
       .where(`"restrictions" is not null`);
     await qb.execute();

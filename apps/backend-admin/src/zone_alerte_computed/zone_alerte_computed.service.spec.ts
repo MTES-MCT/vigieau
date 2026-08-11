@@ -1565,7 +1565,13 @@ describe('ZoneAlerteComputedService', () => {
     expect(computeRegleAr).toHaveBeenNthCalledWith(1, departments[0]);
     expect(computeCommunesIntersected).toHaveBeenCalledTimes(1);
     expect(zonePublicationService.getSourceRevision).not.toHaveBeenCalled();
-    expect(computeGeoJson).toHaveBeenCalledWith(false, undefined, undefined);
+    expect(computeGeoJson).toHaveBeenCalledWith(
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
   });
 
   it('removes collapsed current zones during cleanup', async () => {
@@ -1759,7 +1765,66 @@ describe('ZoneAlerteComputedService', () => {
     expect(computeHistoric).toHaveBeenCalledWith(true, '2026-08-02', '42');
   });
 
+  it('requests guarded current-date certification in legacy publication mode', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    const computeCommuneStatisticsRestrictions = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    (service as any).statisticCommuneService = {
+      computeCommuneStatisticsRestrictions,
+    };
+
+    await (service as any).computePublicationStatistics(
+      [],
+      new Date('2026-08-11T12:00:00.000Z'),
+      false,
+      false,
+      '42',
+      '9',
+    );
+
+    expect(computeCommuneStatisticsRestrictions.mock.calls[0][5]).toEqual(
+      expect.objectContaining({
+        deferCertificationUntilPublication: false,
+        sourceRevision: '42',
+        historicComputeEpoch: '9',
+        requireNationalCoverage: true,
+        publishCurrentDate: true,
+      }),
+    );
+  });
+
+  it('keeps a partial legacy statistic refresh guarded without advancing publication', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    const computeCommuneStatisticsRestrictions = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    (service as any).statisticCommuneService = {
+      computeCommuneStatisticsRestrictions,
+    };
+
+    await (service as any).computePublicationStatistics(
+      [],
+      new Date('2026-08-11T12:00:00.000Z'),
+      false,
+      false,
+      '42',
+      '9',
+      false,
+    );
+
+    expect(computeCommuneStatisticsRestrictions.mock.calls[0][5]).toEqual(
+      expect.objectContaining({
+        sourceRevision: '42',
+        historicComputeEpoch: '9',
+        requireNationalCoverage: false,
+        publishCurrentDate: false,
+      }),
+    );
+  });
+
   it('captures the global revision for a national publication compute', async () => {
+    configService.getConfig.mockResolvedValue({ historicComputeEpoch: '7' });
     const departments = [
       {
         id: 65,
@@ -1791,10 +1856,17 @@ describe('ZoneAlerteComputedService', () => {
 
     expect(computeRegleAr).toHaveBeenCalledTimes(2);
     expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
-    expect(computeGeoJson).toHaveBeenCalledWith(false, '1', '2026-06-23');
+    expect(computeGeoJson).toHaveBeenCalledWith(
+      false,
+      '1',
+      '2026-06-23',
+      '7',
+      true,
+    );
   });
 
   it('keeps the captured business date when a national compute crosses 02:00 in Paris', async () => {
+    configService.getConfig.mockResolvedValue({ historicComputeEpoch: '7' });
     jest.setSystemTime(new Date('2026-07-31T23:59:00Z'));
     zonePublicationService.getSourceRevision.mockImplementationOnce(
       async () => {
@@ -1811,7 +1883,13 @@ describe('ZoneAlerteComputedService', () => {
 
     await service.computeAll([], false);
 
-    expect(computeGeoJson).toHaveBeenCalledWith(false, '1', '2026-07-31');
+    expect(computeGeoJson).toHaveBeenCalledWith(
+      false,
+      '1',
+      '2026-07-31',
+      '7',
+      true,
+    );
   });
 
   it('rejects an invalid daily business date before starting the national compute', async () => {
@@ -1832,16 +1910,59 @@ describe('ZoneAlerteComputedService', () => {
     ).not.toHaveBeenCalled();
   });
 
-  it('does not capture a publication revision while the feature is disabled', async () => {
+  it('captures the certification context while versioned publication is disabled', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
+    configService.getConfig.mockResolvedValue({ historicComputeEpoch: '7' });
     (service as any).departementService = {
       findAllLight: jest.fn().mockResolvedValue([]),
     };
-    jest.spyOn(service, 'computeGeoJson').mockResolvedValue(undefined);
+    const computeGeoJson = jest
+      .spyOn(service, 'computeGeoJson')
+      .mockResolvedValue(undefined);
 
     await service.computeAll([], false);
 
-    expect(zonePublicationService.getSourceRevision).not.toHaveBeenCalled();
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(computeGeoJson).toHaveBeenCalledWith(
+      false,
+      '1',
+      '2026-06-23',
+      '7',
+      true,
+    );
+  });
+
+  it('captures guarded statistics context for a partial legacy compute', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    configService.getConfig.mockResolvedValue({ historicComputeEpoch: '7' });
+    (service as any).departementService = {
+      findAllLight: jest.fn().mockResolvedValue([
+        {
+          id: 65,
+          code: '65',
+          nom: 'Hautes-Pyrenees',
+          parametres: [{ disabled: false, superpositionCommune: 'no' }],
+        },
+      ]),
+    };
+    jest.spyOn(service, 'computeRegleAr').mockResolvedValue([]);
+    jest
+      .spyOn(service, 'computeCommunesIntersected')
+      .mockResolvedValue(undefined);
+    const computeGeoJson = jest
+      .spyOn(service, 'computeGeoJson')
+      .mockResolvedValue(undefined);
+
+    await service.computeAll([65], false);
+
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(computeGeoJson).toHaveBeenCalledWith(
+      false,
+      '1',
+      '2026-06-23',
+      '7',
+      false,
+    );
   });
 
   it('publishes only when the national compute supplied a source revision', async () => {

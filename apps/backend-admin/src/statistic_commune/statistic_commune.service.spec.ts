@@ -193,6 +193,36 @@ describe('StatisticCommuneService', () => {
     expect(harness.repository.createQueryBuilder).not.toHaveBeenCalled();
   });
 
+  it('sorts legacy daily and monthly arrays without casting malformed dates', async () => {
+    const queryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const repository = {
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+    };
+    const service = new StatisticCommuneService(
+      repository as any,
+      {} as any,
+      {} as any,
+    );
+
+    await service.sortStatCommune(['65']);
+
+    const dailySql = queryBuilder.set.mock.calls[0][0].restrictions();
+    const monthlySql = queryBuilder.set.mock.calls[1][0].restrictionsByMonth();
+    expect(dailySql).toContain("~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'");
+    expect(dailySql).toContain('item.ordinality');
+    expect(dailySql).not.toContain('::date');
+    expect(monthlySql).toContain("~ '^[0-9]{4}-[0-9]{2}$'");
+    expect(monthlySql).not.toContain('TO_DATE');
+    expect(queryBuilder.andWhere).toHaveBeenCalledTimes(2);
+    expect(queryBuilder.execute).toHaveBeenCalledTimes(2);
+  });
+
   function createComputationHarness(options?: {
     failBatch?: boolean;
     updatedRows?: number;
@@ -200,8 +230,12 @@ describe('StatisticCommuneService', () => {
     matchedRows?: number;
     nationalAlreadyCompleted?: boolean;
     snapshotAffectedRows?: number;
+    departementRestrictionCount?: number;
+    departementSituationCount?: number;
+    departementSituationKeyCount?: number;
     monthlyAffectedRows?: number;
     monthlyBlocked?: boolean;
+    failNationalFinalization?: boolean;
     invalidZoneIds?: number[];
     loadedZoneCount?: number;
     communes?: Array<{
@@ -302,16 +336,32 @@ describe('StatisticCommuneService', () => {
       }
       if (
         sql.includes('completed_snapshot AS') &&
-        sql.includes('SELECT COUNT(*)::integer AS affected')
+        (sql.includes('SELECT COUNT(*)::integer AS affected') ||
+          sql.includes('FROM completed_snapshot) AS affected'))
       ) {
         events.push(`scope-completed:${String(params?.[2])}`);
-        return [{ affected: options?.snapshotAffectedRows ?? 1 }];
+        return [
+          {
+            affected: options?.snapshotAffectedRows ?? 1,
+            expectedDepartementCount: 101,
+            departementRestrictionCount:
+              options?.departementRestrictionCount ?? 101,
+            departementSituationCount:
+              options?.departementSituationCount ?? 101,
+            departementSituationKeyCount:
+              options?.departementSituationKeyCount ?? 101,
+            publishedStateCount: 1,
+          },
+        ];
       }
       if (
         sql.includes('SET "status" = \'completed\'') &&
         sql.includes('WHERE "snapshotDate" = $1')
       ) {
         events.push('national-certified');
+        if (options?.failNationalFinalization) {
+          throw new Error('national finalization failed');
+        }
         return [];
       }
       if (
@@ -331,12 +381,19 @@ describe('StatisticCommuneService', () => {
       }
       return [];
     });
-    const queryRunner = {
+    const queryRunner: any = {
+      isTransactionActive: false,
       connect: jest.fn().mockResolvedValue(undefined),
       query,
-      startTransaction: jest.fn().mockResolvedValue(undefined),
-      commitTransaction: jest.fn().mockResolvedValue(undefined),
-      rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+      startTransaction: jest.fn(async () => {
+        queryRunner.isTransactionActive = true;
+      }),
+      commitTransaction: jest.fn(async () => {
+        queryRunner.isTransactionActive = false;
+      }),
+      rollbackTransaction: jest.fn(async () => {
+        queryRunner.isTransactionActive = false;
+      }),
       release: jest.fn().mockResolvedValue(undefined),
     };
     const dataSource = {
@@ -485,8 +542,8 @@ describe('StatisticCommuneService', () => {
     expect(
       harness.events.filter((event) => event === 'commune-updated'),
     ).toHaveLength(3);
-    expect(harness.queryRunner.startTransaction).toHaveBeenCalledTimes(3);
-    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(3);
+    expect(harness.queryRunner.startTransaction).toHaveBeenCalledTimes(4);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(4);
     expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
@@ -519,13 +576,16 @@ describe('StatisticCommuneService', () => {
     );
     const updateSql = String(updateCall?.[0]);
     expect(updateSql).toContain('matched AS MATERIALIZED');
+    expect(updateSql).toContain('candidate AS MATERIALIZED');
+    expect(updateSql).toContain("item.value ->> 'date'");
+    expect(updateSql).toContain('item.phase');
     expect(updateSql).toContain('matched."dateCount" = 1');
     expect(updateSql).toContain('matched."identicalCount" = 1');
     expect(updateSql).toContain(
       '(SELECT COUNT(*)::integer FROM matched) AS matched',
     );
     expect(updateSql).toContain('AS unchanged');
-    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(2);
     expect(
       harness.query.mock.calls.some(
         ([sql, params]) =>
@@ -674,6 +734,9 @@ describe('StatisticCommuneService', () => {
     );
     expect(harness.dataSource.query.mock.calls[0][0]).toContain(
       'WHERE ($1::text[] IS NULL OR departement.code = ANY($1::text[]))',
+    );
+    expect(harness.dataSource.query.mock.calls[0][0]).toContain(
+      "sorted.value ->> 'date'",
     );
     expect(harness.dataSource.query.mock.calls[0][1]).toEqual([
       null,
@@ -1031,6 +1094,108 @@ describe('StatisticCommuneService', () => {
       String(sql).includes('INSERT INTO "statistic_commune_snapshot"'),
     );
     expect(runningCall?.[1]).toEqual(['2025-07-13', 'national', 1, '42']);
+  });
+
+  it('publishes a fully covered legacy snapshot in the guarded completion statement', async () => {
+    const harness = createComputationHarness();
+
+    await harness.service.computeCommuneStatisticsRestrictions(
+      [],
+      new Date('2025-07-13T00:00:00.000Z'),
+      undefined,
+      undefined,
+      undefined,
+      {
+        sourceRevision: '42',
+        historicComputeEpoch: '9',
+        requireNationalCoverage: true,
+        publishCurrentDate: true,
+        preserveBootstrapBarrier: true,
+      },
+    );
+
+    const completionCall = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes('national_coverage AS MATERIALIZED'),
+    );
+    expect(completionCall?.[0]).toContain(
+      'coverage."expectedDepartementCount" = 101',
+    );
+    expect(completionCall?.[0]).toContain(
+      'UPDATE "statistic_publication_state" statistic_state',
+    );
+    expect(completionCall?.[0]).toContain('"currentPublishedDate" = $1::date');
+    expect(completionCall?.[0]).not.toContain('"historicDirtyFrom" =');
+    expect(completionCall?.[0]).not.toContain('"historicDirtyThrough" =');
+    expect(completionCall?.[1]).toEqual([
+      '2025-07-13',
+      'national',
+      'completed',
+      1,
+      '42',
+      '9',
+    ]);
+  });
+
+  it('rolls back legacy publication when finalizing the daily snapshots fails', async () => {
+    const harness = createComputationHarness({
+      failNationalFinalization: true,
+    });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        undefined,
+        undefined,
+        undefined,
+        {
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+          requireNationalCoverage: true,
+          publishCurrentDate: true,
+          preserveBootstrapBarrier: true,
+        },
+      ),
+    ).rejects.toThrow('national finalization failed');
+
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.events).toEqual([
+      'lock',
+      'running:national',
+      'commune-updated',
+      'scope-completed:completed',
+      'national-certified',
+      'failed',
+      'unlock',
+    ]);
+  });
+
+  it('rejects legacy publication when one department aggregate is missing', async () => {
+    const harness = createComputationHarness({
+      departementRestrictionCount: 100,
+      snapshotAffectedRows: 0,
+    });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        undefined,
+        undefined,
+        undefined,
+        {
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+          requireNationalCoverage: true,
+          publishCurrentDate: true,
+        },
+      ),
+    ).rejects.toThrow(
+      'Couverture statistique departementale incomplete pour 2025-07-13: 100/101 restrictions',
+    );
+    expect(harness.events).toContain('failed');
+    expect(harness.events).not.toContain('national-certified');
   });
 
   it('does not certify a new date from a department-only snapshot', async () => {
