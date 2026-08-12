@@ -433,7 +433,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         AND "scope" = 'national'
     `);
     await expect(certify()).resolves.toBeUndefined();
-    expect((await readState()).revision).toBe('8');
+    expect((await readState()).revision).toBe('9');
 
     await queryRunner.query(`
       UPDATE "statistic_departement"
@@ -447,7 +447,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     await expect(certify()).rejects.toThrow(
       'Couverture statistique departementale incomplete',
     );
-    expect((await readState()).revision).toBe('8');
+    expect((await readState()).revision).toBe('9');
   });
 
   it('compares export bounds as PostgreSQL dates', async () => {

@@ -21,7 +21,6 @@ describe('DataService', () => {
     historicPublishedThrough: '2023-01-01',
     historicDirtyFrom: null,
     historicDirtyThrough: null,
-    snapshotStateToken: '1:0:stable',
   };
 
   const mockRepository = {
@@ -116,7 +115,6 @@ describe('DataService', () => {
       ...overrides,
     };
     service['certifiedDataCache'] = certifiedData as any;
-    service['snapshotStateToken'] = String(certifiedData.revision);
     return certifiedData;
   };
 
@@ -172,7 +170,6 @@ describe('DataService', () => {
     }).compile();
 
     service = <DataService>module.get(DataService);
-    service['snapshotStateToken'] = 'stable';
     service['publicationState'] = stablePublicationState;
     service['publicationStateCheckedAt'] = Date.now();
     setReferenceData();
@@ -612,7 +609,7 @@ describe('DataService', () => {
       expect(service['certifiedDataCache']?.dataArea).toEqual([
         { date: '2023-01-01', ESO: 2, ESU: 2, AEP: 2 },
       ]);
-      expect(service['snapshotStateToken']).toBe('running-v2');
+      expect(service['certifiedDataCache']?.revision).toBe('running-v2');
     });
 
     it('keeps the current publication while hiding a dirty historic range', async () => {
@@ -640,7 +637,6 @@ describe('DataService', () => {
         historicPublishedThrough: '2023-01-02',
         historicDirtyFrom: '2023-01-01',
         historicDirtyThrough: '2023-01-02',
-        snapshotStateToken: '3:0:stable',
       });
 
       expect(service['dataArea'].map(({ date }) => date)).toEqual([
@@ -936,7 +932,6 @@ describe('DataService', () => {
 
     it('waits only on cold start and shares one concurrent reconstruction', async () => {
       service['certifiedDataCache'] = null;
-      service['snapshotStateToken'] = null;
       let resolveState: (state: typeof stablePublicationState) => void;
       const delayedState = new Promise<typeof stablePublicationState>(
         (resolve) => {
@@ -982,7 +977,7 @@ describe('DataService', () => {
       expect(requestsFinished).toBe(true);
     });
 
-    it('reads publication and snapshot watermarks without hashing payloads', async () => {
+    it('reads only the canonical publication watermark without hashing payloads', async () => {
       service['publicationState'] = null;
       service['publicationStateCheckedAt'] = 0;
 
@@ -994,11 +989,8 @@ describe('DataService', () => {
       expect(query).toContain('WHERE statistic_state.id = 1');
       expect(query).toContain('LIMIT 1');
       expect(query).not.toContain('md5');
-      expect(query).toContain('statistic_commune_snapshot');
-      expect(query).toContain('"snapshotCount"');
-      expect(query).toContain('"incompleteCount"');
-      expect(query).toContain('"latestUpdatedAt"');
-      expect(mockDataSource.query).toHaveBeenCalledWith(query, ['2013-01-01']);
+      expect(query).not.toContain('statistic_commune_snapshot');
+      expect(mockDataSource.query).toHaveBeenCalledWith(query);
     });
 
     it('reports a fresh deterministic statistic cache status', async () => {
@@ -1057,35 +1049,56 @@ describe('DataService', () => {
       );
     });
 
-    it('refreshes a hot cache after a pre-release snapshot completes', async () => {
-      const previousSnapshotState = {
+    it('ignores background snapshot progress until its publication revision changes', async () => {
+      const previousPublishedState = {
         ...stablePublicationState,
         currentPublishedDate: '2026-08-11',
-        snapshotStateToken: '[1128, 0, "2026-08-11T10:00:00Z"]',
-      };
-      const certifiedSnapshotState = {
-        ...stablePublicationState,
-        currentPublishedDate: '2026-08-11',
-        snapshotStateToken: '[1128, 0, "2026-08-11T11:00:00Z"]',
       };
       certifyData({
-        publicationState: previousSnapshotState,
+        publicationState: previousPublishedState,
         latestDate: '2026-08-11',
       });
       service['publicationStateCheckedAt'] = 0;
-      mockDataSource.query.mockResolvedValue([certifiedSnapshotState]);
+      mockDataSource.query.mockResolvedValue([previousPublishedState]);
+      const loadDataOnce = jest.spyOn(service as any, 'loadDataOnce');
+
+      await service.loadData();
+
+      expect(loadDataOnce).not.toHaveBeenCalled();
+    });
+
+    it('refreshes a hot cache when an explicit same-date repair bumps the revision', async () => {
+      const previousPublishedState = {
+        ...stablePublicationState,
+        revision: '41',
+        currentPublishedDate: '2026-08-11',
+      };
+      const repairedPublishedState = {
+        ...previousPublishedState,
+        revision: '42',
+      };
+      certifyData({
+        revision: previousPublishedState.revision,
+        publicationState: previousPublishedState,
+        latestDate: '2026-08-11',
+      });
+      service['publicationStateCheckedAt'] = 0;
+      mockDataSource.query
+        .mockResolvedValueOnce([repairedPublishedState])
+        .mockResolvedValueOnce([repairedPublishedState]);
       const loadDataOnce = jest
         .spyOn(service as any, 'loadDataOnce')
         .mockResolvedValue({
           ...service['certifiedDataCache'],
-          publicationState: certifiedSnapshotState,
+          revision: repairedPublishedState.revision,
+          publicationState: repairedPublishedState,
         });
 
       await service.loadData();
 
       expect(loadDataOnce).toHaveBeenCalledTimes(1);
       expect(service['certifiedDataCache']?.publicationState).toEqual(
-        certifiedSnapshotState,
+        repairedPublishedState,
       );
     });
 
@@ -1343,7 +1356,6 @@ describe('DataService', () => {
       await service.loadData();
 
       expect(loadDataOnce).not.toHaveBeenCalled();
-      expect(service['snapshotStateToken']).toBe('stable');
     });
 
     it('cooldowns the publication state that actually fails after a transition', async () => {
@@ -1377,6 +1389,64 @@ describe('DataService', () => {
         (service as any).getPublicationStateToken(revision3),
       );
       expect(service['certifiedDataCache']).toBe(previousCache);
+    });
+
+    it('cooldowns a failed cold reconstruction for the same publication state', async () => {
+      const now = jest.spyOn(Date, 'now').mockReturnValue(100_000);
+      service['certifiedDataCache'] = null;
+      service['publicationStateCheckedAt'] = 0;
+      mockDataSource.query.mockResolvedValue([stablePublicationState]);
+      const loadDataOnce = jest
+        .spyOn(service as any, 'loadDataOnce')
+        .mockRejectedValue(new Error('snapshot is still running'));
+
+      await expect(service.loadData()).rejects.toThrow(
+        'snapshot is still running',
+      );
+      const failedAt = service['failedPublicationAt'];
+      await expect(service.loadData()).rejects.toThrow(
+        'is in refresh cooldown',
+      );
+
+      expect(loadDataOnce).toHaveBeenCalledTimes(1);
+      expect(service['failedPublicationAt']).toBe(failedAt);
+
+      now.mockReturnValue(160_001);
+      await expect(service.loadData()).rejects.toThrow(
+        'snapshot is still running',
+      );
+      expect(loadDataOnce).toHaveBeenCalledTimes(2);
+      expect(service['failedPublicationAt']).toBe(160_001);
+    });
+
+    it('bypasses a cold reconstruction cooldown for a new publication revision', async () => {
+      const nextRevision = { ...stablePublicationState, revision: 'next' };
+      service['certifiedDataCache'] = null;
+      service['publicationStateCheckedAt'] = 0;
+      mockDataSource.query
+        .mockResolvedValueOnce([stablePublicationState])
+        .mockResolvedValueOnce([nextRevision])
+        .mockResolvedValueOnce([nextRevision]);
+      const loadDataOnce = jest
+        .spyOn(service as any, 'loadDataOnce')
+        .mockRejectedValueOnce(new Error('snapshot is still running'))
+        .mockResolvedValueOnce({
+          ...service['referenceDataCache'],
+          revision: nextRevision.revision,
+          publicationState: nextRevision,
+          dataArea: [],
+          dataCommune: [],
+          dataDepartement: [],
+        });
+
+      await expect(service.loadData()).rejects.toThrow(
+        'snapshot is still running',
+      );
+      await expect(service.loadData()).resolves.toBeUndefined();
+
+      expect(loadDataOnce).toHaveBeenCalledTimes(2);
+      expect(service['certifiedDataCache']?.revision).toBe('next');
+      expect(service['failedPublicationStateToken']).toBeNull();
     });
 
     it('refreshes a hot cache when the dirty range changes at the same revision', async () => {

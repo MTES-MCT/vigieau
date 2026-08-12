@@ -1123,6 +1123,12 @@ describe('StatisticCommuneService', () => {
     expect(completionCall?.[0]).toContain(
       'UPDATE "statistic_publication_state" statistic_state',
     );
+    expect(completionCall?.[0]).toContain(
+      '"revision" = statistic_state."revision" + 1',
+    );
+    expect(completionCall?.[0]).not.toContain(
+      '"currentPublishedDate"\n                    IS DISTINCT FROM',
+    );
     expect(completionCall?.[0]).toContain('"currentPublishedDate" = $1::date');
     expect(completionCall?.[0]).not.toContain('"historicDirtyFrom" =');
     expect(completionCall?.[0]).not.toContain('"historicDirtyThrough" =');

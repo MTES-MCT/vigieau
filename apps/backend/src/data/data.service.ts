@@ -29,7 +29,6 @@ interface StatisticPublicationState {
   historicPublishedThrough: string | null;
   historicDirtyFrom: string | null;
   historicDirtyThrough: string | null;
-  snapshotStateToken: string;
 }
 
 type StatisticCacheMode = 'legacy-bootstrap' | 'versioned';
@@ -94,7 +93,6 @@ export class DataService implements OnModuleInit {
   private bassinsVersants: BassinVersant[] = [];
   private fullArea: number = 0;
   private metropoleArea: number = 0;
-  private snapshotStateToken: string | null = null;
   private publicationState: StatisticPublicationState | null = null;
   private publicationStateCheckedAt = 0;
   private publicationStateCheckError: Error | null = null;
@@ -112,7 +110,7 @@ export class DataService implements OnModuleInit {
   private lastDataCacheError: { at: Date; phase: string } | null = null;
 
   private readonly publicationStateCheckIntervalMs = 5_000;
-  private readonly publicationRefreshRetryIntervalMs = 5_000;
+  private readonly publicationRefreshRetryIntervalMs = 60_000;
   private readonly referenceDataRefreshIntervalMs = 2 * 60 * 60 * 1_000;
   private readonly referenceDataRefreshRetryIntervalMs = 5_000;
 
@@ -623,6 +621,7 @@ export class DataService implements OnModuleInit {
     let attemptedPublicationStateToken = requestedPublicationState
       ? this.getPublicationStateToken(requestedPublicationState)
       : null;
+    let attemptedCandidateLoad = false;
     const loading = (async () => {
       try {
         let publicationState =
@@ -630,6 +629,7 @@ export class DataService implements OnModuleInit {
         attemptedPublicationStateToken =
           this.getPublicationStateToken(publicationState);
         for (let attempt = 0; attempt < 3; attempt += 1) {
+          attemptedCandidateLoad = false;
           const publicationStateToken =
             this.getPublicationStateToken(publicationState);
           attemptedPublicationStateToken = publicationStateToken;
@@ -650,7 +650,6 @@ export class DataService implements OnModuleInit {
             return;
           }
           if (
-            hadInitializedCache &&
             this.failedPublicationStateToken === publicationStateToken &&
             Date.now() - this.failedPublicationAt <
               this.publicationRefreshRetryIntervalMs
@@ -659,6 +658,7 @@ export class DataService implements OnModuleInit {
               `Public data publication state ${publicationStateToken} is in refresh cooldown`,
             );
           }
+          attemptedCandidateLoad = true;
           const candidateCache = await this.loadDataOnce(publicationState);
           const stateAfter = await this.getPublicationState(true);
           if (this.isSamePublicationState(publicationState, stateAfter)) {
@@ -668,7 +668,6 @@ export class DataService implements OnModuleInit {
               publicationState: stateAfter,
             };
             this.publishCertifiedDataCache(certifiedDataCache);
-            this.snapshotStateToken = stateAfter.revision;
             this.publicationState = stateAfter;
             this.failedPublicationStateToken = null;
             this.failedPublicationAt = 0;
@@ -688,11 +687,11 @@ export class DataService implements OnModuleInit {
           at: new Date(),
           phase: hadInitializedCache ? 'refresh' : 'load',
         };
+        if (attemptedCandidateLoad && attemptedPublicationStateToken) {
+          this.failedPublicationStateToken = attemptedPublicationStateToken;
+          this.failedPublicationAt = Date.now();
+        }
         if (hadInitializedCache) {
-          if (attemptedPublicationStateToken) {
-            this.failedPublicationStateToken = attemptedPublicationStateToken;
-            this.failedPublicationAt = Date.now();
-          }
           if (!requestedPublicationState) {
             this.logger.warn(
               `PUBLIC DATA CACHE REFRESH FAILED - SERVING LAST VALID CACHE: ${
@@ -1234,7 +1233,6 @@ export class DataService implements OnModuleInit {
           historicPublishedThrough: string | Date | null;
           historicDirtyFrom: string | Date | null;
           historicDirtyThrough: string | Date | null;
-          snapshotStateToken: string | null;
         }> = await this.dataSource.query(
           `
         SELECT
@@ -1243,31 +1241,12 @@ export class DataService implements OnModuleInit {
           statistic_state."currentPublishedDate"::text AS "currentPublishedDate",
           statistic_state."historicPublishedThrough"::text AS "historicPublishedThrough",
           statistic_state."historicDirtyFrom"::text AS "historicDirtyFrom",
-          statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough",
-          JSONB_BUILD_ARRAY(
-            snapshot_state."snapshotCount",
-            snapshot_state."incompleteCount",
-            snapshot_state."latestUpdatedAt"
-          )::text AS "snapshotStateToken"
+          statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough"
         FROM statistic_publication_state statistic_state
         LEFT JOIN zone_publication_state zone_state ON zone_state.id = 1
-        LEFT JOIN LATERAL (
-          SELECT
-            COUNT(*)::integer AS "snapshotCount",
-            COUNT(*) FILTER (
-              WHERE snapshot.status <> 'completed'
-                 OR snapshot."processedCommuneCount" <>
-                    snapshot."expectedCommuneCount"
-            )::integer AS "incompleteCount",
-            MAX(snapshot."updatedAt") AS "latestUpdatedAt"
-          FROM statistic_commune_snapshot snapshot
-          WHERE snapshot."snapshotDate" BETWEEN $1::date
-            AND statistic_state."currentPublishedDate"
-        ) snapshot_state ON true
         WHERE statistic_state.id = 1
         LIMIT 1
       `,
-          [this.beginDate],
         );
         if (rows.length !== 1 || rows[0].revision === null) {
           throw new Error('Statistic publication state is unavailable');
@@ -1287,7 +1266,6 @@ export class DataService implements OnModuleInit {
           historicDirtyThrough: this.normalizeDate(
             rows[0].historicDirtyThrough,
           ),
-          snapshotStateToken: String(rows[0].snapshotStateToken ?? '0:0:'),
         };
         this.publicationState = state;
         this.publicationStateCheckError = null;
@@ -1332,8 +1310,7 @@ export class DataService implements OnModuleInit {
       left.currentPublishedDate === right.currentPublishedDate &&
       left.historicPublishedThrough === right.historicPublishedThrough &&
       left.historicDirtyFrom === right.historicDirtyFrom &&
-      left.historicDirtyThrough === right.historicDirtyThrough &&
-      left.snapshotStateToken === right.snapshotStateToken
+      left.historicDirtyThrough === right.historicDirtyThrough
     );
   }
 
@@ -1345,7 +1322,6 @@ export class DataService implements OnModuleInit {
       state.historicPublishedThrough,
       state.historicDirtyFrom,
       state.historicDirtyThrough,
-      state.snapshotStateToken,
     ]);
   }
 

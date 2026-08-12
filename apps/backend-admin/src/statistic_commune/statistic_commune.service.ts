@@ -1567,11 +1567,7 @@ export class StatisticCommuneService {
       ? `,
         published_state AS (
           UPDATE "statistic_publication_state" statistic_state
-          SET "revision" = statistic_state."revision" + CASE
-                WHEN statistic_state."currentPublishedDate"
-                    IS DISTINCT FROM $1::date THEN 1
-                ELSE 0
-              END,
+          SET "revision" = statistic_state."revision" + 1,
               "currentPublishedDate" = $1::date,
               "updatedAt" = now()
           FROM completed_snapshot
