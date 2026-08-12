@@ -1834,7 +1834,7 @@ describe('ZoneAlerteComputedService', () => {
     expect(computeHistoric).toHaveBeenCalledWith(true, '2026-08-02', '42');
   });
 
-  it('requests guarded current-date certification in legacy publication mode', async () => {
+  it('prepares a guarded ready snapshot in legacy publication mode', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const computeCommuneStatisticsRestrictions = jest
       .fn()
@@ -1854,16 +1854,16 @@ describe('ZoneAlerteComputedService', () => {
 
     expect(computeCommuneStatisticsRestrictions.mock.calls[0][5]).toEqual(
       expect.objectContaining({
-        deferCertificationUntilPublication: false,
+        deferCertificationUntilPublication: true,
         sourceRevision: '42',
         historicComputeEpoch: '9',
         requireNationalCoverage: true,
-        publishCurrentDate: true,
+        publishCurrentDate: false,
       }),
     );
   });
 
-  it('keeps a partial legacy statistic refresh guarded without advancing publication', async () => {
+  it('certifies complete current statistics after a partial legacy recompute', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const computeCommuneStatisticsRestrictions = jest
       .fn()
@@ -1877,6 +1877,34 @@ describe('ZoneAlerteComputedService', () => {
       new Date('2026-08-11T12:00:00.000Z'),
       false,
       false,
+      '42',
+      '9',
+      false,
+    );
+
+    expect(computeCommuneStatisticsRestrictions.mock.calls[0][5]).toEqual(
+      expect.objectContaining({
+        sourceRevision: '42',
+        historicComputeEpoch: '9',
+        requireNationalCoverage: true,
+        publishCurrentDate: false,
+      }),
+    );
+  });
+
+  it('keeps partial versioned statistics outside current certification', async () => {
+    const computeCommuneStatisticsRestrictions = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    (service as any).statisticCommuneService = {
+      computeCommuneStatisticsRestrictions,
+    };
+
+    await (service as any).computePublicationStatistics(
+      [],
+      new Date('2026-08-11T12:00:00.000Z'),
+      false,
+      true,
       '42',
       '9',
       false,
@@ -2337,12 +2365,26 @@ describe('ZoneAlerteComputedService', () => {
     expect(datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
   });
 
-  it('keeps the stable and data.gouv publication path when versioning is disabled', async () => {
+  it('separates stable legacy uploads from archive and data.gouv side effects', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const s3Service = {
-      uploadFile: jest.fn(async (file) => ({
-        Location: `https://stable.test/${file.originalname}`,
-      })),
+      uploadFile: jest.fn(
+        async (
+          file: { originalname: string },
+          _prefix: string,
+          _options: {
+            abortSignal: AbortSignal;
+            cacheControl: string;
+            contentType: string;
+          },
+        ) => {
+          void _prefix;
+          void _options;
+          return {
+            Location: `https://stable.test/${file.originalname}`,
+          };
+        },
+      ),
       copyFile: jest.fn().mockResolvedValue(undefined),
     };
     const datagouvService = {
@@ -2350,26 +2392,62 @@ describe('ZoneAlerteComputedService', () => {
     };
     (service as any).s3Service = s3Service;
     (service as any).datagouvService = datagouvService;
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue('42500'),
+    };
 
     const computedAt = new Date('2026-07-31T12:00:00Z');
-    await (service as any).publishLegacyArtifact(
+    const geojsonFile = {
+      originalname: 'zones_arretes_en_vigueur.geojson',
+      buffer: Buffer.from('{}'),
+    };
+    const pmtilesFile = {
+      originalname: 'zones_arretes_en_vigueur.pmtiles',
+      buffer: Buffer.from('PMTiles-test'),
+    };
+    const stableArtifacts = await (service as any).publishLegacyZoneArtifacts({
+      geojsonFile,
+      pmtilesFile,
+    });
+
+    expect(stableArtifacts).toEqual({
+      geojsonUrl: 'https://stable.test/zones_arretes_en_vigueur.geojson',
+      pmtilesUrl: 'https://stable.test/zones_arretes_en_vigueur.pmtiles',
+    });
+    expect(
+      s3Service.uploadFile.mock.calls.map(([file, prefix, options]) => ({
+        file: file.originalname,
+        prefix,
+        cacheControl: options.cacheControl,
+        contentType: options.contentType,
+        hasAbortSignal: options.abortSignal instanceof AbortSignal,
+      })),
+    ).toEqual([
       {
-        originalname: 'zones_arretes_en_vigueur.geojson',
-        buffer: Buffer.from('{}'),
+        file: 'zones_arretes_en_vigueur.geojson',
+        prefix: 'geojson/',
+        cacheControl: 'public, max-age=0, must-revalidate',
+        contentType: 'application/geo+json',
+        hasAbortSignal: true,
       },
-      computedAt,
-      'geojson',
-      'Carte des zones et arrêtés en vigueur - GeoJSON',
-    );
-    await (service as any).publishLegacyArtifact(
       {
-        originalname: 'zones_arretes_en_vigueur.pmtiles',
-        buffer: Buffer.from('PMTiles-test'),
+        file: 'zones_arretes_en_vigueur.pmtiles',
+        prefix: 'pmtiles/',
+        cacheControl: 'public, max-age=0, must-revalidate',
+        contentType: 'application/vnd.pmtiles',
+        hasAbortSignal: true,
       },
-      computedAt,
-      'pmtiles',
-      'Carte des zones et arrêtés en vigueur - PMTILES',
-    );
+    ]);
+    expect(s3Service.copyFile).not.toHaveBeenCalled();
+    expect(datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
+
+    await (service as any).publishLegacyZoneArtifactSideEffects({
+      geojsonFile,
+      geojsonUrl: stableArtifacts.geojsonUrl,
+      pmtilesFile,
+      pmtilesUrl: stableArtifacts.pmtilesUrl,
+      date: computedAt,
+    });
 
     expect(s3Service.uploadFile).toHaveBeenCalledTimes(2);
     expect(s3Service.copyFile.mock.calls).toEqual([
@@ -2378,6 +2456,7 @@ describe('ZoneAlerteComputedService', () => {
         'zones_arretes_en_vigueur_2026-07-31.geojson',
         'geojson/',
         {
+          abortSignal: expect.any(AbortSignal),
           cacheControl: 'public, max-age=0, must-revalidate',
           contentType: 'application/geo+json',
         },
@@ -2387,6 +2466,7 @@ describe('ZoneAlerteComputedService', () => {
         'zones_arretes_en_vigueur_2026-07-31.pmtiles',
         'pmtiles/',
         {
+          abortSignal: expect.any(AbortSignal),
           cacheControl: 'public, max-age=0, must-revalidate',
           contentType: 'application/vnd.pmtiles',
         },
@@ -2395,11 +2475,173 @@ describe('ZoneAlerteComputedService', () => {
     expect(datagouvService.uploadToDatagouv).toHaveBeenCalledTimes(2);
   });
 
-  it('publishes a validated legacy PMTiles before its matching GeoJSON', async () => {
-    const publishLegacyArtifact = jest
-      .spyOn(service as any, 'publishLegacyArtifact')
+  it('keeps a ready legacy snapshot unpublished when artifact publication fails', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-current-legacy-'));
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const enableQueryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const publicationError = new Error('S3 unavailable');
+    const computePublicationStatistics = jest
+      .spyOn(service as any, 'computePublicationStatistics')
       .mockResolvedValue(undefined);
-    const computedAt = new Date('2026-07-31T12:00:00Z');
+    const publishLegacyZoneArtifacts = jest
+      .spyOn(service as any, 'publishLegacyZoneArtifacts')
+      .mockRejectedValue(publicationError);
+    const publishLegacyZoneArtifactSideEffects = jest
+      .spyOn(service as any, 'publishLegacyZoneArtifactSideEffects')
+      .mockResolvedValue(undefined);
+    const finalizeLegacyCurrentPublication = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    (service as any).statisticCommuneService = {
+      finalizeLegacyCurrentPublication,
+    };
+    const markLegacyComputationAvailable = jest
+      .spyOn(service as any, 'markLegacyComputationAvailable')
+      .mockResolvedValue(undefined);
+    (service as any).zoneAlerteComputedRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn().mockReturnValue(enableQueryBuilder),
+    };
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+
+    try {
+      await expect(
+        service.computeGeoJson(false, '42', '2026-08-11', '9', false),
+      ).rejects.toBe(publicationError);
+
+      expect(computePublicationStatistics).toHaveBeenCalledTimes(1);
+      expect(publishLegacyZoneArtifacts).toHaveBeenCalledTimes(1);
+      expect(
+        computePublicationStatistics.mock.invocationCallOrder[0],
+      ).toBeLessThan(publishLegacyZoneArtifacts.mock.invocationCallOrder[0]);
+      expect(finalizeLegacyCurrentPublication).not.toHaveBeenCalled();
+      expect(markLegacyComputationAvailable).not.toHaveBeenCalled();
+      expect(publishLegacyZoneArtifactSideEffects).not.toHaveBeenCalled();
+      expect(configService.setConfig).not.toHaveBeenCalled();
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('finalizes stable legacy artifacts before ignoring a side-effect failure', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-current-legacy-'));
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const enableQueryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const computePublicationStatistics = jest
+      .spyOn(service as any, 'computePublicationStatistics')
+      .mockResolvedValue(undefined);
+    const publishLegacyZoneArtifacts = jest
+      .spyOn(service as any, 'publishLegacyZoneArtifacts')
+      .mockResolvedValue({
+        geojsonUrl: 'https://stable.test/current.geojson',
+        pmtilesUrl: 'https://stable.test/current.pmtiles',
+      });
+    const finalizeLegacyCurrentPublication = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    (service as any).statisticCommuneService = {
+      finalizeLegacyCurrentPublication,
+    };
+    const markLegacyComputationAvailable = jest
+      .spyOn(service as any, 'markLegacyComputationAvailable')
+      .mockResolvedValue(undefined);
+    const sideEffectError = new Error('archive unavailable');
+    const publishLegacyZoneArtifactSideEffects = jest
+      .spyOn(service as any, 'publishLegacyZoneArtifactSideEffects')
+      .mockRejectedValue(sideEffectError);
+    const logError = jest
+      .spyOn((service as any).logger, 'error')
+      .mockImplementation();
+    (service as any).zoneAlerteComputedRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn().mockReturnValue(enableQueryBuilder),
+    };
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+
+    try {
+      await expect(
+        service.computeGeoJson(false, '42', '2026-08-11', '9', false),
+      ).resolves.toEqual({
+        publicationId: undefined,
+        sourceRevision: '42',
+      });
+
+      expect(computePublicationStatistics).toHaveBeenCalledTimes(1);
+      expect(publishLegacyZoneArtifacts).toHaveBeenCalledTimes(1);
+      expect(finalizeLegacyCurrentPublication).toHaveBeenCalledWith(
+        expect.any(Date),
+        '42',
+        '9',
+      );
+      expect(markLegacyComputationAvailable).toHaveBeenCalledTimes(1);
+      expect(publishLegacyZoneArtifactSideEffects).toHaveBeenCalledWith({
+        geojsonFile: expect.objectContaining({
+          originalname: 'zones_arretes_en_vigueur.geojson',
+        }),
+        geojsonUrl: 'https://stable.test/current.geojson',
+        pmtilesFile: expect.objectContaining({
+          originalname: 'zones_arretes_en_vigueur.pmtiles',
+        }),
+        pmtilesUrl: 'https://stable.test/current.pmtiles',
+        date: expect.any(Date),
+      });
+      expect(
+        computePublicationStatistics.mock.invocationCallOrder[0],
+      ).toBeLessThan(publishLegacyZoneArtifacts.mock.invocationCallOrder[0]);
+      expect(
+        publishLegacyZoneArtifacts.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        finalizeLegacyCurrentPublication.mock.invocationCallOrder[0],
+      );
+      expect(
+        finalizeLegacyCurrentPublication.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        markLegacyComputationAvailable.mock.invocationCallOrder[0],
+      );
+      expect(
+        markLegacyComputationAvailable.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        publishLegacyZoneArtifactSideEffects.mock.invocationCallOrder[0],
+      );
+      expect(logError).toHaveBeenCalledWith(
+        'ERROR PUBLISHING LEGACY ZONE ARTIFACT SIDE EFFECTS',
+        sideEffectError,
+      );
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes the stable legacy PMTiles alias last', async () => {
+    const uploadStableLegacyArtifact = jest
+      .spyOn(service as any, 'uploadStableLegacyArtifact')
+      .mockImplementation(async (_file, kind) => `https://stable/${kind}`);
 
     await (service as any).publishLegacyZoneArtifacts({
       geojsonFile: {
@@ -2410,19 +2652,17 @@ describe('ZoneAlerteComputedService', () => {
         originalname: 'zones_arretes_en_vigueur.pmtiles',
         buffer: Buffer.from('PMTiles-test'),
       },
-      date: computedAt,
     });
 
-    expect(publishLegacyArtifact.mock.calls.map(([, , kind]) => kind)).toEqual([
-      'pmtiles',
-      'geojson',
-    ]);
+    expect(
+      uploadStableLegacyArtifact.mock.calls.map(([, kind]) => kind),
+    ).toEqual(['geojson', 'pmtiles']);
   });
 
-  it('keeps the legacy GeoJSON unchanged when PMTiles publication fails', async () => {
-    const publishLegacyArtifact = jest
-      .spyOn(service as any, 'publishLegacyArtifact')
-      .mockRejectedValueOnce(new Error('PMTiles upload failed'));
+  it('keeps the stable PMTiles unchanged when GeoJSON publication fails', async () => {
+    const uploadStableLegacyArtifact = jest
+      .spyOn(service as any, 'uploadStableLegacyArtifact')
+      .mockRejectedValueOnce(new Error('GeoJSON upload failed'));
 
     await expect(
       (service as any).publishLegacyZoneArtifacts({
@@ -2434,11 +2674,10 @@ describe('ZoneAlerteComputedService', () => {
           originalname: 'zones_arretes_en_vigueur.pmtiles',
           buffer: Buffer.from('PMTiles-test'),
         },
-        date: new Date('2026-07-31T12:00:00Z'),
       }),
-    ).rejects.toThrow('PMTiles upload failed');
-    expect(publishLegacyArtifact).toHaveBeenCalledTimes(1);
-    expect(publishLegacyArtifact.mock.calls[0][2]).toBe('pmtiles');
+    ).rejects.toThrow('GeoJSON upload failed');
+    expect(uploadStableLegacyArtifact).toHaveBeenCalledTimes(1);
+    expect(uploadStableLegacyArtifact.mock.calls[0][1]).toBe('geojson');
   });
 
   it('fails the legacy publication when the stable upload fails', async () => {
@@ -2449,16 +2688,15 @@ describe('ZoneAlerteComputedService', () => {
     const datagouvService = { uploadToDatagouv: jest.fn() };
     (service as any).s3Service = s3Service;
     (service as any).datagouvService = datagouvService;
+    (service as any).nestConfigService = { get: jest.fn() };
 
     await expect(
-      (service as any).publishLegacyArtifact(
+      (service as any).uploadStableLegacyArtifact(
         {
           originalname: 'zones_arretes_en_vigueur.pmtiles',
           buffer: Buffer.from('PMTiles-test'),
         },
-        new Date('2026-07-31T12:00:00Z'),
         'pmtiles',
-        'Carte des zones et arrêtés en vigueur - PMTILES',
       ),
     ).rejects.toThrow('S3 unavailable');
     expect(s3Service.copyFile).not.toHaveBeenCalled();
@@ -2481,22 +2719,24 @@ describe('ZoneAlerteComputedService', () => {
     jest.spyOn((service as any).logger, 'error').mockImplementation();
     const computedAt = new Date('2026-07-31T12:00:00Z');
 
-    await (service as any).publishLegacyArtifact(
+    await (service as any).publishLegacyArtifactSideEffects(
       {
         originalname: 'zones_arretes_en_vigueur.geojson',
         buffer: Buffer.from('{}'),
       },
+      'https://stable.test/zones_arretes_en_vigueur.geojson',
       computedAt,
       'geojson',
       'Carte des zones et arrêtés en vigueur - GeoJSON',
     );
     expect(datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
 
-    await (service as any).publishLegacyArtifact(
+    await (service as any).publishLegacyArtifactSideEffects(
       {
         originalname: 'zones_arretes_en_vigueur.pmtiles',
         buffer: Buffer.from('PMTiles-test'),
       },
+      'https://stable.test/zones_arretes_en_vigueur.pmtiles',
       computedAt,
       'pmtiles',
       'Carte des zones et arrêtés en vigueur - PMTILES',

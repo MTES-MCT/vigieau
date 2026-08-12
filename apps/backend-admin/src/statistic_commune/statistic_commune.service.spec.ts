@@ -1,6 +1,8 @@
 import {
+  CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT,
   HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT,
   parseCommuneStatisticsBatchSize,
+  parseCurrentCommuneStatisticsLockWaitTimeoutMs,
   parseHistoricEmptyStatisticsRangeMaxDays,
   StatisticCommuneService,
 } from './statistic_commune.service';
@@ -11,10 +13,13 @@ describe('StatisticCommuneService', () => {
   const previousBatchSize = process.env.COMMUNE_STATISTICS_BATCH_SIZE;
   const previousEmptyRangeMaxDays =
     process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
+  const previousCurrentLockWaitTimeoutMs =
+    process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
 
   beforeEach(() => {
     delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
     delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
+    delete process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
   });
 
   afterAll(() => {
@@ -28,6 +33,12 @@ describe('StatisticCommuneService', () => {
     } else {
       process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS =
         previousEmptyRangeMaxDays;
+    }
+    if (previousCurrentLockWaitTimeoutMs === undefined) {
+      delete process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
+    } else {
+      process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS =
+        previousCurrentLockWaitTimeoutMs;
     }
   });
 
@@ -65,6 +76,27 @@ describe('StatisticCommuneService', () => {
       expect(() => parseHistoricEmptyStatisticsRangeMaxDays(value)).toThrow(
         'Invalid HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS',
       );
+    },
+  );
+
+  it.each([
+    [undefined, CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT],
+    ['', CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT],
+    ['1', 1],
+    ['600000', 600_000],
+    [' 1800000 ', 1_800_000],
+  ])('parses current lock wait timeout %s as %i ms', (value, expected) => {
+    expect(parseCurrentCommuneStatisticsLockWaitTimeoutMs(value)).toBe(
+      expected,
+    );
+  });
+
+  it.each(['0', '-1', '1.5', '1800001', 'invalid'])(
+    'rejects invalid current lock wait timeout %p',
+    (value) => {
+      expect(() =>
+        parseCurrentCommuneStatisticsLockWaitTimeoutMs(value),
+      ).toThrow('Invalid CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS');
     },
   );
 
@@ -238,6 +270,8 @@ describe('StatisticCommuneService', () => {
     failNationalFinalization?: boolean;
     invalidZoneIds?: number[];
     loadedZoneCount?: number;
+    lockAcquired?: boolean;
+    blockingLock?: jest.Mock;
     communes?: Array<{
       id: number;
       departement: { code: string };
@@ -267,7 +301,17 @@ describe('StatisticCommuneService', () => {
     const query = jest.fn(async (sql: string, params?: unknown[]) => {
       if (sql.includes('pg_try_advisory_lock')) {
         events.push('lock');
+        return [{ locked: options?.lockAcquired ?? true }];
+      }
+      if (sql.includes('pg_advisory_lock')) {
+        events.push('lock');
+        if (options?.blockingLock) {
+          return options.blockingLock();
+        }
         return [{ locked: true }];
+      }
+      if (sql.includes("set_config('statement_timeout'")) {
+        return [{ set_config: params?.[0] }];
       }
       if (
         sql.includes('WITH current_context AS MATERIALIZED') &&
@@ -469,6 +513,95 @@ describe('StatisticCommuneService', () => {
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
+  it('queues a current computation until the shared snapshot lock is acquired', async () => {
+    let releaseLock!: (value: Array<{ locked: boolean }>) => void;
+    const blockingLock = jest.fn(
+      () =>
+        new Promise<Array<{ locked: boolean }>>((resolve) => {
+          releaseLock = resolve;
+        }),
+    );
+    const harness = createComputationHarness({ blockingLock });
+
+    const computation = harness.service.computeCommuneStatisticsRestrictions(
+      [],
+      new Date('2025-07-13T00:00:00.000Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(blockingLock).toHaveBeenCalledTimes(1);
+    expect(harness.events).toEqual(['lock']);
+    expect(harness.communeService.count).not.toHaveBeenCalled();
+    const timeoutCall = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes("set_config('statement_timeout'"),
+    );
+    expect(timeoutCall?.[1]).toEqual([
+      `${CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT}ms`,
+    ]);
+
+    releaseLock([{ locked: true }]);
+    await computation;
+
+    expect(harness.events).toContain('running:national');
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps historic computations fail-fast when the shared lock is busy', async () => {
+    const harness = createComputationHarness({ lockAcquired: false });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        true,
+      ),
+    ).rejects.toThrow(
+      'Un calcul des statistiques communales est deja en cours',
+    );
+
+    expect(
+      harness.query.mock.calls.some(([sql]) =>
+        String(sql).includes('pg_try_advisory_lock'),
+      ),
+    ).toBe(true);
+    expect(
+      harness.query.mock.calls.some(([sql]) =>
+        String(sql).includes('SELECT pg_advisory_lock'),
+      ),
+    ).toBe(false);
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds current lock waiting and cleans up the acquisition transaction on timeout', async () => {
+    const lockTimeout = Object.assign(
+      new Error('canceling statement due to statement timeout'),
+      { code: '57014' },
+    );
+    const blockingLock = jest.fn().mockRejectedValue(lockTimeout);
+    const harness = createComputationHarness({ blockingLock });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+      ),
+    ).rejects.toThrow(
+      `Delai maximal d'attente du calcul courant des statistiques communales atteint (${CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT} ms)`,
+    );
+
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.isTransactionActive).toBe(false);
+    expect(
+      harness.query.mock.calls.some(([sql]) =>
+        String(sql).includes('pg_advisory_unlock'),
+      ),
+    ).toBe(false);
+    expect(harness.communeService.count).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves the bootstrap barrier during a targeted recomputation', async () => {
     const harness = createComputationHarness();
 
@@ -542,8 +675,8 @@ describe('StatisticCommuneService', () => {
     expect(
       harness.events.filter((event) => event === 'commune-updated'),
     ).toHaveLength(3);
-    expect(harness.queryRunner.startTransaction).toHaveBeenCalledTimes(4);
-    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(4);
+    expect(harness.queryRunner.startTransaction).toHaveBeenCalledTimes(5);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(5);
     expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
@@ -585,7 +718,7 @@ describe('StatisticCommuneService', () => {
       '(SELECT COUNT(*)::integer FROM matched) AS matched',
     );
     expect(updateSql).toContain('AS unchanged');
-    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(2);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(3);
     expect(
       harness.query.mock.calls.some(
         ([sql, params]) =>
@@ -1096,6 +1229,81 @@ describe('StatisticCommuneService', () => {
     expect(runningCall?.[1]).toEqual(['2025-07-13', 'national', 1, '42']);
   });
 
+  it('finalizes a ready legacy snapshot only in its guarded publication context', async () => {
+    const harness = createComputationHarness();
+    harness.query.mockResolvedValueOnce([
+      {
+        contextMatches: true,
+        publicationContextMatches: true,
+        readyCount: 1,
+        alreadyPublishedCount: 0,
+        completedCount: 1,
+        completedSiblingCount: 2,
+        clearedBootstrapCount: 1,
+        publishedStateCount: 1,
+        expectedDepartementCount: 101,
+        departementRestrictionCount: 101,
+        departementSituationCount: 101,
+        departementSituationKeyCount: 101,
+      },
+    ]);
+
+    await harness.service.finalizeLegacyCurrentPublication(
+      new Date('2025-07-13T00:00:00.000Z'),
+      '42',
+      '9',
+    );
+
+    const [sql, parameters] = harness.query.mock.calls[0];
+    expect(sql).toContain('snapshot."status" = \'ready\'');
+    expect(sql).toContain('source_state."revision" = $2::bigint');
+    expect(sql).toContain('config."historicComputeEpoch" = $3::bigint');
+    expect(sql).toContain('coverage."expectedDepartementCount" = 101');
+    expect(sql).toContain('snapshot."scope" <> \'bootstrap\'');
+    expect(sql).toContain('"revision" = publication_state."revision" + 1');
+    expect(parameters).toEqual(['2025-07-13', '42', '9']);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not publish a legacy watermark after source context drift', async () => {
+    const harness = createComputationHarness();
+    harness.query.mockResolvedValueOnce([
+      {
+        contextMatches: false,
+        publicationContextMatches: false,
+        readyCount: 0,
+        alreadyPublishedCount: 0,
+        completedCount: 0,
+        publishedStateCount: 0,
+        expectedDepartementCount: 101,
+        departementRestrictionCount: 101,
+        departementSituationCount: 101,
+        departementSituationKeyCount: 101,
+      },
+    ]);
+
+    await expect(
+      harness.service.finalizeLegacyCurrentPublication(
+        new Date('2025-07-13T00:00:00.000Z'),
+        '42',
+        '9',
+      ),
+    ).rejects.toThrow(
+      'Legacy statistic publication context changed for 2025-07-13',
+    );
+
+    const sql = String(harness.query.mock.calls[0][0]);
+    expect(sql).toContain(
+      'UPDATE "statistic_publication_state" publication_state',
+    );
+    expect(sql).toContain('FROM completed_snapshot, publication_context');
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
   it('publishes a fully covered legacy snapshot in the guarded completion statement', async () => {
     const harness = createComputationHarness();
 
@@ -1165,7 +1373,7 @@ describe('StatisticCommuneService', () => {
     ).rejects.toThrow('national finalization failed');
 
     expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
-    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(2);
     expect(harness.events).toEqual([
       'lock',
       'running:national',
@@ -1259,7 +1467,7 @@ describe('StatisticCommuneService', () => {
       'unlock',
     ]);
     expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
-    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('fails the barrier when a matched input is neither updated nor unchanged', async () => {
@@ -1291,7 +1499,7 @@ describe('StatisticCommuneService', () => {
       ),
     ).toBe(false);
     expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
-    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('does not certify a snapshot whose completion transition affected no row', async () => {

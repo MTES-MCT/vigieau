@@ -1180,6 +1180,16 @@ DELETE FROM zone_alerte_computed
     isNationalCompute = sourceRevision !== undefined,
   ) {
     const publicationEnabled = isZonePublicationEnabled();
+    if (
+      !publicationEnabled &&
+      (sourceRevision === undefined ||
+        historicComputeEpoch === undefined ||
+        scheduledFor === undefined)
+    ) {
+      throw new Error(
+        'Legacy computation is missing its statistic certification context',
+      );
+    }
     const isNationalVersionedCompute =
       isNationalCompute && publicationEnabled && sourceRevision !== undefined;
     if (isNationalVersionedCompute && scheduledFor === undefined) {
@@ -1313,12 +1323,6 @@ DELETE FROM zone_alerte_computed
         pmtilesFile: fileToTransferPmtiles,
         pmtilesChecksum,
       });
-    } else {
-      await this.publishLegacyZoneArtifacts({
-        geojsonFile: fileToTransferGeojson,
-        pmtilesFile: fileToTransferPmtiles,
-        date,
-      });
     }
     await this.zoneAlerteComputedRepository
       .createQueryBuilder()
@@ -1326,7 +1330,6 @@ DELETE FROM zone_alerte_computed
       .set({ enabled: true })
       .where('1 = 1')
       .execute();
-    await this.markLegacyComputationAvailable(new Date(), publicationEnabled);
     await this.computePublicationStatistics(
       allZonesComputed,
       date,
@@ -1338,6 +1341,32 @@ DELETE FROM zone_alerte_computed
         : undefined,
       isNationalCompute,
     );
+    if (!publicationEnabled) {
+      const stableArtifacts = await this.publishLegacyZoneArtifacts({
+        geojsonFile: fileToTransferGeojson,
+        pmtilesFile: fileToTransferPmtiles,
+      });
+      await this.statisticCommuneService.finalizeLegacyCurrentPublication(
+        date,
+        sourceRevision!,
+        historicComputeEpoch!,
+      );
+      await this.markLegacyComputationAvailable(new Date(), false);
+      try {
+        await this.publishLegacyZoneArtifactSideEffects({
+          geojsonFile: fileToTransferGeojson,
+          geojsonUrl: stableArtifacts.geojsonUrl,
+          pmtilesFile: fileToTransferPmtiles!,
+          pmtilesUrl: stableArtifacts.pmtilesUrl,
+          date,
+        });
+      } catch (error) {
+        this.logger.error(
+          'ERROR PUBLISHING LEGACY ZONE ARTIFACT SIDE EFFECTS',
+          error,
+        );
+      }
+    }
     const publicationId = await this.buildVersionedPublicationIfNational({
       sourceRevision: isNationalCompute ? sourceRevision : undefined,
       sourceComputedAt: date,
@@ -1362,6 +1391,8 @@ DELETE FROM zone_alerte_computed
     if (publicationEnabled && sourceRevision === undefined) {
       return;
     }
+    const certifyCompleteCurrentSnapshot =
+      certifyCurrentPublication || !publicationEnabled;
     await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
       allZonesComputed,
       date,
@@ -1385,18 +1416,14 @@ DELETE FROM zone_alerte_computed
             date.toISOString().slice(0, 10),
           );
         },
-        deferCertificationUntilPublication: publicationEnabled,
+        deferCertificationUntilPublication: true,
         sourceRevision,
         historicComputeEpoch,
         requireNationalCoverage:
-          certifyCurrentPublication &&
+          certifyCompleteCurrentSnapshot &&
           sourceRevision !== undefined &&
           historicComputeEpoch !== undefined,
-        publishCurrentDate:
-          certifyCurrentPublication &&
-          !publicationEnabled &&
-          sourceRevision !== undefined &&
-          historicComputeEpoch !== undefined,
+        publishCurrentDate: false,
       },
     );
     if (computeHistoric && publicationEnabled) {
@@ -1450,41 +1477,75 @@ DELETE FROM zone_alerte_computed
   private async publishLegacyZoneArtifacts(input: {
     geojsonFile: { originalname: string; buffer: Buffer };
     pmtilesFile?: { originalname: string; buffer: Buffer };
-    date: Date;
-  }): Promise<void> {
+  }): Promise<{ geojsonUrl: string; pmtilesUrl: string }> {
     if (!input.pmtilesFile) {
       throw new Error('Legacy publication requires a PMTiles artifact');
     }
-    await this.publishLegacyArtifact(
-      input.pmtilesFile,
-      input.date,
-      'pmtiles',
-      'Carte des zones et arrêtés en vigueur - PMTILES',
-    );
-    await this.publishLegacyArtifact(
+    const geojsonUrl = await this.uploadStableLegacyArtifact(
       input.geojsonFile,
-      input.date,
       'geojson',
-      'Carte des zones et arrêtés en vigueur - GeoJSON',
     );
+    const pmtilesUrl = await this.uploadStableLegacyArtifact(
+      input.pmtilesFile,
+      'pmtiles',
+    );
+    return { geojsonUrl, pmtilesUrl };
   }
 
-  private async publishLegacyArtifact(
+  private async uploadStableLegacyArtifact(
     file: { originalname: string; buffer: Buffer },
-    date: Date,
     kind: 'geojson' | 'pmtiles',
-    dataGouvTitle: string,
-  ): Promise<void> {
+  ): Promise<string> {
+    const timeoutMs = this.getZonePublicationS3TimeoutMs();
     const stableResponse = await this.s3Service.uploadFile(
       file as Express.Multer.File,
       `${kind}/`,
-      { cacheControl: 'public, max-age=0, must-revalidate' },
+      {
+        abortSignal: AbortSignal.timeout(timeoutMs),
+        cacheControl: 'public, max-age=0, must-revalidate',
+        contentType:
+          kind === 'geojson'
+            ? 'application/geo+json'
+            : 'application/vnd.pmtiles',
+      },
     );
     const stableUrl = stableResponse?.Location;
     if (!stableUrl) {
       throw new Error(`Stable ${kind} upload returned no URL`);
     }
+    return stableUrl;
+  }
 
+  private async publishLegacyZoneArtifactSideEffects(input: {
+    geojsonFile: { originalname: string; buffer: Buffer };
+    geojsonUrl: string;
+    pmtilesFile: { originalname: string; buffer: Buffer };
+    pmtilesUrl: string;
+    date: Date;
+  }): Promise<void> {
+    await this.publishLegacyArtifactSideEffects(
+      input.geojsonFile,
+      input.geojsonUrl,
+      input.date,
+      'geojson',
+      'Carte des zones et arrêtés en vigueur - GeoJSON',
+    );
+    await this.publishLegacyArtifactSideEffects(
+      input.pmtilesFile,
+      input.pmtilesUrl,
+      input.date,
+      'pmtiles',
+      'Carte des zones et arrêtés en vigueur - PMTILES',
+    );
+  }
+
+  private async publishLegacyArtifactSideEffects(
+    file: { originalname: string; buffer: Buffer },
+    stableUrl: string,
+    date: Date,
+    kind: 'geojson' | 'pmtiles',
+    dataGouvTitle: string,
+  ): Promise<void> {
     let datedCopySucceeded = false;
     try {
       const datedFileName = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.${kind}`;
@@ -1493,6 +1554,9 @@ DELETE FROM zone_alerte_computed
         datedFileName,
         `${kind}/`,
         {
+          abortSignal: AbortSignal.timeout(
+            this.getZonePublicationS3TimeoutMs(),
+          ),
           cacheControl: 'public, max-age=0, must-revalidate',
           contentType:
             kind === 'geojson'
@@ -1505,7 +1569,7 @@ DELETE FROM zone_alerte_computed
       this.logger.error(`ERROR COPYING ${kind.toUpperCase()}`, error);
     }
 
-    if (stableUrl && (kind === 'pmtiles' || datedCopySucceeded)) {
+    if (kind === 'pmtiles' || datedCopySucceeded) {
       try {
         await this.datagouvService.uploadToDatagouv(
           kind,
@@ -1527,13 +1591,7 @@ DELETE FROM zone_alerte_computed
     checksum: string,
     kind: 'geojson' | 'pmtiles',
   ): Promise<string> {
-    const configuredTimeoutMs = Number(
-      this.nestConfigService.get('ZONE_PUBLICATION_S3_TIMEOUT_MS'),
-    );
-    const timeoutMs =
-      Number.isInteger(configuredTimeoutMs) && configuredTimeoutMs > 0
-        ? configuredTimeoutMs
-        : 60_000;
+    const timeoutMs = this.getZonePublicationS3TimeoutMs();
     const immutableResponse = await this.s3Service.uploadFile(
       {
         ...file,
@@ -1554,6 +1612,15 @@ DELETE FROM zone_alerte_computed
       throw new Error(`Immutable ${kind} upload returned no URL`);
     }
     return immutableUrl;
+  }
+
+  private getZonePublicationS3TimeoutMs(): number {
+    const configuredTimeoutMs = Number(
+      this.nestConfigService.get?.('ZONE_PUBLICATION_S3_TIMEOUT_MS'),
+    );
+    return Number.isInteger(configuredTimeoutMs) && configuredTimeoutMs > 0
+      ? configuredTimeoutMs
+      : 60_000;
   }
 
   private async buildVersionedPublicationIfNational(input: {

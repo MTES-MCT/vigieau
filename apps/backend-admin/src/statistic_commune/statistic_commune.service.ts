@@ -12,6 +12,8 @@ import { Moment } from 'moment';
 
 const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
   'vigieau:statistic-commune:snapshot-computation';
+export const CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT = 600_000;
+const CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_LIMIT = 1_800_000;
 const DEFAULT_COMMUNE_STATISTICS_BATCH_SIZE = 250;
 const MAX_COMMUNE_STATISTICS_BATCH_SIZE = 1000;
 export const HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS_DEFAULT = 7;
@@ -76,6 +78,30 @@ export function parseHistoricEmptyStatisticsRangeMaxDays(
     );
   }
   return maxDays;
+}
+
+export function parseCurrentCommuneStatisticsLockWaitTimeoutMs(
+  value = process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS,
+): number {
+  if (value === undefined || value.trim() === '') {
+    return CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_DEFAULT;
+  }
+  const normalizedValue = value.trim();
+  if (!/^[1-9]\d*$/.test(normalizedValue)) {
+    throw new Error(
+      'Invalid CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS: expected a positive integer',
+    );
+  }
+  const timeoutMs = Number(normalizedValue);
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs > CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_LIMIT
+  ) {
+    throw new Error(
+      `Invalid CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS: expected at most ${CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS_LIMIT}`,
+    );
+  }
+  return timeoutMs;
 }
 
 interface CommuneStatisticRestriction {
@@ -238,16 +264,11 @@ export class StatisticCommuneService {
     try {
       await queryRunner.connect();
       connected = true;
-      const [lock] = await queryRunner.query(
-        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-        [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
+      await this.acquireStatisticCommuneSnapshotLock(
+        queryRunner,
+        historic !== true,
       );
-      locked = lock?.locked === true;
-      if (!locked) {
-        throw new Error(
-          'Un calcul des statistiques communales est deja en cours',
-        );
-      }
+      locked = true;
 
       if (snapshotScope !== 'national') {
         nationalSnapshotAlreadyCompleted =
@@ -415,6 +436,250 @@ export class StatisticCommuneService {
     }
   }
 
+  async finalizeLegacyCurrentPublication(
+    date: Date,
+    sourceRevision: string,
+    historicComputeEpoch: string,
+  ): Promise<void> {
+    if (
+      Number.isNaN(date.getTime()) ||
+      !/^\d+$/.test(sourceRevision) ||
+      !/^\d+$/.test(historicComputeEpoch)
+    ) {
+      throw new Error('Invalid legacy statistic publication context');
+    }
+    const snapshotDate = date.toISOString().slice(0, 10);
+    const queryRunner = this.dataSource.createQueryRunner();
+    let transactionStarted = false;
+    try {
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
+      transactionStarted = true;
+      const [result] = await queryRunner.query(
+        `
+          WITH current_context AS MATERIALIZED (
+            SELECT 1
+            FROM "zone_publication_source_state" source_state
+            CROSS JOIN "config" config
+            WHERE source_state."id" = 1
+              AND source_state."revision" = $2::bigint
+              AND config."id" = 1
+              AND config."historicComputeEpoch" = $3::bigint
+            FOR SHARE OF source_state, config
+          ), national_coverage AS MATERIALIZED (
+            SELECT
+              (SELECT COUNT(*)::integer FROM "departement")
+                AS "expectedDepartementCount",
+              (
+                SELECT COUNT(*)::integer
+                FROM "departement" departement
+                JOIN "statistic_departement" statistic_departement
+                  ON statistic_departement."departementId" = departement."id"
+                WHERE (
+                  SELECT COUNT(*)
+                  FROM jsonb_array_elements(
+                    COALESCE(statistic_departement."restrictions", '[]'::jsonb)
+                  ) AS restriction(value)
+                  WHERE restriction.value ->> 'date' = $1::text
+                ) = 1
+              ) AS "departementRestrictionCount",
+              (
+                SELECT COUNT(*)::integer
+                FROM "departement" departement
+                WHERE COALESCE(
+                  (
+                    SELECT statistic."departementSituation"::jsonb
+                    FROM "statistic" statistic
+                    WHERE statistic."date" = $1::date
+                  ),
+                  '{}'::jsonb
+                ) ? departement."code"
+              ) AS "departementSituationCount",
+              (
+                SELECT COUNT(*)::integer
+                FROM jsonb_object_keys(
+                  COALESCE(
+                    (
+                      SELECT statistic."departementSituation"::jsonb
+                      FROM "statistic" statistic
+                      WHERE statistic."date" = $1::date
+                    ),
+                    '{}'::jsonb
+                  )
+                ) AS situation_key
+              ) AS "departementSituationKeyCount"
+          ), publication_context AS MATERIALIZED (
+            SELECT
+              publication_state."id",
+              publication_state."currentPublishedDate"
+            FROM "statistic_publication_state" publication_state
+            CROSS JOIN current_context
+            WHERE publication_state."id" = 1
+              AND (
+                publication_state."currentPublishedDate" IS NULL
+                OR publication_state."currentPublishedDate" <= $1::date
+              )
+            FOR UPDATE OF publication_state
+          ), already_published AS MATERIALIZED (
+            SELECT snapshot."snapshotDate"
+            FROM "statistic_commune_snapshot" snapshot
+            CROSS JOIN current_context
+            CROSS JOIN national_coverage coverage
+            CROSS JOIN publication_context
+            WHERE snapshot."snapshotDate" = $1::date
+              AND snapshot."scope" = 'national'
+              AND snapshot."status" = 'completed'
+              AND snapshot."sourceRevision" = $2::bigint
+              AND snapshot."expectedCommuneCount" > 0
+              AND snapshot."processedCommuneCount" =
+                  snapshot."expectedCommuneCount"
+              AND publication_context."currentPublishedDate" = $1::date
+              AND coverage."expectedDepartementCount" = 101
+              AND coverage."departementRestrictionCount" = 101
+              AND coverage."departementSituationCount" = 101
+              AND coverage."departementSituationKeyCount" = 101
+            FOR SHARE OF snapshot
+          ), ready_snapshot AS MATERIALIZED (
+            SELECT snapshot."snapshotDate"
+            FROM "statistic_commune_snapshot" snapshot
+            CROSS JOIN current_context
+            WHERE snapshot."snapshotDate" = $1::date
+              AND snapshot."scope" = 'national'
+              AND snapshot."status" = 'ready'
+              AND snapshot."sourceRevision" = $2::bigint
+              AND snapshot."expectedCommuneCount" > 0
+              AND snapshot."processedCommuneCount" =
+                  snapshot."expectedCommuneCount"
+            FOR UPDATE OF snapshot
+          ), eligible_snapshot AS MATERIALIZED (
+            SELECT ready_snapshot."snapshotDate"
+            FROM ready_snapshot
+            CROSS JOIN national_coverage coverage
+            CROSS JOIN publication_context
+            WHERE coverage."expectedDepartementCount" = 101
+              AND coverage."departementRestrictionCount" = 101
+              AND coverage."departementSituationCount" = 101
+              AND coverage."departementSituationKeyCount" = 101
+          ), completed_snapshot AS (
+            UPDATE "statistic_commune_snapshot" snapshot
+            SET "status" = 'completed',
+                "processedCommuneCount" = snapshot."expectedCommuneCount",
+                "completedAt" = now(),
+                "lastError" = NULL,
+                "updatedAt" = now()
+            FROM eligible_snapshot
+            WHERE snapshot."snapshotDate" = eligible_snapshot."snapshotDate"
+              AND snapshot."scope" = 'national'
+              AND snapshot."status" = 'ready'
+              AND snapshot."sourceRevision" = $2::bigint
+            RETURNING snapshot."snapshotDate"
+          ), completed_siblings AS (
+            UPDATE "statistic_commune_snapshot" snapshot
+            SET "status" = 'completed',
+                "processedCommuneCount" = snapshot."expectedCommuneCount",
+                "completedAt" = now(),
+                "lastError" = NULL,
+                "sourceRevision" = $2::bigint,
+                "updatedAt" = now()
+            FROM completed_snapshot
+            WHERE snapshot."snapshotDate" = completed_snapshot."snapshotDate"
+              AND snapshot."scope" <> 'national'
+              AND snapshot."scope" <> 'bootstrap'
+            RETURNING 1
+          ), cleared_bootstrap AS (
+            DELETE FROM "statistic_commune_snapshot" snapshot
+            USING completed_snapshot
+            WHERE snapshot."scope" = 'bootstrap'
+            RETURNING 1
+          ), published_state AS (
+            UPDATE "statistic_publication_state" publication_state
+            SET "revision" = publication_state."revision" + 1,
+                "currentPublishedDate" = $1::date,
+                "updatedAt" = now()
+            FROM completed_snapshot, publication_context
+            WHERE publication_state."id" = publication_context."id"
+            RETURNING publication_state."revision"
+          )
+          SELECT
+            EXISTS(SELECT 1 FROM current_context) AS "contextMatches",
+            EXISTS(SELECT 1 FROM publication_context)
+              AS "publicationContextMatches",
+            (SELECT COUNT(*)::integer FROM ready_snapshot) AS "readyCount",
+            (SELECT COUNT(*)::integer FROM already_published)
+              AS "alreadyPublishedCount",
+            (SELECT COUNT(*)::integer FROM completed_snapshot)
+              AS "completedCount",
+            (SELECT COUNT(*)::integer FROM completed_siblings)
+              AS "completedSiblingCount",
+            (SELECT COUNT(*)::integer FROM cleared_bootstrap)
+              AS "clearedBootstrapCount",
+            (SELECT COUNT(*)::integer FROM published_state)
+              AS "publishedStateCount",
+            coverage."expectedDepartementCount",
+            coverage."departementRestrictionCount",
+            coverage."departementSituationCount",
+            coverage."departementSituationKeyCount"
+          FROM national_coverage coverage
+        `,
+        [snapshotDate, sourceRevision, historicComputeEpoch],
+      );
+      if (result?.contextMatches !== true) {
+        throw new Error(
+          `Legacy statistic publication context changed for ${snapshotDate}`,
+        );
+      }
+      if (
+        Number(result?.expectedDepartementCount ?? 0) !== 101 ||
+        Number(result?.departementRestrictionCount ?? 0) !== 101 ||
+        Number(result?.departementSituationCount ?? 0) !== 101 ||
+        Number(result?.departementSituationKeyCount ?? 0) !== 101
+      ) {
+        throw new Error(
+          `Couverture statistique departementale incomplete pour ${snapshotDate}: ` +
+            `${Number(result?.departementRestrictionCount ?? 0)}/101 restrictions, ` +
+            `${Number(result?.departementSituationCount ?? 0)}/101 situations, ` +
+            `${Number(result?.departementSituationKeyCount ?? 0)}/101 cles`,
+        );
+      }
+      if (result?.publicationContextMatches !== true) {
+        throw new Error(
+          `La publication statistique courante ${snapshotDate} ferait regresser la date publiee`,
+        );
+      }
+      const newlyFinalized =
+        Number(result?.readyCount ?? 0) === 1 &&
+        Number(result?.completedCount ?? 0) === 1 &&
+        Number(result?.publishedStateCount ?? 0) === 1 &&
+        Number(result?.alreadyPublishedCount ?? 0) === 0;
+      const alreadyFinalized =
+        Number(result?.readyCount ?? 0) === 0 &&
+        Number(result?.completedCount ?? 0) === 0 &&
+        Number(result?.publishedStateCount ?? 0) === 0 &&
+        Number(result?.alreadyPublishedCount ?? 0) === 1;
+      if (!newlyFinalized && !alreadyFinalized) {
+        throw new Error(
+          `Le snapshot communal ${snapshotDate} n'est pas pret ou finalise pour la publication legacy`,
+        );
+      }
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted && queryRunner.isTransactionActive) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (rollbackError) {
+          this.logger.error(
+            'ERREUR LORS DU ROLLBACK DE LA PUBLICATION STATISTIQUE LEGACY',
+            rollbackError,
+          );
+        }
+      }
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
   async computeEmptyHistoricCommuneStatisticsRange(
     days: EmptyHistoricStatisticDay[],
     options: EmptyHistoricStatisticRangeOptions,
@@ -441,16 +706,8 @@ export class StatisticCommuneService {
     try {
       await queryRunner.connect();
       connected = true;
-      const [lock] = await queryRunner.query(
-        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-        [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
-      );
-      locked = lock?.locked === true;
-      if (!locked) {
-        throw new Error(
-          'Un calcul des statistiques communales est deja en cours',
-        );
-      }
+      await this.acquireStatisticCommuneSnapshotLock(queryRunner, false);
+      locked = true;
 
       const communeSize = await this.communeService.count();
       if (communeSize === 0) {
@@ -549,6 +806,78 @@ export class StatisticCommuneService {
           );
         }
       }
+    }
+  }
+
+  private async acquireStatisticCommuneSnapshotLock(
+    queryRunner: QueryRunner,
+    waitForLock: boolean,
+  ): Promise<void> {
+    if (!waitForLock) {
+      const [lock] = await queryRunner.query(
+        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+        [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
+      );
+      if (lock?.locked !== true) {
+        throw new Error(
+          'Un calcul des statistiques communales est deja en cours',
+        );
+      }
+      return;
+    }
+
+    const timeoutMs = parseCurrentCommuneStatisticsLockWaitTimeoutMs();
+    let lockAcquired = false;
+    try {
+      await queryRunner.startTransaction();
+      await queryRunner.query(
+        "SELECT set_config('statement_timeout', $1, true)",
+        [`${timeoutMs}ms`],
+      );
+      await queryRunner.query(
+        'SELECT pg_advisory_lock(hashtext($1)) AS locked',
+        [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
+      );
+      lockAcquired = true;
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      if (queryRunner.isTransactionActive) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (rollbackError) {
+          this.logger.error(
+            "ERREUR LORS DE L'ANNULATION DE L'ATTENTE DU VERROU DES STATISTIQUES COMMUNALES",
+            rollbackError,
+          );
+        }
+      }
+      if (lockAcquired) {
+        try {
+          await queryRunner.query(
+            'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
+            [STATISTIC_COMMUNE_SNAPSHOT_LOCK],
+          );
+        } catch (unlockError) {
+          this.logger.error(
+            "ERREUR LORS DE LA LIBERATION DU VERROU DES STATISTIQUES COMMUNALES APRES ECHEC D'ACQUISITION",
+            unlockError,
+          );
+        }
+      }
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === '57014'
+      ) {
+        throw Object.assign(
+          new Error(
+            `Delai maximal d'attente du calcul courant des statistiques communales atteint (${timeoutMs} ms)`,
+          ),
+          { cause: error },
+        );
+      }
+      throw error;
     }
   }
 

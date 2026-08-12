@@ -54,9 +54,17 @@ type EmptyHistoricStatisticRangePersister = {
   ): Promise<void>;
 };
 
+type StatisticCommuneLockAcquirer = {
+  acquireStatisticCommuneSnapshotLock(
+    queryRunner: QueryRunner,
+    waitForLock: boolean,
+  ): Promise<void>;
+};
+
 type StatisticCommuneInternals = SnapshotFinalizer &
   StatisticCommunePersister &
-  EmptyHistoricStatisticRangePersister;
+  EmptyHistoricStatisticRangePersister &
+  StatisticCommuneLockAcquirer;
 
 type StatisticCommuneExportGuard = {
   assertNoIncompleteSnapshots(
@@ -64,6 +72,35 @@ type StatisticCommuneExportGuard = {
     endDate?: string,
   ): Promise<void>;
 };
+
+async function expectAdvisoryLockState(
+  dataSource: DataSource,
+  pid: number,
+  granted: boolean,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  do {
+    const [lockState] = await dataSource.query(
+      `
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_locks
+          WHERE pid = $1
+            AND locktype = 'advisory'
+            AND granted = $2
+        ) AS present
+      `,
+      [pid, granted],
+    );
+    if (lockState?.present === true) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } while (Date.now() < deadline);
+  throw new Error(
+    `PostgreSQL advisory lock for pid ${pid} did not reach granted=${granted}`,
+  );
+}
 
 describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
   let dataSource: DataSource;
@@ -103,6 +140,114 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
   afterAll(async () => {
     if (dataSource?.isInitialized) {
       await dataSource.destroy();
+    }
+  });
+
+  it('queues a current computation behind the PostgreSQL advisory lock and acquires it after release', async () => {
+    const holder = dataSource.createQueryRunner();
+    const waiter = dataSource.createQueryRunner();
+    await holder.connect();
+    await waiter.connect();
+    let holderLocked = false;
+    let waiterLocked = false;
+
+    try {
+      const [holderResult] = await holder.query(
+        "SELECT pg_try_advisory_lock(hashtext('vigieau:statistic-commune:snapshot-computation')) AS locked",
+      );
+      holderLocked = holderResult?.locked === true;
+      expect(holderLocked).toBe(true);
+      const [{ pid: waiterPid }] = await waiter.query(
+        'SELECT pg_backend_pid() AS pid',
+      );
+
+      const acquisition = service.acquireStatisticCommuneSnapshotLock(
+        waiter,
+        true,
+      );
+      await expectAdvisoryLockState(dataSource, Number(waiterPid), false);
+
+      const [holderUnlock] = await holder.query(
+        "SELECT pg_advisory_unlock(hashtext('vigieau:statistic-commune:snapshot-computation')) AS unlocked",
+      );
+      expect(holderUnlock?.unlocked).toBe(true);
+      holderLocked = false;
+      await acquisition;
+      waiterLocked = true;
+
+      await expectAdvisoryLockState(dataSource, Number(waiterPid), true);
+    } finally {
+      if (waiterLocked) {
+        await waiter.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau:statistic-commune:snapshot-computation'))",
+        );
+      }
+      if (holderLocked) {
+        await holder.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau:statistic-commune:snapshot-computation'))",
+        );
+      }
+      await waiter.release();
+      await holder.release();
+    }
+  });
+
+  it('times out current lock waiting without leaking transaction state, timeout, or advisory lock', async () => {
+    const previousTimeout =
+      process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
+    process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS = '100';
+    const holder = dataSource.createQueryRunner();
+    const waiter = dataSource.createQueryRunner();
+    await holder.connect();
+    await waiter.connect();
+    let holderLocked = false;
+
+    try {
+      const [holderResult] = await holder.query(
+        "SELECT pg_try_advisory_lock(hashtext('vigieau:statistic-commune:snapshot-computation')) AS locked",
+      );
+      holderLocked = holderResult?.locked === true;
+      expect(holderLocked).toBe(true);
+      const [{ pid: waiterPid }] = await waiter.query(
+        'SELECT pg_backend_pid() AS pid',
+      );
+      const [timeoutBefore] = await waiter.query('SHOW statement_timeout');
+
+      await expect(
+        service.acquireStatisticCommuneSnapshotLock(waiter, true),
+      ).rejects.toThrow(
+        "Delai maximal d'attente du calcul courant des statistiques communales atteint (100 ms)",
+      );
+
+      expect(waiter.isTransactionActive).toBe(false);
+      const [timeoutAfter] = await waiter.query('SHOW statement_timeout');
+      expect(timeoutAfter.statement_timeout).toBe(
+        timeoutBefore.statement_timeout,
+      );
+      const [lockState] = await dataSource.query(
+        `
+          SELECT COUNT(*)::integer AS count
+          FROM pg_locks
+          WHERE pid = $1
+            AND locktype = 'advisory'
+        `,
+        [Number(waiterPid)],
+      );
+      expect(lockState.count).toBe(0);
+    } finally {
+      if (holderLocked) {
+        await holder.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau:statistic-commune:snapshot-computation'))",
+        );
+      }
+      await waiter.release();
+      await holder.release();
+      if (previousTimeout === undefined) {
+        delete process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
+      } else {
+        process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS =
+          previousTimeout;
+      }
     }
   });
 
@@ -448,6 +593,229 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       'Couverture statistique departementale incomplete',
     );
     expect((await readState()).revision).toBe('9');
+  });
+
+  it('finalizes a staged legacy publication atomically and retries it idempotently', async () => {
+    const schemaName = `legacy_finalizer_${process.pid}_${Date.now()}`;
+    const snapshotDate = '2026-08-12';
+    let isolatedDataSource: DataSource | undefined;
+
+    await dataSource.query(`CREATE SCHEMA "${schemaName}"`);
+    try {
+      isolatedDataSource = await new DataSource({
+        type: 'postgres',
+        url: postgresUrl,
+        synchronize: false,
+        logging: false,
+        extra: {
+          options: `-c search_path=${schemaName},public`,
+        },
+      }).initialize();
+      await isolatedDataSource.query(`
+        CREATE TABLE "config" (
+          "id" integer PRIMARY KEY,
+          "historicComputeEpoch" bigint NOT NULL
+        );
+        CREATE TABLE "zone_publication_source_state" (
+          "id" integer PRIMARY KEY,
+          "revision" bigint NOT NULL
+        );
+        CREATE TABLE "departement" (
+          "id" integer PRIMARY KEY,
+          "code" varchar NOT NULL UNIQUE
+        );
+        CREATE TABLE "statistic_departement" (
+          "id" serial PRIMARY KEY,
+          "departementId" integer NOT NULL UNIQUE,
+          "restrictions" jsonb
+        );
+        CREATE TABLE "statistic" (
+          "id" serial PRIMARY KEY,
+          "date" date NOT NULL UNIQUE,
+          "departementSituation" json
+        );
+        CREATE TABLE "statistic_commune_snapshot" (
+          "snapshotDate" date NOT NULL,
+          "scope" varchar NOT NULL,
+          "status" varchar NOT NULL,
+          "processedCommuneCount" integer NOT NULL DEFAULT 0,
+          "expectedCommuneCount" integer NOT NULL DEFAULT 0,
+          "sourceRevision" bigint,
+          "completedAt" timestamptz,
+          "lastError" text,
+          "updatedAt" timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY ("snapshotDate", "scope")
+        );
+        CREATE TABLE "statistic_publication_state" (
+          "id" integer PRIMARY KEY,
+          "revision" bigint NOT NULL,
+          "currentPublishedDate" date,
+          "historicPublishedThrough" date,
+          "historicDirtyFrom" date,
+          "historicDirtyThrough" date,
+          "updatedAt" timestamptz NOT NULL DEFAULT now()
+        );
+
+        INSERT INTO "config" VALUES (1, 9);
+        INSERT INTO "zone_publication_source_state" VALUES (1, 42);
+        INSERT INTO "departement" ("id", "code")
+        SELECT value, lpad(value::text, 3, '0')
+        FROM generate_series(1, 101) value;
+        INSERT INTO "statistic_departement" (
+          "departementId", "restrictions"
+        )
+        SELECT
+          "id",
+          jsonb_build_array(jsonb_build_object('date', '${snapshotDate}'))
+        FROM "departement";
+        INSERT INTO "statistic" ("date", "departementSituation")
+        SELECT
+          date '${snapshotDate}',
+          jsonb_object_agg(
+            "code",
+            jsonb_build_object('max', NULL, 'sup', NULL, 'sou', NULL, 'aep', NULL)
+          )::json
+        FROM "departement";
+        INSERT INTO "statistic_commune_snapshot" (
+          "snapshotDate", "scope", "status", "expectedCommuneCount",
+          "processedCommuneCount", "sourceRevision"
+        ) VALUES
+          ('${snapshotDate}', 'national', 'ready', 34943, 34943, 42),
+          ('${snapshotDate}', 'departements:65', 'partial', 469, 469, 42),
+          ('${snapshotDate}', 'bootstrap', 'running', 34943, 0, NULL);
+        INSERT INTO "statistic_publication_state" VALUES (
+          1, 7, date '2026-08-05', date '2025-05-12',
+          date '2025-05-13', date '2026-08-11', now()
+        );
+      `);
+      const finalizer = new StatisticCommuneService(
+        {} as never,
+        {} as never,
+        isolatedDataSource,
+      );
+      const readState = async () => {
+        const [state] = await isolatedDataSource!.query(`
+          SELECT
+            "revision"::text AS "revision",
+            "currentPublishedDate"::text AS "currentPublishedDate",
+            "historicPublishedThrough"::text AS "historicPublishedThrough",
+            "historicDirtyFrom"::text AS "historicDirtyFrom",
+            "historicDirtyThrough"::text AS "historicDirtyThrough"
+          FROM "statistic_publication_state"
+          WHERE "id" = 1
+        `);
+        return state;
+      };
+      const readSnapshots = () =>
+        isolatedDataSource!.query(`
+          SELECT "scope", "status"
+          FROM "statistic_commune_snapshot"
+          WHERE "snapshotDate" = date '${snapshotDate}'
+          ORDER BY "scope"
+        `);
+
+      await expect(
+        finalizer.finalizeLegacyCurrentPublication(
+          snapshotDateAsDate(),
+          '42',
+          '9',
+        ),
+      ).resolves.toBeUndefined();
+      expect(await readState()).toEqual({
+        revision: '8',
+        currentPublishedDate: snapshotDate,
+        historicPublishedThrough: '2025-05-12',
+        historicDirtyFrom: '2025-05-13',
+        historicDirtyThrough: '2026-08-11',
+      });
+      expect(await readSnapshots()).toEqual([
+        { scope: 'departements:65', status: 'completed' },
+        { scope: 'national', status: 'completed' },
+      ]);
+
+      await expect(
+        finalizer.finalizeLegacyCurrentPublication(
+          snapshotDateAsDate(),
+          '42',
+          '9',
+        ),
+      ).resolves.toBeUndefined();
+      expect((await readState()).revision).toBe('8');
+
+      await isolatedDataSource.query(`
+        UPDATE "statistic_commune_snapshot"
+        SET "status" = CASE
+              WHEN "scope" = 'national' THEN 'ready'
+              ELSE 'partial'
+            END,
+            "completedAt" = NULL
+        WHERE "snapshotDate" = date '${snapshotDate}';
+        INSERT INTO "statistic_commune_snapshot" (
+          "snapshotDate", "scope", "status", "expectedCommuneCount",
+          "processedCommuneCount", "sourceRevision"
+        ) VALUES ('${snapshotDate}', 'bootstrap', 'running', 34943, 0, NULL);
+        UPDATE "zone_publication_source_state" SET "revision" = 43 WHERE "id" = 1;
+      `);
+      await expect(
+        finalizer.finalizeLegacyCurrentPublication(
+          snapshotDateAsDate(),
+          '42',
+          '9',
+        ),
+      ).rejects.toThrow(
+        `Legacy statistic publication context changed for ${snapshotDate}`,
+      );
+      expect((await readState()).revision).toBe('8');
+      expect(await readSnapshots()).toEqual([
+        { scope: 'bootstrap', status: 'running' },
+        { scope: 'departements:65', status: 'partial' },
+        { scope: 'national', status: 'ready' },
+      ]);
+
+      await isolatedDataSource.query(`
+        UPDATE "zone_publication_source_state" SET "revision" = 42 WHERE "id" = 1;
+        UPDATE "config" SET "historicComputeEpoch" = 10 WHERE "id" = 1;
+      `);
+      await expect(
+        finalizer.finalizeLegacyCurrentPublication(
+          snapshotDateAsDate(),
+          '42',
+          '9',
+        ),
+      ).rejects.toThrow(
+        `Legacy statistic publication context changed for ${snapshotDate}`,
+      );
+      expect((await readState()).revision).toBe('8');
+
+      await isolatedDataSource.query(`
+        UPDATE "config" SET "historicComputeEpoch" = 9 WHERE "id" = 1;
+        UPDATE "statistic_departement"
+        SET "restrictions" = '[]'::jsonb
+        WHERE "departementId" = 101;
+      `);
+      await expect(
+        finalizer.finalizeLegacyCurrentPublication(
+          snapshotDateAsDate(),
+          '42',
+          '9',
+        ),
+      ).rejects.toThrow('Couverture statistique departementale incomplete');
+      expect((await readState()).revision).toBe('8');
+      expect(await readSnapshots()).toEqual([
+        { scope: 'bootstrap', status: 'running' },
+        { scope: 'departements:65', status: 'partial' },
+        { scope: 'national', status: 'ready' },
+      ]);
+
+      function snapshotDateAsDate(): Date {
+        return new Date(`${snapshotDate}T12:00:00.000Z`);
+      }
+    } finally {
+      if (isolatedDataSource?.isInitialized) {
+        await isolatedDataSource.destroy();
+      }
+      await dataSource.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+    }
   });
 
   it('compares export bounds as PostgreSQL dates', async () => {
