@@ -591,9 +591,10 @@ export class ZoneAlerteComputedService {
       await Promise.all(
         ar.restrictions.map(async (restriction) => {
           if (restriction.zoneAlerte) {
+            const arreteCadreId = restriction.arreteCadre?.id;
             const za = await this.zoneAlerteService.findOne(
               restriction.zoneAlerte.id,
-              [restriction.arreteCadre.id],
+              arreteCadreId === undefined ? undefined : [arreteCadreId],
             );
             za.restriction = {
               id: restriction.id,

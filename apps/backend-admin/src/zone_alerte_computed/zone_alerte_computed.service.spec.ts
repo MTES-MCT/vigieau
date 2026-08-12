@@ -1574,6 +1574,75 @@ describe('ZoneAlerteComputedService', () => {
     );
   });
 
+  it.each([
+    ['without a framework order', null, undefined],
+    ['with a framework order', { id: 42 }, [42]],
+  ])(
+    'loads a current reference zone %s',
+    async (_label, arreteCadre, expectedArreteCadreIds) => {
+      const findByDepartement = jest.fn().mockResolvedValue([
+        {
+          id: 123,
+          restrictions: [
+            {
+              id: 456,
+              niveauGravite: 'alerte',
+              zoneAlerte: { id: 789 },
+              arreteCadre,
+              communes: [],
+            },
+          ],
+        },
+      ]);
+      const findOne = jest.fn().mockResolvedValue({
+        id: 789,
+        type: 'SUP',
+        geom: JSON.stringify({
+          type: 'MultiPolygon',
+          coordinates: [
+            [
+              [
+                [0, 0],
+                [1, 0],
+                [0, 1],
+                [0, 0],
+              ],
+            ],
+          ],
+        }),
+        arreteCadreZoneAlerteCommunes: [],
+      });
+      const zoneAlerteComputedRepository = {
+        delete: jest.fn().mockResolvedValue(undefined),
+        save: jest.fn().mockImplementation(async (zones) => zones),
+      };
+      Object.assign(service as any, {
+        arreteResrictionService: { findByDepartement },
+        zoneAlerteService: { findOne },
+        zoneAlerteComputedRepository,
+      });
+      jest.spyOn(service, 'cleanZones').mockResolvedValue(undefined);
+
+      const result = await service.computeRegleAr({
+        id: 16,
+        code: '16',
+        nom: 'Charente',
+        parametres: [{ disabled: false, superpositionCommune: 'yes_all' }],
+      } as any);
+
+      expect(findOne).toHaveBeenCalledWith(789, expectedArreteCadreIds);
+      expect(zoneAlerteComputedRepository.save).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: null,
+          departement: { id: 16 },
+          niveauGravite: 'alerte',
+          geom: expect.objectContaining({ type: 'MultiPolygon' }),
+        }),
+      ]);
+      expect(result).toHaveLength(1);
+    },
+  );
+
   it('removes collapsed current zones during cleanup', async () => {
     const updateQuery = {
       update: jest.fn(),
@@ -2508,7 +2577,10 @@ describe('withHistoricArtifactCleanup', () => {
 
 describe('ZoneAlerteComputedHistoricService', () => {
   let service: ZoneAlerteComputedHistoricService;
-  let arreteRestrictionService: { findByDate: jest.Mock };
+  let arreteRestrictionService: {
+    findByDate: jest.Mock;
+    findByDepartementAndDate: jest.Mock;
+  };
   let statisticDepartementService: {
     computeDepartementStatisticsRestrictions: jest.Mock;
     sortStatDepartement: jest.Mock;
@@ -2531,6 +2603,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
     createQueryBuilder: jest.Mock;
     delete: jest.Mock;
     find: jest.Mock;
+    save: jest.Mock;
   };
   let zoneAlerteService: {
     findByArreteRestriction: jest.Mock;
@@ -2604,6 +2677,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
     };
     arreteRestrictionService = {
       findByDate: jest.fn().mockResolvedValue([]),
+      findByDepartementAndDate: jest.fn().mockResolvedValue([]),
     };
     configService = {
       setConfig: jest.fn().mockResolvedValue(undefined),
@@ -2635,6 +2709,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
         .mockReturnValue(updateAllHistoricZonesQuery),
       delete: jest.fn().mockResolvedValue(undefined),
       find: jest.fn(),
+      save: jest.fn().mockImplementation(async (zones) => zones),
     };
     zoneAlerteService = {
       findByArreteRestriction: jest.fn().mockResolvedValue([]),
@@ -2759,6 +2834,71 @@ describe('ZoneAlerteComputedHistoricService', () => {
     expect(() => isHistoricEmptyStatisticsRangeEnabled('1')).toThrow(
       'must be true or false',
     );
+  });
+
+  it('uses the reference zone geometry when a historic restriction has no framework order', async () => {
+    const departement = {
+      id: 16,
+      code: '16',
+      nom: 'Charente',
+      parametres: [
+        {
+          dateDebut: '2010-01-01',
+          dateFin: null,
+          superpositionCommune: 'yes_all',
+        },
+      ],
+    } as any;
+    arreteRestrictionService.findByDepartementAndDate.mockResolvedValue([
+      {
+        id: 123,
+        restrictions: [
+          {
+            id: 456,
+            niveauGravite: 'alerte',
+            zoneAlerte: { id: 789 },
+            arreteCadre: null,
+            communes: [],
+          },
+        ],
+      },
+    ]);
+    zoneAlerteService.findOne.mockResolvedValue({
+      id: 789,
+      type: 'SUP',
+      geom: JSON.stringify({
+        type: 'MultiPolygon',
+        coordinates: [
+          [
+            [
+              [0, 0],
+              [1, 0],
+              [0, 1],
+              [0, 0],
+            ],
+          ],
+        ],
+      }),
+      arreteCadreZoneAlerteCommunes: [],
+    });
+    (service as any).computeRegleAr =
+      ZoneAlerteComputedHistoricService.prototype.computeRegleAr.bind(service);
+
+    const result = await service.computeRegleAr(
+      departement,
+      moment('2014-04-23', 'YYYY-MM-DD'),
+    );
+
+    expect(zoneAlerteService.findOne).toHaveBeenCalledWith(789, undefined);
+    expect(zoneAlerteComputedHistoricRepository.save).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: null,
+        departement: { id: 16 },
+        niveauGravite: 'alerte',
+        geom: expect.objectContaining({ type: 'MultiPolygon' }),
+      }),
+    ]);
+    expect(result).toHaveLength(1);
   });
 
   it('cleans global historic residues once before computing departments', async () => {
