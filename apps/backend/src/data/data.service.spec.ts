@@ -1020,7 +1020,258 @@ describe('DataService', () => {
           departmentCount: 101,
           communeCount: 1,
           fingerprint: 'stable-fingerprint',
+          incompleteSnapshotCount: null,
+          oldestIncompleteSnapshot: null,
           lastError: null,
+        }),
+      );
+      expect(mockDataSource.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports an incomplete legacy snapshot and keeps the last cache usable', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).beginDate = '2015-05-18';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2015-05-20',
+      };
+      certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2015-05-18',
+        latestDate: '2015-05-20',
+        dateCount: 3,
+      });
+      mockDataSource.query
+        .mockResolvedValueOnce([legacyPublicationState])
+        .mockResolvedValueOnce([
+          {
+            incompleteSnapshotCount: 1,
+            oldestSnapshotDate: '2015-05-19',
+            oldestSnapshotScope: 'national',
+            oldestSnapshotStatus: 'failed',
+            oldestProcessedCommuneCount: 34943,
+            oldestExpectedCommuneCount: 34943,
+          },
+        ]);
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          usable: true,
+          fresh: false,
+          mode: 'legacy-bootstrap',
+          incompleteSnapshotCount: 1,
+          oldestIncompleteSnapshot: {
+            date: '2015-05-19',
+            scope: 'national',
+            status: 'failed',
+            processedCommuneCount: 34943,
+            expectedCommuneCount: 34943,
+          },
+        }),
+      );
+      expect(mockDataSource.query.mock.calls[1][1]).toEqual([
+        '2015-05-18',
+        '2015-05-20',
+      ]);
+    });
+
+    it('reports the out-of-range bootstrap sentinel while keeping a warm cache usable', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2013-01-02',
+      };
+      certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2013-01-02',
+        dateCount: 2,
+      });
+      mockDataSource.query
+        .mockResolvedValueOnce([legacyPublicationState])
+        .mockResolvedValueOnce([
+          {
+            incompleteSnapshotCount: 1,
+            oldestSnapshotDate: '1970-01-01',
+            oldestSnapshotScope: 'bootstrap',
+            oldestSnapshotStatus: 'failed',
+            oldestProcessedCommuneCount: 0,
+            oldestExpectedCommuneCount: 0,
+          },
+        ]);
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          usable: true,
+          fresh: false,
+          incompleteSnapshotCount: 1,
+          oldestIncompleteSnapshot: {
+            date: '1970-01-01',
+            scope: 'bootstrap',
+            status: 'failed',
+            processedCommuneCount: 0,
+            expectedCommuneCount: 0,
+          },
+        }),
+      );
+      expect(mockDataSource.query.mock.calls[1][0]).toContain(
+        `"scope" = 'bootstrap'`,
+      );
+    });
+
+    it('keeps an existing legacy cache unchanged behind the bootstrap barrier', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2013-01-02',
+      };
+      const warmCache = certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2013-01-02',
+        dateCount: 2,
+      });
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(legacyPublicationState);
+      jest
+        .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
+        .mockResolvedValue({
+          incompleteSnapshotCount: 1,
+          oldestIncompleteSnapshot: {
+            date: '1970-01-01',
+            scope: 'bootstrap',
+            status: 'failed',
+            processedCommuneCount: 0,
+            expectedCommuneCount: 0,
+          },
+        });
+      const loadDataOnce = jest.spyOn(service as any, 'loadDataOnce');
+
+      await service.loadData();
+
+      expect(loadDataOnce).not.toHaveBeenCalled();
+      expect(service['certifiedDataCache']).toBe(warmCache);
+    });
+
+    it('reuses the legacy snapshot diagnostic within its TTL', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2013-01-02',
+      };
+      certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2013-01-02',
+        dateCount: 2,
+      });
+      mockDataSource.query
+        .mockResolvedValueOnce([legacyPublicationState])
+        .mockResolvedValueOnce([{ incompleteSnapshotCount: 0 }])
+        .mockResolvedValueOnce([legacyPublicationState]);
+
+      await service.getStatisticCacheStatus(true);
+      await service.getStatisticCacheStatus(true);
+
+      const coverageQueries = mockDataSource.query.mock.calls.filter(([sql]) =>
+        String(sql).includes('oldest_incomplete_snapshot'),
+      );
+      expect(coverageQueries).toHaveLength(1);
+      expect(mockDataSource.query).toHaveBeenCalledTimes(3);
+    });
+
+    it('shares an in-flight legacy snapshot diagnostic', async () => {
+      let releaseCoverage: (rows: unknown[]) => void;
+      const coverage = new Promise<unknown[]>((resolve) => {
+        releaseCoverage = resolve;
+      });
+      mockDataSource.query.mockReturnValue(coverage);
+
+      const first = (service as any).getLegacySnapshotCoverageStatus(
+        '2013-01-02',
+      );
+      const second = (service as any).getLegacySnapshotCoverageStatus(
+        '2013-01-02',
+      );
+      expect(mockDataSource.query).toHaveBeenCalledTimes(1);
+
+      releaseCoverage!([{ incompleteSnapshotCount: 0 }]);
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        { incompleteSnapshotCount: 0, oldestIncompleteSnapshot: null },
+        { incompleteSnapshotCount: 0, oldestIncompleteSnapshot: null },
+      ]);
+      expect(mockDataSource.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports a complete continuous legacy cache as fresh', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2013-01-02',
+      };
+      certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2013-01-02',
+        dateCount: 2,
+      });
+      mockDataSource.query
+        .mockResolvedValueOnce([legacyPublicationState])
+        .mockResolvedValueOnce([{ incompleteSnapshotCount: 0 }]);
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'ready',
+          usable: true,
+          fresh: true,
+          mode: 'legacy-bootstrap',
+          incompleteSnapshotCount: 0,
+          oldestIncompleteSnapshot: null,
+        }),
+      );
+    });
+
+    it('fails strict legacy health closed when snapshot diagnostics are unavailable', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2013-01-02',
+      };
+      certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2013-01-02',
+        dateCount: 2,
+      });
+      mockDataSource.query
+        .mockResolvedValueOnce([legacyPublicationState])
+        .mockRejectedValueOnce(new Error('snapshot diagnostic unavailable'));
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          usable: true,
+          fresh: false,
+          incompleteSnapshotCount: null,
+          oldestIncompleteSnapshot: null,
+          lastError: expect.objectContaining({
+            phase: 'snapshot-coverage-check',
+          }),
         }),
       );
     });
@@ -1065,6 +1316,129 @@ describe('DataService', () => {
       await service.loadData();
 
       expect(loadDataOnce).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds an incomplete legacy cache after repair without a publication state change', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).beginDate = '2015-05-18';
+      const legacyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2015-05-20',
+      };
+      certifyData({
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2015-05-18',
+        latestDate: '2015-05-20',
+        dateCount: 2,
+      });
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(legacyPublicationState);
+      jest
+        .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
+        .mockResolvedValueOnce({
+          incompleteSnapshotCount: 1,
+          oldestIncompleteSnapshot: {
+            date: '2015-05-19',
+            scope: 'national',
+            status: 'failed',
+            processedCommuneCount: 34943,
+            expectedCommuneCount: 34943,
+          },
+        })
+        .mockResolvedValueOnce({
+          incompleteSnapshotCount: 0,
+          oldestIncompleteSnapshot: null,
+        });
+      const repairedCandidate = {
+        ...service['certifiedDataCache'],
+        publicationState: legacyPublicationState,
+        mode: 'legacy-bootstrap',
+        dateCount: 3,
+      };
+      const loadDataOnce = jest
+        .spyOn(service as any, 'loadDataOnce')
+        .mockResolvedValue(repairedCandidate);
+
+      await service.loadData();
+      expect(loadDataOnce).not.toHaveBeenCalled();
+
+      await service.loadData();
+      expect(loadDataOnce).toHaveBeenCalledWith(legacyPublicationState);
+      expect(service['certifiedDataCache']?.dateCount).toBe(3);
+      expect(service['legacySnapshotCoverageDirty']).toBe(false);
+    });
+
+    it('does not refresh or clear the legacy repair signal while the historic range is dirty', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const dirtyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2015-05-20',
+        historicDirtyFrom: '2015-05-19',
+        historicDirtyThrough: '2015-05-20',
+      };
+      const warmCache = certifyData({
+        publicationState: dirtyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2015-05-20',
+        dateCount: 868,
+      });
+      service['legacySnapshotCoverageDirty'] = true;
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(dirtyPublicationState);
+      const getCoverage = jest.spyOn(
+        service as any,
+        'getLegacySnapshotCoverageStatus',
+      );
+      const loadDataOnce = jest.spyOn(service as any, 'loadDataOnce');
+
+      await service.loadData();
+
+      expect(getCoverage).not.toHaveBeenCalled();
+      expect(loadDataOnce).not.toHaveBeenCalled();
+      (service as any).publishCertifiedDataCache(warmCache);
+      expect(service['legacySnapshotCoverageDirty']).toBe(true);
+    });
+
+    it('keeps legacy health degraded without starting a rebuild while history is dirty', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      const dirtyPublicationState = {
+        ...stablePublicationState,
+        activePublicationId: null,
+        currentPublishedDate: '2013-01-02',
+        historicDirtyFrom: '2013-01-01',
+        historicDirtyThrough: '2013-01-02',
+      };
+      certifyData({
+        publicationState: dirtyPublicationState,
+        mode: 'legacy-bootstrap',
+        firstDate: '2013-01-01',
+        latestDate: '2013-01-02',
+        dateCount: 2,
+      });
+      mockDataSource.query
+        .mockResolvedValueOnce([dirtyPublicationState])
+        .mockResolvedValueOnce([{ incompleteSnapshotCount: 0 }]);
+      const startRefresh = jest.spyOn(
+        service as any,
+        'startCertifiedDataRefresh',
+      );
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          usable: true,
+          fresh: false,
+          incompleteSnapshotCount: 0,
+        }),
+      );
+      expect(startRefresh).not.toHaveBeenCalled();
+      expect(service['legacySnapshotCoverageDirty']).toBe(false);
     });
 
     it('refreshes a hot cache when an explicit same-date repair bumps the revision', async () => {
@@ -1535,6 +1909,7 @@ describe('DataService', () => {
 
     it('rejects a legacy bootstrap candidate with a raw daily coverage hole', () => {
       process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).beginDate = '2023-07-11';
       const referenceData = prepareCandidate(['2023-07-11', '2023-07-12']);
       const publicationState = {
         ...stablePublicationState,
@@ -1551,6 +1926,58 @@ describe('DataService', () => {
         ),
       ).toThrow(
         'Raw department statistics for 2023-07-11 contain 0/101 departments',
+      );
+    });
+
+    it('rejects a pre-release legacy candidate with a missing civil date', () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).beginDate = '2015-05-18';
+      service['certifiedDataCache'] = null;
+      const referenceData = prepareCandidate(['2015-05-18', '2015-05-20']);
+
+      expect(() =>
+        (service as any).createCertifiedDataCandidate(
+          referenceData,
+          {
+            ...stablePublicationState,
+            activePublicationId: null,
+            currentPublishedDate: '2015-05-20',
+          },
+          { coverageByDate: new Map() },
+          1,
+        ),
+      ).toThrow(
+        'Legacy statistic coverage is missing candidate date 2015-05-19',
+      );
+    });
+
+    it('does not require raw department coverage before the release date', () => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).beginDate = '2015-05-18';
+      service['certifiedDataCache'] = null;
+      const referenceData = prepareCandidate([
+        '2015-05-18',
+        '2015-05-19',
+        '2015-05-20',
+      ]);
+
+      expect(
+        (service as any).createCertifiedDataCandidate(
+          referenceData,
+          {
+            ...stablePublicationState,
+            activePublicationId: null,
+            currentPublishedDate: '2015-05-20',
+          },
+          { coverageByDate: new Map() },
+          1,
+        ),
+      ).toEqual(
+        expect.objectContaining({
+          firstDate: '2015-05-18',
+          latestDate: '2015-05-20',
+          dateCount: 3,
+        }),
       );
     });
 
@@ -1625,6 +2052,42 @@ describe('DataService', () => {
       );
     });
 
+    it('rejects a cold cache candidate while the bootstrap sentinel exists outside the date range', async () => {
+      mockTransactionManager.query.mockResolvedValue([
+        {
+          snapshotDate: '1970-01-01',
+          scope: 'bootstrap',
+          status: 'failed',
+          expectedCommuneCount: 0,
+          processedCommuneCount: 0,
+        },
+        {
+          snapshotDate: '2026-08-11',
+          scope: 'national',
+          status: 'completed',
+          expectedCommuneCount: 34943,
+          processedCommuneCount: 34943,
+        },
+      ]);
+
+      await expect(
+        (service as any).assertSnapshotCoverage(
+          {
+            ...stablePublicationState,
+            currentPublishedDate: '2026-08-11',
+          },
+          mockTransactionManager,
+        ),
+      ).rejects.toThrow('Statistic bootstrap barrier 1970-01-01 is active');
+      expect(mockTransactionManager.query.mock.calls[0][0]).toContain(
+        `"scope" = 'bootstrap'`,
+      );
+      expect(mockTransactionManager.query.mock.calls[0][1]).toEqual([
+        '2023-07-11',
+        '2026-08-11',
+      ]);
+    });
+
     it('accepts an incomplete historic snapshot in versioned mode', async () => {
       mockTransactionManager.query.mockResolvedValue([
         {
@@ -1685,6 +2148,10 @@ describe('DataService', () => {
       ).rejects.toThrow(
         'Statistic snapshot 2026-08-10 (national) is incomplete',
       );
+      expect(mockTransactionManager.query.mock.calls[0][1]).toEqual([
+        '2013-01-01',
+        '2026-08-11',
+      ]);
     });
 
     it('rejects stale or unordered monthly commune statistics', () => {

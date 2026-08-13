@@ -70,6 +70,14 @@ export type StatisticCacheStatus = {
   communeCount: number;
   fingerprint: string | null;
   loadedAt: string | null;
+  incompleteSnapshotCount: number | null;
+  oldestIncompleteSnapshot: {
+    date: string;
+    scope: string;
+    status: string;
+    processedCommuneCount: number;
+    expectedCommuneCount: number;
+  } | null;
   lastError: {
     at: string;
     phase: string;
@@ -78,6 +86,15 @@ export type StatisticCacheStatus = {
 
 type DepartmentDataLoad = {
   coverageByDate: Map<string, Set<string>>;
+};
+
+type LegacySnapshotCoverageStatus = Pick<
+  StatisticCacheStatus,
+  'incompleteSnapshotCount' | 'oldestIncompleteSnapshot'
+>;
+
+type CachedLegacySnapshotCoverageStatus = LegacySnapshotCoverageStatus & {
+  currentPublishedDate: string;
 };
 
 @Injectable()
@@ -108,8 +125,15 @@ export class DataService implements OnModuleInit {
   private failedPublicationStateToken: string | null = null;
   private failedPublicationAt = 0;
   private lastDataCacheError: { at: Date; phase: string } | null = null;
+  private legacySnapshotCoverageStatus: CachedLegacySnapshotCoverageStatus | null =
+    null;
+  private legacySnapshotCoverageCheckedAt = 0;
+  private legacySnapshotCoverageLoading: Promise<LegacySnapshotCoverageStatus> | null =
+    null;
+  private legacySnapshotCoverageDirty = false;
 
   private readonly publicationStateCheckIntervalMs = 5_000;
+  private readonly legacySnapshotCoverageCheckIntervalMs = 5_000;
   private readonly publicationRefreshRetryIntervalMs = 60_000;
   private readonly referenceDataRefreshIntervalMs = 2 * 60 * 60 * 1_000;
   private readonly referenceDataRefreshRetryIntervalMs = 5_000;
@@ -639,7 +663,8 @@ export class DataService implements OnModuleInit {
             this.isSamePublicationState(
               this.certifiedDataCache.publicationState,
               publicationState,
-            )
+            ) &&
+            !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
           ) {
             await this.refreshReferenceDataCacheIfStale();
             this.publicationState = publicationState;
@@ -828,7 +853,8 @@ export class DataService implements OnModuleInit {
         this.isSamePublicationState(
           this.certifiedDataCache.publicationState,
           publicationState,
-        )
+        ) &&
+        !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
       ) {
         this.lastDataCacheError = null;
         return;
@@ -865,11 +891,13 @@ export class DataService implements OnModuleInit {
   ): Promise<StatisticCacheStatus> {
     let availableState = this.publicationState;
     let stateCheckFailed = false;
+    let stateCheckErrorPhase: string | null = null;
     if (checkPublicationState) {
       try {
         availableState = await this.getPublicationState(true);
       } catch {
         stateCheckFailed = true;
+        stateCheckErrorPhase = 'publication-state-check';
       }
     }
 
@@ -880,19 +908,43 @@ export class DataService implements OnModuleInit {
       mode = this.getStatisticCacheMode(availableState);
     } catch {
       stateCheckFailed = true;
+      stateCheckErrorPhase ??= 'cache-mode-check';
+    }
+    let snapshotCoverage: LegacySnapshotCoverageStatus = {
+      incompleteSnapshotCount: null,
+      oldestIncompleteSnapshot: null,
+    };
+    if (
+      mode === 'legacy-bootstrap' &&
+      availableState?.currentPublishedDate &&
+      !stateCheckFailed
+    ) {
+      try {
+        snapshotCoverage = await this.getLegacySnapshotCoverageStatus(
+          availableState.currentPublishedDate,
+        );
+      } catch {
+        stateCheckFailed = true;
+        stateCheckErrorPhase = 'snapshot-coverage-check';
+      }
     }
     const stateMatches = Boolean(
       cache &&
       availableState &&
       this.isSamePublicationState(cache.publicationState, availableState),
     );
-    const historicCoverageIsComplete =
-      mode === 'legacy-bootstrap' || !availableState?.historicDirtyFrom;
+    const historicCoverageIsComplete = !availableState?.historicDirtyFrom;
+    const legacySnapshotCoverageIsComplete =
+      mode !== 'legacy-bootstrap' ||
+      (snapshotCoverage.incompleteSnapshotCount === 0 &&
+        !this.legacySnapshotCoverageDirty &&
+        this.isLegacyCacheContinuous(cache, availableState));
     const fresh = Boolean(
       cache &&
       stateMatches &&
       cache.latestDate === availableState?.currentPublishedDate &&
       historicCoverageIsComplete &&
+      legacySnapshotCoverageIsComplete &&
       !stateCheckFailed &&
       !this.lastDataCacheError,
     );
@@ -911,19 +963,189 @@ export class DataService implements OnModuleInit {
       communeCount: cache?.communeCount ?? 0,
       fingerprint: cache?.fingerprint ?? null,
       loadedAt: cache?.loadedAt.toISOString() ?? null,
+      ...snapshotCoverage,
       lastError: this.lastDataCacheError
         ? {
             at: this.lastDataCacheError.at.toISOString(),
             phase: this.lastDataCacheError.phase,
           }
         : stateCheckFailed
-          ? { at: new Date().toISOString(), phase: 'publication-state-check' }
+          ? {
+              at: new Date().toISOString(),
+              phase: stateCheckErrorPhase ?? 'publication-state-check',
+            }
           : null,
     };
     if (!cache) {
       this.startColdDataLoad(stateCheckFailed ? undefined : availableState);
+    } else if (
+      mode === 'legacy-bootstrap' &&
+      snapshotCoverage.incompleteSnapshotCount === 0 &&
+      !availableState?.historicDirtyFrom &&
+      (!this.isLegacyCacheContinuous(cache, availableState) ||
+        this.legacySnapshotCoverageDirty)
+    ) {
+      this.startCertifiedDataRefresh();
     }
     return result;
+  }
+
+  private async getLegacySnapshotCoverageStatus(
+    currentPublishedDate: string,
+  ): Promise<LegacySnapshotCoverageStatus> {
+    if (
+      this.legacySnapshotCoverageStatus?.currentPublishedDate ===
+        currentPublishedDate &&
+      Date.now() - this.legacySnapshotCoverageCheckedAt <
+        this.legacySnapshotCoverageCheckIntervalMs
+    ) {
+      return this.legacySnapshotCoverageStatus;
+    }
+    if (this.legacySnapshotCoverageLoading) {
+      return this.legacySnapshotCoverageLoading;
+    }
+    const loading = this.readLegacySnapshotCoverageStatus(
+      currentPublishedDate,
+    ).then((coverage) => {
+      this.legacySnapshotCoverageStatus = {
+        ...coverage,
+        currentPublishedDate,
+      };
+      this.legacySnapshotCoverageCheckedAt = Date.now();
+      if ((coverage.incompleteSnapshotCount ?? 0) > 0) {
+        this.legacySnapshotCoverageDirty = true;
+      }
+      return coverage;
+    });
+    this.legacySnapshotCoverageLoading = loading;
+    try {
+      return await loading;
+    } finally {
+      if (this.legacySnapshotCoverageLoading === loading) {
+        this.legacySnapshotCoverageLoading = null;
+      }
+    }
+  }
+
+  private async readLegacySnapshotCoverageStatus(
+    currentPublishedDate: string,
+  ): Promise<LegacySnapshotCoverageStatus> {
+    const [coverage] = await this.dataSource.query(
+      `
+        WITH incomplete_snapshot AS MATERIALIZED (
+          SELECT
+            "snapshotDate", "scope", "status",
+            "processedCommuneCount", "expectedCommuneCount"
+          FROM "statistic_commune_snapshot"
+          WHERE "scope" = 'bootstrap'
+            OR (
+              "snapshotDate" BETWEEN $1::date AND $2::date
+              AND "scope" <> 'bootstrap'
+              AND (
+                "status" <> 'completed'
+                OR "processedCommuneCount" <> "expectedCommuneCount"
+              )
+            )
+        ), oldest_incomplete_snapshot AS MATERIALIZED (
+          SELECT *
+          FROM incomplete_snapshot
+          ORDER BY "snapshotDate" ASC, "scope" ASC
+          LIMIT 1
+        )
+        SELECT
+          (SELECT COUNT(*)::integer FROM incomplete_snapshot)
+            AS "incompleteSnapshotCount",
+          oldest."snapshotDate" AS "oldestSnapshotDate",
+          oldest."scope" AS "oldestSnapshotScope",
+          oldest."status" AS "oldestSnapshotStatus",
+          oldest."processedCommuneCount" AS "oldestProcessedCommuneCount",
+          oldest."expectedCommuneCount" AS "oldestExpectedCommuneCount"
+        FROM (SELECT 1) singleton
+        LEFT JOIN oldest_incomplete_snapshot oldest ON true
+      `,
+      [this.beginDate, currentPublishedDate],
+    );
+    const incompleteSnapshotCount = Number(
+      coverage?.incompleteSnapshotCount ?? Number.NaN,
+    );
+    if (
+      !Number.isSafeInteger(incompleteSnapshotCount) ||
+      incompleteSnapshotCount < 0
+    ) {
+      throw new Error('Invalid statistic snapshot coverage diagnostic');
+    }
+    if (incompleteSnapshotCount === 0) {
+      return {
+        incompleteSnapshotCount,
+        oldestIncompleteSnapshot: null,
+      };
+    }
+    const processedCommuneCount = Number(
+      coverage?.oldestProcessedCommuneCount ?? Number.NaN,
+    );
+    const expectedCommuneCount = Number(
+      coverage?.oldestExpectedCommuneCount ?? Number.NaN,
+    );
+    if (
+      !coverage?.oldestSnapshotDate ||
+      !coverage?.oldestSnapshotScope ||
+      !coverage?.oldestSnapshotStatus ||
+      !Number.isSafeInteger(processedCommuneCount) ||
+      !Number.isSafeInteger(expectedCommuneCount)
+    ) {
+      throw new Error('Invalid oldest statistic snapshot diagnostic');
+    }
+    return {
+      incompleteSnapshotCount,
+      oldestIncompleteSnapshot: {
+        date: this.normalizeDate(coverage.oldestSnapshotDate),
+        scope: String(coverage.oldestSnapshotScope),
+        status: String(coverage.oldestSnapshotStatus),
+        processedCommuneCount,
+        expectedCommuneCount,
+      },
+    };
+  }
+
+  private async shouldRefreshUnchangedLegacyCache(
+    publicationState: StatisticPublicationState,
+  ): Promise<boolean> {
+    const cache = this.certifiedDataCache;
+    if (
+      !cache ||
+      this.getStatisticCacheMode(publicationState) !== 'legacy-bootstrap' ||
+      !publicationState.currentPublishedDate ||
+      publicationState.historicDirtyFrom !== null
+    ) {
+      return false;
+    }
+    const coverage = await this.getLegacySnapshotCoverageStatus(
+      publicationState.currentPublishedDate,
+    );
+    if (coverage.incompleteSnapshotCount !== 0) {
+      return false;
+    }
+    return (
+      this.legacySnapshotCoverageDirty ||
+      !this.isLegacyCacheContinuous(cache, publicationState)
+    );
+  }
+
+  private isLegacyCacheContinuous(
+    cache: CertifiedDataCache | null,
+    publicationState: StatisticPublicationState | null,
+  ): boolean {
+    return Boolean(
+      cache &&
+      publicationState?.currentPublishedDate &&
+      cache.firstDate === this.beginDate &&
+      cache.latestDate === publicationState.currentPublishedDate &&
+      cache.dateCount ===
+        this.countCivilDates(
+          this.beginDate,
+          publicationState.currentPublishedDate,
+        ),
+    );
   }
 
   private startColdDataLoad(
@@ -979,15 +1201,29 @@ export class DataService implements OnModuleInit {
           "snapshotDate", "scope", "status",
           "expectedCommuneCount", "processedCommuneCount"
         FROM "statistic_commune_snapshot"
-        WHERE "snapshotDate" BETWEEN $1::date AND $2::date
+        WHERE "scope" = 'bootstrap'
+           OR "snapshotDate" BETWEEN $1::date AND $2::date
         ORDER BY "snapshotDate" ASC, "scope" ASC
       `,
-      [this.releaseDate, currentPublishedDate],
+      [
+        this.getStatisticCacheMode(publicationState) === 'legacy-bootstrap'
+          ? this.beginDate
+          : this.releaseDate,
+        currentPublishedDate,
+      ],
     );
     const isIncomplete = (snapshot: (typeof snapshots)[number]) =>
       snapshot.status !== 'completed' ||
       Number(snapshot.processedCommuneCount) !==
         Number(snapshot.expectedCommuneCount);
+    const bootstrapBarrier = snapshots.find(
+      (snapshot) => snapshot.scope === 'bootstrap',
+    );
+    if (bootstrapBarrier) {
+      throw new Error(
+        `Statistic bootstrap barrier ${this.normalizeDate(bootstrapBarrier.snapshotDate)} is active`,
+      );
+    }
     const incomplete = snapshots.find(isIncomplete);
     if (
       this.getStatisticCacheMode(publicationState) === 'legacy-bootstrap' &&
@@ -1107,21 +1343,28 @@ export class DataService implements OnModuleInit {
     }
 
     const candidateDates = new Set(areaDates);
-    const coverageEnd = moment(currentPublishedDate, 'YYYY-MM-DD');
-    const coverageStart = coverageEnd.isBefore(this.releaseDate, 'day')
-      ? moment(firstDate, 'YYYY-MM-DD')
-      : moment(this.releaseDate, 'YYYY-MM-DD');
+    const coverageEnd = moment.utc(currentPublishedDate, 'YYYY-MM-DD', true);
+    if (mode === 'legacy-bootstrap') {
+      for (
+        const date = moment.utc(this.beginDate, 'YYYY-MM-DD', true);
+        date.isSameOrBefore(coverageEnd, 'day');
+        date.add(1, 'day')
+      ) {
+        const dateString = date.format('YYYY-MM-DD');
+        if (!candidateDates.has(dateString)) {
+          throw new Error(
+            `Legacy statistic coverage is missing candidate date ${dateString}`,
+          );
+        }
+      }
+    }
+    const rawCoverageStart = moment.utc(this.releaseDate, 'YYYY-MM-DD', true);
     for (
-      const date = coverageStart.clone();
+      const date = rawCoverageStart.clone();
       date.isSameOrBefore(coverageEnd, 'day');
       date.add(1, 'day')
     ) {
       const dateString = date.format('YYYY-MM-DD');
-      if (mode === 'legacy-bootstrap' && !candidateDates.has(dateString)) {
-        throw new Error(
-          `Legacy statistic coverage is missing candidate date ${dateString}`,
-        );
-      }
       if (!candidateDates.has(dateString)) {
         continue;
       }
@@ -1162,6 +1405,18 @@ export class DataService implements OnModuleInit {
     };
   }
 
+  private countCivilDates(startDate: string, endDate?: string | null): number {
+    if (!endDate) {
+      return 0;
+    }
+    const start = moment.utc(startDate, 'YYYY-MM-DD', true);
+    const end = moment.utc(endDate, 'YYYY-MM-DD', true);
+    if (!start.isValid() || !end.isValid() || end.isBefore(start, 'day')) {
+      return 0;
+    }
+    return end.diff(start, 'days') + 1;
+  }
+
   private computeStatisticCacheFingerprint(
     cache: Omit<CertifiedDataCache, 'fingerprint'>,
   ): string {
@@ -1191,6 +1446,12 @@ export class DataService implements OnModuleInit {
 
   private publishCertifiedDataCache(cache: CertifiedDataCache): void {
     this.certifiedDataCache = cache;
+    if (
+      cache.mode === 'legacy-bootstrap' &&
+      cache.publicationState.historicDirtyFrom === null
+    ) {
+      this.legacySnapshotCoverageDirty = false;
+    }
     this.publishReferenceData(cache);
   }
 

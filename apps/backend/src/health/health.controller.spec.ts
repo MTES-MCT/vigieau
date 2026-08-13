@@ -55,6 +55,8 @@ describe('HealthController', () => {
     communeCount: 34943,
     fingerprint: 'statistic-fingerprint',
     loadedAt: '2026-08-11T12:00:00.000Z',
+    incompleteSnapshotCount: null,
+    oldestIncompleteSnapshot: null,
     lastError: null,
   };
 

@@ -22,6 +22,7 @@ interface RecomputeOptions {
   departementCodes: string[];
   confirmNationalRecompute: boolean;
   publishThrough: string | null;
+  publishLegacyRepair: boolean;
   recomputeMonths: boolean;
   sortAtEnd: boolean;
   historicLockTimeoutMs: number;
@@ -70,6 +71,7 @@ interface RecomputeDependencies {
         preserveBootstrapBarrier: boolean;
         requireNationalCoverage: boolean;
         publishCurrentDate: boolean;
+        bumpLegacyRevisionOnCompletion: boolean;
       },
     ) => Promise<void>;
     computeCommuneStatisticsRestrictionsByMonth: (
@@ -250,6 +252,11 @@ export function parseOptions(
   const publishThrough = rawPublishThrough
     ? parseMoment(rawPublishThrough).format('YYYY-MM-DD')
     : null;
+  const publishLegacyRepair = parseBooleanOption(
+    'PUBLISH_LEGACY_REPAIR',
+    environment.PUBLISH_LEGACY_REPAIR,
+    false,
+  );
   if (publishThrough !== null && !dates.includes(publishThrough)) {
     throw new Error('PUBLISH_THROUGH must be included in DATES');
   }
@@ -258,6 +265,14 @@ export function parseOptions(
   }
   if (publishThrough !== null && dates.at(-1) !== publishThrough) {
     throw new Error('PUBLISH_THROUGH must be the last recomputation date');
+  }
+  if (publishLegacyRepair && departementCodes.length > 0) {
+    throw new Error('PUBLISH_LEGACY_REPAIR requires a national recomputation');
+  }
+  if (publishLegacyRepair && publishThrough !== null) {
+    throw new Error(
+      'PUBLISH_LEGACY_REPAIR cannot be combined with PUBLISH_THROUGH',
+    );
   }
   const recomputeMonths = parseBooleanOption(
     'RECOMPUTE_MONTHS',
@@ -284,6 +299,7 @@ export function parseOptions(
       false,
     ),
     publishThrough,
+    publishLegacyRepair,
     recomputeMonths,
     sortAtEnd,
     historicLockTimeoutMs: parsePositiveIntegerOption(
@@ -393,6 +409,41 @@ async function assertNoBootstrapBarrier(dataSource: DataSource): Promise<void> {
   if (bootstrapBarrier) {
     throw new Error(
       'Targeted commune statistic recomputation is blocked until the bootstrap barrier is cleared by the normal historic chain',
+    );
+  }
+}
+
+async function assertLegacyRepairPublicationContext(
+  dataSource: DataSource,
+  targetDate: string,
+): Promise<void> {
+  const [context] = await dataSource.query(
+    `
+      SELECT
+        statistic_state."currentPublishedDate"::text AS "currentPublishedDate",
+        zone_state."activePublicationId"::text AS "activePublicationId"
+      FROM "statistic_publication_state" statistic_state
+      JOIN "zone_publication_state" zone_state ON zone_state."id" = 1
+      WHERE statistic_state."id" = 1
+      LIMIT 1
+    `,
+  );
+  if (!context || context.activePublicationId !== null) {
+    throw new Error(
+      'PUBLISH_LEGACY_REPAIR requires an active legacy publication context',
+    );
+  }
+  if (!context.currentPublishedDate) {
+    throw new Error(
+      'PUBLISH_LEGACY_REPAIR requires a current statistic publication date',
+    );
+  }
+  const currentPublishedDate = parseMoment(
+    String(context.currentPublishedDate),
+  ).format('YYYY-MM-DD');
+  if (targetDate > currentPublishedDate) {
+    throw new Error(
+      `PUBLISH_LEGACY_REPAIR target ${targetDate} exceeds current publication date ${currentPublishedDate}`,
     );
   }
 }
@@ -525,12 +576,18 @@ export async function runRecomputeCommuneStatistics(
     new Date(),
     NATIONAL_COMPUTE_START_HOUR,
   );
-  if (options.publishThrough !== null) {
+  if (options.publishThrough !== null || options.publishLegacyRepair) {
     if (isZonePublicationEnabled()) {
       throw new Error(
-        'PUBLISH_THROUGH is only supported while ZONE_PUBLICATION_ENABLED=false',
+        `${
+          options.publishThrough !== null
+            ? 'PUBLISH_THROUGH'
+            : 'PUBLISH_LEGACY_REPAIR'
+        } is only supported while ZONE_PUBLICATION_ENABLED=false`,
       );
     }
+  }
+  if (options.publishThrough !== null) {
     if (options.publishThrough > businessDate) {
       throw new Error(
         `PUBLISH_THROUGH cannot exceed the scheduled civil date ${businessDate}`,
@@ -538,6 +595,12 @@ export async function runRecomputeCommuneStatistics(
     }
   }
   await assertNoBootstrapBarrier(dependencies.dataSource);
+  if (options.publishLegacyRepair) {
+    await assertLegacyRepairPublicationContext(
+      dependencies.dataSource,
+      options.dates.at(-1)!,
+    );
+  }
   let departements = await dependencies.departementService.findAllLight();
   if (options.departementCodes.length > 0) {
     departements = departements.filter((departement) =>
@@ -640,6 +703,11 @@ export async function runRecomputeCommuneStatistics(
         preserveBootstrapBarrier: true,
         requireNationalCoverage: isNationalRecompute,
         publishCurrentDate,
+        bumpLegacyRevisionOnCompletion:
+          options.publishLegacyRepair &&
+          isNationalRecompute &&
+          date === lastSelectedDate &&
+          !publishCurrentDate,
       },
     );
 

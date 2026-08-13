@@ -32,6 +32,7 @@ describe('recompute-commune-statistics safeguards', () => {
       departementCodes: ['2B', '65'],
       confirmNationalRecompute: false,
       publishThrough: null,
+      publishLegacyRepair: false,
       recomputeMonths: true,
       sortAtEnd: true,
       historicLockTimeoutMs: 120000,
@@ -51,6 +52,12 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(() =>
       parseOptions({ DATES: '2026-03-28', SORT_AT_END: 'yes' }),
     ).toThrow('Invalid SORT_AT_END');
+    expect(() =>
+      parseOptions({
+        DATES: '2026-03-28',
+        PUBLISH_LEGACY_REPAIR: 'yes',
+      }),
+    ).toThrow('Invalid PUBLISH_LEGACY_REPAIR');
     expect(() =>
       parseOptions({
         DATES: '2026-03-28',
@@ -133,6 +140,27 @@ describe('recompute-commune-statistics safeguards', () => {
         parseMoment('2026-08-11'),
       ),
     ).toThrow('PUBLISH_THROUGH must be the last recomputation date');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-08-10',
+          DEP_CODES: '65',
+          PUBLISH_LEGACY_REPAIR: 'true',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('PUBLISH_LEGACY_REPAIR requires a national recomputation');
+    expect(() =>
+      parseOptions(
+        {
+          DATES: '2026-08-10',
+          PUBLISH_THROUGH: '2026-08-10',
+          PUBLISH_LEGACY_REPAIR: 'true',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+        },
+        parseMoment('2026-08-11'),
+      ),
+    ).toThrow('PUBLISH_LEGACY_REPAIR cannot be combined with PUBLISH_THROUGH');
   });
 
   it('accepts an explicit national publication target from the previous day', () => {
@@ -146,6 +174,19 @@ describe('recompute-commune-statistics safeguards', () => {
         parseMoment('2026-08-11'),
       ).publishThrough,
     ).toBe('2026-08-10');
+  });
+
+  it('only enables legacy repair publication when explicitly requested', () => {
+    expect(
+      parseOptions(
+        {
+          DATES: '2015-05-19',
+          PUBLISH_LEGACY_REPAIR: 'true',
+          CONFIRM_NATIONAL_RECOMPUTE: 'true',
+        },
+        parseMoment('2026-08-11'),
+      ).publishLegacyRepair,
+    ).toBe(true);
   });
 
   it('requires an explicit confirmation for a national recomputation', () => {
@@ -190,6 +231,7 @@ describe('recompute-commune-statistics safeguards', () => {
           departementCodes: [],
           confirmNationalRecompute: true,
           publishThrough: '2026-08-11',
+          publishLegacyRepair: false,
           recomputeMonths: true,
           sortAtEnd: true,
           historicLockTimeoutMs: 1000,
@@ -222,6 +264,7 @@ describe('recompute-commune-statistics safeguards', () => {
           departementCodes: [],
           confirmNationalRecompute: true,
           publishThrough: '2026-08-10',
+          publishLegacyRepair: false,
           recomputeMonths: true,
           sortAtEnd: true,
           historicLockTimeoutMs: 1000,
@@ -232,6 +275,130 @@ describe('recompute-commune-statistics safeguards', () => {
         'PUBLISH_THROUGH is only supported while ZONE_PUBLICATION_ENABLED=false',
       );
       expect(dataSource.query).not.toHaveBeenCalled();
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+  });
+
+  it('rejects explicit legacy repair publication in versioned mode', async () => {
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const dataSource = { query: jest.fn() };
+
+    try {
+      await expect(
+        runRecomputeCommuneStatistics({ dataSource } as any, {
+          dates: ['2026-05-19'],
+          departementCodes: [],
+          confirmNationalRecompute: true,
+          publishThrough: null,
+          publishLegacyRepair: true,
+          recomputeMonths: true,
+          sortAtEnd: true,
+          historicLockTimeoutMs: 1000,
+          historicLockRetryMs: 1,
+          maxDates: 100,
+        }),
+      ).rejects.toThrow(
+        'PUBLISH_LEGACY_REPAIR is only supported while ZONE_PUBLICATION_ENABLED=false',
+      );
+      expect(dataSource.query).not.toHaveBeenCalled();
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+  });
+
+  it('rejects legacy repair before any batch when the database publication is versioned', async () => {
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const findAllLight = jest.fn();
+    const dataSource = {
+      query: jest
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            currentPublishedDate: '2026-08-10',
+            activePublicationId: '11111111-1111-1111-1111-111111111111',
+          },
+        ]),
+    };
+
+    try {
+      await expect(
+        runRecomputeCommuneStatistics(
+          { dataSource, departementService: { findAllLight } } as any,
+          {
+            dates: ['2015-05-19'],
+            departementCodes: [],
+            confirmNationalRecompute: true,
+            publishThrough: null,
+            publishLegacyRepair: true,
+            recomputeMonths: true,
+            sortAtEnd: true,
+            historicLockTimeoutMs: 1000,
+            historicLockRetryMs: 1,
+            maxDates: 100,
+          },
+        ),
+      ).rejects.toThrow(
+        'PUBLISH_LEGACY_REPAIR requires an active legacy publication context',
+      );
+      expect(findAllLight).not.toHaveBeenCalled();
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+  });
+
+  it('rejects legacy repair before any batch when the target exceeds the watermark', async () => {
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const findAllLight = jest.fn();
+    const dataSource = {
+      query: jest
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            currentPublishedDate: '2015-05-18',
+            activePublicationId: null,
+          },
+        ]),
+    };
+
+    try {
+      await expect(
+        runRecomputeCommuneStatistics(
+          { dataSource, departementService: { findAllLight } } as any,
+          {
+            dates: ['2015-05-19'],
+            departementCodes: [],
+            confirmNationalRecompute: true,
+            publishThrough: null,
+            publishLegacyRepair: true,
+            recomputeMonths: true,
+            sortAtEnd: true,
+            historicLockTimeoutMs: 1000,
+            historicLockRetryMs: 1,
+            maxDates: 100,
+          },
+        ),
+      ).rejects.toThrow(
+        'PUBLISH_LEGACY_REPAIR target 2015-05-19 exceeds current publication date 2015-05-18',
+      );
+      expect(findAllLight).not.toHaveBeenCalled();
     } finally {
       if (previousPublicationFlag === undefined) {
         delete process.env.ZONE_PUBLICATION_ENABLED;
@@ -446,6 +613,7 @@ describe('recompute-commune-statistics safeguards', () => {
       departementCodes: [],
       confirmNationalRecompute: true,
       publishThrough: null,
+      publishLegacyRepair: false,
       recomputeMonths: true,
       sortAtEnd: true,
       historicLockTimeoutMs: 1000,
@@ -480,7 +648,13 @@ describe('recompute-commune-statistics safeguards', () => {
       preserveBootstrapBarrier: true,
       requireNationalCoverage: true,
       publishCurrentDate: false,
+      bumpLegacyRevisionOnCompletion: false,
     });
+    expect(
+      computeCommuneStatisticsRestrictions.mock.calls.map(
+        (call) => call[5].bumpLegacyRevisionOnCompletion,
+      ),
+    ).toEqual([false, false, false]);
     expect(computeDepartementStatisticsRestrictions).toHaveBeenCalledTimes(3);
     expect(
       computeDepartementStatisticsRestrictions.mock.calls[0].slice(1),
@@ -511,6 +685,74 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(sortStatDepartement).toHaveBeenCalledTimes(1);
     expect(statisticLockRunner.query).not.toHaveBeenCalled();
     expect(statisticLockRunner.release).not.toHaveBeenCalled();
+  });
+
+  it('bumps the legacy publication revision only for an explicit repair', async () => {
+    const previousPublicationFlag = process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const computeCommuneStatisticsRestrictions = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    const dependencies = {
+      departementService: {
+        findAllLight: jest.fn().mockResolvedValue([{ id: 1, code: '01' }]),
+      },
+      historicService: {
+        computeZonesForDate: jest.fn().mockResolvedValue(undefined),
+        findZonesForStatistics: jest.fn().mockResolvedValue([{ id: 1 }]),
+      },
+      statisticCommuneService: { computeCommuneStatisticsRestrictions },
+      configService: {
+        getConfig: jest.fn().mockResolvedValue({ historicComputeEpoch: '17' }),
+      },
+      zonePublicationService: {
+        getSourceRevision: jest.fn().mockResolvedValue('42'),
+      },
+      dataSource: {
+        query: jest
+          .fn()
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([
+            {
+              currentPublishedDate: '2026-08-10',
+              activePublicationId: null,
+            },
+          ]),
+      },
+    };
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      await runRecomputeCommuneStatistics(dependencies as any, {
+        dates: ['2015-05-19'],
+        departementCodes: [],
+        confirmNationalRecompute: true,
+        publishThrough: null,
+        publishLegacyRepair: true,
+        recomputeMonths: true,
+        sortAtEnd: true,
+        historicLockTimeoutMs: 1000,
+        historicLockRetryMs: 1,
+        maxDates: 100,
+      });
+    } finally {
+      if (previousPublicationFlag === undefined) {
+        delete process.env.ZONE_PUBLICATION_ENABLED;
+      } else {
+        process.env.ZONE_PUBLICATION_ENABLED = previousPublicationFlag;
+      }
+    }
+
+    expect(computeCommuneStatisticsRestrictions).toHaveBeenCalledTimes(1);
+    expect(computeCommuneStatisticsRestrictions.mock.calls[0][5]).toMatchObject(
+      {
+        requireNationalCoverage: true,
+        publishCurrentDate: false,
+        bumpLegacyRevisionOnCompletion: true,
+        sourceRevision: '42',
+        historicComputeEpoch: '17',
+      },
+    );
   });
 
   it('repairs and publishes a previous-day target only after monthly aggregation and sorting', async () => {
@@ -575,6 +817,7 @@ describe('recompute-commune-statistics safeguards', () => {
         departementCodes: [],
         confirmNationalRecompute: true,
         publishThrough: '2026-08-10',
+        publishLegacyRepair: false,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,
@@ -599,6 +842,7 @@ describe('recompute-commune-statistics safeguards', () => {
     expect(certificationHooks).toMatchObject({
       requireNationalCoverage: true,
       publishCurrentDate: true,
+      bumpLegacyRevisionOnCompletion: false,
       sourceRevision: '42',
       historicComputeEpoch: '17',
     });
@@ -661,6 +905,7 @@ describe('recompute-commune-statistics safeguards', () => {
         departementCodes: [],
         confirmNationalRecompute: true,
         publishThrough: null,
+        publishLegacyRepair: false,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,
@@ -727,6 +972,7 @@ describe('recompute-commune-statistics safeguards', () => {
         departementCodes: [],
         confirmNationalRecompute: true,
         publishThrough: null,
+        publishLegacyRepair: false,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,
@@ -808,6 +1054,7 @@ describe('recompute-commune-statistics safeguards', () => {
           departementCodes: ['01'],
           confirmNationalRecompute: true,
           publishThrough: null,
+          publishLegacyRepair: false,
           recomputeMonths: true,
           sortAtEnd: true,
           historicLockTimeoutMs: 1000,
@@ -866,6 +1113,7 @@ describe('recompute-commune-statistics safeguards', () => {
         departementCodes: [],
         confirmNationalRecompute: true,
         publishThrough: null,
+        publishLegacyRepair: false,
         recomputeMonths: true,
         sortAtEnd: true,
         historicLockTimeoutMs: 1000,

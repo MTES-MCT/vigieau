@@ -19,6 +19,7 @@ type SnapshotFinalizer = {
     certificationOptions?: {
       requireNationalCoverage?: boolean;
       publishCurrentDate?: boolean;
+      bumpLegacyRevisionOnCompletion?: boolean;
     },
   ): Promise<void>;
 };
@@ -337,6 +338,16 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         "id" integer PRIMARY KEY,
         "revision" bigint NOT NULL
       ) ON COMMIT DROP;
+      CREATE TEMP TABLE "zone_publication_state" (
+        "id" integer PRIMARY KEY,
+        "activePublicationId" uuid
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE "statistic_publication_state" (
+        "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL,
+        "currentPublishedDate" date,
+        "updatedAt" timestamptz NOT NULL DEFAULT now()
+      ) ON COMMIT DROP;
       CREATE TEMP TABLE "statistic_commune_snapshot" (
         "snapshotDate" date NOT NULL,
         "scope" varchar NOT NULL,
@@ -351,6 +362,10 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       ) ON COMMIT DROP;
       INSERT INTO "config" VALUES (1, 10);
       INSERT INTO "zone_publication_source_state" VALUES (1, 42);
+      INSERT INTO "zone_publication_state" VALUES (1, NULL);
+      INSERT INTO "statistic_publication_state" (
+        "id", "revision", "currentPublishedDate"
+      ) VALUES (1, 0, '9998-12-30');
       INSERT INTO "statistic_commune_snapshot" (
         "snapshotDate", "scope", "status", "expectedCommuneCount",
         "processedCommuneCount", "sourceRevision"
@@ -367,6 +382,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
         false,
         '42',
         '9',
+        { bumpLegacyRevisionOnCompletion: true },
       );
     const readStatus = async () => {
       const [snapshot] = await queryRunner.query(
@@ -382,8 +398,15 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     };
 
     await expect(complete()).rejects.toThrow(
-      'Le snapshot communal 9998-12-29 ne couvre pas toutes les communes attendues',
+      'Historic compute epoch changed (9 -> 10)',
     );
+    expect(
+      (
+        await queryRunner.query(
+          `SELECT "revision"::integer AS revision FROM "statistic_publication_state" WHERE "id" = 1`,
+        )
+      )[0].revision,
+    ).toBe(0);
     expect(await readStatus()).toBe('running');
 
     await queryRunner.query(
@@ -393,15 +416,75 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       `UPDATE "zone_publication_source_state" SET "revision" = 41 WHERE "id" = 1`,
     );
     await expect(complete()).rejects.toThrow(
-      'Le snapshot communal 9998-12-29 ne couvre pas toutes les communes attendues',
+      'Historic source revision changed (42 -> 41)',
     );
     expect(await readStatus()).toBe('running');
 
     await queryRunner.query(
       `UPDATE "zone_publication_source_state" SET "revision" = 42 WHERE "id" = 1`,
     );
+    await queryRunner.query(
+      `UPDATE "statistic_commune_snapshot" SET "status" = 'failed' WHERE "snapshotDate" = $1`,
+      [snapshotDate],
+    );
+    await expect(complete()).rejects.toThrow(
+      'Le snapshot communal 9998-12-29 (national) a le statut failed au lieu de running',
+    );
+
+    await queryRunner.query(
+      `UPDATE "statistic_commune_snapshot" SET "status" = 'running', "expectedCommuneCount" = 2 WHERE "snapshotDate" = $1`,
+      [snapshotDate],
+    );
+    await expect(complete()).rejects.toThrow(
+      'Le snapshot communal 9998-12-29 (national) attend 2 communes au lieu de 1',
+    );
+
+    await queryRunner.query(
+      `UPDATE "statistic_commune_snapshot" SET "expectedCommuneCount" = 1, "sourceRevision" = 41 WHERE "snapshotDate" = $1`,
+      [snapshotDate],
+    );
+    await expect(complete()).rejects.toThrow(
+      'Le snapshot communal 9998-12-29 (national) utilise la revision source 41 au lieu de 42',
+    );
+
+    await queryRunner.query(
+      `UPDATE "statistic_commune_snapshot" SET "sourceRevision" = 42 WHERE "snapshotDate" = $1`,
+      [snapshotDate],
+    );
+    await queryRunner.query(
+      `DELETE FROM "zone_publication_state" WHERE "id" = 1`,
+    );
+    await expect(complete()).rejects.toThrow(
+      'Le contexte de publication legacy 9998-12-29 est indisponible',
+    );
+    expect(await readStatus()).toBe('running');
+    expect(
+      (
+        await queryRunner.query(
+          `SELECT "revision"::integer AS revision FROM "statistic_publication_state" WHERE "id" = 1`,
+        )
+      )[0].revision,
+    ).toBe(0);
+
+    await queryRunner.query(
+      `INSERT INTO "zone_publication_state" VALUES (1, '11111111-1111-1111-1111-111111111111')`,
+    );
+    await expect(complete()).rejects.toThrow(
+      'Le contexte de publication legacy 9998-12-29 est indisponible',
+    );
+    expect(await readStatus()).toBe('running');
+    await queryRunner.query(
+      `UPDATE "zone_publication_state" SET "activePublicationId" = NULL WHERE "id" = 1`,
+    );
     await expect(complete()).resolves.toBeUndefined();
     expect(await readStatus()).toBe('completed');
+    expect(
+      (
+        await queryRunner.query(
+          `SELECT "revision"::integer AS revision FROM "statistic_publication_state" WHERE "id" = 1`,
+        )
+      )[0].revision,
+    ).toBe(1);
   });
 
   it('atomically publishes a fully covered legacy current snapshot without clearing the dirty range', async () => {

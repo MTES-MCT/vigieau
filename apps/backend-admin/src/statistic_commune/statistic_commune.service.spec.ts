@@ -262,6 +262,17 @@ describe('StatisticCommuneService', () => {
     matchedRows?: number;
     nationalAlreadyCompleted?: boolean;
     snapshotAffectedRows?: number;
+    snapshotCount?: number;
+    snapshotStatus?: string;
+    snapshotExpectedCommuneCount?: number;
+    snapshotProcessedCommuneCount?: number;
+    snapshotSourceRevision?: string;
+    certificationContextCount?: number;
+    actualSourceRevision?: string;
+    actualHistoricComputeEpoch?: string;
+    publicationContextCount?: number;
+    legacyPublicationContextCount?: number;
+    legacyRepairPublishedStateCount?: number;
     departementRestrictionCount?: number;
     departementSituationCount?: number;
     departementSituationKeyCount?: number;
@@ -387,6 +398,22 @@ describe('StatisticCommuneService', () => {
         return [
           {
             affected: options?.snapshotAffectedRows ?? 1,
+            snapshotCount: options?.snapshotCount ?? 1,
+            snapshotStatus: options?.snapshotStatus ?? 'running',
+            snapshotExpectedCommuneCount:
+              options?.snapshotExpectedCommuneCount ?? communes.length,
+            snapshotProcessedCommuneCount:
+              options?.snapshotProcessedCommuneCount ?? communes.length,
+            snapshotSourceRevision: options?.snapshotSourceRevision ?? '42',
+            contextCount: options?.certificationContextCount ?? 1,
+            actualSourceRevision: options?.actualSourceRevision ?? '42',
+            actualHistoricComputeEpoch:
+              options?.actualHistoricComputeEpoch ?? '9',
+            publicationContextCount: options?.publicationContextCount ?? 1,
+            legacyPublicationContextCount:
+              options?.legacyPublicationContextCount ?? 1,
+            legacyRepairPublishedStateCount:
+              options?.legacyRepairPublishedStateCount ?? 1,
             expectedDepartementCount: 101,
             departementRestrictionCount:
               options?.departementRestrictionCount ?? 101,
@@ -1350,6 +1377,90 @@ describe('StatisticCommuneService', () => {
     ]);
   });
 
+  it('rejects overlapping current publication and legacy repair signals', async () => {
+    const harness = createComputationHarness();
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        undefined,
+        undefined,
+        undefined,
+        {
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+          requireNationalCoverage: true,
+          publishCurrentDate: true,
+          bumpLegacyRevisionOnCompletion: true,
+        },
+      ),
+    ).rejects.toThrow(
+      'La publication courante et le signal de reparation legacy sont mutuellement exclusifs',
+    );
+    expect(harness.events).toContain('failed');
+  });
+
+  it('fails certification when a requested legacy repair signal is not published', async () => {
+    const harness = createComputationHarness({
+      legacyRepairPublishedStateCount: 0,
+    });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        true,
+        false,
+        undefined,
+        {
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+          requireNationalCoverage: true,
+          bumpLegacyRevisionOnCompletion: true,
+        },
+      ),
+    ).rejects.toThrow(
+      "La reparation statistique legacy 2025-07-13 n'a pas actualise le filigrane",
+    );
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.events).toContain('failed');
+  });
+
+  it('fails certification when the locked legacy publication context is absent', async () => {
+    const harness = createComputationHarness({
+      legacyPublicationContextCount: 0,
+      legacyRepairPublishedStateCount: 0,
+    });
+
+    await expect(
+      harness.service.computeCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        true,
+        false,
+        undefined,
+        {
+          sourceRevision: '42',
+          historicComputeEpoch: '9',
+          requireNationalCoverage: true,
+          bumpLegacyRevisionOnCompletion: true,
+        },
+      ),
+    ).rejects.toThrow(
+      'Le contexte de publication legacy 2025-07-13 est indisponible',
+    );
+    const completionSql = harness.query.mock.calls.find(([sql]) =>
+      String(sql).includes('legacy_publication_context AS MATERIALIZED'),
+    )?.[0];
+    expect(completionSql).toContain('FOR UPDATE OF zone_state');
+    expect(completionSql).toContain(
+      'FROM completed_snapshot, legacy_publication_context',
+    );
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.events).toContain('failed');
+  });
+
   it('rolls back legacy publication when finalizing the daily snapshots fails', async () => {
     const harness = createComputationHarness({
       failNationalFinalization: true,
@@ -1503,7 +1614,10 @@ describe('StatisticCommuneService', () => {
   });
 
   it('does not certify a snapshot whose completion transition affected no row', async () => {
-    const harness = createComputationHarness({ snapshotAffectedRows: 0 });
+    const harness = createComputationHarness({
+      snapshotAffectedRows: 0,
+      snapshotStatus: 'failed',
+    });
 
     await expect(
       harness.service.computeCommuneStatisticsRestrictions(
@@ -1511,7 +1625,7 @@ describe('StatisticCommuneService', () => {
         new Date('2025-07-13T00:00:00.000Z'),
       ),
     ).rejects.toThrow(
-      'Le snapshot communal 2025-07-13 ne couvre pas toutes les communes attendues',
+      'Le snapshot communal 2025-07-13 (national) a le statut failed au lieu de running',
     );
 
     expect(harness.events).toEqual([
@@ -1526,7 +1640,10 @@ describe('StatisticCommuneService', () => {
   });
 
   it('fails closed when the historic context changes after the certification hook', async () => {
-    const harness = createComputationHarness({ snapshotAffectedRows: 0 });
+    const harness = createComputationHarness({
+      snapshotAffectedRows: 0,
+      actualSourceRevision: '43',
+    });
 
     await expect(
       harness.service.computeCommuneStatisticsRestrictions(
@@ -1543,16 +1660,14 @@ describe('StatisticCommuneService', () => {
           historicComputeEpoch: '9',
         },
       ),
-    ).rejects.toThrow(
-      'Le snapshot communal 2025-07-13 ne couvre pas toutes les communes attendues',
-    );
+    ).rejects.toThrow('Historic source revision changed (42 -> 43)');
 
     const completionCall = harness.query.mock.calls.find(([sql]) =>
-      String(sql).includes('WITH current_context AS MATERIALIZED'),
+      String(sql).includes('current_context AS MATERIALIZED'),
     );
     expect(completionCall?.[0]).toContain('FOR SHARE OF source_state, config');
     expect(completionCall?.[0]).toContain(
-      'snapshot."sourceRevision" = $5::bigint',
+      'target."sourceRevision" = $5::bigint',
     );
     expect(completionCall?.[0]).toContain(
       'current_context."sourceRevision" = $5::bigint',
@@ -1695,7 +1810,10 @@ describe('StatisticCommuneService', () => {
   });
 
   it('fails every still-running range snapshot when guarded certification cannot complete', async () => {
-    const harness = createComputationHarness({ snapshotAffectedRows: 0 });
+    const harness = createComputationHarness({
+      snapshotAffectedRows: 0,
+      actualHistoricComputeEpoch: '10',
+    });
 
     await expect(
       harness.service.computeEmptyHistoricCommuneStatisticsRange(
@@ -1709,9 +1827,7 @@ describe('StatisticCommuneService', () => {
         ],
         { sourceRevision: '42', historicComputeEpoch: '9' },
       ),
-    ).rejects.toThrow(
-      'Le snapshot communal 2025-07-13 ne couvre pas toutes les communes attendues',
-    );
+    ).rejects.toThrow('Historic compute epoch changed (9 -> 10)');
 
     expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(harness.events).toContain('failed');

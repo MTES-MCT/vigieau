@@ -128,6 +128,7 @@ interface StatisticSnapshotHooks {
   preserveBootstrapBarrier?: boolean;
   requireNationalCoverage?: boolean;
   publishCurrentDate?: boolean;
+  bumpLegacyRevisionOnCompletion?: boolean;
   sourceRevision?: string;
   historicComputeEpoch?: string;
 }
@@ -135,6 +136,7 @@ interface StatisticSnapshotHooks {
 interface StatisticSnapshotCertificationOptions {
   requireNationalCoverage?: boolean;
   publishCurrentDate?: boolean;
+  bumpLegacyRevisionOnCompletion?: boolean;
 }
 
 export interface EmptyHistoricStatisticDay {
@@ -384,6 +386,8 @@ export class StatisticCommuneService {
         {
           requireNationalCoverage: hooks?.requireNationalCoverage === true,
           publishCurrentDate: hooks?.publishCurrentDate === true,
+          bumpLegacyRevisionOnCompletion:
+            hooks?.bumpLegacyRevisionOnCompletion === true,
         },
       );
     } catch (error) {
@@ -1798,16 +1802,27 @@ export class StatisticCommuneService {
     const requireNationalCoverage =
       certificationOptions.requireNationalCoverage === true;
     const publishCurrentDate = certificationOptions.publishCurrentDate === true;
+    const bumpLegacyRevisionOnCompletion =
+      certificationOptions.bumpLegacyRevisionOnCompletion === true;
     if (
-      (requireNationalCoverage || publishCurrentDate) &&
+      (requireNationalCoverage ||
+        publishCurrentDate ||
+        bumpLegacyRevisionOnCompletion) &&
       snapshotScope !== 'national'
     ) {
       throw new Error(
         'Seul un snapshot national peut etre certifie avec une couverture nationale',
       );
     }
+    if (publishCurrentDate && bumpLegacyRevisionOnCompletion) {
+      throw new Error(
+        'La publication courante et le signal de reparation legacy sont mutuellement exclusifs',
+      );
+    }
     if (
-      (requireNationalCoverage || publishCurrentDate) &&
+      (requireNationalCoverage ||
+        publishCurrentDate ||
+        bumpLegacyRevisionOnCompletion) &&
       (!guardedCertification || historicComputeEpoch === undefined)
     ) {
       throw new Error(
@@ -1892,6 +1907,10 @@ export class StatisticCommuneService {
       ? `
             AND EXISTS (SELECT 1 FROM publication_context)`
       : '';
+    const legacyPublicationPredicate = bumpLegacyRevisionOnCompletion
+      ? `
+            AND EXISTS (SELECT 1 FROM legacy_publication_context)`
+      : '';
     const publishedStateCte = publishCurrentDate
       ? `,
         published_state AS (
@@ -1905,20 +1924,75 @@ export class StatisticCommuneService {
           RETURNING statistic_state."revision"
         )`
       : '';
+    const legacyPublicationContextCte = bumpLegacyRevisionOnCompletion
+      ? `,
+        legacy_publication_context AS MATERIALIZED (
+          SELECT zone_state."id"
+          FROM "zone_publication_state" zone_state
+          WHERE zone_state."id" = 1
+            AND zone_state."activePublicationId" IS NULL
+          FOR UPDATE OF zone_state
+        )`
+      : '';
+    const legacyRepairPublishedStateCte = bumpLegacyRevisionOnCompletion
+      ? `,
+        legacy_repair_published_state AS (
+          UPDATE "statistic_publication_state" statistic_state
+          SET "revision" = statistic_state."revision" + 1,
+              "updatedAt" = now()
+          FROM completed_snapshot, legacy_publication_context
+          WHERE statistic_state."id" = 1
+            AND statistic_state."currentPublishedDate" IS NOT NULL
+            AND $1::date <= statistic_state."currentPublishedDate"
+          RETURNING statistic_state."revision"
+        )`
+      : '';
     const resultProjection = `
-          (SELECT COUNT(*)::integer FROM completed_snapshot) AS affected${
-            publishCurrentDate
-              ? ', (SELECT COUNT(*)::integer FROM published_state) AS "publishedStateCount"'
-              : ''
-          }${
-            requireNationalCoverage
-              ? `,
+          (SELECT COUNT(*)::integer FROM completed_snapshot) AS affected,
+          (SELECT COUNT(*)::integer FROM target_snapshot)
+            AS "snapshotCount",
+          (SELECT target."status" FROM target_snapshot target)
+            AS "snapshotStatus",
+          (SELECT target."expectedCommuneCount" FROM target_snapshot target)
+            AS "snapshotExpectedCommuneCount",
+          (SELECT target."processedCommuneCount" FROM target_snapshot target)
+            AS "snapshotProcessedCommuneCount"${
+              guardedCertification
+                ? `,
+          (SELECT target."sourceRevision" FROM target_snapshot target)
+            AS "snapshotSourceRevision",
+          (SELECT COUNT(*)::integer FROM current_context)
+            AS "contextCount",
+          (SELECT context."sourceRevision" FROM current_context context)
+            AS "actualSourceRevision",
+          (SELECT context."historicComputeEpoch" FROM current_context context)
+            AS "actualHistoricComputeEpoch"`
+                : ''
+            }${
+              publishCurrentDate
+                ? `,
+          (SELECT COUNT(*)::integer FROM publication_context)
+            AS "publicationContextCount",
+          (SELECT COUNT(*)::integer FROM published_state)
+            AS "publishedStateCount"`
+                : ''
+            }${
+              bumpLegacyRevisionOnCompletion
+                ? `,
+          (SELECT COUNT(*)::integer FROM legacy_publication_context)
+            AS "legacyPublicationContextCount",
+          (SELECT COUNT(*)::integer FROM legacy_repair_published_state)
+            AS "legacyRepairPublishedStateCount"`
+                : ''
+            }${
+              requireNationalCoverage
+                ? `,
           coverage."expectedDepartementCount",
           coverage."departementRestrictionCount",
           coverage."departementSituationCount",
           coverage."departementSituationKeyCount"`
-              : ''
-          }`;
+                : ''
+            }`;
     const ownsCertificationTransaction = !queryRunner.isTransactionActive;
     let certificationTransactionStarted = false;
     try {
@@ -1929,7 +2003,16 @@ export class StatisticCommuneService {
       const [result] = await queryRunner.query(
         guardedCertification
           ? `
-        WITH current_context AS MATERIALIZED (
+        WITH target_snapshot AS MATERIALIZED (
+          SELECT
+            snapshot."snapshotDate", snapshot."scope", snapshot."status",
+            snapshot."expectedCommuneCount", snapshot."processedCommuneCount",
+            snapshot."sourceRevision"
+          FROM "statistic_commune_snapshot" snapshot
+          WHERE snapshot."snapshotDate" = $1::date
+            AND snapshot."scope" = $2
+          FOR UPDATE OF snapshot
+        ), current_context AS MATERIALIZED (
           SELECT
             source_state."revision" AS "sourceRevision",
             config."historicComputeEpoch" AS "historicComputeEpoch"
@@ -1938,7 +2021,7 @@ export class StatisticCommuneService {
           WHERE source_state."id" = 1
             AND config."id" = 1
           FOR SHARE OF source_state, config
-        )${coverageCte}${publicationContextCte},
+        )${coverageCte}${publicationContextCte}${legacyPublicationContextCte},
         completed_snapshot AS (
           UPDATE "statistic_commune_snapshot" snapshot
           SET "status" = $3::varchar,
@@ -1949,25 +2032,33 @@ export class StatisticCommuneService {
               END,
               "lastError" = NULL,
               "updatedAt" = now()
-          FROM current_context
-          WHERE snapshot."snapshotDate" = $1::date
-            AND snapshot."scope" = $2
-            AND snapshot."status" = 'running'
-            AND snapshot."expectedCommuneCount" = $4
-            AND snapshot."sourceRevision" = $5::bigint
+          FROM current_context, target_snapshot target
+          WHERE snapshot."snapshotDate" = target."snapshotDate"
+            AND snapshot."scope" = target."scope"
+            AND target."status" = 'running'
+            AND target."expectedCommuneCount" = $4
+            AND target."sourceRevision" = $5::bigint
             AND current_context."sourceRevision" = $5::bigint
             AND (
               $6::bigint IS NULL
               OR current_context."historicComputeEpoch" = $6::bigint
-            )${coveragePredicate}${publicationPredicate}
+            )${coveragePredicate}${publicationPredicate}${legacyPublicationPredicate}
           RETURNING 1
-        )${publishedStateCte}
+        )${publishedStateCte}${legacyRepairPublishedStateCte}
         SELECT ${resultProjection}
         ${requireNationalCoverage ? 'FROM national_coverage coverage' : ''}
       `
           : `
-        WITH completed_snapshot AS (
-          UPDATE "statistic_commune_snapshot"
+        WITH target_snapshot AS MATERIALIZED (
+          SELECT
+            snapshot."snapshotDate", snapshot."scope", snapshot."status",
+            snapshot."expectedCommuneCount", snapshot."processedCommuneCount"
+          FROM "statistic_commune_snapshot" snapshot
+          WHERE snapshot."snapshotDate" = $1::date
+            AND snapshot."scope" = $2
+          FOR UPDATE OF snapshot
+        ), completed_snapshot AS (
+          UPDATE "statistic_commune_snapshot" snapshot
           SET "status" = $3::varchar,
               "processedCommuneCount" = $4,
               "completedAt" = CASE
@@ -1976,13 +2067,14 @@ export class StatisticCommuneService {
               END,
               "lastError" = NULL,
               "updatedAt" = now()
-          WHERE "snapshotDate" = $1
-            AND "scope" = $2
-            AND "status" = 'running'
-            AND "expectedCommuneCount" = $4
+          FROM target_snapshot target
+          WHERE snapshot."snapshotDate" = target."snapshotDate"
+            AND snapshot."scope" = target."scope"
+            AND target."status" = 'running'
+            AND target."expectedCommuneCount" = $4
           RETURNING 1
-        )
-        SELECT COUNT(*)::integer AS affected FROM completed_snapshot
+        )${legacyRepairPublishedStateCte}
+        SELECT ${resultProjection}
       `,
         guardedCertification
           ? [
@@ -2000,6 +2092,86 @@ export class StatisticCommuneService {
               processedCommuneCount,
             ],
       );
+      if (Number(result?.affected ?? 0) !== 1) {
+        if (guardedCertification) {
+          if (Number(result?.contextCount ?? 0) !== 1) {
+            throw new Error(
+              `Contexte de certification du snapshot communal ${snapshotDate} indisponible`,
+            );
+          }
+          if (String(result.actualSourceRevision) !== sourceRevision) {
+            throw new Error(
+              `Historic source revision changed (${sourceRevision} -> ${String(result.actualSourceRevision)})`,
+            );
+          }
+          if (
+            historicComputeEpoch !== undefined &&
+            String(result.actualHistoricComputeEpoch) !== historicComputeEpoch
+          ) {
+            throw new Error(
+              `Historic compute epoch changed (${historicComputeEpoch} -> ${String(result.actualHistoricComputeEpoch)})`,
+            );
+          }
+        }
+        if (Number(result?.snapshotCount ?? 0) !== 1) {
+          throw new Error(
+            `Le snapshot communal ${snapshotDate} (${snapshotScope}) est introuvable`,
+          );
+        }
+        if (result.snapshotStatus !== 'running') {
+          throw new Error(
+            `Le snapshot communal ${snapshotDate} (${snapshotScope}) a le statut ${String(result.snapshotStatus)} au lieu de running`,
+          );
+        }
+        if (
+          Number(result.snapshotExpectedCommuneCount) !== processedCommuneCount
+        ) {
+          throw new Error(
+            `Le snapshot communal ${snapshotDate} (${snapshotScope}) attend ${Number(result.snapshotExpectedCommuneCount)} communes au lieu de ${processedCommuneCount}`,
+          );
+        }
+        if (
+          guardedCertification &&
+          String(result.snapshotSourceRevision) !== sourceRevision
+        ) {
+          throw new Error(
+            `Le snapshot communal ${snapshotDate} (${snapshotScope}) utilise la revision source ${String(result.snapshotSourceRevision)} au lieu de ${sourceRevision}`,
+          );
+        }
+        if (
+          publishCurrentDate &&
+          Number(result?.publicationContextCount ?? 0) !== 1
+        ) {
+          throw new Error(
+            `La publication statistique courante ${snapshotDate} ferait regresser le filigrane actif`,
+          );
+        }
+        if (
+          bumpLegacyRevisionOnCompletion &&
+          Number(result?.legacyPublicationContextCount ?? 0) !== 1
+        ) {
+          throw new Error(
+            `Le contexte de publication legacy ${snapshotDate} est indisponible`,
+          );
+        }
+        if (
+          requireNationalCoverage &&
+          (Number(result?.expectedDepartementCount ?? 0) !== 101 ||
+            Number(result?.departementRestrictionCount ?? 0) !== 101 ||
+            Number(result?.departementSituationCount ?? 0) !== 101 ||
+            Number(result?.departementSituationKeyCount ?? 0) !== 101)
+        ) {
+          throw new Error(
+            `Couverture statistique departementale incomplete pour ${snapshotDate}: ` +
+              `${Number(result?.departementRestrictionCount ?? 0)}/101 restrictions, ` +
+              `${Number(result?.departementSituationCount ?? 0)}/101 situations, ` +
+              `${Number(result?.departementSituationKeyCount ?? 0)}/101 cles`,
+          );
+        }
+        throw new Error(
+          `Les preconditions de certification du snapshot communal ${snapshotDate} (${snapshotScope}) ont change`,
+        );
+      }
       if (
         requireNationalCoverage &&
         (Number(result?.expectedDepartementCount ?? 0) !== 101 ||
@@ -2014,17 +2186,28 @@ export class StatisticCommuneService {
             `${Number(result?.departementSituationKeyCount ?? 0)}/101 cles`,
         );
       }
-      if (Number(result?.affected ?? 0) !== 1) {
-        throw new Error(
-          `Le snapshot communal ${snapshotDate} ne couvre pas toutes les communes attendues`,
-        );
-      }
       if (
         publishCurrentDate &&
         Number(result?.publishedStateCount ?? 0) !== 1
       ) {
         throw new Error(
           `La publication statistique courante ${snapshotDate} n'a pas ete certifiee`,
+        );
+      }
+      if (
+        bumpLegacyRevisionOnCompletion &&
+        Number(result?.legacyPublicationContextCount ?? 0) !== 1
+      ) {
+        throw new Error(
+          `Le contexte de publication legacy ${snapshotDate} est indisponible`,
+        );
+      }
+      if (
+        bumpLegacyRevisionOnCompletion &&
+        Number(result?.legacyRepairPublishedStateCount ?? 0) !== 1
+      ) {
+        throw new Error(
+          `La reparation statistique legacy ${snapshotDate} n'a pas actualise le filigrane`,
         );
       }
       if (snapshotScope === 'national' && !deferCertificationUntilPublication) {
