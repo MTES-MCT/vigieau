@@ -4,11 +4,8 @@ import { ArreteCadreZoneAlerteCommunes } from '@shared/entities/arrete_cadre_zon
 import { ArreteCadreZoneAlerteCommunesService } from './arrete_cadre_zone_alerte_communes.service';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([ArreteCadreZoneAlerteCommunes]),
-  ],
+  imports: [TypeOrmModule.forFeature([ArreteCadreZoneAlerteCommunes])],
   providers: [ArreteCadreZoneAlerteCommunesService],
   exports: [ArreteCadreZoneAlerteCommunesService],
 })
-export class ArreteCadreZoneAlerteCommunesModule {
-}
+export class ArreteCadreZoneAlerteCommunesModule {}

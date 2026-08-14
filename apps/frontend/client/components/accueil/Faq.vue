@@ -12,9 +12,9 @@ const activeAccordion = ref<number>();
     </div>
     <div class="section-title">
       <DsfrAccordionsGroup v-model="activeAccordion">
-        <template v-for="(category, x) in faq.categories">
+        <template v-for="(category, x) in faq.categories" :key="category.name">
           <h3 class="fr-mt-4w h6">{{ category.name }}</h3>
-          <template v-for="(item, y) in category.data">
+          <template v-for="(item, y) in category.data" :key="item.question">
             <DsfrAccordion :title="item.question"
                            titleTag="h4"
                            :id="x.toString() + y.toString()">

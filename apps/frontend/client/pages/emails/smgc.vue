@@ -17,7 +17,7 @@ useHead({
         <img src="/emails_popcorn.png"
              style="max-width: 100%"
              height="100"
-             title="Image d'illustration popcorn"
+             alt=""
         />
       </div>
       <div class="fr-col-9">

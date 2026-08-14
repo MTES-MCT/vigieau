@@ -9,7 +9,7 @@ describe('CommunesService', () => {
   let service: CommunesService;
   let communeRepository: Repository<Commune>;
 
-  const mockCommunes: Commune[] = <Commune[]> [
+  const mockCommunes: Commune[] = <Commune[]>[
     { id: 1, code: '75001', nom: 'Commune 1', disabled: false },
     { id: 2, code: '13201', nom: 'Commune 2', disabled: false },
     { id: 3, code: '75056', nom: 'Paris', disabled: false },
@@ -54,7 +54,9 @@ describe('CommunesService', () => {
     }).compile();
 
     service = <CommunesService>module.get(CommunesService);
-    communeRepository = <Repository<Commune>>module.get(getRepositoryToken(Commune));
+    communeRepository = <Repository<Commune>>(
+      module.get(getRepositoryToken(Commune))
+    );
   });
 
   afterEach(() => {
@@ -73,7 +75,7 @@ describe('CommunesService', () => {
       expect(result).toEqual(mockCommunes[2]);
     });
 
-    it('devrait retourner undefined si la commune n\'existe pas', () => {
+    it("devrait retourner undefined si la commune n'existe pas", () => {
       const result = service.getCommune('99999'); // Code inconnu
       expect(result).toBeUndefined();
     });
@@ -86,7 +88,9 @@ describe('CommunesService', () => {
 
       await service.loadCommunes();
 
-      expect(communeRepository.find).toHaveBeenCalledWith({ where: { disabled: false } });
+      expect(communeRepository.find).toHaveBeenCalledWith({
+        where: { disabled: false },
+      });
       expect(service['communes']).toEqual(mockCommunes);
       expect(service['communesIndex']).toEqual({
         '75001': mockCommunes[0],
@@ -118,30 +122,31 @@ describe('CommunesService', () => {
   describe('findArretesMunicipaux', () => {
     it('devrait retourner les arrêtés municipaux publiés', async () => {
       // @ts-ignore
-      jest.spyOn(communeRepository, 'find').mockResolvedValueOnce(mockArretesMunicipaux);
+      jest
+        .spyOn(communeRepository, 'find')
+        .mockResolvedValueOnce(mockArretesMunicipaux as any);
 
       const result = await service.findArretesMunicipaux();
 
-      expect(communeRepository.find).toHaveBeenCalledWith(expect.objectContaining({
-        select: {
-          code: true,
-          arretesMunicipaux: {
-            id: true,
-            fichier: {
-              url: true,
+      expect(communeRepository.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: {
+            code: true,
+            arretesMunicipaux: {
+              id: true,
+              fichier: {
+                url: true,
+              },
             },
           },
-        },
-        relations: [
-          'arretesMunicipaux',
-          'arretesMunicipaux.fichier',
-        ],
-        where: {
-          arretesMunicipaux: {
-            statut: 'publie',
+          relations: ['arretesMunicipaux', 'arretesMunicipaux.fichier'],
+          where: {
+            arretesMunicipaux: {
+              statut: 'publie',
+            },
           },
-        },
-      }));
+        }),
+      );
       expect(result).toEqual(mockArretesMunicipaux);
     });
   });

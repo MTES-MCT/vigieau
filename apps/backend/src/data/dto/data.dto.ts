@@ -2,11 +2,17 @@ import { IsOptional, IsString, IsDateString } from 'class-validator';
 
 export class CommonDataQueryDto {
   @IsOptional()
-  @IsDateString({}, { message: 'dateDebut doit être une date valide au format YYYY-MM-DD' })
+  @IsDateString(
+    {},
+    { message: 'dateDebut doit être une date valide au format YYYY-MM-DD' },
+  )
   dateDebut?: string;
 
   @IsOptional()
-  @IsDateString({}, { message: 'dateFin doit être une date valide au format YYYY-MM-DD' })
+  @IsDateString(
+    {},
+    { message: 'dateFin doit être une date valide au format YYYY-MM-DD' },
+  )
   dateFin?: string;
 
   @IsOptional()
@@ -24,7 +30,9 @@ export class CommonDataQueryDto {
 
 export class CommuneQueryDto {
   @IsOptional()
-  @IsString({ message: 'dateDebut doit être une date valide au format YYYY-MM' })
+  @IsString({
+    message: 'dateDebut doit être une date valide au format YYYY-MM',
+  })
   dateDebut?: string;
 
   @IsOptional()

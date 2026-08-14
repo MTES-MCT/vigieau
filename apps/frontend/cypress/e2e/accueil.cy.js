@@ -1,5 +1,21 @@
+/* global beforeEach, cy, describe, it */
+
+function stubHomeMap() {
+  cy.intercept('GET', '**/zones/publication', {
+    statusCode: 503,
+    body: { message: 'Publication indisponible pendant le test' },
+  });
+  cy.intercept(
+    'GET',
+    'https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json',
+    { statusCode: 200, body: { version: 8, sources: {}, layers: [] } },
+  );
+  cy.intercept('HEAD', '**/*.pmtiles*', { statusCode: 503, body: '' });
+}
+
 describe('Test de la home page', () => {
   beforeEach(() => {
+    stubHomeMap();
     cy.visit('/');
   });
 
@@ -20,42 +36,48 @@ describe('Test de la home page', () => {
   describe(`Header`, () => {
     it(`Le header doit s'afficher correctement`, () => {
       cy.get('body .fr-header').should('exist');
-      cy.get('body .fr-header .fr-logo').contains('Gouvernement').should('exist');
+      cy.get('body .fr-header .fr-logo')
+        .should('contain.text', 'République')
+        .and('contain.text', 'Française');
     });
   });
 
   describe(`Footer`, () => {
     it(`Le footer doit s'afficher correctement`, () => {
       cy.get('body .fr-footer').should('exist');
-      cy.get('body .fr-header .fr-logo').contains('Gouvernement').should('exist');
-      cy.get('body .fr-footer .fr-footer__content-list').find('li').should('have.length', 3);
-      cy.get('body .fr-footer .fr-footer__bottom-list').find('li').should('have.length', 4);
+      cy.get('body .fr-footer .fr-logo')
+        .should('contain.text', 'République')
+        .and('contain.text', 'Française');
+      cy.get('body .fr-footer .fr-footer__content-list')
+        .find('li')
+        .should('have.length', 4);
+      cy.get('body .fr-footer .fr-footer__bottom-list')
+        .find('li')
+        .should('have.length', 4);
     });
-    
+
     it(`On doit pouvoir accéder aux pages légales depuis le footer`, () => {
-      cy.get('body .fr-footer [data-testid="/accessibilite"]').should('exist');
-      cy.get('body .fr-footer [data-testid="/mentions-legales"]').should('exist');
-      cy.get('body .fr-footer [data-testid="/donnees-personnelles"]').should('exist');
-      cy.get('body .fr-footer [data-testid="/cookies"]').should('exist');
+      const legalRoutes = [
+        '/accessibilite',
+        '/mentions-legales',
+        '/donnees-personnelles',
+        '/cookies',
+      ];
 
-      cy.get('body .fr-footer [data-testid="/accessibilite"]').click();
-      cy.location('pathname').should('equal', '/accessibilite');
-
-      cy.get('body .fr-footer [data-testid="/mentions-legales"]').click();
-      cy.location('pathname').should('equal', '/mentions-legales');
-
-      cy.get('body .fr-footer [data-testid="/donnees-personnelles"]').click();
-      cy.location('pathname').should('equal', '/donnees-personnelles');
-
-      cy.get('body .fr-footer [data-testid="/cookies"]').click();
-      cy.location('pathname').should('equal', '/cookies');
+      for (const route of legalRoutes) {
+        cy.get(`body .fr-footer a[href="${route}"]`).click();
+        cy.location('pathname').should('equal', route);
+      }
     });
   });
-  
+
   describe(`Bloc présentation`, () => {
     it(`Le bloc présentation doit s'afficher correctement`, () => {
-      cy.get('body .presentation [data-cy=ProfileSelection]').should('exist');
-      cy.get('body .presentation [data-cy=AddressSearchInput]').should('exist');
+      cy.get('body .presentation #main-search-profile').should('exist');
+      cy.get('body .presentation #main-search-water-type').should('exist');
+      cy.get('body .presentation #main-search-address').should('exist');
+      cy.get('body .presentation [data-cy=MainRestrictionSearchSubmit]')
+        .should('exist');
     });
   });
-})
+});

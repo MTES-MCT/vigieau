@@ -6,7 +6,10 @@ class FichierDto {
   @ApiProperty({ example: 'fichier.pdf', description: `Nom du fichier` })
   nom: string;
 
-  @ApiProperty({ example: 'https://vigieau.gouv.fr/fichier.pdf', description: `URL du fichier` })
+  @ApiProperty({
+    example: 'https://vigieau.gouv.fr/fichier.pdf',
+    description: `URL du fichier`,
+  })
   url: string;
 
   @ApiProperty({ example: 1024, description: `Taille du fichier en octets` })
@@ -14,19 +17,34 @@ class FichierDto {
 }
 
 export class ArreteRestrictionDto {
-  @ApiProperty({ example: 1, description: `Identifiant BDD de l'arrêté de restriction` })
+  @ApiProperty({
+    example: 1,
+    description: `Identifiant BDD de l'arrêté de restriction`,
+  })
   id: string;
 
-  @ApiProperty({ example: '01', description: `Numéro de l'arrêté de restriction` })
+  @ApiProperty({
+    example: '01',
+    description: `Numéro de l'arrêté de restriction`,
+  })
   numero: string;
 
-  @ApiProperty({ example: '01/01/2024', description: 'Date d\'entrée en vigueur de l\'arrêté de restriction' })
+  @ApiProperty({
+    example: '01/01/2024',
+    description: "Date d'entrée en vigueur de l'arrêté de restriction",
+  })
   dateDebut: Date;
 
-  @ApiProperty({ example: '31/12/2024', description: 'Date d\'abrogation de l\'arrêté de restriction' })
+  @ApiProperty({
+    example: '31/12/2024',
+    description: "Date d'abrogation de l'arrêté de restriction",
+  })
   dateFin: Date;
 
-  @ApiProperty({ example: '01/01/2024', description: 'Date de signature de l\'arrêté de restriction' })
+  @ApiProperty({
+    example: '01/01/2024',
+    description: "Date de signature de l'arrêté de restriction",
+  })
   dateSignature: Date;
 
   @ApiProperty()
@@ -45,14 +63,16 @@ export class ArreteRestrictionDto {
   @ApiProperty({
     enum: ['vigilance', 'alerte', 'alerte_renforcee', 'crise'],
     example: 'alerte_renforcee',
-    description: 'Niveau de gravité maximum en vigueur sur le département, null si pas de zone d\'alerte en vigueur',
+    description:
+      "Niveau de gravité maximum en vigueur sur le département, null si pas de zone d'alerte en vigueur",
   })
   niveauGraviteMax: string;
 }
 
 export class ArretesRestrictionsQueryDto {
   @ApiPropertyOptional({
-    description: 'Date de recherche (YYYY-MM-DD), si non précisée c\'est la date du jour qui est prise en compte',
+    description:
+      "Date de recherche (YYYY-MM-DD), si non précisée c'est la date du jour qui est prise en compte",
     example: '2025-01-16',
   })
   @IsOptional()
@@ -60,21 +80,24 @@ export class ArretesRestrictionsQueryDto {
   date?: string;
 
   @ApiPropertyOptional({
-    description: 'ID Bassin versant, si non précisée c\'est tout le territoire français qui est pris en compte',
+    description:
+      "ID Bassin versant, si non précisée c'est tout le territoire français qui est pris en compte",
   })
   @IsOptional()
   @IsString()
   bassinVersant?: string;
 
   @ApiPropertyOptional({
-    description: 'ID Région, si non précisée c\'est tout le territoire français qui est pris en compte',
+    description:
+      "ID Région, si non précisée c'est tout le territoire français qui est pris en compte",
   })
   @IsOptional()
   @IsString()
   region?: string;
 
   @ApiPropertyOptional({
-    description: 'ID Département, si non précisé c\'est tout le territoire français qui est pris en compte',
+    description:
+      "ID Département, si non précisé c'est tout le territoire français qui est pris en compte",
   })
   @IsOptional()
   @IsString()

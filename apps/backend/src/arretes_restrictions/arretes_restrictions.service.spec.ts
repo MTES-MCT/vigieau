@@ -18,7 +18,11 @@ describe('ArretesRestrictionsService', () => {
       dateSignature: '2024-01-01',
       statut: 'publie',
       departement: { code: '75', nom: 'Paris' },
-      fichier: { nom: 'fichier.pdf', url: 'http://example.com/fichier.pdf', size: 1024 },
+      fichier: {
+        nom: 'fichier.pdf',
+        url: 'http://example.com/fichier.pdf',
+        size: 1024,
+      },
       restrictions: [
         { niveauGravite: 'alerte', zonesAlerteComputed: [{ type: 'ESO' }] },
         { niveauGravite: 'vigilance', zonesAlerteComputed: [{ type: 'ESU' }] },
@@ -32,7 +36,11 @@ describe('ArretesRestrictionsService', () => {
       dateSignature: '2024-02-01',
       statut: 'publie',
       departement: { code: '33', nom: 'Gironde' },
-      fichier: { nom: 'arrete.pdf', url: 'http://example.com/arrete.pdf', size: 2048 },
+      fichier: {
+        nom: 'arrete.pdf',
+        url: 'http://example.com/arrete.pdf',
+        size: 2048,
+      },
       restrictions: [
         { niveauGravite: 'crise', zonesAlerteComputed: [{ type: 'AEP' }] },
       ],
@@ -55,8 +63,12 @@ describe('ArretesRestrictionsService', () => {
       ],
     }).compile();
 
-    service = <ArretesRestrictionsService>module.get(ArretesRestrictionsService);
-    repository = <Repository<ArreteRestriction>>module.get(getRepositoryToken(ArreteRestriction));
+    service = <ArretesRestrictionsService>(
+      module.get(ArretesRestrictionsService)
+    );
+    repository = <Repository<ArreteRestriction>>(
+      module.get(getRepositoryToken(ArreteRestriction))
+    );
   });
 
   afterEach(() => {
@@ -136,7 +148,9 @@ describe('ArretesRestrictionsService', () => {
     it('devrait lancer une erreur en cas de problème dans la base de données', async () => {
       mockRepository.find.mockRejectedValue(new Error('Erreur BDD'));
 
-      await expect(service.getByDate('2024-01-15')).rejects.toThrow('Erreur BDD');
+      await expect(service.getByDate('2024-01-15')).rejects.toThrow(
+        'Erreur BDD',
+      );
       expect(repository.find).toHaveBeenCalled();
     });
 

@@ -29,6 +29,7 @@ const departementsTags: Ref<any> = ref([]);
 const departementsFiltered: Ref<any> = ref([]);
 const communesTags: Ref<any> = ref([]);
 const communesFiltered: Ref<any> = ref([]);
+const communesLoading = computed(() => refDataStore.communesLoading);
 
 for (const ur in UserRole) {
   if (ur !== 'departement' && authStore.user.role === 'departement') {
@@ -191,12 +192,13 @@ const deleteCommune = (communeCode: string) => {
 const computeCommunesTags = () => {
   communesTags.value = formData.roleCommunes.map((c) => {
     const commune = refDataStore.communes.find((com) => com.code === c);
+    const canDismiss = authStore.user?.role === 'mte' || authStore.user?.roleCommunes?.includes(c);
     return {
-      label: `${commune?.code} - ${commune?.nom}`,
-      class: authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(commune.code) ? '' : 'fr-tag--dismiss',
+      label: commune ? `${commune.code} - ${commune.nom}` : c,
+      class: canDismiss ? 'fr-tag--dismiss' : '',
       tagName: 'button',
       onclick: () => {
-        if (authStore.user?.role !== 'mte' && !authStore.user?.roleCommunes.includes(commune.code)) {
+        if (!canDismiss) {
           return;
         }
         deleteCommune(c);
@@ -206,6 +208,14 @@ const computeCommunesTags = () => {
 };
 
 computeCommunesTags();
+
+const loadCommunes = async () => {
+  await refDataStore.ensureCommunesLoaded();
+  computeCommunesTags();
+  if (queryCom.value.length >= 2) {
+    filtercommunes();
+  }
+};
 
 watch(
   queryDep,
@@ -220,8 +230,18 @@ watch(
     if (queryCom.value.length < 2) {
       return;
     }
-    filtercommunes();
+    await loadCommunes();
   }, 300),
+);
+
+watch(
+  () => formData.role,
+  async (role) => {
+    if (role === 'commune') {
+      await loadCommunes();
+    }
+  },
+  { immediate: true },
 );
 
 defineExpose({
@@ -319,9 +339,14 @@ defineExpose({
           placeholder="Rechercher une commune (nom ou code INSEE)"
           @update:modelValue="selectCommune($event)"
           @search="selectCommune($event)"
-          :disabled="loading"
+          :disabled="loading || communesLoading"
           :required="true"
         />
+
+        <p v-if="communesLoading" class="fr-mt-1w">
+          <VIcon name="ri-loader-4-line" animation="spin" />
+          Chargement des communes...
+        </p>
 
         <DsfrTags class="fr-mt-2w" :tags="communesTags"/>
       </div>

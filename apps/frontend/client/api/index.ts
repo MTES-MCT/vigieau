@@ -1,16 +1,32 @@
+import { $fetch } from 'ofetch';
+import { ref } from 'vue';
 import { Address } from '../dto/address.dto';
 import { Geo } from '../dto/geo.dto';
+import { useZonePublicationStore } from '../store/zonePublication';
+import { fetchAsRefResponse } from '../utils/fetch-response';
+import {
+  buildPublishedZonePath,
+  getDepartmentsApiDate,
+  shouldRefreshZonePublication,
+} from '../utils/zone-publication';
 
 const _adresseOptions: string = '&limit=10';
+
+export interface ZonePublicationPin {
+  publicationId: string | null;
+}
 
 const index = {
   searchAddresses(addressQuery: string, exactAddress = false): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/search/?q=${addressQuery}${_adresseOptions}${exactAddress ? '&type=housenumber' : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiAdresseUrl,
-      parseResponse: _formatAddresses,
-    });
+    return useFetch(
+      `/search/?q=${addressQuery}${_adresseOptions}${exactAddress ? '&type=housenumber' : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiAdresseUrl,
+        parseResponse: _formatAddresses,
+      },
+    );
   },
 
   searchAddressByLatlon(lon: string, lat: string): Promise<any> {
@@ -29,23 +45,36 @@ const index = {
     });
   },
 
-  searchZonesByAdress(address: Address): Promise<any> {
-    const runtimeConfig = useRuntimeConfig();
-    let options = ['municipality'].includes(address.properties.type) ?
-      `/zones?commune=${address.properties.citycode}` :
-      `/zones?lon=${address.geometry.coordinates[0]}&lat=${address.geometry.coordinates[1]}&commune=${address.properties.citycode}`;
-    return useFetch(options, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+  async searchZonesByAdress(
+    address: Address,
+    publicationPin?: ZonePublicationPin,
+  ): Promise<any> {
+    const citycode = address.properties.citycode;
+    const coordinates = address.geometry?.coordinates;
+    const params = new URLSearchParams();
+    if (['municipality'].includes(address.properties.type) && citycode) {
+      params.set('commune', citycode);
+    } else {
+      if (coordinates?.length >= 2) {
+        params.set('lon', String(coordinates[0]));
+        params.set('lat', String(coordinates[1]));
+      }
+      if (citycode) {
+        params.set('commune', citycode);
+      }
+    }
+    return _searchZones('/zones', params, publicationPin);
   },
 
-  searchZonesByGeo(geo: Geo): Promise<any> {
-    const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/zones?commune=${geo.code}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+  async searchZonesByGeo(
+    geo: Geo,
+    publicationPin?: ZonePublicationPin,
+  ): Promise<any> {
+    return _searchZones(
+      '/zones',
+      new URLSearchParams({ commune: geo.code }),
+      publicationPin,
+    );
   },
 
   subscribeMail(form: any): Promise<any> {
@@ -70,9 +99,19 @@ const index = {
     });
   },
 
-  getDepartmentsData(date: string, area?: string): Promise<any> {
+  getDepartmentsData(
+    date: string,
+    area?: string,
+    publicationPin?: ZonePublicationPin | null,
+  ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/departements?date=${date}&${area ? area : ''}`, {
+    const apiDate = getDepartmentsApiDate(date);
+    const params = new URLSearchParams(area || '');
+    params.set('date', apiDate);
+    if (publicationPin?.publicationId) {
+      params.set('publicationId', publicationPin.publicationId);
+    }
+    return useFetch(`/departements?${params.toString()}`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
     });
@@ -80,18 +119,28 @@ const index = {
 
   getDataArea(dateDebut: string, dateFin: string, area?: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/area?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch(
+      `/data/area?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
-  getDataDepartement(dateDebut: string, dateFin: string, area?: string): Promise<any> {
+  getDataDepartement(
+    dateDebut: string,
+    dateFin: string,
+    area?: string,
+  ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/departement?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch(
+      `/data/departement?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
   getDataDuree(): Promise<any> {
@@ -102,12 +151,19 @@ const index = {
     });
   },
 
-  getDataCommune(codeInsee: string, dateDebut?: string, dateFin?: string): Promise<any> {
+  getDataCommune(
+    codeInsee: string,
+    dateDebut?: string,
+    dateFin?: string,
+  ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/commune/${codeInsee}?${dateDebut ? 'dateDebut=' + dateDebut : ''}&${dateFin ? 'dateFin=' + dateFin : ''}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch(
+      `/data/commune/${codeInsee}?${dateDebut ? 'dateDebut=' + dateDebut : ''}&${dateFin ? 'dateFin=' + dateFin : ''}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
   getArretesRestrictions(date: string, area?: string): Promise<any> {
@@ -170,14 +226,80 @@ const index = {
     });
   },
 
-  getZonesByDepartement(depCode: string): Promise<any> {
-    const runtimeConfig = useRuntimeConfig();
-    return useFetch(`zones/departement/${depCode}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+  async getZonesByDepartement(depCode: string): Promise<any> {
+    return _searchZones(`/zones/departement/${depCode}`);
   },
 };
+
+const _searchZones = async (
+  path: string,
+  searchParams = new URLSearchParams(),
+  publicationPin?: ZonePublicationPin,
+): Promise<any> => {
+  const apiSecheresseUrl = useRuntimeConfig().public.apiSecheresseUrl;
+  const publicationStore = publicationPin ? null : useZonePublicationStore();
+  let publicationId = publicationPin?.publicationId;
+  if (publicationStore) {
+    try {
+      publicationId = (await publicationStore.loadPublication())?.id;
+    } catch {
+      return _manifestUnavailableResponse();
+    }
+  }
+  let response = await _fetchZones(
+    path,
+    searchParams,
+    apiSecheresseUrl,
+    publicationId,
+  );
+
+  if (
+    shouldRefreshZonePublication(
+      _getErrorStatus(response),
+      Boolean(publicationPin),
+    ) &&
+    publicationStore
+  ) {
+    try {
+      publicationId = (await publicationStore.loadPublication(true))?.id;
+    } catch {
+      return _manifestUnavailableResponse();
+    }
+    response = await _fetchZones(
+      path,
+      searchParams,
+      apiSecheresseUrl,
+      publicationId,
+    );
+  }
+
+  return response;
+};
+
+const _fetchZones = (
+  path: string,
+  searchParams: URLSearchParams,
+  baseURL: string,
+  publicationId?: string | null,
+): Promise<any> => {
+  return fetchAsRefResponse(() =>
+    $fetch(buildPublishedZonePath(path, searchParams, publicationId), {
+      method: 'GET',
+      baseURL,
+    }),
+  );
+};
+
+const _getErrorStatus = (response: any): number | undefined =>
+  response.error?.value?.statusCode ?? response.error?.value?.status;
+
+const _manifestUnavailableResponse = () => ({
+  data: ref(null),
+  error: ref({
+    statusCode: 503,
+    statusMessage: 'Manifest des zones indisponible.',
+  }),
+});
 
 const _formatAddresses = (response: string): Address[] => {
   const addresses = JSON.parse(response);

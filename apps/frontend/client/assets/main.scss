@@ -1,5 +1,23 @@
 @use "dsfr";
 
+:root {
+  // The background colours are also used by the public maps and charts.
+  // Keep a dedicated, darker text palette: the background shades themselves
+  // do not provide enough contrast when they are used as text colours.
+  --situation-level-0-background: #e8edff;
+  --situation-level-1-background: #ffeda0;
+  --situation-level-2-background: #feb24c;
+  --situation-level-3-background: #fc4e2a;
+  --situation-level-4-background: #b10026;
+  --situation-level-text-on-light-background: #161616;
+  --situation-level-text-on-dark-background: #fff;
+  --situation-level-0-text: #0063cb;
+  --situation-level-1-text: #756300;
+  --situation-level-2-text: #8a4b00;
+  --situation-level-3-text: #a33a00;
+  --situation-level-4-text: #b10026;
+}
+
 body {
   height: 100%;
   overflow-x: hidden;
@@ -72,28 +90,28 @@ fieldset {
 
 .situation-level-bg {
   &-4 {
-    background-color: #B10026;
-    color: var(--grey-1000-50);
+    background-color: var(--situation-level-4-background);
+    color: var(--situation-level-text-on-dark-background);
   }
 
   &-3 {
-    background-color: #FC4E2A;
-    color: #000;
+    background-color: var(--situation-level-3-background);
+    color: var(--situation-level-text-on-light-background);
   }
 
   &-2 {
-    background-color: #FEB24C;
-    color: #000;
+    background-color: var(--situation-level-2-background);
+    color: var(--situation-level-text-on-light-background);
   }
 
   &-1 {
-    background-color: #FFEDA0;
-    color: #000;
+    background-color: var(--situation-level-1-background);
+    color: var(--situation-level-text-on-light-background);
   }
 
   &-0 {
-    background-color: var(--info-950-100);
-    color: #000;
+    background-color: var(--situation-level-0-background);
+    color: var(--situation-level-text-on-light-background);
   }
 }
 
@@ -105,23 +123,23 @@ fieldset {
 
 .situation-level-c {
   &-4 {
-    color: #B10026;
+    color: var(--situation-level-4-text);
   }
 
   &-3 {
-    color: #FC4E2A;
+    color: var(--situation-level-3-text);
   }
 
   &-2 {
-    color: #FEB24C;
+    color: var(--situation-level-2-text);
   }
 
   &-1 {
-    color: #FFEDA0;
+    color: var(--situation-level-1-text);
   }
 
   &-0 {
-    color: var(--info-425-625);
+    color: var(--situation-level-0-text);
   }
 }
 

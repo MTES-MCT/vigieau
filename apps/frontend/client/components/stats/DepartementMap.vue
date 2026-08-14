@@ -2,6 +2,8 @@
 import * as maplibregl from 'maplibre-gl';
 import { Ref } from "vue";
 import utils from "../../utils";
+import { getFrenchMapLocale } from '../../utils/map-locale';
+import { createStatsPopupContent } from '../../utils/map-popup-content';
 
 const props = defineProps<{
   stats: any
@@ -27,7 +29,10 @@ onMounted(() => {
   map.value = new maplibregl.Map({
     container: mapContainer.value,
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
-    bounds: initialState
+    bounds: initialState,
+    locale: getFrenchMapLocale(
+      'Carte interactive de la répartition géographique des recherches',
+    ),
   });
 
 
@@ -126,20 +131,25 @@ onMounted(() => {
     map.value.getCanvas().style.cursor = 'pointer';
 
     const searches = props.stats.departementRepartition[e.features[0].properties.code];
-    const description = `<div>${e.features[0].properties.nom} (${e.features[0].properties.code})</div>
-<div>${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)</div>`;
+    const popupContent = createStatsPopupContent({
+      name: e.features[0].properties.nom,
+      code: e.features[0].properties.code,
+      summary: `${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)`,
+    });
 
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
   });
 
   map.value?.on('mousemove', 'regions-data', (e: any) => {
     map.value.getCanvas().style.cursor = 'pointer';
 
     const searches = props.stats.regionRepartition[e.features[0].properties.code];
-    const description = `<div>${e.features[0].properties.nom}</div>
-<div>${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)</div>`;
+    const popupContent = createStatsPopupContent({
+      name: e.features[0].properties.nom,
+      summary: `${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)`,
+    });
 
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
   });
 
   map.value?.on('mouseleave', 'departements-data', () => {
@@ -182,7 +192,7 @@ const repartitionTags: Ref<any[]> = ref([{
   label: 'Par région',
   value: false
 }]);
-const selectedRepartitionTag: Ref<string> = ref(true);
+const selectedRepartitionTag: Ref<boolean> = ref(true);
 
 const flyToLocation = (bounds: any) => {
   map.value?.fitBounds(bounds);
@@ -198,44 +208,61 @@ const updateLayerFilter = () => {
 <template>
   <div v-if="isMapSupported">
     <div class="map-pre-actions">
-      <div class="map-pre-actions-card fr-p-1w fr-m-1w">
-        <h6 class="fr-mb-1w fr-mr-2w">Maille :</h6>
-        <DsfrRadioButton v-for="option of repartitionTags"
-                         :modelValue="selectedRepartitionTag"
-                         v-bind="option"
-                         :small="true"
-                         class="fr-mb-1w"
-                         @update:modelValue="selectedRepartitionTag = $event; updateLayerFilter();"
+      <fieldset class="map-pre-actions-card map-repartition-group fr-p-1w fr-m-1w">
+        <legend class="map-control-label fr-mb-1w fr-mr-2w">
+          Maille :
+        </legend>
+        <DsfrRadioButton
+          v-for="option of repartitionTags"
+          :key="option.label"
+          :model-value="selectedRepartitionTag"
+          v-bind="option"
+          :small="true"
+          class="fr-mb-1w"
+          @update:model-value="
+            selectedRepartitionTag = $event;
+            updateLayerFilter();
+          "
         />
         <div class="map-legende">
-          <div class="map-legende-carre"></div>
+          <div class="map-legende-carre" />
           <div class="map-legende-text">
             {{ legendTooltip }}
-            <span> </span>
+            <span />
           </div>
         </div>
-      </div>
-      <div class="map-pre-actions-card fr-p-1w fr-m-1w">
-        <h6 class="fr-mb-1w fr-mr-2w">Raccourcis :</h6>
-        <DsfrTag v-for="tag in mapTags"
-                 :label="tag.label"
-                 class="fr-m-1w"
-                 small
-                 @click="flyToLocation(tag.bounds)"
-                 tag-name="button"/>
+      </fieldset>
+      <div
+        class="map-pre-actions-card fr-p-1w fr-m-1w"
+        role="group"
+        aria-label="Raccourcis de la carte"
+      >
+        <p class="map-control-label fr-mb-1w fr-mr-2w">
+          Raccourcis :
+        </p>
+        <DsfrTag
+          v-for="tag in mapTags"
+          :key="tag.label"
+          :label="tag.label"
+          class="fr-m-1w"
+          small
+          tag-name="button"
+          @click="flyToLocation(tag.bounds)"
+        />
       </div>
     </div>
     <div style="height: 75vh">
       <div class="map-wrap">
-        <div class="map" ref="mapContainer"></div>
+        <div ref="mapContainer" class="map" />
       </div>
     </div>
   </div>
   <template v-else>
-    <DsfrAlert title="Votre navigateur ne supporte pas les cartographies"
-               description="Impossible d'afficher la carte de la répartition géographique des recherches sur les 30 derniers jours"
-               type="error"
-               :closeable="false"
+    <DsfrAlert
+      title="Votre navigateur ne supporte pas les cartographies"
+      description="Impossible d'afficher la carte de la répartition géographique des recherches sur les 30 derniers jours"
+      type="error"
+      :closeable="false"
     />
   </template>
 </template>
@@ -243,8 +270,8 @@ const updateLayerFilter = () => {
 <style scoped lang="scss">
 .map-wrap {
   position: absolute;
-  width: calc(100vw);
-  max-width: calc(100% - 2px);
+  width: 100%;
+  max-width: 100%;
   height: calc(75vh + 3px);
   left: 1px;
 
@@ -292,8 +319,15 @@ const updateLayerFilter = () => {
   }
 }
 
-h6 {
+.map-control-label {
   font-size: 16px;
+  font-weight: 700;
+  line-height: 1.5rem;
+}
+
+.map-repartition-group {
+  border: 0;
+  min-width: 0;
 }
 
 .maplibregl-map {

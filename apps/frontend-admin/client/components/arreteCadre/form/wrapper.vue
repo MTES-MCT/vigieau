@@ -17,6 +17,7 @@ const refDataStore = useRefDataStore();
 const alertStore = useAlertStore();
 const authStore = useAuthStore();
 const utils = useUtils();
+const apiErrorHandler = useApiErrorHandler();
 const loading = ref(false);
 const componentKey = ref(0);
 const asc = ref(true);
@@ -88,42 +89,90 @@ const previousStep = () => {
   utils.scrollToTop();
 };
 
-const saveArrete = async (publish: boolean = false) => {
+const publicationContext = (action: string) => ({
+  action,
+  arreteType: 'arrete_cadre',
+  arreteId: props.arreteCadre.id,
+  numero: props.arreteCadre.numero,
+  statut: props.arreteCadre.statut,
+});
+
+const syncSavedUsageIds = (savedArreteCadre: ArreteCadre) => {
+  props.arreteCadre.usages.forEach((usageArreteCadre: Usage) => {
+    const savedUsage = savedArreteCadre.usages?.find(
+      (uac: Usage) => uac.nom === usageArreteCadre.nom,
+    );
+
+    if (!savedUsage?.id) {
+      throw new Error(`L'usage "${usageArreteCadre.nom}" n'a pas été renvoyé par l'API après enregistrement.`);
+    }
+
+    usageArreteCadre.id = savedUsage.id;
+  });
+};
+
+const saveArrete = async (publish: boolean = false): Promise<boolean> => {
   if (loading.value) {
-    return;
+    return false;
   }
-  publish ? v$.value.$validate() :
-    generalFormRef.value?.v$.$validate() && usagesFormRef.value?.arreteCadreUsageListRef.v$.$validate();
+  if (publish) {
+    await v$.value.$validate();
+  } else {
+    await generalFormRef.value?.v$.$validate();
+    await usagesFormRef.value?.arreteCadreUsageListRef.v$.$validate();
+  }
   if (publish ? v$.value.$error : generalFormRef.value?.v$.$error || usagesFormRef.value?.arreteCadreUsageListRef.v$.$error) {
     showErrors(v$.value.$errors, publish ? 'Impossible de publier l\'arrêté cadre' : 'Impossible d\'enregistrer l\'arrêté cadre');
-    return;
+    return false;
   }
+
+  let shouldPublishAfterSave = false;
   loading.value = true;
-  const { data, error } = props.arreteCadre.id
-    ? await api.arreteCadre.update(props.arreteCadre.id.toString(), props.arreteCadre)
-    : await api.arreteCadre.create({ ...props.arreteCadre });
-  if (data.value?.id) {
+
+  try {
+    const { data, error } = props.arreteCadre.id
+      ? await api.arreteCadre.update(props.arreteCadre.id.toString(), props.arreteCadre)
+      : await api.arreteCadre.create({ ...props.arreteCadre });
+
+    if (error.value) {
+      apiErrorHandler.captureClientError(error.value, publicationContext(publish ? 'save_before_publish' : 'save'));
+      return false;
+    }
+
+    if (!data.value?.id) {
+      throw new Error('La réponse de l’API ne contient pas d’identifiant d’arrêté cadre.');
+    }
+
     // Mise à jour des ids des objets nouvellement crées
     props.arreteCadre.id = data.value.id;
-    props.arreteCadre.usages.map((usageArreteCadre: Usage) => {
-      usageArreteCadre.id = (<ArreteCadre>data.value).usages.find(
-        (uac: Usage) => uac.nom === usageArreteCadre.nom,
-      ).id;
-      return usageArreteCadre;
-    });
+    syncSavedUsageIds(<ArreteCadre>data.value);
     componentKey.value++;
+
+    shouldPublishAfterSave = props.arreteCadre.statut !== 'a_valider';
+  } catch (error) {
+    apiErrorHandler.showError(
+      error,
+      publish ? 'Impossible de préparer la publication de l\'arrêté cadre' : 'Impossible d\'enregistrer l\'arrêté cadre',
+      'Une erreur technique empêche l’enregistrement de l’arrêté cadre.',
+      publicationContext(publish ? 'save_before_publish_exception' : 'save_exception'),
+    );
+    return false;
+  } finally {
     loading.value = false;
-    if (props.arreteCadre.statut !== 'a_valider') {
-      await publishArrete(props.arreteCadre);
-    }
-    if (!publish) {
-      alertStore.addAlert({
-        description: 'Enregistrement réussi',
-        type: 'success',
-      });
-    }
   }
-  loading.value = false;
+
+  if (shouldPublishAfterSave) {
+    return await publishArrete(props.arreteCadre);
+  }
+
+  if (!publish) {
+    alertStore.addAlert({
+      description: 'Enregistrement réussi',
+      type: 'success',
+    });
+  }
+
+  return true;
 };
 
 const showErrors = (errors: any, title: string | null) => {
@@ -140,27 +189,48 @@ const showErrors = (errors: any, title: string | null) => {
 };
 
 const askPublishArrete = async () => {
-  await saveArrete(true);
-  if (!v$.value.$error) {
+  const saved = await saveArrete(true);
+  if (saved && !v$.value.$error) {
     modalPublishOpened.value = true;
   }
 };
 
-const publishArrete = async (ac: ArreteCadre) => {
+const publishArrete = async (ac: ArreteCadre): Promise<boolean> => {
   if (loading.value) {
-    return;
+    return false;
   }
   loading.value = true;
-  const { data, error } = await api.arreteCadre.publish(ac.id?.toString(), ac);
-  if (data.value) {
-    utils.closeModal(modalPublishOpened);
-    navigateTo('/arrete-cadre');
+
+  try {
+    const { data, error } = await api.arreteCadre.publish(ac.id?.toString(), ac);
+
+    if (error.value) {
+      apiErrorHandler.captureClientError(error.value, publicationContext('publish'));
+      return false;
+    }
+
+    if (!data.value) {
+      throw new Error('La réponse de l’API ne confirme pas la publication de l’arrêté cadre.');
+    }
+
+    modalPublishOpened.value = utils.closeModal(modalPublishOpened);
+    await navigateTo('/arrete-cadre');
     alertStore.addAlert({
       description: 'Publication réussie',
       type: 'success',
     });
+    return true;
+  } catch (error) {
+    apiErrorHandler.showError(
+      error,
+      'Impossible de publier l\'arrêté cadre',
+      'Une erreur technique empêche la publication de l’arrêté cadre.',
+      publicationContext('publish_exception'),
+    );
+    return false;
+  } finally {
+    loading.value = false;
   }
-  loading.value = false;
 };
 
 // PUBLISH MODAL
@@ -267,7 +337,7 @@ const ressourcesInfluenceesFormRef = ref(null);
              icon="ri-arrow-right-line"
              :title="modalTitle"
              @close="modalPublishOpened = utils.closeModal(modalPublishOpened);">
-    <p>
+    <div>
       Cet arrêté cadre contient&nbsp;:
       <ul>
         <li v-if="arreteCadre.departements.length > 1">{{ arreteCadre.departements.length }} départements</li>
@@ -275,7 +345,7 @@ const ressourcesInfluenceesFormRef = ref(null);
         <li>{{ arreteCadre.usages.length }} usages</li>
       </ul>
       <div class="divider"></div>
-    </p>
+    </div>
     <ArreteCadreFormPublier :showDateFin="false" ref="publierFormRef" :arrete-cadre="arreteCadre" @publier="publishArrete($event)" />
     <template #footer>
       <ul class="fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w">

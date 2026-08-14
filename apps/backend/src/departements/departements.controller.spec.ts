@@ -3,6 +3,10 @@ import { DepartementsController } from './departements.controller';
 import { DepartementsService } from './departements.service';
 import { DepartementDto, QueryDepartementDto } from './dto/departement.dto';
 
+jest.mock('./departements.service', () => ({
+  DepartementsService: class DepartementsService {},
+}));
+
 describe('DepartementsController', () => {
   let controller: DepartementsController;
   let service: DepartementsService;
@@ -49,7 +53,9 @@ describe('DepartementsController', () => {
         { code: '4', niveauGravite: 'alerte' },
       ];
 
-      mockDepartementsService.situationByDepartement.mockResolvedValue(expectedResult);
+      mockDepartementsService.situationByDepartement.mockResolvedValue(
+        expectedResult,
+      );
 
       // Act
       const result = await controller.situationByDepartement(query);
@@ -60,6 +66,7 @@ describe('DepartementsController', () => {
         query.bassinVersant,
         query.region,
         query.departement,
+        query.publicationId,
       );
       expect(result).toEqual(expectedResult);
     });
@@ -69,13 +76,21 @@ describe('DepartementsController', () => {
       const query: QueryDepartementDto = {}; // Aucun paramètre fourni
       const expectedResult: DepartementDto[] = [];
 
-      mockDepartementsService.situationByDepartement.mockResolvedValue(expectedResult);
+      mockDepartementsService.situationByDepartement.mockResolvedValue(
+        expectedResult,
+      );
 
       // Act
       const result = await controller.situationByDepartement(query);
 
       // Assert
-      expect(service.situationByDepartement).toHaveBeenCalledWith(undefined, undefined, undefined, undefined);
+      expect(service.situationByDepartement).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
       expect(result).toEqual(expectedResult);
     });
   });

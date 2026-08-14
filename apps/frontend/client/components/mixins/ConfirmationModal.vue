@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { Ref } from 'vue';
 
-const props = defineProps<{
-  opened: string;
+defineProps<{
+  opened: boolean;
   title: string;
   description: string;
 }>();
@@ -15,14 +15,14 @@ const emit = defineEmits<{
 const modalActions: Ref<any[]> = ref([
   {
     label: 'Confirmer',
-    onclick: () => {
+    onClick: () => {
       emit('confirm');
     },
   },
   {
     label: 'Annuler',
     secondary: true,
-    onclick: () => {
+    onClick: () => {
       emit('close');
     },
   },
@@ -30,13 +30,13 @@ const modalActions: Ref<any[]> = ref([
 </script>
 
 <template>
-  <DsfrModal
+  <AccessibleModal
     :opened="opened"
     icon="ri-arrow-right-line"
     :title="title"
     :actions="modalActions"
     @close="emit('close')"
   >
-    <div v-html="description" />
-  </DsfrModal>
+    <p>{{ description }}</p>
+  </AccessibleModal>
 </template>

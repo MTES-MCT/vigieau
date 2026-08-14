@@ -24,7 +24,7 @@ const typesEau = [
       <h2>Les restrictions peuvent varier en fonction de l’eau que vous consommez</h2>
     </div>
     <div class="fr-grid-row fr-grid-row fr-grid-row--gutters fr-grid-row--center">
-      <div v-for="typeEau of typesEau" class="fr-col-12 fr-col-md-4">
+      <div v-for="typeEau of typesEau" :key="typeEau.title" class="fr-col-12 fr-col-md-4">
         <DsfrCard
           class="type-eau-card"
           :img-src="typeEau.img"

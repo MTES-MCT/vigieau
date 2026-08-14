@@ -74,7 +74,9 @@ describe('SubscriptionsService', () => {
     }).compile();
 
     service = <SubscriptionsService>module.get(SubscriptionsService);
-    abonnementMailRepository = <Repository<AbonnementMail>>module.get(getRepositoryToken(AbonnementMail));
+    abonnementMailRepository = <Repository<AbonnementMail>>(
+      module.get(getRepositoryToken(AbonnementMail))
+    );
     communesService = <CommunesService>module.get(CommunesService);
     zonesService = <ZonesService>module.get(ZonesService);
     brevoService = <BrevoService>module.get(BrevoService);
@@ -88,7 +90,9 @@ describe('SubscriptionsService', () => {
 
   describe('getAllLight', () => {
     it('should return all subscriptions with selected fields', async () => {
-      const mockData = [{ id: 1, email: 'test@test.com', createdAt: new Date() }];
+      const mockData = [
+        { id: 1, email: 'test@test.com', createdAt: new Date() },
+      ];
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'find').mockResolvedValue(mockData);
 
@@ -104,6 +108,7 @@ describe('SubscriptionsService', () => {
     it('should create a subscription and send a confirmation email', async () => {
       const mockSubscription = {
         email: 'test@test.com',
+        profil: 'particulier',
         commune: '12345',
         typesEau: ['AEP'],
       };
@@ -120,7 +125,9 @@ describe('SubscriptionsService', () => {
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(false);
       // @ts-ignore
-      jest.spyOn(abonnementMailRepository, 'save').mockResolvedValue(mockSavedSubscription as any);
+      jest
+        .spyOn(abonnementMailRepository, 'save')
+        .mockResolvedValue(mockSavedSubscription as any);
       // @ts-ignore
       jest.spyOn(brevoService, 'sendMail').mockResolvedValue(undefined);
 
@@ -151,29 +158,117 @@ describe('SubscriptionsService', () => {
     it('should update an existing subscription if it already exists', async () => {
       const mockSubscription = {
         email: 'test@test.com',
+        profil: 'particulier',
         commune: '12345',
         typesEau: ['AEP'],
       };
 
       // @ts-ignore
-      jest.spyOn(communesService, 'getCommune').mockReturnValue({ nom: 'Test Commune' });
+      jest
+        .spyOn(communesService, 'getCommune')
+        .mockReturnValue({ nom: 'Test Commune' } as any);
       // @ts-ignore
       jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
       // @ts-ignore
-      jest.spyOn(abonnementMailRepository, 'update').mockResolvedValue(undefined);
+      jest
+        .spyOn(abonnementMailRepository, 'update')
+        .mockResolvedValue(undefined);
 
       const result = await service.create(mockSubscription as any, '127.0.0.1');
-      expect(result).toEqual(
-        {
-          email: 'test@test.com',
-          commune: '12345',
-          typesEau: ['AEP'],
-          ip: '127.0.0.1',
-          libelleLocalisation: 'Test Commune',
-          situation: {},
-        },
-      );
+      expect(result).toEqual({
+        email: 'test@test.com',
+        profil: 'particulier',
+        commune: '12345',
+        typesEau: ['AEP'],
+        ip: '127.0.0.1',
+        libelleLocalisation: 'Test Commune',
+        situation: {},
+      });
       expect(abonnementMailRepository.update).toHaveBeenCalled();
+    });
+
+    it('should use the address commune name when the commune is not loaded locally', async () => {
+      const mockSubscription = {
+        email: 'test@test.com',
+        profil: 'particulier',
+        idAdresse: 'address-id',
+        lon: 2.3522,
+        lat: 48.8566,
+        typesEau: ['AEP'],
+      };
+      const mockAddress = {
+        data: {
+          commune: { code: '75056', nom: 'Paris' },
+          type: 'numero',
+          numero: '10',
+          voie: { nomVoie: 'Rue de Rivoli' },
+        },
+      };
+
+      // @ts-ignore
+      jest.spyOn(httpService, 'get').mockReturnValue(of(mockAddress));
+      // @ts-ignore
+      jest.spyOn(communesService, 'getCommune').mockReturnValue(undefined);
+      // @ts-ignore
+      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([]);
+      // @ts-ignore
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(false);
+      // @ts-ignore
+      jest.spyOn(abonnementMailRepository, 'save').mockResolvedValue({
+        ...mockSubscription,
+        commune: '75056',
+        libelleLocalisation: '10, Rue de Rivoli, Paris',
+      } as any);
+      // @ts-ignore
+      jest.spyOn(brevoService, 'sendMail').mockResolvedValue(undefined);
+
+      const result = await service.create(mockSubscription as any, '127.0.0.1');
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          commune: '75056',
+          libelleLocalisation: '10, Rue de Rivoli, Paris',
+        }),
+      );
+      expect(brevoService.sendMail).toHaveBeenCalledWith(
+        29,
+        'test@test.com',
+        expect.objectContaining({
+          city: 'Paris',
+          address: '10, Rue de Rivoli, Paris',
+        }),
+      );
+    });
+
+    it('should create a coordinate subscription without a commune name', async () => {
+      const mockSubscription = {
+        email: 'test@test.com',
+        profil: 'particulier',
+        lon: 2.3522,
+        lat: 48.8566,
+        typesEau: ['AEP'],
+      };
+
+      // @ts-ignore
+      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([]);
+      // @ts-ignore
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(false);
+      // @ts-ignore
+      jest
+        .spyOn(abonnementMailRepository, 'save')
+        .mockResolvedValue(mockSubscription as any);
+      // @ts-ignore
+      jest.spyOn(brevoService, 'sendMail').mockResolvedValue(undefined);
+
+      await service.create(mockSubscription as any, '127.0.0.1');
+
+      expect(brevoService.sendMail).toHaveBeenCalledWith(
+        29,
+        'test@test.com',
+        expect.objectContaining({
+          city: '',
+        }),
+      );
     });
 
     it('should throw an error if commune is invalid', async () => {
@@ -189,7 +284,12 @@ describe('SubscriptionsService', () => {
   describe('resolveIdAdresse', () => {
     it('should resolve address ID successfully', async () => {
       const mockAddress = {
-        data: { commune: { code: '12345', nom: 'City' }, type: 'numero', numero: '10', voie: { nomVoie: 'Main St' } },
+        data: {
+          commune: { code: '12345', nom: 'City' },
+          type: 'numero',
+          numero: '10',
+          voie: { nomVoie: 'Main St' },
+        },
       };
 
       // @ts-ignore
@@ -199,25 +299,36 @@ describe('SubscriptionsService', () => {
       expect(result).toEqual({
         libelle: '10, Main St, City',
         commune: '12345',
+        communeNom: 'City',
       });
     });
 
     it('should throw an error if address ID is invalid', async () => {
       // @ts-ignore
-      jest.spyOn(httpService, 'get').mockReturnValue(throwError({ response: { statusCode: 404 } }));
+      jest
+        .spyOn(httpService, 'get')
+        .mockReturnValue(throwError({ response: { statusCode: 404 } }));
 
-      await expect(service.resolveIdAdresse('invalid')).rejects.toThrow(HttpException);
+      await expect(service.resolveIdAdresse('invalid')).rejects.toThrow(
+        HttpException,
+      );
     });
   });
 
   describe('computeNiveauxAlerte', () => {
     it('should compute alert levels for a location', () => {
       // @ts-ignore
-      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([
-        { type: 'AEP', niveauGravite: 'vigilance', idZone: 1 },
-      ]);
+      jest
+        .spyOn(zonesService, 'searchZonesByLonLat')
+        .mockReturnValue([
+          { type: 'AEP', niveauGravite: 'vigilance', idZone: 1 },
+        ]);
 
-      const result = service.computeNiveauxAlerte({ lon: 1, lat: 1, commune: '12345' });
+      const result = service.computeNiveauxAlerte({
+        lon: 1,
+        lat: 1,
+        commune: '12345',
+      });
       expect(result).toEqual({
         AEP: 'vigilance',
         SOU: 'pas_restriction',

@@ -1,9 +1,10 @@
-import { BaseEntity, Entity, JoinTable, ManyToMany, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
+import { BaseEntity, Entity, JoinTable, ManyToMany, ManyToOne, PrimaryGeneratedColumn, Unique } from 'typeorm';
 import { ZoneAlerte } from './zone_alerte.entity';
 import { ArreteCadre } from './arrete_cadre.entity';
 import { Commune } from './commune.entity';
 
 @Entity()
+@Unique('UQ_ac_za_communes_arrete_cadre_zone', ['arreteCadre', 'zoneAlerte'])
 export class ArreteCadreZoneAlerteCommunes extends BaseEntity {
   @PrimaryGeneratedColumn()
   id: number;

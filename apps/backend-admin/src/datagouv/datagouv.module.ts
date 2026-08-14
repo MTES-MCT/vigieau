@@ -7,6 +7,10 @@ import { SharedModule } from '../shared/shared.module';
 import { ArreteCadreModule } from '../arrete_cadre/arrete_cadre.module';
 import { DepartementModule } from '../departement/departement.module';
 import { StatisticCommuneModule } from '../statistic_commune/statistic_commune.module';
+import { DatagouvSchedulerService } from './datagouv-scheduler.service';
+import { ExternalPublicationRegistryService } from './external-publication-registry.service';
+import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
+import { ConfigModule } from '../config/config.module';
 
 @Module({
   imports: [
@@ -16,11 +20,16 @@ import { StatisticCommuneModule } from '../statistic_commune/statistic_commune.m
     forwardRef(() => ZoneAlerteComputedModule),
     SharedModule,
     DepartementModule,
-    StatisticCommuneModule
+    StatisticCommuneModule,
+    ZonePublicationModule,
+    ConfigModule,
   ],
   controllers: [],
-  providers: [DatagouvService],
-  exports: [DatagouvService],
+  providers: [
+    DatagouvService,
+    DatagouvSchedulerService,
+    ExternalPublicationRegistryService,
+  ],
+  exports: [DatagouvService, ExternalPublicationRegistryService],
 })
-export class DatagouvModule {
-}
+export class DatagouvModule {}

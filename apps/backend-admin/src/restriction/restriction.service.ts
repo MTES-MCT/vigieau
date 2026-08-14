@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindOneOptions, In, Not, Repository } from 'typeorm';
+import { EntityManager, FindOneOptions, In, Not, Repository } from 'typeorm';
 import { Restriction } from '@shared/entities/restriction.entity';
 import { UsageService } from '../usage/usage.service';
 import { CreateUpdateArreteRestrictionDto } from '../arrete_restriction/dto/create_update_arrete_restriction.dto';
@@ -12,24 +12,27 @@ export class RestrictionService {
     @InjectRepository(Restriction)
     private readonly restrictionRepository: Repository<Restriction>,
     private readonly usageService: UsageService,
-  ) {
-  }
+  ) {}
 
   async updateAll(
     arreteRestriction: CreateUpdateArreteRestrictionDto,
     arId: number,
+    manager?: EntityManager,
   ): Promise<Restriction[]> {
+    const repository = manager
+      ? manager.getRepository(Restriction)
+      : this.restrictionRepository;
     const restrictionsId = arreteRestriction.restrictions
       .filter((r) => r.id)
       .map((r) => r.id);
-    await this.restrictionRepository.delete({
+    await repository.delete({
       arreteRestriction: {
         id: arId,
       },
       id: Not(In(restrictionsId)),
     });
-    const restrictions: CreateUpdateRestrictionDto[] = arreteRestriction.restrictions.map(
-      (r) => {
+    const restrictions: CreateUpdateRestrictionDto[] =
+      arreteRestriction.restrictions.map((r) => {
         if (r.isAep) {
           r.zoneAlerte = null;
         } else {
@@ -38,25 +41,29 @@ export class RestrictionService {
         // @ts-expect-error on ajoute seulement l'id
         r.arreteRestriction = { id: arId };
         return r;
-      },
-    );
-    const rToReturn: Restriction[] =
-      await this.restrictionRepository.save(restrictions);
+      });
+    const rToReturn: Restriction[] = await repository.save(restrictions);
     await Promise.all(
       rToReturn.map(async (r) => {
-        r.usages =
-          await this.usageService.updateAllByRestriction(r);
+        r.usages = await this.usageService.updateAllByRestriction(r, manager);
         return r;
       }),
     );
     return rToReturn;
   }
 
-  async deleteZonesByArreteCadreId(zonesId: number[], acId: number) {
+  async deleteZonesByArreteCadreId(
+    zonesId: number[],
+    acId: number,
+    manager?: EntityManager,
+  ) {
     if (zonesId.length < 1) {
       return;
     }
-    const restrictionIds = await this.restrictionRepository
+    const repository = manager
+      ? manager.getRepository(Restriction)
+      : this.restrictionRepository;
+    const restrictionIds = await repository
       .createQueryBuilder('restriction')
       .select('restriction.id')
       .leftJoin('restriction.arreteRestriction', 'arreteRestriction')
@@ -66,13 +73,15 @@ export class RestrictionService {
       .andWhere('arreteRestriction.statut != :statut', { statut: 'abroge' })
       .andWhere('zoneAlerte.id IN (:...zonesId)', { zonesId: zonesId })
       .getMany();
-    return this.restrictionRepository.delete({
+    return repository.delete({
       id: In(restrictionIds.map((r) => r.id)),
     });
   }
 
-  async findOneByZoneAlerteComputed(zoneAlerteComputedId: number): Promise<Restriction> {
-    return this.restrictionRepository.findOne(<FindOneOptions> {
+  async findOneByZoneAlerteComputed(
+    zoneAlerteComputedId: number,
+  ): Promise<Restriction> {
+    return this.restrictionRepository.findOne(<FindOneOptions>{
       relations: ['arreteRestriction', 'zonesAlerteComputed'],
       where: {
         zonesAlerteComputed: {
@@ -82,8 +91,10 @@ export class RestrictionService {
     });
   }
 
-  async findOneByZoneAlerteComputedHistoric(zoneAlerteComputedId: number): Promise<Restriction> {
-    return this.restrictionRepository.findOne(<FindOneOptions> {
+  async findOneByZoneAlerteComputedHistoric(
+    zoneAlerteComputedId: number,
+  ): Promise<Restriction> {
+    return this.restrictionRepository.findOne(<FindOneOptions>{
       relations: ['arreteRestriction', 'zonesAlerteComputedHistoric'],
       where: {
         zonesAlerteComputedHistoric: {

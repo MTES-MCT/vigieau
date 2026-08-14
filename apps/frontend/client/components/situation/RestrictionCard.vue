@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { Usage } from '../../dto/usage.dto';
-import { Ref } from 'vue';
 import api from '../../api';
 
 const props = defineProps<{
@@ -9,35 +8,98 @@ const props = defineProps<{
   thematique: any
 }>();
 
-const feedbackComment = ref(null);
-const cardId = utils.getRandomString(5);
-const questionBtn = ref(null);
+const instanceId = useId();
+const feedbackComment = ref('');
+const feedbackStatus = ref('');
+const isSubmittingFeedback = ref(false);
+const modalStep = ref<'feedback' | 'success' | null>(null);
+const cardId = `restriction-title-${instanceId}`;
+const questionBtn = ref<{ focus: () => void } | null>(null);
+let feedbackRequestGeneration = 0;
+const modalOpened = computed(() => modalStep.value !== null);
+const modalTitle = computed(() => (
+  modalStep.value === 'success'
+    ? 'Votre retour a été envoyé'
+    : 'Je ne comprends pas cette restriction'
+));
+const modalIcon = computed(() => (
+  modalStep.value === 'success'
+    ? 'ri-checkbox-circle-line'
+    : 'ri-question-line'
+));
+
+const openModal = () => {
+  feedbackRequestGeneration += 1;
+  isSubmittingFeedback.value = false;
+  feedbackStatus.value = '';
+  modalStep.value = 'feedback';
+};
 
 const closeModal = () => {
-  modalOpened.value = false;
-  modalSuccessOpened.value = false;
-  feedbackComment.value = null;
-  nextTick(() => {
-    questionBtn.value?.focus();
-  })
+  feedbackRequestGeneration += 1;
+  isSubmittingFeedback.value = false;
+  modalStep.value = null;
+  feedbackComment.value = '';
+  feedbackStatus.value = '';
 };
 
 const signalRestriction = async () => {
-  const { data, error } = await api.signalRestriction(props.usage.id, feedbackComment.value);
-  modalOpened.value = false;
-  modalSuccessOpened.value = true;
-  feedbackComment.value = null;
+  if (isSubmittingFeedback.value) {
+    return;
+  }
+
+  isSubmittingFeedback.value = true;
+  feedbackStatus.value = 'Envoi du retour en cours.';
+  const requestGeneration = ++feedbackRequestGeneration;
+
+  try {
+    const { error } = await api.signalRestriction(
+      props.usage.id,
+      feedbackComment.value,
+    );
+
+    if (
+      requestGeneration !== feedbackRequestGeneration
+      || modalStep.value !== 'feedback'
+    ) {
+      return;
+    }
+
+    if (error?.value) {
+      feedbackStatus.value = 'Votre retour n’a pas pu être envoyé. Veuillez réessayer.';
+      return;
+    }
+
+    feedbackComment.value = '';
+    feedbackStatus.value = 'Votre retour a bien été pris en compte !';
+    modalStep.value = 'success';
+  } catch {
+    if (
+      requestGeneration === feedbackRequestGeneration
+      && modalStep.value === 'feedback'
+    ) {
+      feedbackStatus.value = 'Votre retour n’a pas pu être envoyé. Veuillez réessayer.';
+    }
+  } finally {
+    if (requestGeneration === feedbackRequestGeneration) {
+      isSubmittingFeedback.value = false;
+    }
+  }
 };
 
-const modalOpened: Ref<boolean> = ref(false);
-const modalSuccessOpened: Ref<boolean> = ref(false);
-const modalActions: Ref<any[]> = ref([{ label: 'Je ne comprends pas cette restriction', onClick: signalRestriction }, {
-  label: 'Annuler',
-  onClick: closeModal,
-  secondary: true,
-  title: 'Annuler et fermer'
-}]);
-const modalActionsSuccess: Ref<any[]> = ref([{ label: 'Fermer', onClick: closeModal }]);
+const modalActions = computed<any[]>(() => modalStep.value === 'success'
+  ? [{ label: 'Fermer', onClick: closeModal }]
+  : [
+      {
+        label: 'Je ne comprends pas cette restriction',
+        onClick: signalRestriction,
+      },
+      {
+        label: 'Annuler et fermer',
+        onClick: closeModal,
+        secondary: true,
+      },
+    ]);
 </script>
 
 <template>
@@ -47,58 +109,65 @@ const modalActionsSuccess: Ref<any[]> = ref([{ label: 'Fermer', onClick: closeMo
         {{ usage.nom }}
       </h3>
 
-      <DsfrButton icon="ri-question-line"
-                  label="Je ne comprends pas cette restriction"
-                  icon-only
-                  tertiary
-                  size="small"
-                  @click="modalOpened = true"
-                  :aria-describedby="cardId"
-                  ref="questionBtn"
-                  no-outline />
-    </div>
-    <div class="eau-card__desc">
-      {{ usage.description }}
-    </div>
-  </div>
-  <DsfrModal :opened="modalOpened"
-             title="Je ne comprends pas cette restriction"
-             icon="ri-question-line"
-             :actions="modalActions"
-             @close="closeModal">
-    <div>
-      <p>
-        Si la restriction "{{ usage.nom }}" est peu compréhensible, merci de nous le faire remonter.<br />Nous la
-        modifierons si nécessaire !
-      </p>
-    </div>
-    <DsfrInputGroup>
-      <DsfrInput
-        v-model="feedbackComment"
-        :is-textarea="true"
-        label="Commentaire (facultatif)"
-        label-visible
-        type="text"
-        rows="4"
-        :required="false"
-        maxlength="255"
+      <DsfrButton
+        ref="questionBtn"
+        icon="ri-question-line"
+        label="Je ne comprends pas cette restriction"
+        icon-only
+        tertiary
+        no-outline
+        size="small"
+        :aria-describedby="cardId"
+        @click="openModal"
       />
-      <span class="fr-input-group__sub-hint">
+    </div>
+    <p class="eau-card__desc fr-mb-0">
+      {{ usage.description }}
+    </p>
+  </div>
+  <AccessibleModal
+    :opened="modalOpened"
+    :origin="questionBtn ?? undefined"
+    :title="modalTitle"
+    :icon="modalIcon"
+    :actions="modalActions"
+    :aria-busy="isSubmittingFeedback"
+    data-cy="RestrictionFeedbackModal"
+    @close="closeModal"
+  >
+    <p
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-cy="RestrictionFeedbackStatus"
+    >
+      {{ feedbackStatus }}
+    </p>
+    <template v-if="modalStep === 'feedback'">
+      <p>
+        Si la restriction « {{ usage.nom }} » est peu compréhensible, merci de
+        nous le faire remonter.
+      </p>
+      <p>
+        Nous la modifierons si nécessaire !
+      </p>
+      <DsfrInputGroup>
+        <DsfrInput
+          v-model="feedbackComment"
+          :is-textarea="true"
+          label="Commentaire (facultatif)"
+          label-visible
+          type="text"
+          rows="4"
+          :required="false"
+          maxlength="255"
+        />
+        <span class="fr-input-group__sub-hint">
           {{ feedbackComment ? feedbackComment.length : 0 }}/255
         </span>
-    </DsfrInputGroup>
-  </DsfrModal>
-  <DsfrModal :opened="modalSuccessOpened"
-             title=" "
-             icon="ri-checkbox-circle-line"
-             :actions="modalActionsSuccess"
-             @close="closeModal">
-    <div>
-      <p>
-        Votre retour a bien été pris en compte !
-      </p>
-    </div>
-  </DsfrModal>
+      </DsfrInputGroup>
+    </template>
+  </AccessibleModal>
 </template>
 
 <style lang="scss" scoped>

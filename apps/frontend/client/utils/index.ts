@@ -1,12 +1,19 @@
 import { FetchError } from 'ofetch';
 import { Ref } from 'vue';
 import api from '../api';
+import type { ZonePublicationPin } from '../api';
 import { Address } from '../dto/address.dto';
 import { Geo } from '../dto/geo.dto';
 import niveauxGravite from '../dto/niveauGravite';
 import { Zone } from '../dto/zone.dto';
 import { useAddressStore } from '../store/address';
 import { useZoneStore } from '../store/zone';
+import {
+  createCommunePopupContent,
+  createFullCommunePopupContent,
+  createRestrictionsPopupContent,
+} from './map-popup-content';
+import { openAccessibleTallyPopup } from './tally-popup';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 // We need to duplicate the base string to have a longer string
@@ -14,17 +21,17 @@ const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 export const alphanum = alphanumBase.repeat(10);
 
 const index = {
-  debounce(fn: Function, delay: number) {
-    let timeoutID: any = null;
-    return function () {
-      clearTimeout(timeoutID);
-      // eslint-disable-next-line prefer-rest-params
-      const args = arguments;
-      // @ts-ignore
-      // eslint-disable-next-line @typescript-eslint/no-this-alias
-      const that = this;
-      timeoutID = setTimeout(function () {
-        fn.apply(that, args);
+  debounce<Arguments extends unknown[]>(
+    fn: (...args: Arguments) => void,
+    delay: number,
+  ) {
+    let timeoutID: ReturnType<typeof setTimeout> | null = null;
+    return function (this: unknown, ...args: Arguments) {
+      if (timeoutID !== null) {
+        clearTimeout(timeoutID);
+      }
+      timeoutID = setTimeout(() => {
+        fn.apply(this, args);
       }, delay);
     };
   },
@@ -60,7 +67,6 @@ const index = {
   },
 
   getSituationBadgeLabel(situationRank: number | undefined): string {
-    console.log('SITUATION RANK', situationRank);
     if (!situationRank) {
       return 'Pas de restrictions';
     }
@@ -145,6 +151,8 @@ const index = {
     modalActions?: Ref<any[]>,
     modalOpened?: Ref<boolean>,
     loadingRestrictions?: Ref<boolean>,
+    publicationPin?: ZonePublicationPin,
+    onRequestAddressPrecision?: () => void,
   ) {
     const addressStore = useAddressStore();
     const restrictionStore = useZoneStore();
@@ -154,8 +162,8 @@ const index = {
     if (loadingRestrictions) loadingRestrictions.value = true;
 
     const { data, error } = address
-      ? await api.searchZonesByAdress(address)
-      : await api.searchZonesByGeo(geo);
+      ? await api.searchZonesByAdress(address, publicationPin)
+      : await api.searchZonesByGeo(geo, publicationPin);
 
     // STATS MATOMO
     try {
@@ -178,7 +186,7 @@ const index = {
         1,
       ]);
       window._paq.push(['trackEvent', 'API CALL', 'PROFIL', profile, 1]);
-    } catch (e) {}
+    } catch {}
 
     if (loadingRestrictions) loadingRestrictions.value = false;
 
@@ -190,6 +198,7 @@ const index = {
           data?.value,
           profile,
           modalOpened,
+          onRequestAddressPrecision,
         );
         modalTitle.value = title;
         modalText.value = text;
@@ -204,7 +213,7 @@ const index = {
     addressStore.setProfile(profile);
     addressStore.setTypeEau(typeEau);
     setZones(data?.value ? data.value : []);
-    let query: any = {};
+    const query: any = {};
     query.profil = profile;
     query.typeEau = typeEau;
     query.adresse = address
@@ -218,6 +227,7 @@ const index = {
     data: Zone[],
     profile: string,
     modalOpened: Ref<boolean>,
+    onRequestAddressPrecision?: () => void,
   ): {
     title: string;
     text: string;
@@ -234,8 +244,7 @@ const index = {
       case undefined:
         return {
           title: `Pas d'arrêté en vigueur`,
-          text: `Votre adresse n'est actuellement pas concernée par un arrêté préfectoral.
-<br/>Aucune restriction n'est à appliquer à votre adresse, nous vous conseillons tout de même de suivre les eco-gestes présents sur notre site !`,
+          text: `Votre adresse n'est actuellement pas concernée par un arrêté préfectoral. Aucune restriction n'est à appliquer à votre adresse, nous vous conseillons tout de même de suivre les éco-gestes présents sur notre site !`,
           icon: `ri-arrow-right-line`,
           actions: [],
         };
@@ -247,7 +256,7 @@ const index = {
           actions: [
             {
               label: 'Entrer une adresse plus précise',
-              onClick: _closeModal,
+              onClick: onRequestAddressPrecision || _closeModal,
             },
             { label: 'Fermer', onClick: _closeModal, secondary: true },
           ],
@@ -262,18 +271,8 @@ const index = {
     }
   },
 
-  openTally() {
-    window.Tally.openPopup('w881YY', {
-      width: 376,
-      autoClose: 2000,
-      emoji: {
-        text: '👋',
-        animation: 'wave',
-      },
-      onOpen: () => {
-        document.getElementsByTagName('iframe')[0]?.focus();
-      },
-    });
+  openTally(): boolean {
+    return openAccessibleTallyPopup(window);
   },
 
   generatePopupHtml(
@@ -281,90 +280,41 @@ const index = {
     showRestrictionsBtn: boolean,
     address?: Address,
     geo?: Geo,
-  ) {
+  ): HTMLElement {
     let addressName = '';
     if (address?.properties?.label) {
-      addressName = `Adresse proche&nbsp: ${address.properties.label}`;
+      addressName = `Adresse proche\u00A0: ${address.properties.label}`;
     } else if (geo?.code) {
-      addressName = `Commune&nbsp: ${geo.nom} (${geo.code})`;
+      addressName = `Commune\u00A0: ${geo.nom} (${geo.code})`;
     }
-    let popupHtml = '';
+    const entries = (pmtilesData ?? []).map((p) => {
+      const niveauGravite = niveauxGravite.find(
+        (n) => n.niveauGravite === p.niveauGravite,
+      );
 
-    if (pmtilesData && pmtilesData.length > 0) {
-      pmtilesData.forEach((p, index) => {
-        const niveauGravite = niveauxGravite.find(
-          (n) => n.niveauGravite === p.niveauGravite,
-        );
-        if (index > 0) {
-          popupHtml += '<div class="divider fr-my-1w"></div>';
-        }
-        popupHtml += `<div class="fr-mb-1w">
-<p class="fr-badge situation-level-bg-${this.getRestrictionRank(
-          p.niveauGravite,
-        )}">${niveauGravite.text}</p>
-</div>
-<div class="map-popup-zone">Zone&nbsp;: ${p.nom}</div>`;
-      });
-    } else {
-      popupHtml += `<div class="fr-mb-1w">
-<p class="fr-badge situation-level-bg-0">Pas de restrictions</p>
-</div>`;
-    }
+      return {
+        badgeLabel: niveauGravite?.text,
+        rank: this.getRestrictionRank(p.niveauGravite),
+        zoneName: p.nom,
+      };
+    });
 
-    popupHtml += `<div class="fr-my-1w">${addressName}</div>`;
-
-    if (showRestrictionsBtn && pmtilesData) {
-      popupHtml += `
-<div>
-<button class="fr-btn btn-map-popup">
-Je consulte les restrictions
-</button>
-</div>`;
-    }
-    return popupHtml;
+    return createRestrictionsPopupContent(
+      entries,
+      Boolean(showRestrictionsBtn && pmtilesData),
+      addressName,
+    );
   },
 
-  generatePopupCommuneHtml(communeName: any) {
-    return `
-<div class="map-popup-zone">${communeName}</div>
-<div class="lds-ring">
-  <div></div>
-  <div></div>
-  <div></div>
-  <div></div>
-</div>
-<div>
-<button class="fr-btn btn-map-popup">
-Voir l'historique
-</button>
-</div>`;
+  generatePopupCommuneHtml(communeName: any): HTMLElement {
+    return createCommunePopupContent(communeName);
   },
 
-  generateFullPopupCommuneHtml(communeName: any, data: any) {
-    return `
-<div class="map-popup-zone">${communeName}</div>
-<ul class="text-align-left">
-  <li>Jours sans restrictions&nbsp: ${data.noDays} (${Math.round(
-      (data.noDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en vigilance&nbsp: ${data.vigilanceDays} (${Math.round(
-      (data.vigilanceDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en alerte&nbsp: ${data.alerteDays} (${Math.round(
-      (data.alerteDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en alerte renforcée&nbsp: ${data.alerteRenforceeDays} (${Math.round(
-      (data.alerteRenforceeDays / data.nbDays) * 100,
-    )}%)</li>
-  <li>Jours en crise&nbsp: ${data.criseDays} (${Math.round(
-      (data.criseDays / data.nbDays) * 100,
-    )}%)</li>
-</ul>
-<div>
-<button class="fr-btn btn-map-popup">
-Voir l'historique
-</button>
-</div>`;
+  generateFullPopupCommuneHtml(
+    communeName: any,
+    data: any,
+  ): HTMLElement {
+    return createFullCommunePopupContent(communeName, data);
   },
 
   isWebglSupported() {
@@ -380,7 +330,7 @@ Voir l'historique
         if (context && typeof context.getParameter == 'function') {
           return true;
         }
-      } catch (e) {
+      } catch {
         // WebGL is supported, but disabled
       }
       return false;
@@ -402,7 +352,7 @@ Voir l'historique
   },
 
   getRandomString(length: number): string {
-    return Array.from({ length }).map(this.getRandomAlphaNum).join('');
+    return Array.from({ length }, () => this.getRandomAlphaNum()).join('');
   },
 };
 export default index;

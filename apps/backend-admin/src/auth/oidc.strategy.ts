@@ -1,26 +1,34 @@
 import { UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import { Commune } from '@shared/entities/commune.entity';
 import {
-  Strategy,
   Client,
-  UserinfoResponse,
-  TokenSet,
   Issuer,
+  Strategy,
+  TokenSet,
+  UserinfoResponse,
   generators,
 } from 'openid-client';
+import { CommuneService } from '../commune/commune.service';
+import { RegleauLogger } from '../logger/regleau.logger';
 import { UserService } from '../user/user.service';
 import random = generators.random;
-import { RegleauLogger } from '../logger/regleau.logger';
-import { CommuneService } from '../commune/commune.service';
-import { Commune } from '@shared/entities/commune.entity';
-import {ConfigService} from "@nestjs/config";
 
 export const buildOpenIdClient = async (configService: ConfigService) => {
-  const issuerUrl = configService.get<string>('OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER');
-  const trustIssuer = await Issuer.discover(`${issuerUrl}/.well-known/openid-configuration`);
+  const issuerUrl = configService.get<string>(
+    'OAUTH2_CLIENT_PROVIDER_OIDC_ISSUER',
+  );
+  const trustIssuer = await Issuer.discover(
+    `${issuerUrl}/.well-known/openid-configuration`,
+  );
   const client = new trustIssuer.Client({
-    client_id: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_ID'),
-    client_secret: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_SECRET'),
+    client_id: configService.get<string>(
+      'OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_ID',
+    ),
+    client_secret: configService.get<string>(
+      'OAUTH2_CLIENT_REGISTRATION_LOGIN_CLIENT_SECRET',
+    ),
     acr_values: trustIssuer.acr_values_supported,
     response_type: 'code',
     userinfo_signed_response_alg: 'HS256',
@@ -43,9 +51,17 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
     super({
       client: client,
       params: {
-        redirect_uri: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_REDIRECT_URI'),
-        scope: configService.get<string>('OAUTH2_CLIENT_REGISTRATION_LOGIN_SCOPE'),
-        acr_values: client.acr_values,
+        redirect_uri: configService.get<string>(
+          'OAUTH2_CLIENT_REGISTRATION_LOGIN_REDIRECT_URI',
+        ),
+        scope: configService.get<string>(
+          'OAUTH2_CLIENT_REGISTRATION_LOGIN_SCOPE',
+        ),
+        // openid-client types expect a string; keep undefined if not provided.
+        acr_values:
+          typeof (client as any).acr_values === 'string'
+            ? ((client as any).acr_values as string)
+            : undefined,
       },
       usePKCE: false,
     });
@@ -60,14 +76,16 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
 
   async validate(tokenset: TokenSet): Promise<any> {
     const userinfo: UserinfoResponse = await this.client.userinfo(tokenset);
-    let userInDb = await this.userService.findOne(<string> userinfo?.email);
+    let userInDb = await this.userService.findOne(<string>userinfo?.email);
 
     /**
      * Si l'utilisateur n'existe pas en BDD, on vérifie son numéro SIREN associé afin d'associer sa commune
      * Si il y a une commune associée à un numéro SIREN, on crée l'utilisateur automatiquement
      */
     if (!userInDb && userinfo.siret) {
-      const commune: Commune = await this.communeService.findBySiren((<string>userinfo.siret).substring(0, 9));
+      const commune: Commune = await this.communeService.findBySiren(
+        (<string>userinfo.siret).substring(0, 9),
+      );
       if (commune) {
         const userToCreate = {
           email: userinfo.email.toLowerCase(),
@@ -79,12 +97,15 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
       }
     }
     if (!userInDb) {
-      this._logger.error('ERROR LOGIN VALIDATE - USER NOT IN DB -', JSON.stringify(userinfo));
+      this._logger.error(
+        'ERROR LOGIN VALIDATE - USER NOT IN DB -',
+        JSON.stringify(userinfo),
+      );
       throw new UnauthorizedException();
     }
 
     await this.userService.updateName(
-      <string> userinfo.email,
+      <string>userinfo.email,
       <string>userinfo.given_name,
       <string>userinfo.usual_name,
     );

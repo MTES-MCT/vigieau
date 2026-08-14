@@ -8,7 +8,7 @@ import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import utils from '../../../utils';
 
-const props = defineProps<{
+defineProps<{
   loading: boolean,
 }>();
 
@@ -103,7 +103,7 @@ const loadData = (() => {
     dateDebut: formData.dateDebut,
     dateFin: formData.dateFin,
     area: formData.area,
-    areaText: areaText,
+    areaText,
   });
   computeDisabled.value = true;
   modalOpened.value = false;

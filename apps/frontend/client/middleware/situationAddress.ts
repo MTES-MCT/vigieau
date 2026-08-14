@@ -3,7 +3,7 @@ import { storeToRefs } from "pinia";
 import api from "../api";
 import utils from "../utils";
 
-export default defineNuxtRouteMiddleware(async (to: any, from: any) => {
+export default defineNuxtRouteMiddleware(async (to: any) => {
   const addressStore = useAddressStore();
   const {address, geo, profile, typeEau} = storeToRefs(addressStore);
   if (address.value || geo.value) {
@@ -18,7 +18,7 @@ export default defineNuxtRouteMiddleware(async (to: any, from: any) => {
   const eau = to.query.typeEau ? to.query.typeEau : typeEau.value;
 
   // SEARCH ADDRESS
-  const {data, error} = await api.searchAddresses(addressString);
+  const {data} = await api.searchAddresses(addressString);
   const firstAddress = data.value?.features[0];
   if (!firstAddress) {
     return navigateTo({path: '/', query: to.query});

@@ -18,7 +18,7 @@ const communeName = ref(null);
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <h1>Commune - {{ route.params.code_insee }} <span v-if="communeName">({{ communeName }})</span></h1>
     <DonneesCommuneChart :codeInsee="route.params.code_insee" @commune="communeName = $event.nom" />
   </div>

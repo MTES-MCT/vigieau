@@ -1,4 +1,9 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, Repository } from 'typeorm';
 import { Departement } from '@shared/entities/departement.entity';
@@ -9,6 +14,10 @@ import { Utils } from '../core/utils';
 import { max } from 'lodash';
 import { Region } from '@shared/entities/region.entity';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
+import { ZonePublication } from '@shared/entities/zone_publication.entity';
+import { ZonePublicationAggregate } from '@shared/entities/zone_publication_aggregate.entity';
+import { type ZonePublicationAggregatePayload } from '@shared/zone_publication_materialization';
+import { isUUID } from 'class-validator';
 
 @Injectable()
 export class DepartementsService {
@@ -17,15 +26,26 @@ export class DepartementsService {
   departements: any[];
   regions: Region[];
   bassinsVersants: BassinVersant[];
+  private situationLoadGeneration = 0;
+  private readonly situationLoadMaxAttempts = 3;
+  private readonly situationLoadRetryDelayMs = 100;
 
-  constructor(@InjectRepository(Departement)
-              private readonly departementRepository: Repository<Departement>,
-              @InjectRepository(Statistic)
-              private readonly statisticRepository: Repository<Statistic>,
-              @InjectRepository(Region)
-              private readonly regionRepository: Repository<Region>,
-              @InjectRepository(BassinVersant)
-              private readonly bassinVersantRepository: Repository<BassinVersant>) {
+  constructor(
+    @InjectRepository(Departement)
+    private readonly departementRepository: Repository<Departement>,
+    @InjectRepository(Statistic)
+    private readonly statisticRepository: Repository<Statistic>,
+    @InjectRepository(Region)
+    private readonly regionRepository: Repository<Region>,
+    @InjectRepository(BassinVersant)
+    private readonly bassinVersantRepository: Repository<BassinVersant>,
+    @Optional()
+    @InjectRepository(ZonePublication)
+    private readonly zonePublicationRepository?: Repository<ZonePublication>,
+    @Optional()
+    @InjectRepository(ZonePublicationAggregate)
+    private readonly zonePublicationAggregateRepository?: Repository<ZonePublicationAggregate>,
+  ) {
     this.loadRefData();
   }
 
@@ -59,38 +79,73 @@ export class DepartementsService {
     bassinVersant?: string,
     region?: string,
     departement?: string,
-  ): DepartementDto[] {
+    publicationId?: string,
+  ): DepartementDto[] | Promise<DepartementDto[]> {
+    if (publicationId) {
+      return this.situationByPublication(
+        publicationId,
+        bassinVersant,
+        region,
+        departement,
+      );
+    }
     const searchDate = date || new Date().toISOString().split('T')[0];
 
-    const situationDepartement = this.situationDepartements.find(s => s.date === searchDate);
+    const situationDepartement = this.situationDepartements.find(
+      (s) => s.date === searchDate,
+    );
     if (!situationDepartement) {
       throw new HttpException(`Date non disponible.`, HttpStatus.NOT_FOUND);
     }
 
+    return this.filterSituation(
+      situationDepartement.departementSituation,
+      bassinVersant,
+      region,
+      departement,
+    );
+  }
+
+  private filterSituation(
+    situation: DepartementDto[],
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ): DepartementDto[] {
     if (bassinVersant) {
-      const b = this.bassinsVersants.find(b => b.id === +bassinVersant);
+      const b = this.bassinsVersants.find((b) => b.id === +bassinVersant);
       if (!b) {
-        throw new HttpException(`Bassin versant non trouvé.`, HttpStatus.NOT_FOUND);
+        throw new HttpException(
+          `Bassin versant non trouvé.`,
+          HttpStatus.NOT_FOUND,
+        );
       }
-      return situationDepartement.departementSituation.filter(d => b.departements.some(dep => dep.code === d.code));
+      return situation.filter((d) =>
+        b.departements.some((dep) => dep.code === d.code),
+      );
     }
 
     if (region) {
-      const r = this.regions.find(r => r.id === +region);
+      const r = this.regions.find((r) => r.id === +region);
       if (!r) {
         throw new HttpException(`Région non trouvée.`, HttpStatus.NOT_FOUND);
       }
-      return situationDepartement.departementSituation.filter(d => r.departements.some(dep => dep.code === d.code));
+      return situation.filter((d) =>
+        r.departements.some((dep) => dep.code === d.code),
+      );
     }
 
     if (departement) {
-      const d = this.departements.find(d => d.id === +departement);
+      const d = this.departements.find((d) => d.id === +departement);
       if (!d) {
-        throw new HttpException(`Département non trouvé.`, HttpStatus.NOT_FOUND);
+        throw new HttpException(
+          `Département non trouvé.`,
+          HttpStatus.NOT_FOUND,
+        );
       }
-      return situationDepartement.departementSituation.filter(ds => d.code === ds.code);
+      return situation.filter((ds) => d.code === ds.code);
     }
-    return situationDepartement.departementSituation;
+    return situation;
   }
 
   /**
@@ -98,6 +153,7 @@ export class DepartementsService {
    */
   async loadRefData(): Promise<void> {
     this.departements = await this.departementRepository.find({
+      relations: ['region'],
       order: {
         nom: 'ASC',
       },
@@ -122,47 +178,123 @@ export class DepartementsService {
    */
   async loadSituation(currentZones) {
     this.logger.log('LOAD SITUATION DEPARTEMENTS - BEGIN');
-    const departements = await this.departementRepository.find(<FindManyOptions>{
-      select: {
-        id: true,
-        code: true,
-        nom: true,
-        region: {
+    const generation = ++this.situationLoadGeneration;
+    let lastError: unknown;
+
+    for (
+      let attempt = 1;
+      attempt <= this.situationLoadMaxAttempts;
+      attempt += 1
+    ) {
+      if (generation !== this.situationLoadGeneration) {
+        return;
+      }
+      try {
+        const nextSituation = await this.buildSituationSnapshot(currentZones);
+        if (generation !== this.situationLoadGeneration) {
+          return;
+        }
+        this.situationDepartements = nextSituation;
+        this.logger.log('LOAD SITUATION DEPARTEMENTS - END');
+        return;
+      } catch (error) {
+        if (generation !== this.situationLoadGeneration) {
+          return;
+        }
+        lastError = error;
+        if (attempt < this.situationLoadMaxAttempts) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, this.situationLoadRetryDelayMs),
+          );
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  async buildSituationSnapshot(
+    currentZones: readonly Record<string, unknown>[],
+    aggregate?: ZonePublicationAggregatePayload | null,
+  ): Promise<any[]> {
+    return this.buildSituation(currentZones, aggregate);
+  }
+
+  publishSituation(nextSituation: any[]): void {
+    this.situationLoadGeneration += 1;
+    this.situationDepartements = nextSituation;
+  }
+
+  private async buildSituation(
+    currentZones: readonly Record<string, unknown>[],
+    aggregate?: ZonePublicationAggregatePayload | null,
+  ): Promise<any[]> {
+    const [departements, statistics] = await Promise.all([
+      this.departementRepository.find(<FindManyOptions>{
+        select: {
+          id: true,
+          code: true,
           nom: true,
+          region: {
+            nom: true,
+          },
         },
-      },
-      relations: ['region'],
-      order: {
-        code: 'ASC',
-      },
-    });
+        relations: ['region'],
+        order: {
+          code: 'ASC',
+        },
+      }),
+      this.statisticRepository.find({
+        select: {
+          date: true,
+          departementSituation: true,
+        },
+        order: {
+          date: 'ASC',
+        },
+      }),
+    ]);
 
-    const statistics = await this.statisticRepository.find({
-      select: {
-        date: true,
-        departementSituation: true,
-      },
-      order: {
-        date: 'ASC',
-      },
-    });
-
-    this.situationDepartements = statistics.map(s => {
+    const today = new Date().toISOString().split('T')[0];
+    const situations = statistics.map((s) => {
       return {
         date: s.date,
-        departementSituation: departements.map(d => {
-          let niveauGraviteMax = s.departementSituation && s.departementSituation[d.code] ? s.departementSituation[d.code].max : null;
-          let niveauGraviteSupMax = s.departementSituation && s.departementSituation[d.code] ? s.departementSituation[d.code].sup : null;
-          let niveauGraviteSouMax = s.departementSituation && s.departementSituation[d.code] ? s.departementSituation[d.code].sou : null;
-          let niveauGraviteAepMax = s.departementSituation && s.departementSituation[d.code] ? s.departementSituation[d.code].aep : null;
+        departementSituation: departements.map((d) => {
+          let niveauGraviteMax =
+            s.departementSituation && s.departementSituation[d.code]
+              ? s.departementSituation[d.code].max
+              : null;
+          let niveauGraviteSupMax =
+            s.departementSituation && s.departementSituation[d.code]
+              ? s.departementSituation[d.code].sup
+              : null;
+          let niveauGraviteSouMax =
+            s.departementSituation && s.departementSituation[d.code]
+              ? s.departementSituation[d.code].sou
+              : null;
+          let niveauGraviteAepMax =
+            s.departementSituation && s.departementSituation[d.code]
+              ? s.departementSituation[d.code].aep
+              : null;
 
-          if (s.date === new Date().toISOString().split('T')[0]) {
-            const depZones = currentZones.filter(z => z.departement === d.code);
+          if (s.date === today) {
+            const materialized = aggregate?.departments[d.code];
+            const depZones = currentZones.filter(
+              (z) => z.departement === d.code,
+            );
 
-            niveauGraviteMax = this.computeMaxGravite(depZones);
-            niveauGraviteSupMax = this.computeMaxGravite(depZones, 'SUP');
-            niveauGraviteSouMax = this.computeMaxGravite(depZones, 'SOU');
-            niveauGraviteAepMax = this.computeMaxGravite(depZones, 'AEP');
+            niveauGraviteMax = materialized
+              ? materialized.max
+              : this.computeMaxGravite(depZones);
+            niveauGraviteSupMax = materialized
+              ? materialized.sup
+              : this.computeMaxGravite(depZones, 'SUP');
+            niveauGraviteSouMax = materialized
+              ? materialized.sou
+              : this.computeMaxGravite(depZones, 'SOU');
+            niveauGraviteAepMax = materialized
+              ? materialized.aep
+              : this.computeMaxGravite(depZones, 'AEP');
           }
 
           return {
@@ -177,7 +309,85 @@ export class DepartementsService {
         }),
       };
     });
-    this.logger.log('LOAD SITUATION DEPARTEMENTS - END');
+
+    if (
+      aggregate &&
+      !situations.some((situation) => situation.date === today)
+    ) {
+      situations.push({
+        date: today,
+        departementSituation: this.mapMaterializedSituation(aggregate),
+      });
+    }
+    return situations;
+  }
+
+  private async situationByPublication(
+    publicationId: string,
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ): Promise<DepartementDto[]> {
+    if (!isUUID(publicationId)) {
+      throw new HttpException(
+        `L'identifiant de publication n'est pas valide.`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (
+      !this.zonePublicationRepository ||
+      !this.zonePublicationAggregateRepository
+    ) {
+      throw new HttpException(
+        `Cette publication est temporairement indisponible.`,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    if (!this.departements) {
+      await this.loadRefData();
+    }
+    const [publication, aggregate] = await Promise.all([
+      this.zonePublicationRepository.findOne({
+        select: { id: true, status: true },
+        where: { id: publicationId },
+      }),
+      this.zonePublicationAggregateRepository.findOne({
+        where: { publicationId },
+      }),
+    ]);
+    if (
+      !publication ||
+      !aggregate ||
+      !['active', 'retired'].includes(publication.status)
+    ) {
+      throw new HttpException(
+        `Cette publication n'est plus disponible.`,
+        HttpStatus.GONE,
+      );
+    }
+    return this.filterSituation(
+      this.mapMaterializedSituation(aggregate.payload),
+      bassinVersant,
+      region,
+      departement,
+    );
+  }
+
+  private mapMaterializedSituation(
+    aggregate: ZonePublicationAggregatePayload,
+  ): DepartementDto[] {
+    return this.departements.map((department) => {
+      const situation = aggregate.departments[department.code];
+      return {
+        code: department.code,
+        nom: department.nom,
+        region: department.region?.nom,
+        niveauGraviteMax: situation?.max ?? null,
+        niveauGraviteSupMax: situation?.sup ?? null,
+        niveauGraviteSouMax: situation?.sou ?? null,
+        niveauGraviteAepMax: situation?.aep ?? null,
+      };
+    });
   }
 
   /**
@@ -186,11 +396,13 @@ export class DepartementsService {
    * @param type - (Optionnel) Type de zone (SUP, SOU, AEP).
    */
   private computeMaxGravite(zones: any[], type?: string): string | null {
-    const filteredZones = type ? zones.filter(z => z.type === type) : zones;
+    const filteredZones = type ? zones.filter((z) => z.type === type) : zones;
     if (filteredZones.length === 0) return null;
 
     // Transforme les niveaux en valeurs numériques, puis récupère le maximum
-    const maxLevel = max(filteredZones.map(z => Utils.getNiveau(z.niveauGravite)));
+    const maxLevel = max(
+      filteredZones.map((z) => Utils.getNiveau(z.niveauGravite)),
+    );
     return Utils.getNiveauInversed(maxLevel);
   }
 }

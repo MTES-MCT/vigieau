@@ -4,7 +4,9 @@ import {
   IsEmail,
   IsIn,
   IsInt,
-  IsNotEmpty, IsNumber, IsOptional,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
   IsString,
   Length,
   Max,
@@ -17,7 +19,7 @@ export class CreateSubscriptionDto {
   @IsNotEmpty()
   @ApiProperty({
     example: 'test@exemple.com',
-    description: 'Email de l\'utilisateur',
+    description: "Email de l'utilisateur",
   })
   email: string;
 
@@ -27,7 +29,7 @@ export class CreateSubscriptionDto {
   @ApiProperty({
     example: 'particulier',
     enum: ['particulier', 'entreprise', 'collectivite', 'exploitation'],
-    description: 'Rôle de l\'utilisateur',
+    description: "Rôle de l'utilisateur",
   })
   profil: string;
 
@@ -38,8 +40,8 @@ export class CreateSubscriptionDto {
   @ApiProperty({
     example: 'particulier',
     enum: ['SUP', 'SOU', 'AEP'],
-    description: 'Type d\'eau',
-    type: [String]
+    description: "Type d'eau",
+    type: [String],
   })
   typesEau: string[];
 
@@ -56,7 +58,7 @@ export class CreateSubscriptionDto {
   @IsOptional()
   @ApiProperty({
     example: 'x',
-    description: 'Identifiant de l\'adresse',
+    description: "Identifiant de l'adresse",
   })
   idAdresse: string;
 

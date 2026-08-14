@@ -14,13 +14,12 @@ const headers = ['Numéro', 'Département', 'Niveau de gravité maximum', 'Resso
   'Date de début de validite', 'Date de fin de validité', 'Téléchargement'];
 const rows = ref([]);
 const loading = ref(false);
-const componentKey = ref(0);
 const ars = ref([]);
 
 async function loadData() {
   rows.value = [];
   loading.value = true;
-  const { data, error } = await api.getArretesRestrictions(props.date, props.area);
+  const { data } = await api.getArretesRestrictions(props.date, props.area);
   ars.value = data.value;
   data.value?.forEach((d: any) => {
     rows.value.push([
@@ -40,7 +39,6 @@ async function loadData() {
       } : '',
     ]);
   });
-  componentKey.value++;
   loading.value = false;
 }
 
@@ -72,10 +70,10 @@ async function downloadCsv() {
   });
 
   // Create a CSV file and allow the user to download it
-  let blob = new Blob([csv], { type: 'text/csv' });
-  let url = window.URL.createObjectURL(blob);
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
 
-  let a = document.createElement('a');
+  const a = document.createElement('a');
   a.href = url;
   a.download = `arretes_restrictions_${props.date}.csv`;
   a.click();
@@ -97,12 +95,15 @@ watch(() => props, () => {
 <template>
   <div>
     <template v-if="!loading">
-      <DsfrTable :title="tableTitle"
-                 :headers="headers"
-                 :rows="rows"
-                 :pagination="true"
-                 class="fr-table--sm"
-                 :key="componentKey" />
+      <AccessibleDataTable
+        table-id="restriction-orders-table"
+        :title="tableTitle"
+        :headers="headers"
+        :rows="rows"
+        table-class="fr-table--sm"
+      />
+
+      <DocumentAccessibilityNotice />
 
       <div class="text-align-right fr-mt-1w">
         <DsfrButton @click="downloadCsv()">
@@ -117,9 +118,3 @@ watch(() => props, () => {
     </template>
   </div>
 </template>
-
-<style lang="scss" scoped>
-.fr-table {
-  overflow: auto;
-}
-</style>

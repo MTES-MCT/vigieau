@@ -5,5 +5,12 @@
   "testRegex": ".e2e-spec.ts$",
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^@shared/(.*)$": "<rootDir>/../../../global_shared/$1",
+    "^connect-typeorm$": "<rootDir>/../node_modules/connect-typeorm",
+    "^nestjs-paginate$": "<rootDir>/../node_modules/nestjs-paginate",
+    "^typeorm$": "<rootDir>/../node_modules/typeorm",
+    "^typeorm/(.*)$": "<rootDir>/../node_modules/typeorm/$1"
   }
 }

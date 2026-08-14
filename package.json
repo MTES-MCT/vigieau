@@ -2,20 +2,42 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev:public-backend": "yarn workspace vigieau_backend run start:dev",
-    "dev:public-frontend": "yarn workspace vigieau_frontend run dev",
-    "dev:admin-backend": "yarn workspace vigieau_admin_backend run start:dev",
-    "dev:admin-frontend": "yarn workspace vigieau_admin_frontend run dev",
-    "dev:public": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\"",
-    "dev:admin": "concurrently \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\"",
-    "dev": "concurrently \"yarn dev:public-backend\" \"yarn dev:public-frontend\" \"yarn dev:admin-backend\" \"yarn dev:admin-frontend\""
+    "dev:services": "docker compose up -d",
+    "install:apps": "npm --prefix apps/backend install && npm --prefix apps/backend-admin install && npm --prefix apps/frontend install && npm --prefix apps/frontend-admin install",
+    "dev:public-backend": "npm --prefix apps/backend run start:dev",
+    "dev:public-frontend": "npm --prefix apps/frontend run dev -- --port 3000",
+    "dev:admin-backend": "npm --prefix apps/backend-admin run start:dev",
+    "dev:admin-frontend": "npm --prefix apps/frontend-admin run dev -- --port 3003",
+    "dev:public": "concurrently \"npm run dev:public-backend\" \"npm run dev:public-frontend\"",
+    "dev:admin": "concurrently \"npm run dev:admin-backend\" \"npm run dev:admin-frontend\"",
+    "dev": "concurrently \"npm run dev:public-backend\" \"npm run dev:public-frontend\" \"npm run dev:admin-backend\" \"npm run dev:admin-frontend\"",
+    "build:backend": "npm --prefix apps/backend run build",
+    "build:admin-backend": "npm --prefix apps/backend-admin run build",
+    "build:public-frontend": "npm --prefix apps/frontend run build",
+    "build:admin-frontend": "npm --prefix apps/frontend-admin run build",
+    "build": "npm run build:backend && npm run build:admin-backend && npm run build:public-frontend && npm run build:admin-frontend",
+    "test:backend": "npm --prefix apps/backend run test",
+    "test:admin-backend": "npm --prefix apps/backend-admin run test",
+    "test": "npm run test:backend && npm run test:admin-backend",
+    "lint:backend": "npm --prefix apps/backend run lint",
+    "lint:admin-backend": "npm --prefix apps/backend-admin run lint",
+    "lint:public-frontend": "npm --prefix apps/frontend run lint",
+    "lint:admin-frontend": "npm --prefix apps/frontend-admin run lint",
+    "lint": "npm run lint:backend && npm run lint:admin-backend && npm run lint:public-frontend && npm run lint:admin-frontend",
+    "lint:changed": "node scripts/lint-changed.mjs",
+    "audit:production": "npm audit --omit=dev --audit-level=low && npm --prefix apps/backend audit --omit=dev --audit-level=low && npm --prefix apps/backend-admin audit --omit=dev --audit-level=low && npm --prefix apps/frontend audit --omit=dev --audit-level=low && npm --prefix apps/frontend-admin audit --omit=dev --audit-level=low",
+    "smoke:public": "node scripts/smoke-public.mjs",
+    "smoke:statistics": "node scripts/smoke-statistics.mjs",
+    "test:smoke-statistics": "node --test scripts/smoke-statistics.test.mjs",
+    "smoke:admin": "node scripts/smoke-admin.mjs",
+    "smoke:datagouv": "node scripts/smoke-datagouv.mjs"
   },
   "devDependencies": {
     "concurrently": "^7.0.0"
   },
-  "dependencies": {
-    "connect-typeorm": "^2.0.0",
-    "nestjs-paginate": "^11.0.1",
-    "typeorm": "^0.3.20"
+  "packageManager": "npm@11.17.0",
+  "engines": {
+    "node": "24.x",
+    "npm": "11.x"
   }
 }

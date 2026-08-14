@@ -20,7 +20,7 @@ profiles.forEach(p => {
 });
 
 const tooltipPieLabel = (tooltipItem: any): string => {
-  let sum = tooltipItem.dataset.data.reduce((a: number, b: number) => {
+  const sum = tooltipItem.dataset.data.reduce((a: number, b: number) => {
     return a + b;
   })
   const percentage = (tooltipItem.raw * 100 / sum).toFixed(2) + "%";

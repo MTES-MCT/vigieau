@@ -2,6 +2,7 @@
 import moment from 'moment';
 import { json2csv } from 'json-2-csv';
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
+import { sortByDateDesc } from '../../utils/date-sort';
 
 const props = defineProps<{
   dataCommune: any,
@@ -12,10 +13,9 @@ const props = defineProps<{
 
 const headers = ['Date', 'Eau potable', 'Eau superficielle', 'Eau souterraine'];
 const rows = ref([]);
-const componentKey = ref(0);
 
 async function downloadCsv() {
-  const formatData = props.dataCommune
+  const formatData = sortByDateDesc(props.dataCommune)
     .map((stat: any) => {
       return {
         date: stat.date,
@@ -29,10 +29,10 @@ async function downloadCsv() {
   });
 
   // Create a CSV file and allow the user to download it
-  let blob = new Blob([csv], { type: 'text/csv' });
-  let url = window.URL.createObjectURL(blob);
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
 
-  let a = document.createElement('a');
+  const a = document.createElement('a');
   a.href = url;
   a.download = `commune_${props.communeNom}_${props.dateDebut}_${props.dateFin}.csv`;
   a.click();
@@ -42,7 +42,7 @@ watch(() => [props.dataCommune], () => {
   if(!props.dataCommune) {
     return;
   }
-  rows.value = props.dataCommune.map(s => {
+  rows.value = sortByDateDesc(props.dataCommune).map(s => {
     return [
       moment(s.date).format('DD/MM/YYYY'),
       s.AEP ? RestrictionNiveauGraviteFr[s.AEP] : 'Pas de restrictions',
@@ -50,17 +50,18 @@ watch(() => [props.dataCommune], () => {
       s.SOU ? RestrictionNiveauGraviteFr[s.SOU] : 'Pas de restrictions',
     ];
   });
-  componentKey.value ++;
 }, { immediate: true });
 </script>
 
 <template>
-  <DsfrTable title="Évolution journalière du niveau de gravité de la commune"
-             :headers="headers"
-             :rows="rows"
-             :pagination="true"
-             :key="componentKey"
-             class="fr-table--sm fr-table--no-title" />
+  <AccessibleDataTable
+    table-id="commune-restrictions-history-table"
+    title="Évolution journalière du niveau de gravité de la commune"
+    :headers="headers"
+    :rows="rows"
+    table-class="fr-table--sm"
+    fixed-layout
+  />
 
   <div class="text-align-right fr-mt-1w">
     <DsfrButton @click="downloadCsv()">
@@ -68,16 +69,3 @@ watch(() => [props.dataCommune], () => {
     </DsfrButton>
   </div>
 </template>
-
-<style lang="scss" scoped>
-.fr-table {
-  overflow: auto;
-}
-
-@media screen and (min-width: 768px) {
-  .fr-table > :deep(table) {
-    display: table;
-    table-layout: fixed;
-  }
-}
-</style>

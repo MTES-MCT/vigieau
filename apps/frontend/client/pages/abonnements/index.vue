@@ -16,9 +16,10 @@ const links: Ref<any[]> = ref([{ 'to': '/', 'text': 'Accueil' }, { 'text': 'Abon
 const loading: Ref<boolean> = ref(false);
 const modalOpened: Ref<boolean> = ref(false);
 const modalTitle: Ref<string> = ref('');
-const modalText: Ref<string> = ref('');
 const modalIcon: Ref<string> = ref('');
-const modalActions: Ref<any[]> = ref([]);
+const subscriptionsToUnsubscribe: Ref<Subscription[]> = ref([]);
+const unsubscribeError = ref('');
+const unsubscribeStatus = ref('');
 
 const router = useRouter();
 const route = useRoute();
@@ -28,63 +29,158 @@ if (!userSubscriptions.value || userSubscriptions.value.length < 1 || error.valu
   router.push('/');
 }
 
-const unsubscribe = async (ids: string[]) => {
-  loading.value = true;
-  const {
-    data,
-    error,
-  } = ids.length > 1 ? await api.unsubscribeAll(route.query.token) : await api.unsubscribe(ids[0], route.query.token);
-  if (!error.value) {
-    userSubscriptions.value = userSubscriptions.value.filter(s => !ids.includes(s.id));
+const unsubscribe = async () => {
+  if (loading.value) {
+    return;
   }
-  loading.value = false;
-  closeModal();
+
+  const ids = subscriptionsToUnsubscribe.value.map(subscription => subscription.id);
+  if (ids.length < 1) {
+    return;
+  }
+
+  loading.value = true;
+  unsubscribeError.value = '';
+  unsubscribeStatus.value = '';
+  let requestFailed = false;
+
+  try {
+    const response = ids.length > 1
+      ? await api.unsubscribeAll(route.query.token)
+      : await api.unsubscribe(ids[0], route.query.token);
+    requestFailed = Boolean(response.error?.value);
+  } catch {
+    requestFailed = true;
+  } finally {
+    loading.value = false;
+  }
+
+  if (requestFailed) {
+    unsubscribeError.value = 'Le désabonnement n’a pas pu être effectué. Veuillez réessayer.';
+    await nextTick();
+    document.getElementById('unsubscribe-error')?.focus();
+    return;
+  }
+
+  userSubscriptions.value = userSubscriptions.value.filter(subscription => !ids.includes(subscription.id));
+  unsubscribeStatus.value = ids.length > 1
+    ? 'Désabonnement de toutes les adresses effectué.'
+    : 'Désabonnement de l’adresse effectué.';
+  modalOpened.value = false;
+  await nextTick();
+
+  if (userSubscriptions.value.length < 1) {
+    await router.push('/');
+    return;
+  }
+
+  document.getElementById('subscriptions-heading')?.focus();
 };
 
 const askUnsubscribe = (subscriptions: Subscription[]) => {
+  if (loading.value) {
+    return;
+  }
+
   modalTitle.value = 'Désabonnement';
-  modalText.value = subscriptions.length > 1 ? `Voulez-vous vous désabonner de toutes les notifications de changement de restrictions pour vos <b>${subscriptions.length} adresses</b> ?`
-    : `Voulez-vous vous désabonner des notifications de changement de restrictions pour l'adresse <b>${subscriptions[0].libelleLocalisation}</b> ?`;
-  modalActions.value = [{
-    label: 'Valider',
-    onClick: unsubscribe.bind(this, subscriptions.map(s => s.id)),
-  }, { label: 'Annuler', onClick: closeModal, secondary: true }];
+  subscriptionsToUnsubscribe.value = subscriptions;
+  unsubscribeError.value = '';
+  unsubscribeStatus.value = '';
   modalOpened.value = true;
 };
 
 const closeModal = () => {
-  modalOpened.value = false;
-  if (userSubscriptions.value.length < 1) {
-    router.push('/');
+  if (loading.value) {
+    return;
   }
+
+  modalOpened.value = false;
 };
+
+const modalActions = computed(() => [{
+  label: 'Valider',
+  disabled: loading.value,
+  'aria-busy': loading.value ? 'true' : undefined,
+  onClick: unsubscribe,
+}, {
+  label: 'Annuler',
+  disabled: loading.value,
+  onClick: closeModal,
+  secondary: true,
+}]);
 </script>
 
 <template>
   <div class="fr-container">
-    <DsfrBreadcrumb :links='links' />
+    <AppBreadcrumb :links="links" />
     <div v-if="userSubscriptions">
-      <h1>Abonnements</h1>
+      <h1 id="subscriptions-heading" tabindex="-1">
+        Abonnements
+      </h1>
+      <p
+        id="unsubscribe-status"
+        class="fr-sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {{ unsubscribeStatus }}
+      </p>
       <h2>{{ route.query.email }}</h2>
       <div class="fr-grid-row fr-grid-row--gutters">
-        <SubscriptionsCard v-for="subscription in userSubscriptions"
-                           :loading="loading"
-                           :subscription="subscription"
-                           @unsubscribe="askUnsubscribe([subscription])" />
+        <SubscriptionsCard
+          v-for="subscription in userSubscriptions"
+          :key="subscription.id"
+          :loading="loading"
+          :subscription="subscription"
+          @unsubscribe="askUnsubscribe([subscription])"
+        />
       </div>
       <div v-if="userSubscriptions.length > 1">
-        <DsfrButton class="fr-mt-2w"
-                    label="Me désabonner de toutes les adresses"
-                    :disabled="loading"
-                    @click="askUnsubscribe(userSubscriptions)" />
+        <DsfrButton
+          class="fr-mt-2w"
+          label="Me désabonner de toutes les adresses"
+          :disabled="loading"
+          @click="askUnsubscribe(userSubscriptions)"
+        />
       </div>
     </div>
   </div>
-  <DsfrModal :opened="modalOpened"
-             :title="modalTitle"
-             :icon="modalIcon"
-             :actions=modalActions
-             @close="closeModal">
-    <div v-html="modalText"></div>
-  </DsfrModal>
+  <AccessibleModal
+    :opened="modalOpened"
+    :title="modalTitle"
+    :icon="modalIcon"
+    :actions="modalActions"
+    @close="closeModal"
+  >
+    <p
+      class="fr-sr-only"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ loading ? 'Désabonnement en cours.' : '' }}
+    </p>
+    <p
+      id="unsubscribe-error"
+      class="fr-error-text"
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
+      tabindex="-1"
+    >
+      {{ unsubscribeError }}
+    </p>
+    <p v-if="subscriptionsToUnsubscribe.length > 1">
+      Voulez-vous vous désabonner de toutes les notifications de changement de
+      restrictions pour vos
+      <strong>{{ subscriptionsToUnsubscribe.length }} adresses</strong> ?
+    </p>
+    <p v-else-if="subscriptionsToUnsubscribe[0]">
+      Voulez-vous vous désabonner des notifications de changement de
+      restrictions pour l'adresse
+      <strong>{{ subscriptionsToUnsubscribe[0].libelleLocalisation }}</strong>
+      ?
+    </p>
+  </AccessibleModal>
 </template>

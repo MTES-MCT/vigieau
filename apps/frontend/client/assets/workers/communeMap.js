@@ -1,5 +1,13 @@
 import moment from 'moment';
 
+const getDepartementCode = (codeInsee) => {
+  let toReturn = codeInsee.slice(0, 2);
+  if (toReturn === '97' || toReturn === '98') {
+    toReturn = codeInsee.slice(0, 3);
+  }
+  return toReturn;
+};
+
 const commputeCommuneMap = (e) => {
   const { communesData, depsSelected, dateBegin, dateEnd } = e;
 
@@ -22,7 +30,7 @@ const commputeCommuneMap = (e) => {
 
     communeDataReturned.push({
       code: commune.code,
-      ponderation: ponderation,
+      ponderation,
     });
 
     const depCode = getDepartementCode(commune.code);
@@ -39,24 +47,16 @@ const commputeCommuneMap = (e) => {
 
   for (const departement of departementData) {
     departement.ponderation = Math.round(
-      departement.ponderations.reduce((acc, value) => acc + value, 0) / departement.ponderations.length
+      departement.ponderations.reduce((acc, value) => acc + value, 0) / departement.ponderations.length,
     );
     delete departement.ponderations;
   }
 
   // Envoyer le résultat au thread principal
-  return{ communeDataReturned, departementData };
+  return { communeDataReturned, departementData };
 };
 
-const getDepartementCode = (codeInsee) => {
-  let toReturn = codeInsee.slice(0, 2);
-  if (toReturn === '97' || toReturn === '98') {
-    toReturn = codeInsee.slice(0, 3);
-  }
-  return toReturn;
-}
-
-self.addEventListener('message', function(e) {
-  let data = commputeCommuneMap(e.data)
-  self.postMessage(data);
+globalThis.addEventListener('message', (e) => {
+  const data = commputeCommuneMap(e.data);
+  globalThis.postMessage(data);
 }, false);

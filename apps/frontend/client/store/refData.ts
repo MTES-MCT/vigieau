@@ -25,7 +25,7 @@ export const useRefDataStore = defineStore('refDataStore', () => {
     if(departements.value.length > 0 && regions.value.length > 0 && bassinsVersants.value.length > 0) {
       return;
     }
-    const { data, error } = await api.getRefData();
+    const { data } = await api.getRefData();
     if (data.value) {
       setBassinsVersants(data.value.bassinsVersants);
       setRegions(data.value.regions);

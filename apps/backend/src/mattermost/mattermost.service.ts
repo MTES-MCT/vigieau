@@ -9,8 +9,10 @@ export class MattermostService {
   private readonly logger = new VigieauLogger('MattermostService');
   private readonly webhookUrl: string;
 
-  constructor(private readonly httpService: HttpService,
-              private readonly configService: ConfigService) {
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly configService: ConfigService,
+  ) {
     this.webhookUrl = this.configService.get<string>('MATTERMOST_WEBHOOK_URL');
   }
 
@@ -28,12 +30,12 @@ export class MattermostService {
 
     try {
       // Envoi du message au webhook Mattermost.
-      await lastValueFrom(
-        this.httpService.post(this.webhookUrl, { text }),
-      );
+      await lastValueFrom(this.httpService.post(this.webhookUrl, { text }));
     } catch (error) {
-      this.logger.error(`Échec d'envoi du message à Mattermost. Message`, error.message);
+      this.logger.error(
+        `Échec d'envoi du message à Mattermost. Message`,
+        error.message,
+      );
     }
   }
-
 }
