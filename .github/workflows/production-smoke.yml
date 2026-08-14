@@ -1,0 +1,54 @@
+# GitHub loads scheduled workflows from the default branch (master). Keep this
+# file on master; each job checks out develop, the branch deployed to production.
+name: Production smoke
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-smoke
+  cancel-in-progress: false
+
+jobs:
+  statistics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VIGIEAU_STATISTICS_DEADLINE: "06:00"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify statistics smoke deadline policy
+        run: npm run test:smoke-statistics
+      - name: Public statistics consistency
+        run: node scripts/smoke-statistics.mjs
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VIGIEAU_MIN_ZONE_COUNT: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Public application and Tarbes
+        run: node scripts/smoke-public.mjs
+      - name: Public map rendering and real PMTiles ranges
+        run: node scripts/smoke-browser.mjs
+      - name: Admin API, clock and external publications
+        run: node scripts/smoke-admin.mjs
+      - name: data.gouv.fr resources
+        run: node scripts/smoke-datagouv.mjs
