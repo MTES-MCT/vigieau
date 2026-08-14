@@ -1,4 +1,11 @@
 import assert from "node:assert/strict";
+import {
+  assertLegacyArtifactFreshness,
+  assertPublicZoneCache,
+  DEFAULT_ZONE_PUBLICATION_DEADLINE,
+  parseExpectedPublicZonePublicationMode,
+  resolvePublicZonePublication,
+} from "./smoke-public-zone-publication.mjs";
 
 const apiBase = (
   process.env.VIGIEAU_API_URL || "https://api.vigieau.beta.gouv.fr"
@@ -11,6 +18,24 @@ const addressApi = (
 ).replace(/\/+$/, "");
 const timeoutMs = Number(process.env.VIGIEAU_SMOKE_TIMEOUT_MS || 15_000);
 const minimumZoneCount = Number(process.env.VIGIEAU_MIN_ZONE_COUNT || 1);
+const expectedZonePublicationMode = parseExpectedPublicZonePublicationMode(
+  process.env.VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE,
+);
+const zonePublicationDeadline =
+  process.env.VIGIEAU_ZONE_PUBLICATION_DEADLINE ||
+  DEFAULT_ZONE_PUBLICATION_DEADLINE;
+const zonePublicationNow = process.env.VIGIEAU_ZONE_PUBLICATION_NOW
+  ? new Date(process.env.VIGIEAU_ZONE_PUBLICATION_NOW)
+  : new Date();
+const legacyArtifactMaximumSkewMinutes = Number(
+  process.env.VIGIEAU_LEGACY_ARTIFACT_MAX_SKEW_MINUTES || 30,
+);
+const legacyGeojsonUrl =
+  process.env.VIGIEAU_LEGACY_GEOJSON_URL ||
+  "https://regleau.s3.gra.perf.cloud.ovh.net/geojson/zones_arretes_en_vigueur.geojson";
+const legacyPmtilesUrl =
+  process.env.VIGIEAU_LEGACY_PMTILES_URL ||
+  "https://regleau.s3.gra.perf.cloud.ovh.net/pmtiles/zones_arretes_en_vigueur.pmtiles";
 
 assert.ok(
   Number.isInteger(minimumZoneCount) && minimumZoneCount >= 0,
@@ -26,34 +51,60 @@ async function request(url, init = {}) {
 }
 
 async function json(url, expectedStatus = 200) {
+  return (await jsonResponse(url, [expectedStatus])).body;
+}
+
+async function jsonResponse(url, expectedStatuses = [200]) {
   const response = await request(url, {
     headers: { Accept: "application/json" },
   });
   const body = await response.text();
-  assert.equal(
-    response.status,
-    expectedStatus,
+  assert.ok(
+    expectedStatuses.includes(response.status),
     `${url} returned ${response.status}: ${body.slice(0, 500)}`,
   );
-  return body ? JSON.parse(body) : null;
+  return {
+    status: response.status,
+    body: body ? JSON.parse(body) : null,
+  };
 }
 
-for (const healthPath of ["live", "ready", "cache"]) {
-  await json(`${apiBase}/api/health/${healthPath}`);
-}
-
-const publication = await json(`${apiBase}/api/zones/publication`);
-assert.match(publication.id, /^[0-9a-f-]{36}$/i);
-assert.ok(publication.revision, "The active publication has no revision");
-assert.ok(publication.geojsonUrl, "The active publication has no GeoJSON URL");
-assert.match(publication.geojsonChecksum, /^[0-9a-f]{64}$/i);
-assert.ok(publication.pmtilesUrl, "The active publication has no PMTiles URL");
-assert.match(publication.pmtilesChecksum, /^[0-9a-f]{64}$/i);
-assert.ok(
-  Number.isInteger(publication.zoneCount) &&
-    publication.zoneCount >= minimumZoneCount,
-  "The active publication has an invalid zone count",
+await json(`${apiBase}/api/health/live`);
+const readyStatus = await json(`${apiBase}/api/health/ready`);
+const cacheStatus = await json(`${apiBase}/api/health/cache`);
+const readyPolicy = assertPublicZoneCache({
+  body: readyStatus,
+  deadline: zonePublicationDeadline,
+  expectedMode: expectedZonePublicationMode,
+  minimumZoneCount,
+  now: zonePublicationNow,
+});
+const cachePolicy = assertPublicZoneCache({
+  body: cacheStatus,
+  deadline: zonePublicationDeadline,
+  expectedMode: expectedZonePublicationMode,
+  minimumZoneCount,
+  now: zonePublicationNow,
+});
+assert.equal(
+  readyPolicy.loadedVersion,
+  cachePolicy.loadedVersion,
+  "The public API instances expose different zone cache versions",
 );
+
+const publicationResponse = await jsonResponse(
+  `${apiBase}/api/zones/publication`,
+  [200, 404],
+);
+const publication = resolvePublicZonePublication({
+  body: publicationResponse.body,
+  cacheStatus,
+  expectedMode: expectedZonePublicationMode,
+  httpStatus: publicationResponse.status,
+  legacyGeojsonUrl,
+  legacyPmtilesUrl,
+  minimumZoneCount,
+});
 
 const geojsonResponse = await request(publication.geojsonUrl, {
   headers: { Range: "bytes=0-63", "Cache-Control": "no-cache" },
@@ -71,6 +122,15 @@ assert.equal(
   "{",
   "The GeoJSON artifact is invalid",
 );
+if (expectedZonePublicationMode === "legacy") {
+  assertLegacyArtifactFreshness({
+    label: "The legacy GeoJSON artifact",
+    lastModified: geojsonResponse.headers.get("last-modified"),
+    loadedBusinessDate: cachePolicy.loadedBusinessDate,
+    loadedVersion: cachePolicy.loadedVersion,
+    maximumSkewMinutes: legacyArtifactMaximumSkewMinutes,
+  });
+}
 
 const pmtilesResponse = await request(publication.pmtilesUrl, {
   headers: { Range: "bytes=0-126" },
@@ -89,6 +149,15 @@ assert.equal(
 );
 const header = new DataView(pmtilesHeader.buffer);
 assert.equal(header.getUint8(7), 3, "The PMTiles version is unsupported");
+if (expectedZonePublicationMode === "legacy") {
+  assertLegacyArtifactFreshness({
+    label: "The legacy PMTiles artifact",
+    lastModified: pmtilesResponse.headers.get("last-modified"),
+    loadedBusinessDate: cachePolicy.loadedBusinessDate,
+    loadedVersion: cachePolicy.loadedVersion,
+    maximumSkewMinutes: legacyArtifactMaximumSkewMinutes,
+  });
+}
 const uint64 = (offset) => Number(header.getBigUint64(offset, true));
 const pmtilesCounts = {
   rootDirectoryLength: uint64(16),
@@ -127,9 +196,11 @@ assert.match(
 );
 await mapResponse.body?.cancel();
 
-const publicationQuery = `publicationId=${encodeURIComponent(publication.id)}`;
+const publicationQuery = publication.id
+  ? `&publicationId=${encodeURIComponent(publication.id)}`
+  : "";
 const communeResponse = await request(
-  `${apiBase}/api/zones?commune=65440&${publicationQuery}`,
+  `${apiBase}/api/zones?commune=65440${publicationQuery}`,
   { headers: { Accept: "application/json", "Cache-Control": "no-cache" } },
 );
 const communeBody = await communeResponse.text();
@@ -165,7 +236,7 @@ const addressResult = await json(
 const coordinates = addressResult?.features?.[0]?.geometry?.coordinates;
 assert.equal(coordinates?.length, 2, "No precise Tarbes address was resolved");
 const preciseZones = await json(
-  `${apiBase}/api/zones?lon=${encodeURIComponent(coordinates[0])}&lat=${encodeURIComponent(coordinates[1])}&commune=65440&${publicationQuery}`,
+  `${apiBase}/api/zones?lon=${encodeURIComponent(coordinates[0])}&lat=${encodeURIComponent(coordinates[1])}&commune=65440${publicationQuery}`,
 );
 assert.ok(
   Array.isArray(preciseZones),
@@ -196,6 +267,10 @@ assert.ok(
 console.log(
   JSON.stringify({
     status: "ok",
+    zonePublicationMode: expectedZonePublicationMode,
+    zoneBusinessDate: cachePolicy.loadedBusinessDate,
+    minimumZoneBusinessDate: cachePolicy.expectedBusinessDate,
+    loadedVersion: cachePolicy.loadedVersion,
     publicationId: publication.id,
     revision: publication.revision,
     zoneCount: publication.zoneCount,
