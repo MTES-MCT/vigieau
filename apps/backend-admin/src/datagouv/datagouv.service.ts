@@ -32,9 +32,9 @@ import {
   PublicationRunIdentity,
 } from './external-publication-registry.service';
 
-export type DatagouvPublicationContext =
-  | (PublicationRunIdentity & { verifyCurrent: () => Promise<void> })
-  | { publicationMode: 'legacy'; verifyCurrent?: never };
+export type DatagouvPublicationContext = PublicationRunIdentity & {
+  verifyCurrent?: () => Promise<void>;
+};
 
 interface LocalArtifact {
   byteSize: number;

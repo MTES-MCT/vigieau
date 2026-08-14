@@ -48,6 +48,7 @@ describe('DatagouvSchedulerService', () => {
       ),
     };
     const zonePublicationService = {
+      getSourceRevision: jest.fn().mockResolvedValue('42'),
       getActivePublicationGate: jest.fn().mockResolvedValue({
         publicationId: 'publication-1',
         sourceRevision: '42',
@@ -133,21 +134,28 @@ describe('DatagouvSchedulerService', () => {
 
     await harness.service.publishIfDue(now);
 
-    expect(harness.registry.hasSucceeded).toHaveBeenCalledTimes(1);
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledTimes(3);
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:national-daily',
       '2026-08-01',
+      { publicationMode: 'legacy', sourceRevision: '42' },
     );
     expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
       'datagouv:daily',
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: { publicationMode: 'legacy' } },
+      {
+        identity: { publicationMode: 'legacy', sourceRevision: '42' },
+      },
     );
     expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
       '2026-08-01',
-      { publicationMode: 'legacy' },
+      {
+        publicationMode: 'legacy',
+        sourceRevision: '42',
+        verifyCurrent: expect.any(Function),
+      },
     );
     expect(
       harness.zonePublicationService.getActivePublicationGate,
@@ -165,6 +173,7 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
       'compute:national-daily',
       '2026-08-01',
+      { publicationMode: 'legacy', sourceRevision: '42' },
     );
     expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
     expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
@@ -190,6 +199,40 @@ describe('DatagouvSchedulerService', () => {
     await harness.service.publishIfDue(now);
 
     expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(2);
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an obsolete legacy daily success', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const harness = createService();
+    harness.registry.hasSucceeded.mockImplementation(
+      async (_jobKey, _scheduledFor, identity) =>
+        identity?.sourceRevision === '41',
+    );
+
+    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
+
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
+      'compute:national-daily',
+      '2026-08-01',
+      { publicationMode: 'legacy', sourceRevision: '42' },
+    );
+    expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
+    expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+  });
+
+  it('fails a legacy publication when the source revision changes during it', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    const harness = createService();
+    harness.zonePublicationService.getSourceRevision
+      .mockResolvedValueOnce('42')
+      .mockResolvedValueOnce('42')
+      .mockResolvedValueOnce('43');
+
+    await expect(
+      harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z')),
+    ).rejects.toThrow('Legacy computation gate changed during Datagouv run');
+
     expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
   });
 

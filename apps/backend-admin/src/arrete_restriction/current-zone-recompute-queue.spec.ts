@@ -49,8 +49,10 @@ function createHarness(
     query,
     release: jest.fn().mockResolvedValue(undefined),
   };
+  const managerQuery = jest.fn();
   const repository = {
     manager: {
+      query: managerQuery,
       connection: {
         createQueryRunner: jest.fn(() => queryRunner),
       },
@@ -77,6 +79,7 @@ function createHarness(
 
   return {
     askCompute,
+    managerQuery,
     query,
     queryRunner,
     service,
@@ -150,7 +153,9 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       [],
     ]);
 
-    await harness.service.processPendingCurrentZoneRecomputes();
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('processed');
 
     expect(harness.askCompute).toHaveBeenCalledWith([2, 7], false, false);
     expect(
@@ -203,7 +208,9 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       [],
     ]);
 
-    await harness.service.processPendingCurrentZoneRecomputes();
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('processed');
 
     expect(harness.askCompute).toHaveBeenCalledTimes(2);
     const deleteCalls = (
@@ -222,7 +229,9 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
   it('lets the process holding the advisory lock own the recompute', async () => {
     const harness = createHarness([], { lockAcquired: false });
 
-    await harness.service.processPendingCurrentZoneRecomputes();
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('busy');
 
     expect(harness.askCompute).not.toHaveBeenCalled();
     expect(
@@ -255,6 +264,113 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
     ).toHaveBeenCalledTimes(1);
   });
 
+  it('distinguishes an empty queue from a processed queue', async () => {
+    const harness = createHarness([[]]);
+
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('empty');
+
+    expect(harness.askCompute).not.toHaveBeenCalled();
+  });
+
+  it('passes the scheduled business date to a legacy queue computation', async () => {
+    const harness = createHarness([
+      [{ departementId: 7, generation: '1' }],
+      [],
+    ]);
+
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes('2026-08-13'),
+    ).resolves.toBe('processed');
+
+    expect(harness.askCompute).toHaveBeenCalledWith(
+      [7],
+      false,
+      false,
+      false,
+      undefined,
+      '2026-08-13',
+    );
+  });
+
+  it('accepts a fully published legacy daily postcondition', async () => {
+    const harness = createHarness([]);
+    harness.managerQuery.mockResolvedValue([
+      {
+        snapshotStatus: 'completed',
+        expectedCommuneCount: 34943,
+        processedCommuneCount: 34943,
+        snapshotSourceRevision: '42',
+        currentSourceRevision: '42',
+        currentPublishedDate: '2026-08-14',
+        communeCount: 34943,
+        expectedDepartementCount: 101,
+        departementRestrictionCount: 101,
+        departementSituationCount: 101,
+        departementSituationKeyCount: 101,
+        pendingQueueCount: 0,
+      },
+    ]);
+
+    await expect(
+      harness.service.assertLegacyDailyComputationCompleted('2026-08-14'),
+    ).resolves.toEqual({ sourceRevision: '42' });
+
+    expect(harness.managerQuery).toHaveBeenCalledWith(
+      expect.stringContaining('current_zone_recompute_request'),
+      ['2026-08-14'],
+    );
+  });
+
+  it('rejects a daily postcondition while a newer queue generation remains', async () => {
+    const harness = createHarness([]);
+    harness.managerQuery.mockResolvedValue([
+      {
+        snapshotStatus: 'completed',
+        expectedCommuneCount: 34943,
+        processedCommuneCount: 34943,
+        snapshotSourceRevision: '42',
+        currentSourceRevision: '42',
+        currentPublishedDate: '2026-08-14',
+        communeCount: 34943,
+        expectedDepartementCount: 101,
+        departementRestrictionCount: 101,
+        departementSituationCount: 101,
+        departementSituationKeyCount: 101,
+        pendingQueueCount: 1,
+      },
+    ]);
+
+    await expect(
+      harness.service.assertLegacyDailyComputationCompleted('2026-08-14'),
+    ).rejects.toThrow('queue=1');
+  });
+
+  it('accepts a ready versioned snapshot without requiring the active watermark', async () => {
+    const harness = createHarness([]);
+    harness.managerQuery.mockResolvedValue([
+      {
+        snapshotStatus: 'ready',
+        expectedCommuneCount: 34943,
+        processedCommuneCount: 34943,
+        snapshotSourceRevision: '42',
+        currentSourceRevision: '42',
+        currentPublishedDate: '2026-08-13',
+        communeCount: 34943,
+        expectedDepartementCount: 101,
+        departementRestrictionCount: 101,
+        departementSituationCount: 101,
+        departementSituationKeyCount: 101,
+        pendingQueueCount: 0,
+      },
+    ]);
+
+    await expect(
+      harness.service.assertVersionedDailyComputationReady('2026-08-14', '42'),
+    ).resolves.toBeUndefined();
+  });
+
   it('requests a national recompute when versioned publication is enabled', async () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
     const harness = createHarness([
@@ -262,7 +378,9 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       [],
     ]);
 
-    await harness.service.processPendingCurrentZoneRecomputes();
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('processed');
 
     expect(harness.askCompute).toHaveBeenCalledWith([], false, false);
   });

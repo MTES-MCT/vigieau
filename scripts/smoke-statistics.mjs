@@ -35,6 +35,7 @@ const expectedCommuneCount = Number(
 const communeCode = process.env.VIGIEAU_STATISTICS_COMMUNE_CODE || "65440";
 const allowMissingHealth =
   process.env.VIGIEAU_ALLOW_MISSING_STATISTICS_HEALTH === "true";
+const runningSnapshotMaximumAgeMs = 15 * 60 * 1000;
 
 function assertInteger(value, minimum, name) {
   assert.ok(
@@ -129,7 +130,7 @@ const samples = [];
 for (let index = 0; index < sampleCount; index += 1) {
   const nonce = `smoke=${Date.now()}-${index}`;
   const [healthResponse, departmentResponse, areaResponse] = await Promise.all([
-    requestJson(`${apiBase}/api/health/statistics?${nonce}`, [200, 404]),
+    requestJson(`${apiBase}/api/health/statistics?${nonce}`, [200, 404, 503]),
     requestJson(`${apiBase}/api/data/departement?${dateQuery}&${nonce}`),
     requestJson(`${apiBase}/api/data/area?${dateQuery}&${nonce}`),
   ]);
@@ -162,11 +163,19 @@ for (let index = 0; index < sampleCount; index += 1) {
     `Statistics stop at ${latestDate} (${lagDays} days behind ${today})`,
   );
 
-  const health = healthResponse.status === 200 ? healthResponse.body : null;
+  const health = healthResponse.status === 404 ? null : healthResponse.body;
   if (health) {
-    assert.equal(health.status, "ready", "The statistics cache is not ready");
     assert.equal(health.usable, true, "The statistics cache is not usable");
-    assert.equal(health.fresh, true, "The statistics cache is stale");
+    assert.equal(
+      health.fresh,
+      healthResponse.status === 200,
+      "The statistics health HTTP status and freshness disagree",
+    );
+    assert.equal(
+      health.status,
+      healthResponse.status === 200 ? "ready" : "degraded",
+      "The statistics health HTTP status and payload disagree",
+    );
     assert.equal(
       health.currentPublishedDate,
       latestDate,
@@ -176,6 +185,36 @@ for (let index = 0; index < sampleCount; index += 1) {
       health.latestDate,
       latestDate,
       "The health watermark and public statistics disagree",
+    );
+    assert.equal(
+      health.expectedPublishedDate,
+      freshnessPolicy.expectedPublishedDate,
+      "The API and smoke publication deadlines disagree",
+    );
+    assert.equal(
+      health.publicationDeadline,
+      freshnessPolicy.deadline,
+      "The API and smoke use different publication deadlines",
+    );
+    assert.equal(
+      health.lagDays,
+      Math.max(
+        0,
+        dateDifferenceInDays(
+          health.currentPublishedDate,
+          health.expectedPublishedDate,
+        ),
+      ),
+      "The statistics health reports an inconsistent publication lag",
+    );
+    assert.ok(
+      (health.historicDirtyFrom === null &&
+        health.historicDirtyThrough === null) ||
+        (/^\d{4}-\d{2}-\d{2}$/.test(health.historicDirtyFrom) &&
+          /^\d{4}-\d{2}-\d{2}$/.test(health.historicDirtyThrough) &&
+          health.historicDirtyFrom <= health.historicDirtyThrough &&
+          health.historicDirtyThrough <= health.currentPublishedDate),
+      "The historic dirty range is inconsistent",
     );
     assert.match(String(health.firstDate || ""), /^\d{4}-\d{2}-\d{2}$/);
     assert.ok(
@@ -188,11 +227,66 @@ for (let index = 0; index < sampleCount; index += 1) {
     assert.match(String(health.fingerprint || ""), /^[0-9a-f]{64}$/i);
     assert.ok(typeof health.mode === "string" && health.mode.length > 0);
     assert.ok(!Number.isNaN(Date.parse(health.loadedAt)));
-    assert.equal(health.lastError, null);
+    assert.equal(
+      health.lastError,
+      null,
+      "The statistics cache reports an error",
+    );
+  }
+
+  const degradation =
+    healthResponse.status !== 503
+      ? null
+      : health.lagDays > 0
+        ? "current-publication-lag"
+        : health.historicDirtyFrom
+          ? "historic-rebuild"
+          : health.lastError
+            ? "cache-error"
+            : "cache-refresh";
+
+  if (healthResponse.status === 503) {
+    assert.equal(
+      degradation,
+      "historic-rebuild",
+      `Unexpected statistics degradation: ${degradation}`,
+    );
+    const incompleteCount = health.incompleteSnapshotCount;
+    const incompleteSnapshot = health.oldestIncompleteSnapshot;
+    const noIncompleteSnapshot =
+      incompleteCount === 0 && incompleteSnapshot === null;
+    const runningSnapshotUpdatedAt = Date.parse(
+      incompleteSnapshot?.updatedAt ?? "",
+    );
+    const runningSnapshotAgeMs =
+      statisticNow.getTime() - runningSnapshotUpdatedAt;
+    const singleRecentRunningSnapshot =
+      incompleteCount === 1 &&
+      incompleteSnapshot?.scope === "national" &&
+      incompleteSnapshot?.status === "running" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(incompleteSnapshot.date) &&
+      incompleteSnapshot.date >= health.historicDirtyFrom &&
+      incompleteSnapshot.date <= health.historicDirtyThrough &&
+      Number.isInteger(incompleteSnapshot.processedCommuneCount) &&
+      Number.isInteger(incompleteSnapshot.expectedCommuneCount) &&
+      incompleteSnapshot.processedCommuneCount >= 0 &&
+      incompleteSnapshot.expectedCommuneCount > 0 &&
+      incompleteSnapshot.processedCommuneCount <=
+        incompleteSnapshot.expectedCommuneCount &&
+      incompleteSnapshot.expectedCommuneCount === expectedCommuneCount &&
+      !Number.isNaN(runningSnapshotUpdatedAt) &&
+      runningSnapshotAgeMs >= -60_000 &&
+      runningSnapshotAgeMs <= runningSnapshotMaximumAgeMs;
+    assert.ok(
+      noIncompleteSnapshot || singleRecentRunningSnapshot,
+      "The historic rebuild contains an unhealthy incomplete snapshot",
+    );
   }
 
   samples.push({
     health,
+    healthStatus: healthResponse.status,
+    degradation,
     department: departmentResponse.body,
     area: areaResponse.body,
     latestDate,
@@ -201,6 +295,16 @@ for (let index = 0; index < sampleCount; index += 1) {
 
 const reference = samples[0];
 for (const sample of samples.slice(1)) {
+  assert.equal(
+    sample.healthStatus,
+    reference.healthStatus,
+    "Statistics health status differs between API instances",
+  );
+  assert.equal(
+    sample.degradation,
+    reference.degradation,
+    "Statistics health degradation differs between API instances",
+  );
   assert.deepEqual(
     sample.department,
     reference.department,
@@ -215,6 +319,12 @@ for (const sample of samples.slice(1)) {
     for (const field of [
       "mode",
       "currentPublishedDate",
+      "expectedPublishedDate",
+      "publicationDeadline",
+      "lagDays",
+      "historicDirtyFrom",
+      "historicDirtyThrough",
+      "incompleteSnapshotCount",
       "firstDate",
       "latestDate",
       "dateCount",
@@ -228,6 +338,11 @@ for (const sample of samples.slice(1)) {
         `Statistics health field ${field} differs between API instances`,
       );
     }
+    assert.deepEqual(
+      sample.health.oldestIncompleteSnapshot,
+      reference.health.oldestIncompleteSnapshot,
+      "Statistics health incomplete snapshot differs between API instances",
+    );
   }
 }
 
@@ -257,6 +372,9 @@ console.log(
     status: "ok",
     startDate,
     latestDate: reference.latestDate,
+    healthStatus: reference.healthStatus,
+    degradation: reference.degradation,
+    expectedPublishedDate: freshnessPolicy.expectedPublishedDate,
     deadline: freshnessPolicy.deadline,
     afterDeadline: freshnessPolicy.afterDeadline,
     maximumLagDays,

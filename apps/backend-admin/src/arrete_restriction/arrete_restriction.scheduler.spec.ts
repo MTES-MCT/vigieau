@@ -85,6 +85,7 @@ const createService = (askCompute: jest.Mock) => {
     .mockImplementation(async () => {
       await askCompute(queuedDepartementIds, false, false);
       await statisticDepartementService.computeDepartementStatistics();
+      return 'processed';
     });
   return {
     lockQuery,
@@ -241,6 +242,30 @@ describe('ArreteRestrictionService scheduled status update', () => {
     expect(processPendingCurrentZoneRecomputes).toHaveBeenCalledTimes(1);
     expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
       processPendingCurrentZoneRecomputes.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('uses and forwards the scheduled legacy business date', async () => {
+    const askCompute = jest.fn().mockResolvedValue({ success: true });
+    const {
+      processPendingCurrentZoneRecomputes,
+      service,
+      transactionRepository,
+    } = createService(askCompute);
+
+    await service.updateArreteRestrictionStatut(
+      undefined,
+      false,
+      undefined,
+      '2026-08-01',
+    );
+
+    expect(transactionRepository.query.mock.calls[0][1]).toEqual([
+      '2026-08-01',
+      null,
+    ]);
+    expect(processPendingCurrentZoneRecomputes).toHaveBeenCalledWith(
+      '2026-08-01',
     );
   });
 

@@ -1011,6 +1011,35 @@ describe('ZoneAlerteComputedService', () => {
     );
   });
 
+  it('passes a legacy scheduled date to its worker independently of versioned reuse', async () => {
+    const worker = Object.assign(new EventEmitter(), {
+      terminate: jest.fn().mockResolvedValue(1),
+    });
+    (Worker as unknown as jest.Mock).mockReturnValue(worker);
+
+    const compute = service.askCompute(
+      [65],
+      false,
+      false,
+      false,
+      undefined,
+      '2026-08-01',
+    );
+
+    expect(Worker).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        workerData: {
+          depsIds: [65],
+          skipIfBusy: false,
+          publicationScheduledFor: '2026-08-01',
+        },
+      }),
+    );
+    worker.emit('message', { success: true });
+    await expect(compute).resolves.toEqual({ success: true });
+  });
+
   it('keeps the daily reuse identity while its compute waits in the local queue', async () => {
     const firstWorker = Object.assign(new EventEmitter(), {
       terminate: jest.fn().mockResolvedValue(1),
@@ -1211,6 +1240,21 @@ describe('ZoneAlerteComputedService', () => {
       zonePublicationService.findReusableDailyPublication,
     ).not.toHaveBeenCalled();
     expect(computeAll).toHaveBeenCalledWith([65], false);
+  });
+
+  it('pins a legacy computation to the scheduled date supplied by the scheduler', async () => {
+    const computeAll = jest.spyOn(service, 'computeAll').mockResolvedValue({
+      publicationId: undefined,
+      sourceRevision: '42',
+    });
+
+    await service.computeAllOrReuseDailyPublication(
+      [65],
+      undefined,
+      '2026-08-01',
+    );
+
+    expect(computeAll).toHaveBeenCalledWith([65], false, '2026-08-01');
   });
 
   it('rejects and releases the compute slot when the worker reports a failure', async () => {

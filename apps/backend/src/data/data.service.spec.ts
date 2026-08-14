@@ -170,6 +170,14 @@ describe('DataService', () => {
     }).compile();
 
     service = <DataService>module.get(DataService);
+    jest
+      .spyOn(service as any, 'getStatisticPublicationExpectation')
+      .mockReturnValue({
+        today: '2023-01-02',
+        expectedPublishedDate: '2023-01-02',
+        deadline: '06:00',
+        afterDeadline: true,
+      });
     service['publicationState'] = stablePublicationState;
     service['publicationStateCheckedAt'] = Date.now();
     setReferenceData();
@@ -1016,6 +1024,11 @@ describe('DataService', () => {
           fresh: true,
           mode: 'versioned',
           currentPublishedDate: '2023-01-02',
+          expectedPublishedDate: '2023-01-02',
+          publicationDeadline: '06:00',
+          lagDays: 0,
+          historicDirtyFrom: null,
+          historicDirtyThrough: null,
           latestDate: '2023-01-02',
           departmentCount: 101,
           communeCount: 1,
@@ -1026,6 +1039,32 @@ describe('DataService', () => {
         }),
       );
       expect(mockDataSource.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports a late daily watermark as degraded after the Paris deadline', async () => {
+      jest
+        .spyOn(service as any, 'getStatisticPublicationExpectation')
+        .mockReturnValue({
+          today: '2023-01-03',
+          expectedPublishedDate: '2023-01-03',
+          deadline: '06:00',
+          afterDeadline: true,
+        });
+      mockDataSource.query.mockResolvedValue([stablePublicationState]);
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          usable: true,
+          fresh: false,
+          currentPublishedDate: '2023-01-02',
+          expectedPublishedDate: '2023-01-03',
+          publicationDeadline: '06:00',
+          lagDays: 1,
+          historicDirtyFrom: null,
+          historicDirtyThrough: null,
+        }),
+      );
     });
 
     it('reports an incomplete legacy snapshot and keeps the last cache usable', async () => {
@@ -1053,6 +1092,7 @@ describe('DataService', () => {
             oldestSnapshotStatus: 'failed',
             oldestProcessedCommuneCount: 34943,
             oldestExpectedCommuneCount: 34943,
+            oldestSnapshotUpdatedAt: '2015-05-19T12:00:00.000Z',
           },
         ]);
 
@@ -1069,6 +1109,7 @@ describe('DataService', () => {
             status: 'failed',
             processedCommuneCount: 34943,
             expectedCommuneCount: 34943,
+            updatedAt: '2015-05-19T12:00:00.000Z',
           },
         }),
       );
@@ -1102,6 +1143,7 @@ describe('DataService', () => {
             oldestSnapshotStatus: 'failed',
             oldestProcessedCommuneCount: 0,
             oldestExpectedCommuneCount: 0,
+            oldestSnapshotUpdatedAt: '1970-01-01T12:00:00.000Z',
           },
         ]);
 
@@ -1117,6 +1159,7 @@ describe('DataService', () => {
             status: 'failed',
             processedCommuneCount: 0,
             expectedCommuneCount: 0,
+            updatedAt: '1970-01-01T12:00:00.000Z',
           },
         }),
       );
@@ -1216,6 +1259,14 @@ describe('DataService', () => {
 
     it('reports a complete continuous legacy cache as fresh', async () => {
       process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      jest
+        .spyOn(service as any, 'getStatisticPublicationExpectation')
+        .mockReturnValue({
+          today: '2013-01-02',
+          expectedPublishedDate: '2013-01-02',
+          deadline: '06:00',
+          afterDeadline: true,
+        });
       const legacyPublicationState = {
         ...stablePublicationState,
         activePublicationId: null,
@@ -1296,6 +1347,9 @@ describe('DataService', () => {
           mode: 'versioned',
           currentPublishedDate: '2023-01-02',
           latestDate: '2023-01-02',
+          lagDays: 0,
+          historicDirtyFrom: '2023-01-01',
+          historicDirtyThrough: '2023-01-01',
         }),
       );
     });

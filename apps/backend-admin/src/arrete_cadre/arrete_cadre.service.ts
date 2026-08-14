@@ -1601,9 +1601,12 @@ export class ArreteCadreService {
   async updateArreteCadreStatut(
     computeHistoric = true,
     dailyPublicationReuse?: DailyZonePublicationReuseContext,
+    scheduledFor?: string,
   ) {
     const businessDate =
-      dailyPublicationReuse?.scheduledFor ?? getCurrentParisCivilDate();
+      dailyPublicationReuse?.scheduledFor ??
+      scheduledFor ??
+      getCurrentParisCivilDate();
     const changedStatusCounts = { publie: 0, a_venir: 0, abroge: 0 };
     await this.arreteCadreRepository.manager.transaction(
       'SERIALIZABLE',
@@ -1750,9 +1753,33 @@ export class ArreteCadreService {
         dailyPublicationReuse,
       );
     }
+    if (scheduledFor !== undefined) {
+      return this.arreteRestrictionService.updateArreteRestrictionStatut(
+        null,
+        computeHistoric,
+        undefined,
+        scheduledFor,
+      );
+    }
     return this.arreteRestrictionService.updateArreteRestrictionStatut(
       null,
       computeHistoric,
+    );
+  }
+
+  async assertLegacyDailyComputationCompleted(scheduledFor: string) {
+    return this.arreteRestrictionService.assertLegacyDailyComputationCompleted(
+      scheduledFor,
+    );
+  }
+
+  async assertVersionedDailyComputationReady(
+    scheduledFor: string,
+    sourceRevision: string,
+  ): Promise<void> {
+    await this.arreteRestrictionService.assertVersionedDailyComputationReady(
+      scheduledFor,
+      sourceRevision,
     );
   }
 

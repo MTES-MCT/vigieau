@@ -137,6 +137,7 @@ jobs:
       - name: Verify statistic snapshot finalization against PostgreSQL
         run: >-
           npm --prefix apps/backend-admin test -- --runInBand
+          src/arrete_restriction/current-zone-recompute-queue.postgres.spec.ts
           src/statistic_commune/statistic_commune.postgres.spec.ts
           src/health/zone-publication-health.postgres.spec.ts
           src/zone_publication/zone_publication.postgres.spec.ts

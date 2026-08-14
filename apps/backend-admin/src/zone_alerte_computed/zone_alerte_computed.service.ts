@@ -164,6 +164,7 @@ export class ZoneAlerteComputedService {
     | DailyZonePublicationReuseContext
     | null
     | undefined;
+  private pendingPublicationScheduledFor: string | null | undefined;
   private activeComputeWorker: Worker | null = null;
   private computeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private queuedComputeWaiters: QueuedComputeWaiter[] = [];
@@ -216,9 +217,21 @@ export class ZoneAlerteComputedService {
     _computeHistoric = false,
     skipIfBusy = false,
     dailyPublicationReuse?: DailyZonePublicationReuseContext,
+    publicationScheduledFor?: string,
   ) {
     // Historic catch-up is exclusively owned by the persistent clock scheduler.
     void _computeHistoric;
+    if (
+      publicationScheduledFor !== undefined &&
+      dailyPublicationReuse !== undefined
+    ) {
+      throw new Error(
+        'A zone computation cannot use legacy and versioned daily contexts together',
+      );
+    }
+    if (publicationScheduledFor !== undefined) {
+      getCivilDateAtUtcNoon(publicationScheduledFor);
+    }
     this.departementsToUpdate = this.departementsToUpdate.concat(depsIds ?? []);
     if (!force && (!depsIds || depsIds.length === 0)) {
       this.pendingNationalCompute = true;
@@ -226,6 +239,19 @@ export class ZoneAlerteComputedService {
     this.pendingNormalCompute ||= !skipIfBusy;
     if (!skipIfBusy && !dailyPublicationReuse) {
       this.pendingDailyPublicationReuse = null;
+    }
+    if (!skipIfBusy && publicationScheduledFor === undefined) {
+      this.pendingPublicationScheduledFor = null;
+    }
+    if (publicationScheduledFor !== undefined) {
+      if (this.pendingPublicationScheduledFor === undefined) {
+        this.pendingPublicationScheduledFor = publicationScheduledFor;
+      } else if (
+        this.pendingPublicationScheduledFor !== null &&
+        this.pendingPublicationScheduledFor !== publicationScheduledFor
+      ) {
+        this.pendingPublicationScheduledFor = null;
+      }
     }
     if (dailyPublicationReuse) {
       if (this.pendingDailyPublicationReuse === undefined) {
@@ -263,8 +289,11 @@ export class ZoneAlerteComputedService {
       const effectiveSkipIfBusy = !this.pendingNormalCompute;
       const effectiveDailyPublicationReuse =
         this.pendingDailyPublicationReuse ?? undefined;
+      const effectivePublicationScheduledFor =
+        this.pendingPublicationScheduledFor ?? undefined;
       this.pendingNormalCompute = false;
       this.pendingDailyPublicationReuse = undefined;
+      this.pendingPublicationScheduledFor = undefined;
       queuedWaiters = this.queuedComputeWaiters.splice(0);
 
       const resolveQueuedWaiters = (result: unknown) => {
@@ -287,6 +316,9 @@ export class ZoneAlerteComputedService {
           skipIfBusy: effectiveSkipIfBusy,
           ...(effectiveDailyPublicationReuse
             ? { dailyPublicationReuse: effectiveDailyPublicationReuse }
+            : {}),
+          ...(effectivePublicationScheduledFor
+            ? { publicationScheduledFor: effectivePublicationScheduledFor }
             : {}),
         },
       });
@@ -559,6 +591,7 @@ export class ZoneAlerteComputedService {
   async computeAllOrReuseDailyPublication(
     depsIds: number[],
     dailyPublicationReuse?: DailyZonePublicationReuseContext,
+    publicationScheduledFor?: string,
   ) {
     if (depsIds.length === 0 && dailyPublicationReuse) {
       const reusablePublication =
@@ -577,7 +610,9 @@ export class ZoneAlerteComputedService {
         dailyPublicationReuse.scheduledFor,
       );
     }
-    return this.computeAll(depsIds, false);
+    return publicationScheduledFor === undefined
+      ? this.computeAll(depsIds, false)
+      : this.computeAll(depsIds, false, publicationScheduledFor);
   }
 
   async computeRegleAr(departement: Departement) {

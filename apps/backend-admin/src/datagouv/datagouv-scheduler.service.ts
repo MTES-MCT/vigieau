@@ -28,9 +28,6 @@ import {
 } from '../zone_publication/zone_publication.config';
 
 const DATAGOUV_JOB_KEY = 'datagouv:daily';
-const LEGACY_DATAGOUV_RUN_IDENTITY = {
-  publicationMode: 'legacy',
-} satisfies PublicationRunIdentity;
 
 type DatagouvHistoricRunIdentity = HistoricRunIdentity & {
   sourceRevision: string;
@@ -130,26 +127,50 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
     scheduledFor: string,
     now: Date,
   ): Promise<void> {
+    const sourceRevision =
+      await this.zonePublicationService.getSourceRevision();
+    const identity = {
+      publicationMode: 'legacy' as const,
+      sourceRevision,
+    } satisfies PublicationRunIdentity;
     const currentComputed = await this.registry.hasSucceeded(
       NATIONAL_DAILY_COMPUTE_JOB_KEY,
       scheduledFor,
+      identity,
     );
     if (!currentComputed) {
       return;
     }
+    const verifyCurrent = async () => {
+      const [currentSourceRevision, stillComputed] = await Promise.all([
+        this.zonePublicationService.getSourceRevision(),
+        this.registry.hasSucceeded(
+          NATIONAL_DAILY_COMPUTE_JOB_KEY,
+          scheduledFor,
+          identity,
+        ),
+      ]);
+      if (currentSourceRevision !== sourceRevision || !stillComputed) {
+        throw new Error(
+          `Legacy computation gate changed during Datagouv run for ${scheduledFor}`,
+        );
+      }
+    };
 
     await this.registry.executeDailyRun(
       DATAGOUV_JOB_KEY,
       scheduledFor,
       async () => {
-        await this.datagouvService.updateDatagouvData(
-          scheduledFor,
-          LEGACY_DATAGOUV_RUN_IDENTITY,
-        );
-        return LEGACY_DATAGOUV_RUN_IDENTITY;
+        await verifyCurrent();
+        await this.datagouvService.updateDatagouvData(scheduledFor, {
+          ...identity,
+          verifyCurrent,
+        });
+        await verifyCurrent();
+        return identity;
       },
       now,
-      { identity: LEGACY_DATAGOUV_RUN_IDENTITY },
+      { identity },
     );
   }
 

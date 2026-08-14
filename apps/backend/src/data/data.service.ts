@@ -21,6 +21,12 @@ import { Region } from '@shared/entities/region.entity';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
 import { Departement } from '@shared/entities/departement.entity';
+import {
+  DEFAULT_STATISTIC_PUBLICATION_DEADLINE,
+  getPublicationLagDays,
+  getStatisticPublicationExpectation as resolveStatisticPublicationExpectation,
+  type StatisticPublicationExpectation,
+} from './statistic-publication-freshness';
 
 interface StatisticPublicationState {
   revision: string;
@@ -63,6 +69,11 @@ export type StatisticCacheStatus = {
   fresh: boolean;
   mode: StatisticCacheMode;
   currentPublishedDate: string | null;
+  expectedPublishedDate: string;
+  publicationDeadline: string;
+  lagDays: number | null;
+  historicDirtyFrom: string | null;
+  historicDirtyThrough: string | null;
   firstDate: string | null;
   latestDate: string | null;
   dateCount: number;
@@ -77,6 +88,7 @@ export type StatisticCacheStatus = {
     status: string;
     processedCommuneCount: number;
     expectedCommuneCount: number;
+    updatedAt: string;
   } | null;
   lastError: {
     at: string;
@@ -901,6 +913,18 @@ export class DataService implements OnModuleInit {
       }
     }
 
+    let publicationExpectation: StatisticPublicationExpectation;
+    try {
+      publicationExpectation = this.getStatisticPublicationExpectation();
+    } catch {
+      stateCheckFailed = true;
+      stateCheckErrorPhase ??= 'publication-deadline-check';
+      publicationExpectation = resolveStatisticPublicationExpectation(
+        new Date(),
+        DEFAULT_STATISTIC_PUBLICATION_DEADLINE,
+      );
+    }
+
     const cache = this.certifiedDataCache;
     const usable = Boolean(cache);
     let mode: StatisticCacheMode = cache?.mode ?? 'versioned';
@@ -939,10 +963,21 @@ export class DataService implements OnModuleInit {
       (snapshotCoverage.incompleteSnapshotCount === 0 &&
         !this.legacySnapshotCoverageDirty &&
         this.isLegacyCacheContinuous(cache, availableState));
+    const lagDays = getPublicationLagDays(
+      availableState?.currentPublishedDate ?? null,
+      publicationExpectation.expectedPublishedDate,
+    );
+    const currentPublicationIsFresh = Boolean(
+      availableState?.currentPublishedDate &&
+      availableState.currentPublishedDate >=
+        publicationExpectation.expectedPublishedDate &&
+      availableState.currentPublishedDate <= publicationExpectation.today,
+    );
     const fresh = Boolean(
       cache &&
       stateMatches &&
       cache.latestDate === availableState?.currentPublishedDate &&
+      currentPublicationIsFresh &&
       historicCoverageIsComplete &&
       legacySnapshotCoverageIsComplete &&
       !stateCheckFailed &&
@@ -956,6 +991,11 @@ export class DataService implements OnModuleInit {
       fresh: fresh && !stateCheckFailed,
       mode,
       currentPublishedDate: availableState?.currentPublishedDate ?? null,
+      expectedPublishedDate: publicationExpectation.expectedPublishedDate,
+      publicationDeadline: publicationExpectation.deadline,
+      lagDays,
+      historicDirtyFrom: availableState?.historicDirtyFrom ?? null,
+      historicDirtyThrough: availableState?.historicDirtyThrough ?? null,
       firstDate: cache?.firstDate ?? null,
       latestDate: cache?.latestDate ?? null,
       dateCount: cache?.dateCount ?? 0,
@@ -988,6 +1028,14 @@ export class DataService implements OnModuleInit {
       this.startCertifiedDataRefresh();
     }
     return result;
+  }
+
+  private getStatisticPublicationExpectation(): StatisticPublicationExpectation {
+    return resolveStatisticPublicationExpectation(
+      new Date(),
+      process.env.STATISTIC_PUBLICATION_DEADLINE?.trim() ||
+        DEFAULT_STATISTIC_PUBLICATION_DEADLINE,
+    );
   }
 
   private async getLegacySnapshotCoverageStatus(
@@ -1035,7 +1083,7 @@ export class DataService implements OnModuleInit {
         WITH incomplete_snapshot AS MATERIALIZED (
           SELECT
             "snapshotDate", "scope", "status",
-            "processedCommuneCount", "expectedCommuneCount"
+            "processedCommuneCount", "expectedCommuneCount", "updatedAt"
           FROM "statistic_commune_snapshot"
           WHERE "scope" = 'bootstrap'
             OR (
@@ -1059,7 +1107,8 @@ export class DataService implements OnModuleInit {
           oldest."scope" AS "oldestSnapshotScope",
           oldest."status" AS "oldestSnapshotStatus",
           oldest."processedCommuneCount" AS "oldestProcessedCommuneCount",
-          oldest."expectedCommuneCount" AS "oldestExpectedCommuneCount"
+          oldest."expectedCommuneCount" AS "oldestExpectedCommuneCount",
+          oldest."updatedAt" AS "oldestSnapshotUpdatedAt"
         FROM (SELECT 1) singleton
         LEFT JOIN oldest_incomplete_snapshot oldest ON true
       `,
@@ -1090,6 +1139,7 @@ export class DataService implements OnModuleInit {
       !coverage?.oldestSnapshotDate ||
       !coverage?.oldestSnapshotScope ||
       !coverage?.oldestSnapshotStatus ||
+      !coverage?.oldestSnapshotUpdatedAt ||
       !Number.isSafeInteger(processedCommuneCount) ||
       !Number.isSafeInteger(expectedCommuneCount)
     ) {
@@ -1103,6 +1153,7 @@ export class DataService implements OnModuleInit {
         status: String(coverage.oldestSnapshotStatus),
         processedCommuneCount,
         expectedCommuneCount,
+        updatedAt: new Date(coverage.oldestSnapshotUpdatedAt).toISOString(),
       },
     };
   }

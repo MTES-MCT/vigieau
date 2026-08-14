@@ -1,3 +1,5 @@
+# GitHub loads scheduled workflows from the default branch (master). Keep this
+# file on master; each job checks out develop, the branch deployed to production.
 name: Production smoke
 
 on:
@@ -16,8 +18,12 @@ jobs:
   statistics:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      VIGIEAU_STATISTICS_DEADLINE: "06:00"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: develop
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -33,6 +39,8 @@ jobs:
       VIGIEAU_MIN_ZONE_COUNT: 1
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: develop
       - uses: actions/setup-node@v4
         with:
           node-version: 24

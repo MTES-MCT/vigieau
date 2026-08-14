@@ -59,10 +59,13 @@ import { CreateUpdateArreteRestrictionDto } from './dto/create_update_arrete_res
 import { PublishArreteRestrictionDto } from './dto/publish_arrete_restriction.dto';
 import { RepealArreteRestrictionDto } from './dto/repeal_arrete_restriction.dto';
 
+export type CurrentZoneRecomputeResult = 'busy' | 'empty' | 'processed';
+
 @Injectable()
 export class ArreteRestrictionService {
   private readonly logger = new RegleauLogger('ArreteRestrictionService');
-  private currentZoneRecomputeInFlight: Promise<void> | null = null;
+  private currentZoneRecomputeInFlight: Promise<CurrentZoneRecomputeResult> | null =
+    null;
 
   constructor(
     @InjectRepository(ArreteRestriction)
@@ -2084,14 +2087,16 @@ export class ArreteRestrictionService {
   }
 
   @BusinessCron(CronExpression.EVERY_5_MINUTES)
-  async processPendingCurrentZoneRecomputes(): Promise<void> {
+  async processPendingCurrentZoneRecomputes(
+    scheduledFor?: string,
+  ): Promise<CurrentZoneRecomputeResult> {
     if (this.currentZoneRecomputeInFlight) {
       return this.currentZoneRecomputeInFlight;
     }
-    const run = this.runPendingCurrentZoneRecomputes();
+    const run = this.runPendingCurrentZoneRecomputes(scheduledFor);
     this.currentZoneRecomputeInFlight = run;
     try {
-      await run;
+      return await run;
     } finally {
       if (this.currentZoneRecomputeInFlight === run) {
         this.currentZoneRecomputeInFlight = null;
@@ -2099,7 +2104,9 @@ export class ArreteRestrictionService {
     }
   }
 
-  private async runPendingCurrentZoneRecomputes(): Promise<void> {
+  private async runPendingCurrentZoneRecomputes(
+    scheduledFor?: string,
+  ): Promise<CurrentZoneRecomputeResult> {
     const queryRunner =
       this.arreteRestrictionRepository.manager.connection.createQueryRunner();
     await queryRunner.connect();
@@ -2110,9 +2117,10 @@ export class ArreteRestrictionService {
       );
       locked = lockResult?.locked === true;
       if (!locked) {
-        return;
+        return 'busy';
       }
 
+      let processed = false;
       for (let cycle = 0; cycle < 3; cycle += 1) {
         const requests = (await queryRunner.query(
           `
@@ -2122,18 +2130,30 @@ export class ArreteRestrictionService {
           `,
         )) as Array<{ departementId: number; generation: string }>;
         if (requests.length === 0) {
-          return;
+          return processed ? 'processed' : 'empty';
         }
         const departementIds = requests.map(({ departementId }) =>
           Number(departementId),
         );
         const generations = requests.map(({ generation }) => generation);
         try {
-          const result = (await this.zoneAlerteComputedService.askCompute(
-            isZonePublicationEnabled() ? [] : departementIds,
-            false,
-            false,
-          )) as { skipped?: boolean } | undefined;
+          const computeDepartementIds = isZonePublicationEnabled()
+            ? []
+            : departementIds;
+          const result = (await (scheduledFor === undefined
+            ? this.zoneAlerteComputedService.askCompute(
+                computeDepartementIds,
+                false,
+                false,
+              )
+            : this.zoneAlerteComputedService.askCompute(
+                computeDepartementIds,
+                false,
+                false,
+                false,
+                undefined,
+                scheduledFor,
+              ))) as { skipped?: boolean } | undefined;
           if (result?.skipped) {
             throw new Error('Current zone recompute was skipped');
           }
@@ -2148,6 +2168,7 @@ export class ArreteRestrictionService {
             `,
             [departementIds, generations],
           );
+          processed = true;
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -2168,6 +2189,7 @@ export class ArreteRestrictionService {
           throw error;
         }
       }
+      return processed ? 'processed' : 'empty';
     } finally {
       try {
         if (locked) {
@@ -2194,9 +2216,12 @@ export class ArreteRestrictionService {
     departements?: Departement[],
     computeHistoric?: boolean,
     dailyPublicationReuse?: DailyZonePublicationReuseContext,
+    scheduledFor?: string,
   ) {
     const businessDate =
-      dailyPublicationReuse?.scheduledFor ?? getCurrentParisCivilDate();
+      dailyPublicationReuse?.scheduledFor ??
+      scheduledFor ??
+      getCurrentParisCivilDate();
     const departementFilter = departements
       ? departements.map((departement) => departement.id)
       : null;
@@ -2338,8 +2363,7 @@ export class ArreteRestrictionService {
     );
 
     if (!dailyPublicationReuse) {
-      await this.processPendingCurrentZoneRecomputes();
-      return;
+      return this.processPendingCurrentZoneRecomputes(scheduledFor);
     }
     try {
       await this.statisticDepartementService.computeDepartementStatistics();
@@ -2354,6 +2378,155 @@ export class ArreteRestrictionService {
       false,
       dailyPublicationReuse,
     );
+  }
+
+  async assertLegacyDailyComputationCompleted(
+    scheduledFor: string,
+  ): Promise<{ sourceRevision: string }> {
+    return this.assertDailyComputationPostcondition(
+      scheduledFor,
+      ['completed'],
+      true,
+    );
+  }
+
+  async assertVersionedDailyComputationReady(
+    scheduledFor: string,
+    sourceRevision: string,
+  ): Promise<void> {
+    const result = await this.assertDailyComputationPostcondition(
+      scheduledFor,
+      ['ready', 'completed'],
+      false,
+    );
+    if (result.sourceRevision !== sourceRevision) {
+      throw new Error(
+        `Daily computation ${scheduledFor} uses source revision ${result.sourceRevision} instead of ${sourceRevision}`,
+      );
+    }
+  }
+
+  private async assertDailyComputationPostcondition(
+    scheduledFor: string,
+    acceptedSnapshotStatuses: Array<'ready' | 'completed'>,
+    requirePublishedDate: boolean,
+  ): Promise<{ sourceRevision: string }> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduledFor)) {
+      throw new Error(`Invalid daily computation date: ${scheduledFor}`);
+    }
+    const [state] = await this.arreteRestrictionRepository.manager.query(
+      `
+        SELECT
+          snapshot."status" AS "snapshotStatus",
+          snapshot."expectedCommuneCount",
+          snapshot."processedCommuneCount",
+          snapshot."sourceRevision"::text AS "snapshotSourceRevision",
+          source_state."revision"::text AS "currentSourceRevision",
+          publication_state."currentPublishedDate"::text
+            AS "currentPublishedDate",
+          (SELECT COUNT(*)::integer FROM "commune") AS "communeCount",
+          (SELECT COUNT(*)::integer FROM "departement")
+            AS "expectedDepartementCount",
+          (
+            SELECT COUNT(*)::integer
+            FROM "departement" departement
+            JOIN "statistic_departement" statistic_departement
+              ON statistic_departement."departementId" = departement."id"
+            WHERE (
+              SELECT COUNT(*)
+              FROM jsonb_array_elements(
+                COALESCE(statistic_departement."restrictions", '[]'::jsonb)
+              ) AS restriction(value)
+              WHERE restriction.value ->> 'date' = $1::text
+            ) = 1
+          ) AS "departementRestrictionCount",
+          (
+            SELECT COUNT(*)::integer
+            FROM "departement" departement
+            WHERE COALESCE(
+              (
+                SELECT statistic."departementSituation"::jsonb
+                FROM "statistic" statistic
+                WHERE statistic."date" = $1::date
+              ),
+              '{}'::jsonb
+            ) ? departement."code"
+          ) AS "departementSituationCount",
+          (
+            SELECT COUNT(*)::integer
+            FROM jsonb_object_keys(
+              COALESCE(
+                (
+                  SELECT statistic."departementSituation"::jsonb
+                  FROM "statistic" statistic
+                  WHERE statistic."date" = $1::date
+                ),
+                '{}'::jsonb
+              )
+            ) AS situation_key
+          ) AS "departementSituationKeyCount",
+          (SELECT COUNT(*)::integer FROM "current_zone_recompute_request")
+            AS "pendingQueueCount"
+        FROM "zone_publication_source_state" source_state
+        CROSS JOIN "statistic_publication_state" publication_state
+        LEFT JOIN "statistic_commune_snapshot" snapshot
+          ON snapshot."snapshotDate" = $1::date
+         AND snapshot."scope" = 'national'
+        WHERE source_state."id" = 1
+          AND publication_state."id" = 1
+      `,
+      [scheduledFor],
+    );
+    const snapshotStatus = String(state?.snapshotStatus ?? 'missing');
+    const expectedCommuneCount = Number(state?.expectedCommuneCount ?? 0);
+    const processedCommuneCount = Number(state?.processedCommuneCount ?? 0);
+    const communeCount = Number(state?.communeCount ?? 0);
+    const expectedDepartementCount = Number(
+      state?.expectedDepartementCount ?? 0,
+    );
+    const departementRestrictionCount = Number(
+      state?.departementRestrictionCount ?? 0,
+    );
+    const departementSituationCount = Number(
+      state?.departementSituationCount ?? 0,
+    );
+    const departementSituationKeyCount = Number(
+      state?.departementSituationKeyCount ?? 0,
+    );
+    const pendingQueueCount = Number(state?.pendingQueueCount ?? 0);
+    const snapshotSourceRevision = String(
+      state?.snapshotSourceRevision ?? 'missing',
+    );
+    const currentSourceRevision = String(
+      state?.currentSourceRevision ?? 'missing',
+    );
+    const currentPublishedDate = state?.currentPublishedDate
+      ? String(state.currentPublishedDate).slice(0, 10)
+      : null;
+    const valid =
+      acceptedSnapshotStatuses.includes(
+        snapshotStatus as 'ready' | 'completed',
+      ) &&
+      expectedCommuneCount > 0 &&
+      expectedCommuneCount === communeCount &&
+      processedCommuneCount === expectedCommuneCount &&
+      snapshotSourceRevision === currentSourceRevision &&
+      expectedDepartementCount === 101 &&
+      departementRestrictionCount === 101 &&
+      departementSituationCount === 101 &&
+      departementSituationKeyCount === 101 &&
+      pendingQueueCount === 0 &&
+      (!requirePublishedDate || currentPublishedDate === scheduledFor);
+    if (!valid) {
+      throw new Error(
+        `Daily computation postcondition failed for ${scheduledFor}: ` +
+          `snapshot=${snapshotStatus}, communes=${processedCommuneCount}/${expectedCommuneCount}/${communeCount}, ` +
+          `source=${snapshotSourceRevision}/${currentSourceRevision}, ` +
+          `departements=${departementRestrictionCount}/${departementSituationCount}/${departementSituationKeyCount}/${expectedDepartementCount}, ` +
+          `published=${currentPublishedDate ?? 'missing'}, queue=${pendingQueueCount}`,
+      );
+    }
+    return { sourceRevision: currentSourceRevision };
   }
 
   async catchUpHistoricComputations(

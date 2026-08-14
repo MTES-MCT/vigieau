@@ -29,11 +29,26 @@ import {
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
 import { ArreteCadreService } from './arrete_cadre.service';
 
+interface DailyComputationContext {
+  scheduledFor: string;
+  publicationMode: 'legacy' | 'versioned';
+  sourceRevision: string;
+  publicationId?: string;
+  materializationVersion?: number;
+}
+
 @Injectable()
 export class ArreteCadreScheduler implements OnApplicationBootstrap {
   private readonly logger = new RegleauLogger('ArreteCadreScheduler');
   private catchUpScheduled = false;
-  private updateInFlight: Promise<void> | null = null;
+  private currentUpdateInFlight: {
+    scheduledFor: string;
+    run: Promise<DailyComputationContext | null>;
+  } | null = null;
+  private historicUpdateInFlight: {
+    scheduledFor: string;
+    run: Promise<void>;
+  } | null = null;
 
   constructor(
     private readonly arreteCadreService: ArreteCadreService,
@@ -58,32 +73,48 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     }, 0).unref();
   }
 
-  @BusinessCron(CronExpression.EVERY_5_MINUTES)
+  @BusinessCron(CronExpression.EVERY_5_MINUTES, { waitForCompletion: false })
   async updateIfDue(now = new Date()): Promise<void> {
-    if (this.updateInFlight) {
-      return this.updateInFlight;
-    }
-    const update = this.runUpdateIfDue(now);
-    this.updateInFlight = update;
-    try {
-      await update;
-    } finally {
-      if (this.updateInFlight === update) {
-        this.updateInFlight = null;
-      }
-    }
-  }
-
-  private async runUpdateIfDue(now: Date): Promise<void> {
     const scheduledFor = getScheduledCivilDate(
       now,
       NATIONAL_COMPUTE_START_HOUR,
     );
-    if (!isZonePublicationEnabled()) {
-      await this.updateLegacyIfDue(scheduledFor, now);
+    const current = await this.updateCurrentIfDue(scheduledFor, now);
+    if (!current) {
       return;
     }
+    await this.updateHistoricIfDue(current, now);
+  }
 
+  private async updateCurrentIfDue(
+    scheduledFor: string,
+    now: Date,
+  ): Promise<DailyComputationContext | null> {
+    if (this.currentUpdateInFlight) {
+      if (this.currentUpdateInFlight.scheduledFor !== scheduledFor) {
+        this.logger.log(
+          `CURRENT COMPUTE ${scheduledFor} deferred while ${this.currentUpdateInFlight.scheduledFor} is in progress`,
+        );
+      }
+      return null;
+    }
+    const run = isZonePublicationEnabled()
+      ? this.runVersionedCurrentIfDue(scheduledFor, now)
+      : this.runLegacyCurrentIfDue(scheduledFor, now);
+    this.currentUpdateInFlight = { scheduledFor, run };
+    try {
+      return await run;
+    } finally {
+      if (this.currentUpdateInFlight?.run === run) {
+        this.currentUpdateInFlight = null;
+      }
+    }
+  }
+
+  private async runVersionedCurrentIfDue(
+    scheduledFor: string,
+    now: Date,
+  ): Promise<DailyComputationContext | null> {
     const expectedSourceRevision =
       await this.zonePublicationService.getSourceRevision();
     const currentResult = await this.registry.executeDailyRun(
@@ -112,6 +143,10 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
         }
         const computedSourceRevision = String(sourceRevision);
         await this.assertSourceRevision(computedSourceRevision);
+        await this.arreteCadreService.assertVersionedDailyComputationReady(
+          scheduledFor,
+          computedSourceRevision,
+        );
         return {
           publicationId,
           sourceRevision: computedSourceRevision,
@@ -127,7 +162,7 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
       },
     );
     if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
-      return;
+      return null;
     }
 
     const currentMetadata = await this.registry.getSucceededRunMetadata(
@@ -149,42 +184,160 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     }
     const computedSourceRevision = String(sourceRevision);
     await this.assertSourceRevision(computedSourceRevision);
-    const historicIdentity = await this.getHistoricRunIdentity(
+    await this.arreteCadreService.assertVersionedDailyComputationReady(
+      scheduledFor,
       computedSourceRevision,
-      ZONE_PUBLICATION_MATERIALIZATION_VERSION,
     );
+    return {
+      scheduledFor,
+      publicationMode: 'versioned',
+      publicationId,
+      sourceRevision: computedSourceRevision,
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    };
+  }
+
+  private async runLegacyCurrentIfDue(
+    scheduledFor: string,
+    now: Date,
+  ): Promise<DailyComputationContext | null> {
+    const expectedSourceRevision =
+      await this.zonePublicationService.getSourceRevision();
+    let completedSourceRevision: string | undefined;
+    const currentResult = await this.registry.executeDailyRun(
+      NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      scheduledFor,
+      async () => {
+        const queueResult =
+          await this.arreteCadreService.updateArreteCadreStatut(
+            false,
+            undefined,
+            scheduledFor,
+          );
+        if (!['empty', 'processed'].includes(String(queueResult))) {
+          throw new Error(
+            `Current zone recompute queue is ${String(queueResult ?? 'unknown')} for ${scheduledFor}`,
+          );
+        }
+        const completed =
+          await this.arreteCadreService.assertLegacyDailyComputationCompleted(
+            scheduledFor,
+          );
+        completedSourceRevision = completed.sourceRevision;
+        await this.assertSourceRevision(completed.sourceRevision);
+        return {
+          publicationMode: 'legacy' as const,
+          sourceRevision: completed.sourceRevision,
+        };
+      },
+      now,
+      {
+        identity: {
+          publicationMode: 'legacy',
+          sourceRevision: expectedSourceRevision,
+        },
+      },
+    );
+    if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
+      return null;
+    }
+    if (completedSourceRevision === undefined) {
+      const completed =
+        await this.arreteCadreService.assertLegacyDailyComputationCompleted(
+          scheduledFor,
+        );
+      completedSourceRevision = completed.sourceRevision;
+    }
+    await this.assertSourceRevision(completedSourceRevision);
+    return {
+      scheduledFor,
+      publicationMode: 'legacy',
+      sourceRevision: completedSourceRevision,
+    };
+  }
+
+  private async updateHistoricIfDue(
+    current: DailyComputationContext,
+    now: Date,
+  ): Promise<void> {
+    if (this.historicUpdateInFlight) {
+      if (this.historicUpdateInFlight.scheduledFor !== current.scheduledFor) {
+        this.logger.log(
+          `HISTORIC COMPUTE ${current.scheduledFor} deferred while ${this.historicUpdateInFlight.scheduledFor} is in progress`,
+        );
+      }
+      return;
+    }
+    const run = this.runHistoricIfDue(current, now);
+    this.historicUpdateInFlight = {
+      scheduledFor: current.scheduledFor,
+      run,
+    };
+    try {
+      await run;
+    } finally {
+      if (this.historicUpdateInFlight?.run === run) {
+        this.historicUpdateInFlight = null;
+      }
+    }
+  }
+
+  private async runHistoricIfDue(
+    current: DailyComputationContext,
+    now: Date,
+  ): Promise<void> {
+    const materializationVersion = current.materializationVersion;
+    const historicIdentity = await this.getHistoricRunIdentity(
+      current.sourceRevision,
+      materializationVersion,
+    );
+    const publicationIdentity =
+      current.publicationMode === 'versioned'
+        ? historicIdentity
+        : { publicationMode: 'legacy' as const, ...historicIdentity };
 
     const historicResult = await this.registry.executeDailyRun(
       NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
-      scheduledFor,
+      current.scheduledFor,
       async () => {
         const completedState =
           await this.arreteCadreService.catchUpHistoricComputations(
-            shiftCivilDate(scheduledFor, -1),
-            computedSourceRevision,
+            shiftCivilDate(current.scheduledFor, -1),
+            current.sourceRevision,
           );
-        await this.assertSourceRevision(computedSourceRevision);
-        return buildHistoricRunIdentity(completedState, {
-          sourceRevision: computedSourceRevision,
-          materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        await this.assertSourceRevision(current.sourceRevision);
+        const completedIdentity = buildHistoricRunIdentity(completedState, {
+          sourceRevision: current.sourceRevision,
+          ...(materializationVersion === undefined
+            ? {}
+            : { materializationVersion }),
         });
+        return {
+          ...(current.publicationMode === 'legacy'
+            ? { publicationMode: 'legacy' as const }
+            : {}),
+          ...completedIdentity,
+        };
       },
       now,
-      { identity: historicIdentity },
+      { identity: publicationIdentity },
     );
-    if (['succeeded', 'already_succeeded'].includes(historicResult)) {
-      await this.assertSourceRevision(computedSourceRevision);
+    if (
+      current.publicationMode === 'versioned' &&
+      ['succeeded', 'already_succeeded'].includes(historicResult)
+    ) {
+      await this.assertSourceRevision(current.sourceRevision);
       const marked =
         await this.zonePublicationService.promoteCertifiedPublicationIfAvailable(
           {
-            scheduledFor,
-            sourceRevision: computedSourceRevision,
-            preferredPublicationId: publicationId,
+            scheduledFor: current.scheduledFor,
+            sourceRevision: current.sourceRevision,
+            preferredPublicationId: current.publicationId,
           },
         );
       if (!marked) {
         throw new Error(
-          `Zone publication ${publicationId} was superseded before candidacy`,
+          `Zone publication ${current.publicationId} was superseded before candidacy`,
         );
       }
     }
@@ -197,35 +350,6 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
         `Zone source revision changed during computation (${expected} -> ${current})`,
       );
     }
-  }
-
-  private async updateLegacyIfDue(
-    scheduledFor: string,
-    now: Date,
-  ): Promise<void> {
-    const currentResult = await this.registry.executeDailyRun(
-      NATIONAL_DAILY_COMPUTE_JOB_KEY,
-      scheduledFor,
-      () => this.arreteCadreService.updateArreteCadreStatut(false),
-      now,
-    );
-    if (!['succeeded', 'already_succeeded'].includes(currentResult)) {
-      return;
-    }
-    const historicIdentity = await this.getHistoricRunIdentity();
-    await this.registry.executeDailyRun(
-      NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
-      scheduledFor,
-      async () => {
-        const completedState =
-          await this.arreteCadreService.catchUpHistoricComputations(
-            shiftCivilDate(scheduledFor, -1),
-          );
-        return buildHistoricRunIdentity(completedState);
-      },
-      now,
-      { identity: historicIdentity },
-    );
   }
 
   private async getHistoricRunIdentity(

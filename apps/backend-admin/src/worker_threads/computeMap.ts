@@ -13,6 +13,7 @@ interface WorkerData {
   depsIds: number[];
   skipIfBusy?: boolean;
   dailyPublicationReuse?: DailyZonePublicationReuseContext;
+  publicationScheduledFor?: string;
 }
 
 async function closeApp(app: INestApplicationContext | undefined) {
@@ -38,8 +39,12 @@ async function run() {
     app = await NestFactory.createApplicationContext(AppModule);
     const zoneAlerteComputedService = app.get(ZoneAlerteComputedService);
     const dataSource = app.get(DataSource);
-    const { depsIds, skipIfBusy, dailyPublicationReuse } =
-      workerData as WorkerData;
+    const {
+      depsIds,
+      skipIfBusy,
+      dailyPublicationReuse,
+      publicationScheduledFor,
+    } = workerData as WorkerData;
 
     logger.log(`Starting compute with depsIds: ${depsIds}`);
     const lockResult = await withZoneComputeLock(
@@ -49,6 +54,7 @@ async function run() {
         zoneAlerteComputedService.computeAllOrReuseDailyPublication(
           depsIds,
           dailyPublicationReuse,
+          publicationScheduledFor,
         ),
       { skipIfBusy },
     );

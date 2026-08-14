@@ -90,6 +90,41 @@ describe('ArreteCadreService scheduled status update', () => {
     ).toHaveBeenCalledWith(null, false, reuseContext);
   });
 
+  it('propagates an explicit legacy scheduled date to the restriction update', async () => {
+    const transactionRepository = {
+      query: jest.fn().mockResolvedValue([]),
+    };
+    const repository = {
+      manager: {
+        transaction: jest.fn(async (_isolation, callback) =>
+          callback({ getRepository: () => transactionRepository }),
+        ),
+      },
+    };
+    const arreteRestrictionService = {
+      updateArreteRestrictionStatut: jest.fn().mockResolvedValue('processed'),
+    };
+    const service = new ArreteCadreService(
+      repository as never,
+      arreteRestrictionService as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+    );
+
+    await service.updateArreteCadreStatut(false, undefined, '2026-08-01');
+
+    expect(
+      arreteRestrictionService.updateArreteRestrictionStatut,
+    ).toHaveBeenCalledWith(null, false, undefined, '2026-08-01');
+  });
+
   it('does not select unknown legacy boundaries for date reconciliation', async () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'false';
     const transactionRepository = {
@@ -163,7 +198,13 @@ describe('ArreteCadreScheduler', () => {
   const createScheduler = () => {
     const completedRunMetadata: unknown[] = [];
     const arreteCadreService = {
-      updateArreteCadreStatut: jest.fn().mockResolvedValue(undefined),
+      updateArreteCadreStatut: jest.fn().mockResolvedValue('processed'),
+      assertLegacyDailyComputationCompleted: jest
+        .fn()
+        .mockResolvedValue({ sourceRevision: '42' }),
+      assertVersionedDailyComputationReady: jest
+        .fn()
+        .mockResolvedValue(undefined),
       catchUpHistoricComputations: jest
         .fn()
         .mockResolvedValue(historicCursorState),
@@ -208,6 +249,15 @@ describe('ArreteCadreScheduler', () => {
     };
   };
 
+  it('allows cron reentry so a new daily date is not hidden by historic work', () => {
+    expect(
+      Reflect.getMetadata(
+        'SCHEDULE_CRON_OPTIONS',
+        ArreteCadreScheduler.prototype.updateIfDue,
+      ),
+    ).toMatchObject({ waitForCompletion: false });
+  });
+
   it.each([
     ['summer before 02:00', '2026-07-31T23:59:00Z', '2026-07-31'],
     ['summer from 02:00', '2026-08-01T00:00:00Z', '2026-08-01'],
@@ -229,13 +279,22 @@ describe('ArreteCadreScheduler', () => {
         expectedDate,
         expect.any(Function),
         new Date(now),
+        {
+          identity: {
+            publicationMode: 'legacy',
+            sourceRevision: '42',
+          },
+        },
       );
       expect(
         harness.arreteCadreService.updateArreteCadreStatut,
-      ).toHaveBeenCalledWith(false);
+      ).toHaveBeenCalledWith(false, undefined, expectedDate);
       expect(
         harness.arreteCadreService.catchUpHistoricComputations,
-      ).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+      ).toHaveBeenCalledWith(
+        expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+        '42',
+      );
     },
   );
 
@@ -251,7 +310,13 @@ describe('ArreteCadreScheduler', () => {
       '2026-08-01',
       expect.any(Function),
       now,
-      { identity: historicRunIdentity },
+      {
+        identity: {
+          publicationMode: 'legacy',
+          sourceRevision: '42',
+          ...historicRunIdentity,
+        },
+      },
     );
   });
 
@@ -271,10 +336,59 @@ describe('ArreteCadreScheduler', () => {
     expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(3);
   });
 
+  it('does not record a daily success while the current queue is busy', async () => {
+    const harness = createScheduler();
+    harness.arreteCadreService.updateArreteCadreStatut.mockResolvedValue(
+      'busy',
+    );
+
+    await expect(
+      harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z')),
+    ).rejects.toThrow('Current zone recompute queue is busy');
+
+    expect(
+      harness.arreteCadreService.assertLegacyDailyComputationCompleted,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('starts the new daily date while the previous historic catch-up is running', async () => {
+    const harness = createScheduler();
+    let releaseHistoric!: (value: typeof historicCursorState) => void;
+    harness.arreteCadreService.catchUpHistoricComputations.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseHistoric = resolve;
+      }),
+    );
+
+    const previousDate = harness.service.updateIfDue(
+      new Date('2026-08-13T08:00:00Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).toHaveBeenCalledTimes(1);
+
+    await harness.service.updateIfDue(new Date('2026-08-14T08:00:00Z'));
+
+    const dailyDates = harness.registry.executeDailyRun.mock.calls
+      .filter(([jobKey]) => jobKey === NATIONAL_DAILY_COMPUTE_JOB_KEY)
+      .map(([, scheduledFor]) => scheduledFor);
+    expect(dailyDates).toEqual(['2026-08-13', '2026-08-14']);
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledWith(false, undefined, '2026-08-14');
+
+    releaseHistoric(historicCursorState);
+    await previousDate;
+  });
+
   it('does not overlap startup catch-up and cron execution', async () => {
     const harness = createScheduler();
-    let releaseCurrent: () => void;
-    const currentPending = new Promise<void>((resolve) => {
+    let releaseCurrent: (result: string) => void;
+    const currentPending = new Promise<string>((resolve) => {
       releaseCurrent = resolve;
     });
     harness.arreteCadreService.updateArreteCadreStatut.mockReturnValue(
@@ -290,8 +404,9 @@ describe('ArreteCadreScheduler', () => {
     );
 
     expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(1);
-    releaseCurrent!();
-    await Promise.all([startupCatchUp, cronRun]);
+    await expect(cronRun).resolves.toBeUndefined();
+    releaseCurrent!('processed');
+    await startupCatchUp;
 
     expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(2);
     expect(

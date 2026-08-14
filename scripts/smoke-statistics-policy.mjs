@@ -14,6 +14,12 @@ function parseDeadline(deadline) {
   return hour * 60 + minute;
 }
 
+function shiftDate(date, days) {
+  const shifted = new Date(`${date}T00:00:00Z`);
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return shifted.toISOString().slice(0, 10);
+}
+
 export function getStatisticFreshnessPolicy({
   now = new Date(),
   deadline = DEFAULT_STATISTICS_DEADLINE,
@@ -50,8 +56,11 @@ export function getStatisticFreshnessPolicy({
 
   return {
     today: `${parts.year}-${parts.month}-${parts.day}`,
+    expectedPublishedDate: afterDeadline
+      ? `${parts.year}-${parts.month}-${parts.day}`
+      : shiftDate(`${parts.year}-${parts.month}-${parts.day}`, -1),
     deadline,
     afterDeadline,
-    maximumLagDays: maximumLagDays ?? (afterDeadline ? 0 : 1),
+    maximumLagDays: afterDeadline ? 0 : (maximumLagDays ?? 1),
   };
 }
