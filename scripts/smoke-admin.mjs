@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import {
+  assertZonePublicationResponse,
+  parseExpectedZonePublicationMode,
+} from "./smoke-admin-zone-publication.mjs";
 
 const apiBase = (
   process.env.VIGIEAU_ADMIN_API_URL || "https://api.admin.vigieau.beta.gouv.fr"
@@ -18,6 +22,9 @@ const expectedDepartmentCount = Number(
 );
 const expectedMapArchiveStatus =
   process.env.VIGIEAU_EXPECT_MAP_ARCHIVES || "disabled";
+const expectedZonePublicationMode = parseExpectedZonePublicationMode(
+  process.env.VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE,
+);
 
 assert.ok(
   expectedSandreModes.length > 0 &&
@@ -38,28 +45,23 @@ async function json(path) {
 }
 
 async function jsonUrl(url) {
+  return (await jsonUrlResponse(url)).body;
+}
+
+async function jsonUrlResponse(url, expectedStatuses = [200]) {
   const response = await fetch(url, {
     headers: { Accept: "application/json", "Cache-Control": "no-cache" },
     signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await response.text();
-  assert.equal(
-    response.status,
-    200,
+  assert.ok(
+    expectedStatuses.includes(response.status),
     `${url} returned ${response.status}: ${body.slice(0, 500)}`,
   );
-  return body ? JSON.parse(body) : null;
-}
-
-function collectObjectKeys(value, keys = []) {
-  if (!value || typeof value !== "object") {
-    return keys;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    keys.push(key);
-    collectObjectKeys(child, keys);
-  }
-  return keys;
+  return {
+    status: response.status,
+    body: body ? JSON.parse(body) : null,
+  };
 }
 
 const frontResponse = await fetch(`${frontBase}/`, {
@@ -91,46 +93,16 @@ assert.deepEqual(
   "The admin API is not ready",
 );
 
-const zonePublication = await json("health/zone-publication");
-assert.equal(
-  zonePublication.status,
-  "healthy",
-  "The zone publication is not fully synchronized",
+const zonePublicationResponse = await jsonUrlResponse(
+  `${apiBase}/api/health/zone-publication`,
+  [200, 503],
 );
-assert.equal(
-  zonePublication.serving,
-  true,
-  "The active zone publication is not served by every live public instance",
-);
-for (const key of [
-  "enabled",
-  "automaticPublishing",
-  "clock",
-  "activeServing",
-  "activeCurrent",
-  "candidateClear",
-  "legacyPromotion",
-  "currentStatistics",
-  "currentSnapshot",
-  "historicStatistics",
-  "historicClean",
-  "historicCursors",
-  "certifiedRun",
-  "snapshotsComplete",
-]) {
-  assert.equal(
-    zonePublication.checks?.[key],
-    true,
-    `Zone publication check ${key} is not healthy`,
-  );
-}
-assert.equal(
-  collectObjectKeys(zonePublication).some((key) =>
-    /(^id$|Id$|revision|version|error)/i.test(key),
-  ),
-  false,
-  "The public zone publication health exposes an internal field",
-);
+const zonePublication = zonePublicationResponse.body;
+assertZonePublicationResponse({
+  body: zonePublication,
+  httpStatus: zonePublicationResponse.status,
+  mode: expectedZonePublicationMode,
+});
 
 const sandreReferences = await json("health/sandre-references");
 assert.equal(
@@ -282,6 +254,7 @@ console.log(
   JSON.stringify({
     status: "ok",
     zonePublication: {
+      mode: expectedZonePublicationMode,
       status: zonePublication.status,
       businessDate: zonePublication.businessDate,
       requiredHistoricThrough: zonePublication.requiredHistoricThrough,
