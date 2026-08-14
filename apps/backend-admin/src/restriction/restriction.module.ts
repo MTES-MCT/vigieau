@@ -5,13 +5,9 @@ import { RestrictionService } from './restriction.service';
 import { UsageModule } from '../usage/usage.module';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([Restriction]),
-    UsageModule,
-  ],
+  imports: [TypeOrmModule.forFeature([Restriction]), UsageModule],
   controllers: [],
   providers: [RestrictionService],
   exports: [RestrictionService],
 })
-export class RestrictionModule {
-}
+export class RestrictionModule {}

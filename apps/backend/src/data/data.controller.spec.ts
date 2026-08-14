@@ -26,8 +26,8 @@ describe('DataController', () => {
       ],
     }).compile();
 
-    controller = <DataController> module.get(DataController);
-    service = <DataService> module.get(DataService);
+    controller = <DataController>module.get(DataController);
+    service = <DataService>module.get(DataService);
   });
 
   afterEach(() => {
@@ -41,11 +41,17 @@ describe('DataController', () => {
   describe('refData', () => {
     it('devrait appeler la méthode getRefData du service et retourner les données', async () => {
       // Arrange
-      const expectedResult = { regions: [], departements: [], bassinsVersants: [] };
-      mockDataService.getRefData.mockReturnValue(expectedResult);
+      const expectedResult = {
+        regions: [],
+        departements: [],
+        bassinsVersants: [],
+      };
+      mockDataService.getRefData.mockResolvedValue(expectedResult);
 
       // Act
-      const result = controller.refData();
+      const resultPromise = controller.refData();
+      expect(resultPromise).toBeInstanceOf(Promise);
+      const result = await resultPromise;
 
       // Assert
       expect(service.getRefData).toHaveBeenCalled();
@@ -63,11 +69,13 @@ describe('DataController', () => {
         region: '2',
         departement: '3',
       };
-      const expectedResult = [{ date: '2023-01-01', ESO: 10, ESU: 20, AEP: 30 }];
-      mockDataService.areaFindByDate.mockReturnValue(expectedResult);
+      const expectedResult = [
+        { date: '2023-01-01', ESO: 10, ESU: 20, AEP: 30 },
+      ];
+      mockDataService.areaFindByDate.mockResolvedValue(expectedResult);
 
       // Act
-      const result = controller.area(query);
+      const result = await controller.area(query);
 
       // Assert
       expect(service.areaFindByDate).toHaveBeenCalledWith(
@@ -92,10 +100,10 @@ describe('DataController', () => {
         departement: '3',
       };
       const expectedResult = [{ code: '3', niveauGravite: 'alerte' }];
-      mockDataService.departementFindByDate.mockReturnValue(expectedResult);
+      mockDataService.departementFindByDate.mockResolvedValue(expectedResult);
 
       // Act
-      const result = controller.departement(query);
+      const result = await controller.departement(query);
 
       // Assert
       expect(service.departementFindByDate).toHaveBeenCalledWith(
@@ -113,10 +121,10 @@ describe('DataController', () => {
     it('devrait appeler la méthode duree du service et retourner les données', async () => {
       // Arrange
       const expectedResult = [{ commune: 'Commune1', restrictions: [] }];
-      mockDataService.duree.mockReturnValue(expectedResult);
+      mockDataService.duree.mockResolvedValue(expectedResult);
 
       // Act
-      const result = controller.duree();
+      const result = await controller.duree();
 
       // Assert
       expect(service.duree).toHaveBeenCalled();
@@ -154,10 +162,14 @@ describe('DataController', () => {
         dateDebut: '2023-01',
         dateFin: '2023-12',
       };
-      mockDataService.commune.mockRejectedValue(new Error('Erreur dans le service'));
+      mockDataService.commune.mockRejectedValue(
+        new Error('Erreur dans le service'),
+      );
 
       // Act & Assert
-      await expect(controller.commune(codeInsee, query)).rejects.toThrowError('Erreur dans le service');
+      await expect(controller.commune(codeInsee, query)).rejects.toThrowError(
+        'Erreur dans le service',
+      );
       expect(service.commune).toHaveBeenCalledWith(
         codeInsee,
         query.dateDebut,

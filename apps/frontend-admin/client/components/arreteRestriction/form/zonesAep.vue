@@ -36,7 +36,6 @@ const rules = computed(() => {
 });
 
 const utils = useUtils();
-const api = useApi();
 const refDataStore = useRefDataStore();
 const communes: Ref<Commune[]> = ref([]);
 const doublonCommunes: Ref<Commune[]> = ref([]);
@@ -147,17 +146,31 @@ defineExpose({
   v$,
 });
 
-watch(
-  () => props.arreteRestriction.departement,
-  async () => {
-    const regex = new RegExp(`^(${props.arreteRestriction.departement?.code})`);
+const loadCommunes = async () => {
+  const depCode = props.arreteRestriction.departement?.code;
+  if (!depCode) {
+    communes.value = [];
+    return;
+  }
+
+  loading.value = true;
+  try {
+    await refDataStore.ensureCommunesLoaded([depCode]);
+    const regex = new RegExp(`^(${depCode})`);
     communes.value = refDataStore.communes.filter(c => regex.test(c.code));
     const restrictionsAep = props.arreteRestriction.restrictions.filter((r) => r.isAep);
     if (restrictionsAep.length > 0) {
       canComputeFullDepartement.value = false;
       isFullDepartement.value = restrictionsAep.length < 2 && communesAssociated.value === communes.value.length;
     }
-  },
+  } finally {
+    loading.value = false;
+  }
+};
+
+watch(
+  () => props.arreteRestriction.departement,
+  loadCommunes,
   {immediate: true},
 );
 
@@ -182,6 +195,11 @@ watch(zonesSelected, () => {
     <div class="zone-alerte-aep fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 fr-col-lg-6">
         <h6>Définition des zones AEP</h6>
+
+        <p v-if="loading" class="fr-mt-2w">
+          <VIcon name="ri-loader-4-line" animation="spin" />
+          Chargement des communes...
+        </p>
 
         <div v-if="communes.length > 0" class="form-group fr-fieldset fr-mt-2w">
           <DsfrInputGroup class="full-width"
@@ -227,7 +245,7 @@ watch(zonesSelected, () => {
               :icon="loading ? { name: 'ri-loader-4-line', animation: 'spin' } : ''"
               :iconRight="true"
               @click="createEditGroupementCommunes()"
-              :disabled="communesAssociated >= communes.length"
+              :disabled="loading || communesAssociated >= communes.length"
             />
           </li>
           <li>
@@ -235,7 +253,7 @@ watch(zonesSelected, () => {
               label="Ajouter toutes les communes du département"
               secondary
               @click="createEditGroupementCommunes(null, true)"
-              :disabled="zonesSelected.length > 0"
+              :disabled="loading || communes.length <= 0 || zonesSelected.length > 0"
             />
           </li>
         </ul>

@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { LoggerModule } from './logger/logger.module';
-import {ConfigModule, ConfigService} from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { LoggerInterceptor } from './core/interceptor/logger.interceptor';
 import { DataSource } from 'typeorm';
 import { TypeOrmModule, TypeOrmModuleAsyncOptions } from '@nestjs/typeorm';
@@ -17,15 +17,20 @@ import { UsageModule } from './usage/usage.module';
 import AuthModule from './auth/auth.module';
 import { ArretesRestrictionsModule } from './arretes_restrictions/arretes_restrictions.module';
 import { DataModule } from './data/data.module';
-import path from "path";
+import path from 'path';
+import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
+import { HealthModule } from './health/health.module';
+
+const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 
 @Module({
   imports: [
+    ...(isSentryEnabled() ? [SentryModule.forRoot()] : []),
     ConfigModule.forRoot({
       envFilePath: path.resolve(__dirname, '../../../../.env'),
       isGlobal: true,
     }),
-    TypeOrmModule.forRootAsync(<TypeOrmModuleAsyncOptions> {
+    TypeOrmModule.forRootAsync(<TypeOrmModuleAsyncOptions>{
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
@@ -51,13 +56,13 @@ import path from "path";
           maxQueryExecutionTime: 1000,
           ssl: configService.get('NODE_ENV') !== 'local',
           extra:
-              configService.get('NODE_ENV') !== 'local'
-                  ? {
-                    ssl: {
-                      rejectUnauthorized: false,
-                    },
-                  }
-                  : {},
+            configService.get('NODE_ENV') !== 'local'
+              ? {
+                  ssl: {
+                    rejectUnauthorized: false,
+                  },
+                }
+              : {},
         };
       },
       dataSourceFactory: (options) => {
@@ -82,9 +87,18 @@ import path from "path";
     UsageModule,
     ArretesRestrictionsModule,
     DataModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [
+    ...(isSentryEnabled()
+      ? [
+          {
+            provide: APP_FILTER,
+            useClass: SentryGlobalFilter,
+          },
+        ]
+      : []),
     {
       provide: APP_INTERCEPTOR,
       useClass: LoggerInterceptor,
@@ -95,5 +109,4 @@ import path from "path";
     },
   ],
 })
-export class AppModule {
-}
+export class AppModule {}

@@ -5,12 +5,10 @@ import { Repository } from 'typeorm';
 
 @Injectable()
 export class BassinVersantService {
-
   constructor(
     @InjectRepository(BassinVersant)
     private readonly bassinVersantRepository: Repository<BassinVersant>,
-  ) {
-  }
+  ) {}
 
   findByCode(bassinVersantCode: number): Promise<BassinVersant> {
     return this.bassinVersantRepository.findOne({

@@ -1,5 +1,5 @@
-# GitHub loads scheduled workflows from the default branch (master). Keep this
-# file on master; each job checks out develop, the branch deployed to production.
+# GitHub loads scheduled workflows from the default branch. Keep this file and
+# its checked-out smoke scripts on master, the branch deployed to production.
 name: Production smoke
 
 on:
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: master
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -43,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: master
       - uses: actions/setup-node@v4
         with:
           node-version: 24

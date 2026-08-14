@@ -45,7 +45,8 @@ export class ParametresController {
     type: [ParametresDto],
   })
   async findOne(@Param('depCode') depCode: string): Promise<ParametresDto> {
-    const parametres: Parametres = await this.parametresService.findOne(depCode);
+    const parametres: Parametres =
+      await this.parametresService.findOne(depCode);
     return plainToInstance(
       ParametresDto,
       camelcaseKeys(parametres, { deep: true }),

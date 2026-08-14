@@ -11,7 +11,7 @@
               <img src="/accueil_donnees.svg"
                    style="max-width: 100%;"
                    width="296" height="291"
-                   title="Image d'illustration ordinateur données"
+                   alt=""
               />
             </div>
             <div>

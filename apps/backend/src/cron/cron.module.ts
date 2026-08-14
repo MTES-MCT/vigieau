@@ -6,5 +6,4 @@ import { CronService } from './cron.service';
   providers: [CronService],
   exports: [CronService],
 })
-export class CronModule {
-}
+export class CronModule {}

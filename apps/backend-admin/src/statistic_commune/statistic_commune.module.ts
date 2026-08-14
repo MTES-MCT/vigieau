@@ -16,5 +16,4 @@ import { ZoneAlerteModule } from '../zone_alerte/zone_alerte.module';
   providers: [StatisticCommuneService],
   exports: [StatisticCommuneService],
 })
-export class StatisticCommuneModule {
-}
+export class StatisticCommuneModule {}

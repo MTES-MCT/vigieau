@@ -5,6 +5,7 @@ import moment, { Moment } from 'moment';
 import { Ref } from 'vue';
 import api from '../../../api';
 import { useRefDataStore } from '../../../store/refData';
+import { getFrenchMapLocale } from '../../../utils/map-locale';
 
 const props = defineProps<{
   embedded: any,
@@ -68,6 +69,9 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
+    locale: getFrenchMapLocale(
+      'Carte interactive de l’intensité des sécheresses passées',
+    ),
   });
 
 
@@ -115,8 +119,8 @@ onMounted(() => {
     if (!feature) {
       return;
     }
-    const description = utils.generatePopupCommuneHtml(communeNameSelected.value);
-    popup.setLngLat(e.lngLat).setHTML(description).addTo(map.value);
+    const popupContent = utils.generatePopupCommuneHtml(communeNameSelected.value);
+    popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
 
     linkPopupBtn();
   });
@@ -243,7 +247,7 @@ const addSourceAndLayerZones = () => {
 };
 
 const loadPopupData = async () => {
-  const { data, error } = await api.getDataCommune(communeSelected.value, props.dateBegin, props.dateEnd);
+  const { data } = await api.getDataCommune(communeSelected.value, props.dateBegin, props.dateEnd);
   if (data.value) {
     const dateBegin = props.dateBegin ? moment(props.dateBegin, 'YYYY-MM').startOf('month') : null;
     const dateEnd = props.dateEnd ? moment(props.dateEnd, 'YYYY-MM').endOf('month') : null;
@@ -274,7 +278,7 @@ const loadPopupData = async () => {
       return r.niveauGravite === 4;
     }).length;
     const nbDays = dateEnd ? dateEnd.diff(dateBegin, 'days') : 1;
-    const description = utils.generateFullPopupCommuneHtml(communeNameSelected.value, {
+    const popupContent = utils.generateFullPopupCommuneHtml(communeNameSelected.value, {
       noDays,
       vigilanceDays,
       alerteDays,
@@ -282,7 +286,7 @@ const loadPopupData = async () => {
       criseDays,
       nbDays,
     });
-    popup.setHTML(description);
+    popup.setDOMContent(popupContent);
     linkPopupBtn();
   }
 };
@@ -293,7 +297,7 @@ const linkPopupBtn = () => {
     return;
   }
   btn.addEventListener('click', async () => {
-    let query: any = {};
+    const query: any = {};
     query.dateDebut = moment(props.dateBegin, 'YYYY-MM').startOf('month').format('YYYY-MM-DD');
     query.dateFin = moment(props.dateEnd, 'YYYY-MM').endOf('month').format('YYYY-MM-DD');
     router.push({ path: `/donnees/commune/${communeSelected.value}`, query });
@@ -468,22 +472,26 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
 
 <template>
   <div v-if="isMapSupported">
-    <div v-if=loading
+    <div v-if="loading"
          class="fr-grid-row fr-grid-row--center fr-my-2w">
       <Loader :show="true" />
     </div>
-    <div v-show=!loading>
+    <div v-show="!loading">
       <div data-html2canvas-ignore="true" class="map-pre-actions">
         <div v-if="showError"
              class="map-pre-actions-card fr-p-1w fr-m-1w">
-          <DsfrAlert description="Une erreur est survenue lors du chargement de la carte"
+          <DsfrAlert title="Carte indisponible"
+                     description="Une erreur est survenue lors du chargement de la carte"
                      type="error"
                      :closeable="false"
           />
         </div>
-        <div class="map-pre-actions-card fr-p-1w fr-m-1w hide-sm">
-          <h6 class="fr-mb-1w fr-mr-2w">Raccourcis :</h6>
+        <div class="map-pre-actions-card fr-p-1w fr-m-1w hide-sm"
+             role="group"
+             aria-label="Raccourcis de la carte">
+          <p class="fr-mb-1w fr-mr-2w">Raccourcis :</p>
           <DsfrTag v-for="tag in mapTags"
+                   :key="tag.label"
                    :label="tag.label"
                    class="fr-m-1w"
                    small
@@ -493,7 +501,9 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
       </div>
       <div class="map-legend fr-grid-row fr-grid-row--middle fr-grid-row--gutters show-sm">
         <div class="fr-col-3">Zones non concernées par la sécheresse</div>
-        <div class="fr-col-1" v-for="legend of legende">
+        <div class="fr-col-1"
+             v-for="legend of legende"
+             :key="legend.description">
           <div :style="{'background-color': legend.color}"
                class="map-legend-carre"></div>
         </div>
@@ -503,16 +513,19 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
         <div class="fr-col-12" style="position:relative;"
              :style="embedded ? 'height: calc(100vh - 125px)' : 'height: 75vh'">
           <div :class="{
-          'map-wrap-embedded': embedded
-        }" class="map-wrap">
+            'map-wrap-embedded': embedded
+          }" class="map-wrap">
             <div class="map" ref="mapContainer"></div>
           </div>
         </div>
       </div>
       <div class="map-post-actions">
-        <div class="map-post-actions-card fr-p-1w fr-m-1w fr-mt-4w show-sm">
-          <h6 class="fr-mb-1w fr-mr-2w">Raccourcis :</h6>
+        <div class="map-post-actions-card fr-p-1w fr-m-1w fr-mt-4w show-sm"
+             role="group"
+             aria-label="Raccourcis de la carte">
+          <p class="fr-mb-1w fr-mr-2w">Raccourcis :</p>
           <DsfrTag v-for="tag in mapTags"
+                   :key="tag.label"
                    :label="tag.label"
                    class="fr-m-1w"
                    small
@@ -522,7 +535,9 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
       </div>
       <div class="map-legend fr-grid-row fr-grid-row--middle fr-grid-row--gutters hide-sm">
         <div class="fr-col-3">Zones non concernées par la sécheresse</div>
-        <div class="fr-col-1" v-for="legend of legende">
+        <div class="fr-col-1"
+             v-for="legend of legende"
+             :key="legend.description">
           <DsfrTooltip on-hover
                        :content="legend.description">
             <div :style="{'background-color': legend.color}"
@@ -549,8 +564,8 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
                        :id="true">
           <div>
             <p>
-              Les couleurs de la carte traduisent un "score de sur les niveaux de gravité appliqués aux usages de
-              l'eau". Ce score est calculé pour chaque commune en combinant deux facteurs : la durée et le niveau de
+              Les couleurs de la carte traduisent un score basé sur les niveaux de gravité appliqués aux usages de
+              l'eau. Ce score est calculé pour chaque commune en combinant deux facteurs : la durée et le niveau de
               gravité des épisodes de sécheresse. Pour les territoires concernés par différentes ressources (eaux
               superficielles, souterraines, eau potable), le niveau de gravité maximale est retenu. La carte représente
               donc un indice de sécheresse toutes ressources confondues, pour plus de détail, nous vous invitons à
@@ -558,14 +573,14 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
             </p>
             <p>
               L'intensité des sécheresses est classée en cinq niveaux, chacun pondéré selon sa sévérité&nbsp;:
-              <ul>
-                <li>Pas de restriction&nbsp;: 0</li>
-                <li>Vigilance&nbsp;: 0,5</li>
-                <li>Alerte&nbsp;: 2</li>
-                <li>Alerte renforcée&nbsp;: 3</li>
-                <li>Crise&nbsp;: 4</li>
-              </ul>
             </p>
+            <ul>
+              <li>Pas de restriction&nbsp;: 0</li>
+              <li>Vigilance&nbsp;: 0,5</li>
+              <li>Alerte&nbsp;: 2</li>
+              <li>Alerte renforcée&nbsp;: 3</li>
+              <li>Crise&nbsp;: 4</li>
+            </ul>
 
             <p>
               La durée correspond au nombre de jours pendant lesquels la commune est concernée par un niveau de gravité
@@ -580,36 +595,59 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
               Les résultats sont ensuite visualisés à l'aide d'un code couleur. Plus le score est élevé, plus la couleur
               est foncée, indiquant une gravité et/ou une durée importante des niveaux de gravité sécheresse dans la
               commune. L'échelle utilisée est la suivante&nbsp;:
-
-              <ul>
-                <li>
-                  <div class="map-legend-carre fr-mr-1w" :style="{'background-color': legende[0].color}"></div>
-                  0%&nbsp;: zones non concernées par la sécheresse sur la période (le fond de carte est affiché sans
-                  couleur)
-                </li>
-                <li>
-                  <div class="map-legend-carre fr-mr-1w" :style="{'background-color': legende[1].color}"></div>
-                  entre 0% et 24%&nbsp;: zones faiblement concernées par la sécheresse (ex : toute la période en
-                  vigilance)
-                </li>
-                <li>
-                  <div class="map-legend-carre fr-mr-1w" :style="{'background-color': legende[2].color}"></div>
-                  entre 25% et 49%&nbsp;: zones moyennement concernées (ex : la moitié de la période en alerte)
-                </li>
-                <li>
-                  <div class="map-legend-carre fr-mr-1w" :style="{'background-color': legende[3].color}"></div>
-                  entre 50% et 74%&nbsp;: zones fortement concernées (ex: la moitié de la période en alerte renforcée)
-                </li>
-                <li>
-                  <div class="map-legend-carre fr-mr-1w" :style="{'background-color': legende[4].color}"></div>
-                  entre 75% et 99%&nbsp;: zones très fortement concernées (ex: jusqu'à la moitié de la période en crise)
-                </li>
-                <li>
-                  <div class="map-legend-carre fr-mr-1w" :style="{'background-color': legende[5].color}"></div>
-                  100%&nbsp;: situations extrêmes (ex : plus de la moitié de la période en crise)
-                </li>
-              </ul>
             </p>
+            <ul>
+              <li>
+                <div
+                  class="map-legend-carre fr-mr-1w"
+                  :style="{'background-color': legende[0].color}"
+                  aria-hidden="true"
+                />
+                0%&nbsp;: zones non concernées par la sécheresse sur la période (le fond de carte est affiché sans
+                couleur)
+              </li>
+              <li>
+                <div
+                  class="map-legend-carre fr-mr-1w"
+                  :style="{'background-color': legende[1].color}"
+                  aria-hidden="true"
+                />
+                entre 0% et 24%&nbsp;: zones faiblement concernées par la sécheresse (ex : toute la période en
+                vigilance)
+              </li>
+              <li>
+                <div
+                  class="map-legend-carre fr-mr-1w"
+                  :style="{'background-color': legende[2].color}"
+                  aria-hidden="true"
+                />
+                entre 25% et 49%&nbsp;: zones moyennement concernées (ex : la moitié de la période en alerte)
+              </li>
+              <li>
+                <div
+                  class="map-legend-carre fr-mr-1w"
+                  :style="{'background-color': legende[3].color}"
+                  aria-hidden="true"
+                />
+                entre 50% et 74%&nbsp;: zones fortement concernées (ex: la moitié de la période en alerte renforcée)
+              </li>
+              <li>
+                <div
+                  class="map-legend-carre fr-mr-1w"
+                  :style="{'background-color': legende[4].color}"
+                  aria-hidden="true"
+                />
+                entre 75% et 99%&nbsp;: zones très fortement concernées (ex: jusqu'à la moitié de la période en crise)
+              </li>
+              <li>
+                <div
+                  class="map-legend-carre fr-mr-1w"
+                  :style="{'background-color': legende[5].color}"
+                  aria-hidden="true"
+                />
+                100%&nbsp;: situations extrêmes (ex : plus de la moitié de la période en crise)
+              </li>
+            </ul>
             <p>
               Une même couleur peut ainsi correspondre à des situations très variées. Pour mieux comprendre la situation
               d'une commune, nous vous invitons à consulter son historique.
@@ -643,9 +681,9 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
 
   &-embedded {
     position: absolute;
-    width: calc(100vw + 32px);
-    max-width: calc(100% + 32px);
-    left: -32px;
+    width: 100%;
+    max-width: 100%;
+    left: 0;
     height: calc(100vh - 125px - 12px);
   }
 

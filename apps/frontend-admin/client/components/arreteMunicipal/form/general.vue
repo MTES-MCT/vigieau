@@ -11,11 +11,11 @@ const props = defineProps<{
 }>();
 
 const utils = useUtils();
-const api = useApi();
 const authStore = useAuthStore();
 const refDataStore = useRefDataStore();
 const hint = ref('');
 const communes: Ref<any> = ref([]);
+const communesLoading = ref(false);
 const communesText = ref(props.arreteMunicipal.communes?.map((c) => c.code).join('\n'));
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const rules = computed(() => {
@@ -65,10 +65,16 @@ const userFullName = computed(() => {
 const v$ = useVuelidate(rules, props.arreteMunicipal);
 
 const loadCommunes = async () => {
-  communes.value = refDataStore.communes;
-  if (!props.arreteMunicipal.id && authStore.user?.role === 'commune') {
-    props.arreteMunicipal.communes = communes.value.filter((c: any) => authStore.user?.roleCommunes.includes(c.code));
-    communesText.value = props.arreteMunicipal.communes?.map((c) => c.code).join('\n');
+  communesLoading.value = true;
+  try {
+    await refDataStore.ensureCommunesLoaded();
+    communes.value = refDataStore.communes;
+    if (!props.arreteMunicipal.id && authStore.user?.role === 'commune') {
+      props.arreteMunicipal.communes = communes.value.filter((c: any) => authStore.user?.roleCommunes.includes(c.code));
+      communesText.value = props.arreteMunicipal.communes?.map((c) => c.code).join('\n');
+    }
+  } finally {
+    communesLoading.value = false;
   }
 }
 
@@ -165,8 +171,12 @@ defineExpose({
             isTextarea
             required
             type="text"
-            :disabled="communes.length <= 0"
+            :disabled="communesLoading || communes.length <= 0"
           />
+          <p v-if="communesLoading" class="fr-mt-1w">
+            <VIcon name="ri-loader-4-line" animation="spin" />
+            Chargement des communes...
+          </p>
           <p>
             {{ props.arreteMunicipal.communes?.length }} communes associées
             <br/>

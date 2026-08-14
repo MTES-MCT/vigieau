@@ -1,10 +1,15 @@
 import { Module } from '@nestjs/common';
-import { TerminusModule } from '@nestjs/terminus';
 import { HealthController } from './health.controller';
-import { HttpModule } from '@nestjs/axios';
+import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
+import { ClockHeartbeatService } from '../core/scheduling/clock-heartbeat.service';
+import { ZonePublicationHealthService } from './zone-publication-health.service';
 
 @Module({
-  imports: [TerminusModule, HttpModule],
   controllers: [HealthController],
+  providers: [
+    ExternalPublicationRegistryService,
+    ClockHeartbeatService,
+    ZonePublicationHealthService,
+  ],
 })
 export class HealthModule {}

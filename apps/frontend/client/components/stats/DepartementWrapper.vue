@@ -1,32 +1,34 @@
 <script setup lang="ts">
 import { Ref } from 'vue';
 
-const props = defineProps<{
+defineProps<{
   stats: any
 }>();
 
-const tabTitles = [
-  { title: 'Carte', tabId: 'tab-0', panelId: 'tab-content-0' },
-  { title: 'Données', tabId: 'tab-1', panelId: 'tab-content-1' },
+const tabs = [
+  { id: 'map', label: 'Carte' },
+  { id: 'data', label: 'Données' },
 ];
 const selectedTabIndex: Ref<number> = ref(0);
 </script>
 
 <template>
   <DsfrCallout title="Répartition géographique des recherches sur les 30 derniers jours">
-    <DsfrTabs :tab-titles="tabTitles"
-              v-model="selectedTabIndex">
-      <DsfrTabContent panel-id="tab-content-0"
-                      tab-id="tab-0">
+    <AccessibleTabs
+      v-model="selectedTabIndex"
+      id-prefix="search-statistics"
+      label="Présentation de la répartition géographique des recherches"
+      :tabs="tabs"
+    >
+      <template #map>
         <StatsDepartementMap :stats="stats" />
-      </DsfrTabContent>
-      <DsfrTabContent panel-id="tab-content-1"
-                      tab-id="tab-1">
+      </template>
+      <template #data>
         <div class="fr-mt-2w">
           <StatsDepartementTable :stats="stats" />
         </div>
-      </DsfrTabContent>
-    </DsfrTabs>
+      </template>
+    </AccessibleTabs>
   </DsfrCallout>
 </template>
 
@@ -38,7 +40,7 @@ const selectedTabIndex: Ref<number> = ref(0);
     box-shadow: none;
   }
 
-  &__panel {
+  :deep(.fr-tabs__panel) {
     padding-top: 0;
     padding-bottom: 0;
     z-index: 1;

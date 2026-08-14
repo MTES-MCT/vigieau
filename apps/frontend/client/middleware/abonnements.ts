@@ -1,4 +1,4 @@
-export default defineNuxtRouteMiddleware((to: any, from: any) => {
+export default defineNuxtRouteMiddleware((to: any) => {
   if (!to.query.token) {
     return navigateTo({path: '/'});
   }

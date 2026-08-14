@@ -1,10 +1,16 @@
 <script setup lang="ts">
-import { computed, nextTick, Ref, ref, watch } from 'vue';
+import {
+  computed,
+  nextTick,
+  type Ref,
+  ref,
+  useAttrs,
+  useId,
+  watch,
+} from 'vue';
+import { moveActiveOption } from '../utils/address-combobox';
 
-const container = ref(undefined);
-const optionsList = ref(undefined);
-const optionSelected = ref(undefined);
-const inputSearchBar: Ref<any> = ref(null);
+defineOptions({ inheritAttrs: false });
 
 const props = defineProps({
   modelValue: {
@@ -33,7 +39,7 @@ const props = defineProps({
   },
   ariaLabelList: {
     type: String,
-    default: '',
+    default: 'Suggestions d’adresses',
   },
   light: {
     type: Boolean,
@@ -43,44 +49,132 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  dataCy: {
+    type: String,
+    default: '',
+  },
+  statusMessage: {
+    type: String,
+    default: '',
+  },
 });
 
 const emit = defineEmits(['update:modelValue', 'search']);
 
-const hasFocus = ref(true);
+const attrs = useAttrs();
+const generatedId = useId();
+const container: Ref<HTMLElement | null> = ref(null);
+const optionsList: Ref<HTMLElement | null> = ref(null);
+const inputSearchBar: Ref<HTMLInputElement | null> = ref(null);
+
+const hasFocus = ref(false);
+const isOpen = ref(false);
 const displayOptions = computed(() => !!props.options.length);
+const displayListbox = computed(() => (
+  isOpen.value && displayOptions.value && !props.disabled
+));
+const inputId = computed(() => (
+  typeof attrs.id === 'string' && attrs.id
+    ? attrs.id
+    : `${generatedId}-address-input`
+));
+const hintId = computed(() => `${inputId.value}-hint`);
+const listboxId = computed(() => `${inputId.value}-listbox`);
+const activeOption = ref(-1);
+const activeOptionId = computed(() => (
+  displayListbox.value && activeOption.value >= 0
+    ? getOptionId(activeOption.value)
+    : undefined
+));
+const describedBy = computed(() => {
+  const externalDescription = typeof attrs['aria-describedby'] === 'string'
+    ? attrs['aria-describedby'].trim()
+    : '';
+  return [props.placeholder ? hintId.value : '', externalDescription]
+    .filter(Boolean)
+    .join(' ') || undefined;
+});
+const controlledInputAttributes = new Set([
+  'aria-autocomplete',
+  'aria-controls',
+  'aria-describedby',
+  'aria-expanded',
+  'aria-haspopup',
+  'aria-label',
+  'aria-labelledby',
+  'autocomplete',
+  'class',
+  'disabled',
+  'id',
+  'required',
+  'role',
+  'style',
+  'value',
+]);
+const forwardedInputAttrs = computed(() => Object.fromEntries(
+  Object.entries(attrs).filter(([name]) => !controlledInputAttributes.has(name)),
+));
 
 function convertRemToPixels(rem) {
-  return rem * parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return rem * Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
 }
 
-function selectOption(option) {
-  optionSelected.value = option;
-  emit('update:modelValue', option);
+function getOptionId(index: number): string {
+  return `${listboxId.value}-option-${index}`;
+}
+
+function closeListbox() {
+  isOpen.value = false;
+  activeOption.value = -1;
+}
+
+function focusInput() {
   inputSearchBar.value?.focus();
+}
+
+function selectOption(option, index: number) {
+  if (option === undefined) {
+    return;
+  }
+
+  activeOption.value = index;
+  isOpen.value = false;
+  emit('update:modelValue', option);
+  nextTick(focusInput);
 }
 
 const displayAtTheTop = ref(false);
 
-const looseFocus = () => {
-  setTimeout(() => {
-    hasFocus.value = false;
-  }, 100);
-};
-
-watch(displayOptions, () => {
-  if (displayOptions.value) {
-    const posContainerY = container.value.offsetTop;
-    const containerHeight = container.value.offsetHeight;
-    const screenHeight = document.body.scrollHeight;
-    const optionsHeight = convertRemToPixels(17);
-    const isTooLow = (optionsHeight + posContainerY + containerHeight) > screenHeight;
-
-    displayAtTheTop.value = isTooLow;
+function updateListboxPosition() {
+  if (!container.value || typeof document === 'undefined') {
+    return;
   }
+
+  const posContainerY = container.value.offsetTop;
+  const containerHeight = container.value.offsetHeight;
+  const screenHeight = document.body.scrollHeight;
+  const optionsHeight = convertRemToPixels(17);
+  displayAtTheTop.value = optionsHeight + posContainerY + containerHeight > screenHeight;
+}
+
+watch(displayListbox, async (isDisplayed) => {
+  if (!isDisplayed) {
+    return;
+  }
+  await nextTick();
+  updateListboxPosition();
 });
 
-const activeOption = ref(-1);
+watch(() => props.options, () => {
+  activeOption.value = -1;
+  isOpen.value = hasFocus.value && displayOptions.value;
+});
+
+watch(() => props.disabled, (isDisabled) => {
+  if (isDisabled) {
+    closeListbox();
+  }
+});
 
 const isVisible = function(ele, container) {
   const { bottom, height, top } = ele.getBoundingClientRect();
@@ -92,45 +186,96 @@ const isVisible = function(ele, container) {
 };
 
 function checkIfActiveOptionIsVisible() {
+  if (!optionsList.value || activeOption.value < 0) {
+    return;
+  }
+
   const activeLi = optionsList.value.querySelectorAll('li')[activeOption.value];
+  if (!activeLi) {
+    return;
+  }
   const isLiVisible = isVisible(activeLi, optionsList.value);
 
-  if (!isLiVisible) {
-    // Scroll to activeLi
-    activeLi.scrollIntoView({ behavior: 'smooth' });
+  if (!isLiVisible && typeof activeLi.scrollIntoView === 'function') {
+    activeLi.scrollIntoView({ block: 'nearest' });
   }
 }
 
-function moveToPreviousOption() {
-  const isFirst = activeOption.value <= 0;
-  activeOption.value = isFirst ? props.options.length - 1 : activeOption.value - 1;
-  nextTick().then(checkIfActiveOptionIsVisible);
-}
-
-function moveToNextOption() {
-  const isLast = activeOption.value >= (props.options.length - 1);
-  activeOption.value = isLast ? 0 : activeOption.value + 1;
-  nextTick().then(checkIfActiveOptionIsVisible);
-}
-
-function checkKeyboardNav($event) {
-  if (['ArrowUp', 'ArrowDown', 'Enter'].includes($event.key)) {
-    $event.preventDefault();
+function moveOption(direction: 'next' | 'previous') {
+  if (!displayOptions.value) {
+    return;
   }
-  if ($event.key === 'Enter') {
-    selectOption(props.options[activeOption.value >= 0 ? activeOption.value : 0]);
-    hasFocus.value = false;
-  } else if ($event.key === 'ArrowUp') {
-    moveToPreviousOption();
-  } else if ($event.key === 'ArrowDown') {
-    moveToNextOption();
-  } else if ($event.key === 'search') {
-    if (props.options.length) {
-      selectOption(props.options[activeOption.value >= 0 ? activeOption.value : 0]);
-    } else if (optionSelected.value) {
-      emit('update:modelValue', optionSelected.value);
+
+  isOpen.value = true;
+  activeOption.value = moveActiveOption(
+    activeOption.value,
+    props.options.length,
+    direction,
+  );
+  nextTick().then(checkIfActiveOptionIsVisible);
+}
+
+function handleInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  activeOption.value = -1;
+  isOpen.value = hasFocus.value && displayOptions.value;
+  emit('update:modelValue', value);
+}
+
+function handleFocus() {
+  hasFocus.value = true;
+  isOpen.value = displayOptions.value;
+}
+
+function handleBlur() {
+  hasFocus.value = false;
+  closeListbox();
+}
+
+function handleKeyboardNavigation(event: KeyboardEvent) {
+  if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+    if (!displayOptions.value) {
+      return;
     }
+    event.preventDefault();
+    moveOption(event.key === 'ArrowUp' ? 'previous' : 'next');
+    return;
   }
+
+  if (event.key === 'Enter') {
+    if (displayListbox.value && activeOption.value >= 0) {
+      event.preventDefault();
+      selectOption(props.options[activeOption.value], activeOption.value);
+    }
+    return;
+  }
+
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeListbox();
+    return;
+  }
+
+  if (event.key === 'Tab') {
+    closeListbox();
+  }
+}
+
+function handleSearch() {
+  const optionIndex = activeOption.value >= 0
+    ? activeOption.value
+    : props.options.length > 0
+      ? 0
+      : -1;
+
+  if (optionIndex >= 0) {
+    selectOption(props.options[optionIndex], optionIndex);
+    return;
+  }
+
+  closeListbox();
+  nextTick(focusInput);
 }
 
 function displayOption(option) {
@@ -146,66 +291,103 @@ function displayOption(option) {
 }
 
 defineExpose({
-  focusInput: () => inputSearchBar.value.focus(),
+  focusInput,
 });
 
 </script>
 
 <template>
-  <div ref="container"
-       class="relative search-autocomplete">
+  <div
+    ref="container"
+    class="relative search-autocomplete"
+    :class="$attrs.class"
+    :style="$attrs.style"
+    :data-cy="dataCy || undefined"
+  >
     <div class="fr-search-bar">
-      <DsfrInput label-visible
-                 :model-value="modelValue"
-                 :hint="placeholder"
-                 :label="label"
-                 v-bind="$attrs"
-                 :required="required"
-                 :large="!light"
-                 :disabled="disabled"
-                 role="combobox"
-                 aria-autocomplete="list"
-                 aria-expanded="true"
-                 :aria-haspopup="displayOptions"
-                 :autocomplete="hasFocus ? 'off' : 'address-line1'"
-                 buttonText="Rechercher"
-                 @update:model-value="$emit('update:modelValue', $event)"
-                 ref="inputSearchBar"
-                 @focus="hasFocus = true"
-                 @blur="looseFocus()"
-                 @keydown="checkKeyboardNav($event)" />
-      <DsfrButton title="Rechercher"
-                  :disabled="disabled"
-                  :aria-disabled="disabled"
-                  @click="checkKeyboardNav({key: 'search'})">
-        Rechercher
-      </DsfrButton>
-      <div v-show="displayOptions"
-           class="fr-sr-only"
-           aria-live="polite"
-           aria-atomic="true">
-        <p>{{ options.length }} options disponibles</p>
-      </div>
-      <ul v-show="displayOptions"
-          role="listbox"
-          :aria-label="ariaLabelList"
-          ref="optionsList"
-          tabindex="1"
-          class="list-none absolute m-0 right-0 z-1 left-0 bg-white box-shadow max-h-17 scroll pointer"
-          :class="{'at-the-top': displayAtTheTop,}">
-        <li v-for="(option, i) of options"
-            :key="option"
-            role="option"
-            tabindex="0"
-            :aria-selected="optionSelected === option"
-            class="list-item fr-p-1w fr-pl-2w"
-            :class="{ 'active-option': activeOption === i }"
-            @click.stop="selectOption(option)"
-            @keyup.enter="selectOption(option)">
+      <label
+        class="fr-label"
+        :for="inputId"
+      >
+        {{ label }}
+        <span
+          v-if="required"
+          class="required-marker"
+        > (obligatoire)</span>
+      </label>
+      <p
+        v-if="placeholder"
+        :id="hintId"
+        class="fr-hint-text autocomplete-hint"
+      >
+        {{ placeholder }}
+      </p>
+      <input
+        v-bind="forwardedInputAttrs"
+        :id="inputId"
+        ref="inputSearchBar"
+        class="fr-input"
+        type="search"
+        :value="modelValue"
+        :required="required"
+        :disabled="disabled"
+        autocomplete="street-address"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-haspopup="listbox"
+        :aria-expanded="displayListbox"
+        :aria-controls="listboxId"
+        :aria-activedescendant="activeOptionId"
+        :aria-describedby="describedBy"
+        @input="handleInput"
+        @focus="handleFocus"
+        @blur="handleBlur"
+        @keydown="handleKeyboardNavigation"
+      >
+      <button
+        class="fr-btn"
+        type="button"
+        data-cy="AddressSearchSubmit"
+        :disabled="disabled"
+        :aria-disabled="disabled"
+        @mousedown.prevent
+        @click="handleSearch"
+      >
+        <span class="fr-sr-only">Rechercher une adresse</span>
+      </button>
+      <p
+        class="fr-sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-cy="AddressSearchStatus"
+      >
+        {{ statusMessage }}
+      </p>
+      <ul
+        v-show="displayListbox"
+        :id="listboxId"
+        ref="optionsList"
+        role="listbox"
+        :aria-label="ariaLabelList"
+        class="list-none absolute m-0 right-0 z-1 left-0 bg-white box-shadow max-h-17 scroll pointer"
+        :class="{'at-the-top': displayAtTheTop,}"
+      >
+        <li
+          v-for="(option, i) of options"
+          :id="getOptionId(i)"
+          :key="`${displayOption(option)}-${i}`"
+          role="option"
+          :aria-selected="activeOption === i"
+          class="list-item fr-p-1w fr-pl-2w"
+          :class="{ 'active-option': activeOption === i }"
+          @mouseenter="activeOption = i"
+          @mousedown.prevent
+          @click.stop="selectOption(option, i)"
+        >
           {{ displayOption(option) }}
         </li>
       </ul>
-
     </div>
   </div>
 </template>
@@ -256,16 +438,42 @@ defineExpose({
 
 .fr-search-bar {
   flex-wrap: wrap;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+
+  .fr-label,
+  .autocomplete-hint {
+    flex: 0 0 100%;
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .fr-label {
+    position: relative;
+    width: 100%;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+    border: 0;
+  }
 
   :deep(.fr-input), .fr-btn {
     margin-top: .5rem;
     flex: 1;
   }
 
-  :deep(.fr-label) {
-    width: 100%;
-    height: auto;
-    position: relative;
+  .fr-input {
+    min-width: 0;
+  }
+
+  .required-marker {
+    margin-left: 0.125rem;
   }
 
   /**

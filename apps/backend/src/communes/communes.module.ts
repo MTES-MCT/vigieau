@@ -4,9 +4,7 @@ import { CommunesService } from './communes.service';
 import { Commune } from '@shared/entities/commune.entity';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([Commune]),
-  ],
+  imports: [TypeOrmModule.forFeature([Commune])],
   controllers: [],
   providers: [CommunesService],
   exports: [CommunesService],

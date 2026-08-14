@@ -23,7 +23,7 @@ import {
   EauSoleil,
   EauTuyau,
 } from '../assets/icons';
-import { addIcon, listIcons } from '@iconify/vue';
+import { addIcon } from '@iconify/vue';
 
 const icons = [
   EauMaison,

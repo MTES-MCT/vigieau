@@ -5,9 +5,7 @@ import { ArretesRestrictionsController } from './arretes_restrictions.controller
 import { ArretesRestrictionsService } from './arretes_restrictions.service';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([ArreteRestriction]),
-  ],
+  imports: [TypeOrmModule.forFeature([ArreteRestriction])],
   controllers: [ArretesRestrictionsController],
   providers: [ArretesRestrictionsService],
   exports: [ArretesRestrictionsService],

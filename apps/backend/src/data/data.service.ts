@@ -1,59 +1,191 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  OnModuleInit,
+} from '@nestjs/common';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindManyOptions, FindOneOptions, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  FindManyOptions,
+  FindOneOptions,
+  Repository,
+} from 'typeorm';
 import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
 import moment from 'moment';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Region } from '@shared/entities/region.entity';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
-import { Commune } from '@shared/entities/commune.entity';
 import { Departement } from '@shared/entities/departement.entity';
+import {
+  DEFAULT_STATISTIC_PUBLICATION_DEADLINE,
+  getPublicationLagDays,
+  getStatisticPublicationExpectation as resolveStatisticPublicationExpectation,
+  type StatisticPublicationExpectation,
+} from './statistic-publication-freshness';
+
+interface StatisticPublicationState {
+  revision: string;
+  activePublicationId: string | null;
+  currentPublishedDate: string | null;
+  historicPublishedThrough: string | null;
+  historicDirtyFrom: string | null;
+  historicDirtyThrough: string | null;
+}
+
+type StatisticCacheMode = 'legacy-bootstrap' | 'versioned';
+
+interface ReferenceDataCache {
+  departements: any[];
+  regions: Region[];
+  bassinsVersants: BassinVersant[];
+  fullArea: number;
+  metropoleArea: number;
+}
+
+interface CertifiedDataCache extends ReferenceDataCache {
+  revision: string;
+  publicationState: StatisticPublicationState;
+  mode: StatisticCacheMode;
+  dataArea: any[];
+  dataCommune: any[];
+  dataDepartement: any[];
+  firstDate: string;
+  latestDate: string;
+  dateCount: number;
+  departmentCount: number;
+  communeCount: number;
+  fingerprint: string;
+  loadedAt: Date;
+}
+
+export type StatisticCacheStatus = {
+  status: 'ready' | 'degraded' | 'unavailable';
+  usable: boolean;
+  fresh: boolean;
+  mode: StatisticCacheMode;
+  currentPublishedDate: string | null;
+  expectedPublishedDate: string;
+  publicationDeadline: string;
+  lagDays: number | null;
+  historicDirtyFrom: string | null;
+  historicDirtyThrough: string | null;
+  firstDate: string | null;
+  latestDate: string | null;
+  dateCount: number;
+  departmentCount: number;
+  communeCount: number;
+  fingerprint: string | null;
+  loadedAt: string | null;
+  incompleteSnapshotCount: number | null;
+  oldestIncompleteSnapshot: {
+    date: string;
+    scope: string;
+    status: string;
+    processedCommuneCount: number;
+    expectedCommuneCount: number;
+    updatedAt: string;
+  } | null;
+  lastError: {
+    at: string;
+    phase: string;
+  } | null;
+};
+
+type DepartmentDataLoad = {
+  coverageByDate: Map<string, Set<string>>;
+};
+
+type LegacySnapshotCoverageStatus = Pick<
+  StatisticCacheStatus,
+  'incompleteSnapshotCount' | 'oldestIncompleteSnapshot'
+>;
+
+type CachedLegacySnapshotCoverageStatus = LegacySnapshotCoverageStatus & {
+  currentPublishedDate: string;
+};
 
 @Injectable()
-export class DataService {
+export class DataService implements OnModuleInit {
   private readonly logger = new VigieauLogger('DataService');
 
   private data: any[] = [];
   private dataArea: any[] = [];
   private dataCommune: any[] = [];
   private dataDepartement: any[] = [];
-  private communes: any[] = [];
   private departements: any[] = [];
   private regions: Region[] = [];
   private bassinsVersants: BassinVersant[] = [];
   private fullArea: number = 0;
   private metropoleArea: number = 0;
+  private publicationState: StatisticPublicationState | null = null;
+  private publicationStateCheckedAt = 0;
+  private publicationStateCheckError: Error | null = null;
+  private publicationStateLoading: Promise<StatisticPublicationState> | null =
+    null;
+  private referenceDataCache: ReferenceDataCache | null = null;
+  private referenceDataLoading: Promise<ReferenceDataCache> | null = null;
+  private referenceDataLoadedAt = 0;
+  private referenceDataRefreshFailedAt = 0;
+  private certifiedDataCache: CertifiedDataCache | null = null;
+  private certifiedDataRefreshLoading: Promise<void> | null = null;
+  private dataLoading: Promise<void> | null = null;
+  private failedPublicationStateToken: string | null = null;
+  private failedPublicationAt = 0;
+  private lastDataCacheError: { at: Date; phase: string } | null = null;
+  private legacySnapshotCoverageStatus: CachedLegacySnapshotCoverageStatus | null =
+    null;
+  private legacySnapshotCoverageCheckedAt = 0;
+  private legacySnapshotCoverageLoading: Promise<LegacySnapshotCoverageStatus> | null =
+    null;
+  private legacySnapshotCoverageDirty = false;
+
+  private readonly publicationStateCheckIntervalMs = 5_000;
+  private readonly legacySnapshotCoverageCheckIntervalMs = 5_000;
+  private readonly publicationRefreshRetryIntervalMs = 60_000;
+  private readonly referenceDataRefreshIntervalMs = 2 * 60 * 60 * 1_000;
+  private readonly referenceDataRefreshRetryIntervalMs = 5_000;
 
   private readonly releaseDate = '2023-07-11';
   private readonly beginDate = '2013-01-01';
+  private readonly expectedDepartmentCount = 101;
 
-  constructor(@InjectRepository(StatisticDepartement)
-              private readonly statisticDepartementRepository: Repository<StatisticDepartement>,
-              @InjectRepository(StatisticCommune)
-              private readonly statisticCommuneRepository: Repository<StatisticCommune>,
-              @InjectRepository(Commune)
-              private readonly communeRepository: Repository<Commune>,
-              @InjectRepository(Departement)
-              private readonly departementRepository: Repository<Departement>,
-              @InjectRepository(Region)
-              private readonly regionRepository: Repository<Region>,
-              @InjectRepository(BassinVersant)
-              private readonly bassinVersantRepository: Repository<BassinVersant>,
-              private dataSource: DataSource,
-  ) {
+  constructor(
+    @InjectRepository(StatisticDepartement)
+    private readonly statisticDepartementRepository: Repository<StatisticDepartement>,
+    @InjectRepository(StatisticCommune)
+    private readonly statisticCommuneRepository: Repository<StatisticCommune>,
+    @InjectRepository(Departement)
+    private readonly departementRepository: Repository<Departement>,
+    @InjectRepository(Region)
+    private readonly regionRepository: Repository<Region>,
+    @InjectRepository(BassinVersant)
+    private readonly bassinVersantRepository: Repository<BassinVersant>,
+    private dataSource: DataSource,
+  ) {}
+
+  onModuleInit(): void {
+    this.startColdDataLoad();
   }
 
   /**
    * Retourne les données de référence pour les filtres (bassins versants, régions, départements).
    * Ces données sont structurées pour faciliter leur utilisation dans des interfaces utilisateur.
    */
-  getRefData() {
+  async getRefData() {
+    const refreshedReferenceData = await this.ensureReferenceDataCache();
+    const referenceData = this.certifiedDataCache ?? refreshedReferenceData;
     return {
-      bassinsVersants: this.formatEntities(this.bassinsVersants, 'departements'),
-      regions: this.formatEntities(this.regions, 'departements'),
-      departements: this.departements.map(d => {
+      bassinsVersants: this.formatEntities(
+        referenceData.bassinsVersants,
+        'departements',
+      ),
+      regions: this.formatEntities(referenceData.regions, 'departements'),
+      departements: referenceData.departements.map((d) => {
         return {
           id: d.id,
           code: d.code,
@@ -72,8 +204,10 @@ export class DataService {
    */
   private formatEntities(entities: any[], relatedField: string) {
     return entities
-      .filter(entity => entity[relatedField] && entity[relatedField].length > 0)
-      .map(entity => ({
+      .filter(
+        (entity) => entity[relatedField] && entity[relatedField].length > 0,
+      )
+      .map((entity) => ({
         id: entity.id,
         code: entity.code,
         nom: entity.nom,
@@ -94,17 +228,41 @@ export class DataService {
    * @param departement - ID du département (optionnel).
    * @returns Les données filtrées selon les critères.
    */
-  areaFindByDate(dateDebut?: string, dateFin?: string, bassinVersant?: string, region?: string, departement?: string) {
+  async areaFindByDate(
+    dateDebut?: string,
+    dateFin?: string,
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+  ) {
+    const cache = await this.ensureCertifiedDataCache();
     // Filtrage des données par date
-    const filteredData = this.filterDataByDate(this.dataArea, dateDebut, dateFin);
+    const filteredData = this.filterDataByDate(
+      cache.dataArea,
+      dateDebut,
+      dateFin,
+    );
 
     // Filtrer par bassin versant, région ou département
-    if (bassinVersant) return this.filterByEntity(filteredData, bassinVersant, 'bassinsVersants');
-    if (region) return this.filterByEntity(filteredData, region, 'regions');
-    if (departement) return this.filterByEntity(filteredData, departement, 'departements');
+    if (bassinVersant)
+      return this.filterByEntity(
+        filteredData,
+        bassinVersant,
+        'bassinsVersants',
+        cache,
+      );
+    if (region)
+      return this.filterByEntity(filteredData, region, 'regions', cache);
+    if (departement)
+      return this.filterByEntity(
+        filteredData,
+        departement,
+        'departements',
+        cache,
+      );
 
     // Données globales
-    return filteredData.map(d => ({
+    return filteredData.map((d) => ({
       date: d.date,
       ESO: d.ESO,
       ESU: d.ESU,
@@ -118,13 +276,21 @@ export class DataService {
    * @param entityId - L'ID de l'entité géographique à utiliser pour le filtre.
    * @param field - Le champ correspondant à l'entité (ex : 'bassinsVersants', 'regions').
    */
-  private filterByEntity(data: any[], entityId: string, field: string) {
-    const entity = this[field].find(e => e.id === +entityId);
+  private filterByEntity(
+    data: any[],
+    entityId: string,
+    field: string,
+    referenceData: ReferenceDataCache,
+  ) {
+    const entity = referenceData[field].find((e) => e.id === +entityId);
     if (!entity) {
-      throw new HttpException(`${field.slice(0, -1)} non trouvé.`, HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        `${field.slice(0, -1)} non trouvé.`,
+        HttpStatus.NOT_FOUND,
+      );
     }
 
-    return data.map(d => ({
+    return data.map((d) => ({
       date: d.date,
       ...d[field].find((item: any) => item.id === entity.id),
     }));
@@ -138,14 +304,16 @@ export class DataService {
    * @param dateFin - Date de fin de la plage de recherche (optionnelle).
    */
   private filterDataByDate(data: any[], dateDebut?: string, dateFin?: string) {
-    return structuredClone(data.filter(d =>
-      moment(d.date).isBetween(
-        moment(dateDebut || this.beginDate, 'YYYY-MM-DD'),
-        moment(dateFin || moment(), 'YYYY-MM-DD'),
-        undefined,
-        '[]',
+    return structuredClone(
+      data.filter((d) =>
+        moment(d.date).isBetween(
+          moment(dateDebut || this.beginDate, 'YYYY-MM-DD'),
+          moment(dateFin || moment(), 'YYYY-MM-DD'),
+          undefined,
+          '[]',
+        ),
       ),
-    ));
+    );
   }
 
   /**
@@ -158,20 +326,30 @@ export class DataService {
    * @param departement - ID du département (optionnel).
    * @returns Les statistiques du département filtrées.
    */
-  departementFindByDate(
+  async departementFindByDate(
     dateDebut?: string,
     dateFin?: string,
     bassinVersant?: string,
     region?: string,
     departement?: string,
   ) {
-    let dataDepartementFiltered = this.filterDataByDate(this.dataDepartement, dateDebut, dateFin);
+    const cache = await this.ensureCertifiedDataCache();
+    let dataDepartementFiltered = this.filterDataByDate(
+      cache.dataDepartement,
+      dateDebut,
+      dateFin,
+    );
 
-    const departementsToFilter = this.getDepartementsToFilter(bassinVersant, region, departement);
+    const departementsToFilter = this.getDepartementsToFilter(
+      bassinVersant,
+      region,
+      departement,
+      cache,
+    );
     if (departementsToFilter.length > 0) {
-      dataDepartementFiltered = dataDepartementFiltered.map(d => {
-        d.departements = d.departements.filter(dep =>
-          departementsToFilter.some(depf => depf.code === dep.code),
+      dataDepartementFiltered = dataDepartementFiltered.map((d) => {
+        d.departements = d.departements.filter((dep) =>
+          departementsToFilter.some((depf) => depf.code === dep.code),
         );
         return d;
       });
@@ -186,15 +364,37 @@ export class DataService {
    * @param departement - ID du département (optionnel).
    * @returns Une liste de départements correspondant aux critères.
    */
-  private getDepartementsToFilter(bassinVersant?: string, region?: string, departement?: string) {
+  private getDepartementsToFilter(
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+    referenceData: ReferenceDataCache = this.referenceDataCache ?? {
+      departements: this.departements,
+      regions: this.regions,
+      bassinsVersants: this.bassinsVersants,
+      fullArea: this.fullArea,
+      metropoleArea: this.metropoleArea,
+    },
+  ) {
     if (bassinVersant) {
-      return this.getEntityById(this.bassinsVersants, bassinVersant, 'Bassin versant').departements;
+      return this.getEntityById(
+        referenceData.bassinsVersants,
+        bassinVersant,
+        'Bassin versant',
+      ).departements;
     }
     if (region) {
-      return this.getEntityById(this.regions, region, 'Région').departements;
+      return this.getEntityById(referenceData.regions, region, 'Région')
+        .departements;
     }
     if (departement) {
-      return [this.getEntityById(this.departements, departement, 'Département')];
+      return [
+        this.getEntityById(
+          referenceData.departements,
+          departement,
+          'Département',
+        ),
+      ];
     }
     return [];
   }
@@ -207,9 +407,12 @@ export class DataService {
    * @returns L'entité correspondante ou une erreur si elle n'est pas trouvée.
    */
   private getEntityById(collection: any[], id: string, entityName: string) {
-    const entity = collection.find(e => e.id === +id);
+    const entity = collection.find((e) => e.id === +id);
     if (!entity) {
-      throw new HttpException(`${entityName} non trouvé.`, HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        `${entityName} non trouvé.`,
+        HttpStatus.NOT_FOUND,
+      );
     }
     return entity;
   }
@@ -218,32 +421,60 @@ export class DataService {
    * Calcule les données de surface (area) et les restrictions associées pour différents niveaux géographiques.
    * Cette méthode est utilisée pour préparer les données avant leur exposition via des API.
    */
-  computeDataArea() {
+  computeDataArea(referenceData = this.getInstanceReferenceData()) {
     this.logger.log('COMPUTE DATA AREA');
-    this.dataArea = this.data.map(data => {
+    this.dataArea = this.data.map((data) => {
       return {
         date: data.date,
-        ESO: this.computeRestriction(data.departements, 'SOU', this.fullArea),
-        ESU: this.computeRestriction(data.departements, 'SUP', this.fullArea),
-        AEP: this.computeRestriction(data.departements, 'AEP', this.fullArea),
-        bassinsVersants: this.computeEntityRestrictions(data, this.bassinsVersants),
-        regions: this.computeEntityRestrictions(data, this.regions),
-        departements: this.computeEntityRestrictions(data, this.departements),
-      }
+        ESO: this.computeRestriction(
+          data.departements,
+          'SOU',
+          referenceData.fullArea,
+        ),
+        ESU: this.computeRestriction(
+          data.departements,
+          'SUP',
+          referenceData.fullArea,
+        ),
+        AEP: this.computeRestriction(
+          data.departements,
+          'AEP',
+          referenceData.fullArea,
+        ),
+        bassinsVersants: this.computeEntityRestrictions(
+          data,
+          referenceData.bassinsVersants,
+          referenceData.departements,
+        ),
+        regions: this.computeEntityRestrictions(
+          data,
+          referenceData.regions,
+          referenceData.departements,
+        ),
+        departements: this.computeEntityRestrictions(
+          data,
+          referenceData.departements,
+          referenceData.departements,
+        ),
+      };
     });
   }
 
   /**
    * Calcule les restrictions pour un ensemble d'entités (bassins versants, régions, départements).
    */
-  private computeEntityRestrictions(data: any, entities: any[]) {
-    return entities.map(entity => {
-      const filteredDeps = this.departements.filter(dep =>
-        entity.departements?.some(d => d.id === dep.id),
+  private computeEntityRestrictions(
+    data: any,
+    entities: any[],
+    departements: any[],
+  ) {
+    return entities.map((entity) => {
+      const filteredDeps = departements.filter((dep) =>
+        entity.departements?.some((d) => d.id === dep.id),
       );
       const area = filteredDeps.reduce((acc, dep) => acc + dep.area, 0);
-      const restrictions = data.departements.filter(dep =>
-        filteredDeps.some(d => d.code === dep.departement),
+      const restrictions = data.departements.filter((dep) =>
+        filteredDeps.some((d) => d.code === dep.departement),
       );
       return {
         id: entity.id,
@@ -254,13 +485,32 @@ export class DataService {
     });
   }
 
+  private getInstanceReferenceData(): ReferenceDataCache {
+    return {
+      departements: this.departements,
+      regions: this.regions,
+      bassinsVersants: this.bassinsVersants,
+      fullArea: this.fullArea,
+      metropoleArea: this.metropoleArea,
+    };
+  }
+
   /**
    * Calcule un pourcentage de restriction pour un type de zone (ex : SUP, SOU, AEP).
    */
-  private computeRestriction(restrictions: any[], zoneType: string, area: number) {
+  private computeRestriction(
+    restrictions: any[],
+    zoneType: string,
+    area: number,
+  ) {
     const compute = (key: string) =>
       (
-        (restrictions.reduce((acc, r) => acc + Number(r[zoneType]?.[key] || 0), 0) * 100) / area
+        (restrictions.reduce(
+          (acc, r) => acc + Number(r[zoneType]?.[key] || 0),
+          0,
+        ) *
+          100) /
+        area
       ).toFixed(2);
 
     return {
@@ -274,8 +524,9 @@ export class DataService {
   /**
    * Retourne les données communes (pré-calculées).
    */
-  duree() {
-    return this.dataCommune;
+  async duree() {
+    const cache = await this.ensureCertifiedDataCache();
+    return cache.dataCommune;
   }
 
   /**
@@ -286,11 +537,14 @@ export class DataService {
    * @param dateFin - (Optionnel) Fin de la plage de dates (format YYYY-MM).
    * @returns Les statistiques de la commune, incluant les restrictions filtrées si applicable.
    */
-  async commune(code: string, dateDebut?: string, dateFin?: string): Promise<StatisticCommune> {
+  async commune(
+    code: string,
+    dateDebut?: string,
+    dateFin?: string,
+  ): Promise<StatisticCommune> {
     const stat = await this.statisticCommuneRepository.findOne(<FindOneOptions>{
       select: {
         id: true,
-        restrictions: !dateDebut && !dateFin,
         commune: {
           id: true,
           code: true,
@@ -313,20 +567,79 @@ export class DataService {
       );
     }
 
-    if (dateDebut || dateFin) {
-      const dateBegin = dateDebut ? moment(dateDebut, 'YYYY-MM').startOf('month') : moment();
-      const dateEnd = dateFin ? moment(dateFin, 'YYYY-MM').endOf('month') : moment();
-
-      const r = await this.dataSource.query(`
-      SELECT jsonb_agg(r) as filtered_restrictions
-      FROM statistic_commune,
-  jsonb_array_elements(restrictions) AS r
-      WHERE statistic_commune.id = $1 
-      AND (r->>'date')::date BETWEEN $2 AND $3
-    `, [stat.id, dateBegin.format('YYYY-MM-DD'), dateEnd.format('YYYY-MM-DD')]);
-
-      stat.restrictions = r[0].filtered_restrictions;
+    const dateBegin = dateDebut
+      ? moment(dateDebut, 'YYYY-MM').startOf('month')
+      : dateFin
+        ? moment()
+        : null;
+    const dateEnd = dateFin
+      ? moment(dateFin, 'YYYY-MM').endOf('month')
+      : dateDebut
+        ? moment()
+        : null;
+    const [result] = await this.dataSource.query(
+      `
+        WITH publication_state AS MATERIALIZED (
+          SELECT
+            "currentPublishedDate",
+            "historicDirtyFrom",
+            "historicDirtyThrough",
+            (
+              SELECT "activePublicationId"
+              FROM zone_publication_state
+              WHERE id = 1
+            ) AS "activePublicationId"
+          FROM statistic_publication_state
+          WHERE id = 1
+        ), filtered_restrictions AS MATERIALIZED (
+          SELECT restriction.value, restriction.ordinality
+          FROM statistic_commune statistic
+          CROSS JOIN publication_state state
+          CROSS JOIN LATERAL jsonb_array_elements(statistic.restrictions)
+            WITH ORDINALITY AS restriction(value, ordinality)
+          WHERE statistic.id = $1
+            AND ($2::date IS NULL OR (restriction.value->>'date')::date >= $2::date)
+            AND ($3::date IS NULL OR (restriction.value->>'date')::date <= $3::date)
+            AND state."currentPublishedDate" IS NOT NULL
+            AND (restriction.value->>'date')::date <= state."currentPublishedDate"
+            AND (
+              (
+                $4::varchar = 'legacy-bootstrap'
+                AND state."activePublicationId" IS NULL
+              )
+              OR state."historicDirtyFrom" IS NULL
+              OR (restriction.value->>'date')::date < state."historicDirtyFrom"
+              OR (restriction.value->>'date')::date > COALESCE(
+                state."historicDirtyThrough",
+                state."currentPublishedDate"
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM statistic_commune_snapshot snapshot
+              WHERE snapshot."snapshotDate" = (restriction.value->>'date')::date
+                AND snapshot.status <> 'completed'
+                AND snapshot.scope <> 'bootstrap'
+            )
+        )
+        SELECT
+          EXISTS(SELECT 1 FROM publication_state) AS "stateAvailable",
+          (
+            SELECT jsonb_agg(value ORDER BY ordinality)
+            FROM filtered_restrictions
+          ) AS filtered_restrictions
+      `,
+      [
+        stat.id,
+        dateBegin?.format('YYYY-MM-DD') ?? null,
+        dateEnd?.format('YYYY-MM-DD') ?? null,
+        this.getConfiguredStatisticCacheMode(),
+      ],
+    );
+    if (result?.stateAvailable !== true) {
+      throw new Error('Statistic publication state is unavailable');
     }
+    stat.restrictions = result.filtered_restrictions ?? [];
     return stat;
   }
 
@@ -336,17 +649,992 @@ export class DataService {
    * et prépare les données nécessaires pour les départements et les communes.
    */
   @Cron(CronExpression.EVERY_3_HOURS)
-  async loadData() {
-    this.logger.log('LOAD DATA');
-    await this.loadRefData();
-    this.logMemoryUsage();
+  async loadData(requestedPublicationState?: StatisticPublicationState) {
+    if (this.dataLoading) {
+      return this.dataLoading;
+    }
+    const hadInitializedCache = this.certifiedDataCache !== null;
+    let attemptedPublicationStateToken = requestedPublicationState
+      ? this.getPublicationStateToken(requestedPublicationState)
+      : null;
+    let attemptedCandidateLoad = false;
+    const loading = (async () => {
+      try {
+        let publicationState =
+          requestedPublicationState ?? (await this.getPublicationState(true));
+        attemptedPublicationStateToken =
+          this.getPublicationStateToken(publicationState);
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          attemptedCandidateLoad = false;
+          const publicationStateToken =
+            this.getPublicationStateToken(publicationState);
+          attemptedPublicationStateToken = publicationStateToken;
+          if (
+            hadInitializedCache &&
+            this.certifiedDataCache &&
+            this.isSamePublicationState(
+              this.certifiedDataCache.publicationState,
+              publicationState,
+            ) &&
+            !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
+          ) {
+            await this.refreshReferenceDataCacheIfStale();
+            this.publicationState = publicationState;
+            this.publicationStateCheckedAt = Date.now();
+            this.failedPublicationStateToken = null;
+            this.failedPublicationAt = 0;
+            this.lastDataCacheError = null;
+            return;
+          }
+          if (
+            this.failedPublicationStateToken === publicationStateToken &&
+            Date.now() - this.failedPublicationAt <
+              this.publicationRefreshRetryIntervalMs
+          ) {
+            throw new Error(
+              `Public data publication state ${publicationStateToken} is in refresh cooldown`,
+            );
+          }
+          attemptedCandidateLoad = true;
+          const candidateCache = await this.loadDataOnce(publicationState);
+          const stateAfter = await this.getPublicationState(true);
+          if (this.isSamePublicationState(publicationState, stateAfter)) {
+            const certifiedDataCache = {
+              ...candidateCache,
+              revision: stateAfter.revision,
+              publicationState: stateAfter,
+            };
+            this.publishCertifiedDataCache(certifiedDataCache);
+            this.publicationState = stateAfter;
+            this.failedPublicationStateToken = null;
+            this.failedPublicationAt = 0;
+            this.lastDataCacheError = null;
+            return;
+          }
+          this.logger.warn(
+            `PUBLICATION STATE CHANGED DURING DATA LOAD - RETRY ${attempt + 1}`,
+          );
+          publicationState = stateAfter;
+        }
+        throw new Error(
+          'Publication state kept changing while refreshing the public data cache',
+        );
+      } catch (error) {
+        this.lastDataCacheError = {
+          at: new Date(),
+          phase: hadInitializedCache ? 'refresh' : 'load',
+        };
+        if (attemptedCandidateLoad && attemptedPublicationStateToken) {
+          this.failedPublicationStateToken = attemptedPublicationStateToken;
+          this.failedPublicationAt = Date.now();
+        }
+        if (hadInitializedCache) {
+          if (!requestedPublicationState) {
+            this.logger.warn(
+              `PUBLIC DATA CACHE REFRESH FAILED - SERVING LAST VALID CACHE: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+        throw error;
+      }
+    })();
+    this.dataLoading = loading;
+    try {
+      await loading;
+    } finally {
+      if (this.dataLoading === loading) {
+        this.dataLoading = null;
+      }
+    }
+  }
 
-    this.data = this.generateDateRange(this.beginDate, moment().format('YYYY-MM-DD'));
+  private async loadDataOnce(
+    publicationState: StatisticPublicationState,
+  ): Promise<CertifiedDataCache> {
+    const currentPublishedDate = publicationState.currentPublishedDate;
+    if (
+      !currentPublishedDate ||
+      !moment(currentPublishedDate, 'YYYY-MM-DD', true).isValid() ||
+      moment(currentPublishedDate, 'YYYY-MM-DD').isBefore(
+        moment(this.beginDate, 'YYYY-MM-DD'),
+        'day',
+      )
+    ) {
+      throw new Error('No valid current publication date is available');
+    }
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let transactionStarted = false;
+    try {
+      await queryRunner.connect();
+      connected = true;
+      await queryRunner.startTransaction('REPEATABLE READ');
+      transactionStarted = true;
+      await queryRunner.query('SET TRANSACTION READ ONLY');
 
-    await this.loadDepartementData();
-    this.data = [];
+      this.logger.log('LOAD DATA');
+      const referenceData = await this.loadRefData(queryRunner.manager);
+      this.logMemoryUsage();
 
-    await this.loadCommuneData();
+      this.data = this.generateDateRange(this.beginDate, currentPublishedDate);
+      const expectedCommuneCount = await this.assertSnapshotCoverage(
+        publicationState,
+        queryRunner.manager,
+      );
+      const departmentData = await this.loadDepartementData(
+        publicationState,
+        queryRunner.manager,
+        referenceData,
+      );
+      this.data = [];
+
+      const loadedCommuneCount = await this.loadCommuneData(
+        publicationState,
+        queryRunner.manager,
+      );
+      if (loadedCommuneCount !== expectedCommuneCount) {
+        throw new Error(
+          `The commune statistic repository contains ${loadedCommuneCount}/${expectedCommuneCount} certified communes`,
+        );
+      }
+      const candidate = this.createCertifiedDataCandidate(
+        referenceData,
+        publicationState,
+        departmentData,
+        expectedCommuneCount,
+      );
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
+      return candidate;
+    } catch (error) {
+      if (transactionStarted) {
+        await queryRunner.rollbackTransaction();
+      }
+      throw error;
+    } finally {
+      this.data = [];
+      if (connected) {
+        await queryRunner.release();
+      }
+    }
+  }
+
+  private async ensureCertifiedDataCache(): Promise<CertifiedDataCache> {
+    const currentCache = this.certifiedDataCache;
+    if (currentCache) {
+      this.startCertifiedDataRefresh();
+      return currentCache;
+    }
+
+    try {
+      await this.loadData();
+    } catch (error) {
+      throw new HttpException(
+        {
+          status: 'unavailable',
+          message:
+            'Les statistiques publiques sont temporairement indisponibles.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+        { cause: error },
+      );
+    }
+    if (!this.certifiedDataCache) {
+      throw new HttpException(
+        {
+          status: 'unavailable',
+          message:
+            'Les statistiques publiques sont temporairement indisponibles.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    return this.certifiedDataCache;
+  }
+
+  private startCertifiedDataRefresh(): void {
+    if (this.dataLoading || this.certifiedDataRefreshLoading) {
+      return;
+    }
+    const refresh = (async () => {
+      const publicationState = await this.getPublicationState();
+      if (
+        this.certifiedDataCache &&
+        this.isSamePublicationState(
+          this.certifiedDataCache.publicationState,
+          publicationState,
+        ) &&
+        !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
+      ) {
+        this.lastDataCacheError = null;
+        return;
+      }
+      const publicationStateToken =
+        this.getPublicationStateToken(publicationState);
+      if (
+        this.failedPublicationStateToken === publicationStateToken &&
+        Date.now() - this.failedPublicationAt <
+          this.publicationRefreshRetryIntervalMs
+      ) {
+        return;
+      }
+      await this.loadData(publicationState);
+    })();
+    this.certifiedDataRefreshLoading = refresh;
+    void refresh
+      .catch((error) => {
+        this.logger.warn(
+          `PUBLIC DATA CACHE REFRESH FAILED - SERVING LAST VALID CACHE: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      })
+      .finally(() => {
+        if (this.certifiedDataRefreshLoading === refresh) {
+          this.certifiedDataRefreshLoading = null;
+        }
+      });
+  }
+
+  async getStatisticCacheStatus(
+    checkPublicationState = false,
+  ): Promise<StatisticCacheStatus> {
+    let availableState = this.publicationState;
+    let stateCheckFailed = false;
+    let stateCheckErrorPhase: string | null = null;
+    if (checkPublicationState) {
+      try {
+        availableState = await this.getPublicationState(true);
+      } catch {
+        stateCheckFailed = true;
+        stateCheckErrorPhase = 'publication-state-check';
+      }
+    }
+
+    let publicationExpectation: StatisticPublicationExpectation;
+    try {
+      publicationExpectation = this.getStatisticPublicationExpectation();
+    } catch {
+      stateCheckFailed = true;
+      stateCheckErrorPhase ??= 'publication-deadline-check';
+      publicationExpectation = resolveStatisticPublicationExpectation(
+        new Date(),
+        DEFAULT_STATISTIC_PUBLICATION_DEADLINE,
+      );
+    }
+
+    const cache = this.certifiedDataCache;
+    const usable = Boolean(cache);
+    let mode: StatisticCacheMode = cache?.mode ?? 'versioned';
+    try {
+      mode = this.getStatisticCacheMode(availableState);
+    } catch {
+      stateCheckFailed = true;
+      stateCheckErrorPhase ??= 'cache-mode-check';
+    }
+    let snapshotCoverage: LegacySnapshotCoverageStatus = {
+      incompleteSnapshotCount: null,
+      oldestIncompleteSnapshot: null,
+    };
+    if (
+      mode === 'legacy-bootstrap' &&
+      availableState?.currentPublishedDate &&
+      !stateCheckFailed
+    ) {
+      try {
+        snapshotCoverage = await this.getLegacySnapshotCoverageStatus(
+          availableState.currentPublishedDate,
+        );
+      } catch {
+        stateCheckFailed = true;
+        stateCheckErrorPhase = 'snapshot-coverage-check';
+      }
+    }
+    const stateMatches = Boolean(
+      cache &&
+      availableState &&
+      this.isSamePublicationState(cache.publicationState, availableState),
+    );
+    const historicCoverageIsComplete = !availableState?.historicDirtyFrom;
+    const legacySnapshotCoverageIsComplete =
+      mode !== 'legacy-bootstrap' ||
+      (snapshotCoverage.incompleteSnapshotCount === 0 &&
+        !this.legacySnapshotCoverageDirty &&
+        this.isLegacyCacheContinuous(cache, availableState));
+    const lagDays = getPublicationLagDays(
+      availableState?.currentPublishedDate ?? null,
+      publicationExpectation.expectedPublishedDate,
+    );
+    const currentPublicationIsFresh = Boolean(
+      availableState?.currentPublishedDate &&
+      availableState.currentPublishedDate >=
+        publicationExpectation.expectedPublishedDate &&
+      availableState.currentPublishedDate <= publicationExpectation.today,
+    );
+    const fresh = Boolean(
+      cache &&
+      stateMatches &&
+      cache.latestDate === availableState?.currentPublishedDate &&
+      currentPublicationIsFresh &&
+      historicCoverageIsComplete &&
+      legacySnapshotCoverageIsComplete &&
+      !stateCheckFailed &&
+      !this.lastDataCacheError,
+    );
+    const status = !usable ? 'unavailable' : fresh ? 'ready' : 'degraded';
+
+    const result: StatisticCacheStatus = {
+      status: stateCheckFailed && status === 'ready' ? 'degraded' : status,
+      usable,
+      fresh: fresh && !stateCheckFailed,
+      mode,
+      currentPublishedDate: availableState?.currentPublishedDate ?? null,
+      expectedPublishedDate: publicationExpectation.expectedPublishedDate,
+      publicationDeadline: publicationExpectation.deadline,
+      lagDays,
+      historicDirtyFrom: availableState?.historicDirtyFrom ?? null,
+      historicDirtyThrough: availableState?.historicDirtyThrough ?? null,
+      firstDate: cache?.firstDate ?? null,
+      latestDate: cache?.latestDate ?? null,
+      dateCount: cache?.dateCount ?? 0,
+      departmentCount: cache?.departmentCount ?? 0,
+      communeCount: cache?.communeCount ?? 0,
+      fingerprint: cache?.fingerprint ?? null,
+      loadedAt: cache?.loadedAt.toISOString() ?? null,
+      ...snapshotCoverage,
+      lastError: this.lastDataCacheError
+        ? {
+            at: this.lastDataCacheError.at.toISOString(),
+            phase: this.lastDataCacheError.phase,
+          }
+        : stateCheckFailed
+          ? {
+              at: new Date().toISOString(),
+              phase: stateCheckErrorPhase ?? 'publication-state-check',
+            }
+          : null,
+    };
+    if (!cache) {
+      this.startColdDataLoad(stateCheckFailed ? undefined : availableState);
+    } else if (
+      mode === 'legacy-bootstrap' &&
+      snapshotCoverage.incompleteSnapshotCount === 0 &&
+      !availableState?.historicDirtyFrom &&
+      (!this.isLegacyCacheContinuous(cache, availableState) ||
+        this.legacySnapshotCoverageDirty)
+    ) {
+      this.startCertifiedDataRefresh();
+    }
+    return result;
+  }
+
+  private getStatisticPublicationExpectation(): StatisticPublicationExpectation {
+    return resolveStatisticPublicationExpectation(
+      new Date(),
+      process.env.STATISTIC_PUBLICATION_DEADLINE?.trim() ||
+        DEFAULT_STATISTIC_PUBLICATION_DEADLINE,
+    );
+  }
+
+  private async getLegacySnapshotCoverageStatus(
+    currentPublishedDate: string,
+  ): Promise<LegacySnapshotCoverageStatus> {
+    if (
+      this.legacySnapshotCoverageStatus?.currentPublishedDate ===
+        currentPublishedDate &&
+      Date.now() - this.legacySnapshotCoverageCheckedAt <
+        this.legacySnapshotCoverageCheckIntervalMs
+    ) {
+      return this.legacySnapshotCoverageStatus;
+    }
+    if (this.legacySnapshotCoverageLoading) {
+      return this.legacySnapshotCoverageLoading;
+    }
+    const loading = this.readLegacySnapshotCoverageStatus(
+      currentPublishedDate,
+    ).then((coverage) => {
+      this.legacySnapshotCoverageStatus = {
+        ...coverage,
+        currentPublishedDate,
+      };
+      this.legacySnapshotCoverageCheckedAt = Date.now();
+      if ((coverage.incompleteSnapshotCount ?? 0) > 0) {
+        this.legacySnapshotCoverageDirty = true;
+      }
+      return coverage;
+    });
+    this.legacySnapshotCoverageLoading = loading;
+    try {
+      return await loading;
+    } finally {
+      if (this.legacySnapshotCoverageLoading === loading) {
+        this.legacySnapshotCoverageLoading = null;
+      }
+    }
+  }
+
+  private async readLegacySnapshotCoverageStatus(
+    currentPublishedDate: string,
+  ): Promise<LegacySnapshotCoverageStatus> {
+    const [coverage] = await this.dataSource.query(
+      `
+        WITH incomplete_snapshot AS MATERIALIZED (
+          SELECT
+            "snapshotDate", "scope", "status",
+            "processedCommuneCount", "expectedCommuneCount", "updatedAt"
+          FROM "statistic_commune_snapshot"
+          WHERE "scope" = 'bootstrap'
+            OR (
+              "snapshotDate" BETWEEN $1::date AND $2::date
+              AND "scope" <> 'bootstrap'
+              AND (
+                "status" <> 'completed'
+                OR "processedCommuneCount" <> "expectedCommuneCount"
+              )
+            )
+        ), oldest_incomplete_snapshot AS MATERIALIZED (
+          SELECT *
+          FROM incomplete_snapshot
+          ORDER BY "snapshotDate" ASC, "scope" ASC
+          LIMIT 1
+        )
+        SELECT
+          (SELECT COUNT(*)::integer FROM incomplete_snapshot)
+            AS "incompleteSnapshotCount",
+          oldest."snapshotDate" AS "oldestSnapshotDate",
+          oldest."scope" AS "oldestSnapshotScope",
+          oldest."status" AS "oldestSnapshotStatus",
+          oldest."processedCommuneCount" AS "oldestProcessedCommuneCount",
+          oldest."expectedCommuneCount" AS "oldestExpectedCommuneCount",
+          oldest."updatedAt" AS "oldestSnapshotUpdatedAt"
+        FROM (SELECT 1) singleton
+        LEFT JOIN oldest_incomplete_snapshot oldest ON true
+      `,
+      [this.beginDate, currentPublishedDate],
+    );
+    const incompleteSnapshotCount = Number(
+      coverage?.incompleteSnapshotCount ?? Number.NaN,
+    );
+    if (
+      !Number.isSafeInteger(incompleteSnapshotCount) ||
+      incompleteSnapshotCount < 0
+    ) {
+      throw new Error('Invalid statistic snapshot coverage diagnostic');
+    }
+    if (incompleteSnapshotCount === 0) {
+      return {
+        incompleteSnapshotCount,
+        oldestIncompleteSnapshot: null,
+      };
+    }
+    const processedCommuneCount = Number(
+      coverage?.oldestProcessedCommuneCount ?? Number.NaN,
+    );
+    const expectedCommuneCount = Number(
+      coverage?.oldestExpectedCommuneCount ?? Number.NaN,
+    );
+    if (
+      !coverage?.oldestSnapshotDate ||
+      !coverage?.oldestSnapshotScope ||
+      !coverage?.oldestSnapshotStatus ||
+      !coverage?.oldestSnapshotUpdatedAt ||
+      !Number.isSafeInteger(processedCommuneCount) ||
+      !Number.isSafeInteger(expectedCommuneCount)
+    ) {
+      throw new Error('Invalid oldest statistic snapshot diagnostic');
+    }
+    return {
+      incompleteSnapshotCount,
+      oldestIncompleteSnapshot: {
+        date: this.normalizeDate(coverage.oldestSnapshotDate),
+        scope: String(coverage.oldestSnapshotScope),
+        status: String(coverage.oldestSnapshotStatus),
+        processedCommuneCount,
+        expectedCommuneCount,
+        updatedAt: new Date(coverage.oldestSnapshotUpdatedAt).toISOString(),
+      },
+    };
+  }
+
+  private async shouldRefreshUnchangedLegacyCache(
+    publicationState: StatisticPublicationState,
+  ): Promise<boolean> {
+    const cache = this.certifiedDataCache;
+    if (
+      !cache ||
+      this.getStatisticCacheMode(publicationState) !== 'legacy-bootstrap' ||
+      !publicationState.currentPublishedDate ||
+      publicationState.historicDirtyFrom !== null
+    ) {
+      return false;
+    }
+    const coverage = await this.getLegacySnapshotCoverageStatus(
+      publicationState.currentPublishedDate,
+    );
+    if (coverage.incompleteSnapshotCount !== 0) {
+      return false;
+    }
+    return (
+      this.legacySnapshotCoverageDirty ||
+      !this.isLegacyCacheContinuous(cache, publicationState)
+    );
+  }
+
+  private isLegacyCacheContinuous(
+    cache: CertifiedDataCache | null,
+    publicationState: StatisticPublicationState | null,
+  ): boolean {
+    return Boolean(
+      cache &&
+      publicationState?.currentPublishedDate &&
+      cache.firstDate === this.beginDate &&
+      cache.latestDate === publicationState.currentPublishedDate &&
+      cache.dateCount ===
+        this.countCivilDates(
+          this.beginDate,
+          publicationState.currentPublishedDate,
+        ),
+    );
+  }
+
+  private startColdDataLoad(
+    publicationState?: StatisticPublicationState | null,
+  ): void {
+    if (this.certifiedDataCache || this.dataLoading) {
+      return;
+    }
+    void this.loadData(publicationState ?? undefined).catch((error) => {
+      this.logger.warn(
+        `PUBLIC DATA CACHE WARM-UP FAILED: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  private getStatisticCacheMode(
+    publicationState: StatisticPublicationState | null,
+  ): StatisticCacheMode {
+    if (publicationState?.activePublicationId) {
+      return 'versioned';
+    }
+    return this.getConfiguredStatisticCacheMode();
+  }
+
+  private getConfiguredStatisticCacheMode(): StatisticCacheMode {
+    const configuredMode =
+      process.env.STATISTIC_CACHE_MODE?.trim() || 'versioned';
+    if (
+      configuredMode !== 'versioned' &&
+      configuredMode !== 'legacy-bootstrap'
+    ) {
+      throw new Error(`Unsupported STATISTIC_CACHE_MODE: ${configuredMode}`);
+    }
+    return configuredMode;
+  }
+
+  private async assertSnapshotCoverage(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<number> {
+    const currentPublishedDate = publicationState.currentPublishedDate!;
+    const snapshots: Array<{
+      snapshotDate: string | Date;
+      scope: string;
+      status: string;
+      expectedCommuneCount: string | number;
+      processedCommuneCount: string | number;
+    }> = await manager.query(
+      `
+        SELECT
+          "snapshotDate", "scope", "status",
+          "expectedCommuneCount", "processedCommuneCount"
+        FROM "statistic_commune_snapshot"
+        WHERE "scope" = 'bootstrap'
+           OR "snapshotDate" BETWEEN $1::date AND $2::date
+        ORDER BY "snapshotDate" ASC, "scope" ASC
+      `,
+      [
+        this.getStatisticCacheMode(publicationState) === 'legacy-bootstrap'
+          ? this.beginDate
+          : this.releaseDate,
+        currentPublishedDate,
+      ],
+    );
+    const isIncomplete = (snapshot: (typeof snapshots)[number]) =>
+      snapshot.status !== 'completed' ||
+      Number(snapshot.processedCommuneCount) !==
+        Number(snapshot.expectedCommuneCount);
+    const bootstrapBarrier = snapshots.find(
+      (snapshot) => snapshot.scope === 'bootstrap',
+    );
+    if (bootstrapBarrier) {
+      throw new Error(
+        `Statistic bootstrap barrier ${this.normalizeDate(bootstrapBarrier.snapshotDate)} is active`,
+      );
+    }
+    const incomplete = snapshots.find(isIncomplete);
+    if (
+      this.getStatisticCacheMode(publicationState) === 'legacy-bootstrap' &&
+      incomplete
+    ) {
+      throw new Error(
+        `Statistic snapshot ${this.normalizeDate(incomplete.snapshotDate)} (${incomplete.scope}) is incomplete`,
+      );
+    }
+    const currentNationalSnapshot = snapshots.find(
+      (snapshot) =>
+        this.normalizeDate(snapshot.snapshotDate) === currentPublishedDate &&
+        snapshot.scope === 'national',
+    );
+    if (!currentNationalSnapshot || isIncomplete(currentNationalSnapshot)) {
+      throw new Error(
+        `No completed national statistic snapshot is available for ${currentPublishedDate}`,
+      );
+    }
+    const expectedCommuneCount = Number(
+      currentNationalSnapshot.expectedCommuneCount,
+    );
+    if (
+      !Number.isSafeInteger(expectedCommuneCount) ||
+      expectedCommuneCount <= 0
+    ) {
+      throw new Error(
+        `The national statistic snapshot for ${currentPublishedDate} has an invalid expected commune count`,
+      );
+    }
+    return expectedCommuneCount;
+  }
+
+  private createCertifiedDataCandidate(
+    referenceData: ReferenceDataCache,
+    publicationState: StatisticPublicationState,
+    departmentData: DepartmentDataLoad,
+    expectedCommuneCount: number,
+  ): CertifiedDataCache {
+    const mode = this.getStatisticCacheMode(publicationState);
+    const areaDates = this.dataArea.map(({ date }) => String(date));
+    const departmentDates = this.dataDepartement.map(({ date }) =>
+      String(date),
+    );
+    if (
+      areaDates.length === 0 ||
+      departmentDates.length === 0 ||
+      this.dataCommune.length === 0
+    ) {
+      throw new Error('The public statistic cache candidate is empty');
+    }
+    const communeCodes = new Set(
+      this.dataCommune.map(({ code }) => String(code)),
+    );
+    if (
+      this.dataCommune.length !== expectedCommuneCount ||
+      communeCodes.size !== expectedCommuneCount
+    ) {
+      throw new Error(
+        `The public statistic cache candidate contains ${this.dataCommune.length}/${expectedCommuneCount} communes (${communeCodes.size} unique)`,
+      );
+    }
+    if (
+      areaDates.length !== departmentDates.length ||
+      areaDates.some((date, index) => date !== departmentDates[index])
+    ) {
+      throw new Error(
+        'Area and department statistic cache candidates have different dates',
+      );
+    }
+    if (new Set(areaDates).size !== areaDates.length) {
+      throw new Error(
+        'The public statistic cache candidate contains duplicate dates',
+      );
+    }
+    if (
+      areaDates.some((date, index) => index > 0 && date <= areaDates[index - 1])
+    ) {
+      throw new Error(
+        'The public statistic cache candidate dates are not strictly ordered',
+      );
+    }
+
+    const currentPublishedDate = publicationState.currentPublishedDate!;
+    const firstDate = areaDates[0];
+    const latestDate = areaDates[areaDates.length - 1];
+    if (latestDate !== currentPublishedDate) {
+      throw new Error(
+        `The public statistic cache candidate ends on ${latestDate} instead of ${currentPublishedDate}`,
+      );
+    }
+    const previousLatestDate = this.certifiedDataCache?.latestDate;
+    if (previousLatestDate && latestDate < previousLatestDate) {
+      throw new Error(
+        `The public statistic cache candidate regresses from ${previousLatestDate} to ${latestDate}`,
+      );
+    }
+
+    const expectedDepartmentCodes = new Set(
+      referenceData.departements.map(({ code }) => String(code)),
+    );
+    if (expectedDepartmentCodes.size !== this.expectedDepartmentCount) {
+      throw new Error(
+        `The department reference contains ${expectedDepartmentCodes.size}/${this.expectedDepartmentCount} departments`,
+      );
+    }
+    for (const entry of this.dataDepartement) {
+      const codes = new Set(entry.departements.map(({ code }) => String(code)));
+      if (
+        codes.size !== expectedDepartmentCodes.size ||
+        [...expectedDepartmentCodes].some((code) => !codes.has(code))
+      ) {
+        throw new Error(
+          `Department statistics for ${entry.date} contain ${codes.size}/${expectedDepartmentCodes.size} departments`,
+        );
+      }
+    }
+
+    const candidateDates = new Set(areaDates);
+    const coverageEnd = moment.utc(currentPublishedDate, 'YYYY-MM-DD', true);
+    if (mode === 'legacy-bootstrap') {
+      for (
+        const date = moment.utc(this.beginDate, 'YYYY-MM-DD', true);
+        date.isSameOrBefore(coverageEnd, 'day');
+        date.add(1, 'day')
+      ) {
+        const dateString = date.format('YYYY-MM-DD');
+        if (!candidateDates.has(dateString)) {
+          throw new Error(
+            `Legacy statistic coverage is missing candidate date ${dateString}`,
+          );
+        }
+      }
+    }
+    const rawCoverageStart = moment.utc(this.releaseDate, 'YYYY-MM-DD', true);
+    for (
+      const date = rawCoverageStart.clone();
+      date.isSameOrBefore(coverageEnd, 'day');
+      date.add(1, 'day')
+    ) {
+      const dateString = date.format('YYYY-MM-DD');
+      if (!candidateDates.has(dateString)) {
+        continue;
+      }
+      const coveredDepartments = departmentData.coverageByDate.get(dateString);
+      if (
+        !coveredDepartments ||
+        coveredDepartments.size !== expectedDepartmentCodes.size ||
+        [...expectedDepartmentCodes].some(
+          (code) => !coveredDepartments.has(code),
+        )
+      ) {
+        throw new Error(
+          `Raw department statistics for ${dateString} contain ${coveredDepartments?.size ?? 0}/${expectedDepartmentCodes.size} departments`,
+        );
+      }
+    }
+
+    const candidateWithoutFingerprint = {
+      ...referenceData,
+      revision: publicationState.revision,
+      publicationState,
+      mode,
+      dataArea: this.dataArea,
+      dataCommune: this.dataCommune,
+      dataDepartement: this.dataDepartement,
+      firstDate,
+      latestDate,
+      dateCount: areaDates.length,
+      departmentCount: expectedDepartmentCodes.size,
+      communeCount: this.dataCommune.length,
+      loadedAt: new Date(),
+    };
+    return {
+      ...candidateWithoutFingerprint,
+      fingerprint: this.computeStatisticCacheFingerprint(
+        candidateWithoutFingerprint,
+      ),
+    };
+  }
+
+  private countCivilDates(startDate: string, endDate?: string | null): number {
+    if (!endDate) {
+      return 0;
+    }
+    const start = moment.utc(startDate, 'YYYY-MM-DD', true);
+    const end = moment.utc(endDate, 'YYYY-MM-DD', true);
+    if (!start.isValid() || !end.isValid() || end.isBefore(start, 'day')) {
+      return 0;
+    }
+    return end.diff(start, 'days') + 1;
+  }
+
+  private computeStatisticCacheFingerprint(
+    cache: Omit<CertifiedDataCache, 'fingerprint'>,
+  ): string {
+    const hash = createHash('sha256');
+    hash.update(
+      JSON.stringify({
+        revision: cache.revision,
+        mode: cache.mode,
+        currentPublishedDate: cache.publicationState.currentPublishedDate,
+        dateCount: cache.dateCount,
+        departmentCount: cache.departmentCount,
+        communeCount: cache.communeCount,
+      }),
+    );
+    for (const collection of [
+      cache.dataArea,
+      cache.dataDepartement,
+      cache.dataCommune,
+    ]) {
+      for (const entry of collection) {
+        hash.update(JSON.stringify(entry));
+        hash.update('\n');
+      }
+    }
+    return hash.digest('hex');
+  }
+
+  private publishCertifiedDataCache(cache: CertifiedDataCache): void {
+    this.certifiedDataCache = cache;
+    if (
+      cache.mode === 'legacy-bootstrap' &&
+      cache.publicationState.historicDirtyFrom === null
+    ) {
+      this.legacySnapshotCoverageDirty = false;
+    }
+    this.publishReferenceData(cache);
+  }
+
+  private publishReferenceData(referenceData: ReferenceDataCache): void {
+    this.referenceDataCache = referenceData;
+    this.referenceDataLoadedAt = Date.now();
+    this.referenceDataRefreshFailedAt = 0;
+    this.departements = referenceData.departements;
+    this.regions = referenceData.regions;
+    this.bassinsVersants = referenceData.bassinsVersants;
+    this.fullArea = referenceData.fullArea;
+    this.metropoleArea = referenceData.metropoleArea;
+  }
+
+  private async getPublicationState(
+    force = false,
+  ): Promise<StatisticPublicationState> {
+    if (
+      !force &&
+      Date.now() - this.publicationStateCheckedAt <
+        this.publicationStateCheckIntervalMs
+    ) {
+      if (this.publicationStateCheckError) {
+        throw this.publicationStateCheckError;
+      }
+      if (this.publicationState) {
+        return this.publicationState;
+      }
+    }
+    if (this.publicationStateLoading) {
+      return this.publicationStateLoading;
+    }
+
+    const loading = (async () => {
+      try {
+        const rows: Array<{
+          revision: string | number;
+          activePublicationId: string | null;
+          currentPublishedDate: string | Date | null;
+          historicPublishedThrough: string | Date | null;
+          historicDirtyFrom: string | Date | null;
+          historicDirtyThrough: string | Date | null;
+        }> = await this.dataSource.query(
+          `
+        SELECT
+          statistic_state.revision::text AS revision,
+          zone_state."activePublicationId"::text AS "activePublicationId",
+          statistic_state."currentPublishedDate"::text AS "currentPublishedDate",
+          statistic_state."historicPublishedThrough"::text AS "historicPublishedThrough",
+          statistic_state."historicDirtyFrom"::text AS "historicDirtyFrom",
+          statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough"
+        FROM statistic_publication_state statistic_state
+        LEFT JOIN zone_publication_state zone_state ON zone_state.id = 1
+        WHERE statistic_state.id = 1
+        LIMIT 1
+      `,
+        );
+        if (rows.length !== 1 || rows[0].revision === null) {
+          throw new Error('Statistic publication state is unavailable');
+        }
+        const state: StatisticPublicationState = {
+          revision: String(rows[0].revision),
+          activePublicationId: rows[0].activePublicationId
+            ? String(rows[0].activePublicationId)
+            : null,
+          currentPublishedDate: this.normalizeDate(
+            rows[0].currentPublishedDate,
+          ),
+          historicPublishedThrough: this.normalizeDate(
+            rows[0].historicPublishedThrough,
+          ),
+          historicDirtyFrom: this.normalizeDate(rows[0].historicDirtyFrom),
+          historicDirtyThrough: this.normalizeDate(
+            rows[0].historicDirtyThrough,
+          ),
+        };
+        this.publicationState = state;
+        this.publicationStateCheckError = null;
+        this.publicationStateCheckedAt = Date.now();
+        return state;
+      } catch (error) {
+        const stateError =
+          error instanceof Error ? error : new Error(String(error));
+        this.publicationStateCheckError = stateError;
+        this.publicationStateCheckedAt = Date.now();
+        throw stateError;
+      }
+    })();
+    this.publicationStateLoading = loading;
+    try {
+      return await loading;
+    } finally {
+      if (this.publicationStateLoading === loading) {
+        this.publicationStateLoading = null;
+      }
+    }
+  }
+
+  private normalizeDate(
+    value: string | Date | null | undefined,
+  ): string | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    return value instanceof Date
+      ? value.toISOString().slice(0, 10)
+      : String(value).slice(0, 10);
+  }
+
+  private isSamePublicationState(
+    left: StatisticPublicationState,
+    right: StatisticPublicationState,
+  ): boolean {
+    return (
+      left.revision === right.revision &&
+      left.activePublicationId === right.activePublicationId &&
+      left.currentPublishedDate === right.currentPublishedDate &&
+      left.historicPublishedThrough === right.historicPublishedThrough &&
+      left.historicDirtyFrom === right.historicDirtyFrom &&
+      left.historicDirtyThrough === right.historicDirtyThrough
+    );
+  }
+
+  private getPublicationStateToken(state: StatisticPublicationState): string {
+    return JSON.stringify([
+      state.revision,
+      state.activePublicationId,
+      state.currentPublishedDate,
+      state.historicPublishedThrough,
+      state.historicDirtyFrom,
+      state.historicDirtyThrough,
+    ]);
   }
 
   /**
@@ -362,7 +1650,10 @@ export class DataService {
     const dates = [];
 
     while (start.isSameOrBefore(end, 'day')) {
-      dates.push({ date: start.format('YYYY-MM-DD'), departements: [], communes: [] });
+      dates.push({
+        date: start.format('YYYY-MM-DD'),
+        departements: [],
+      });
       start.add(1, 'day');
     }
 
@@ -370,99 +1661,281 @@ export class DataService {
   }
 
   /**
-   * Charge les données de référence, y compris les communes, départements, régions et bassins versants.
+   * Charge les données de référence nécessaires aux réponses publiques.
    * Ces données servent de base à d'autres traitements ou filtrages dans le service.
    */
-  async loadRefData() {
-    this.communes = await this.communeRepository.find({
-      select: {
-        id: true,
-        code: true,
-        nom: true,
-      },
-      order: {
-        code: 'ASC',
-      },
-    });
-    this.departements = (await this.departementRepository
-      .createQueryBuilder('departement')
-      .select('departement.id', 'id')
-      .addSelect('departement.code', 'code')
-      .addSelect('departement.nom', 'nom')
-      .addSelect(
-        'ST_Area(departement.geom::geography)/1000000',
-        'area')
-      .addSelect('ST_Extent(departement.geom)', 'bounds')
-      .groupBy('id')
-      .orderBy('nom', 'ASC')
-      .getRawMany()).map(d => {
-      const bounds = {
-        minLat: d.bounds.split('(')[1].split(' ')[0],
-        maxLat: d.bounds.split(',')[1].split(' ')[0],
-        minLong: d.bounds.split(' ')[1].split(',')[0],
-        maxLong: d.bounds.split(' ')[2].split(')')[0],
+  async loadRefData(manager?: EntityManager): Promise<ReferenceDataCache> {
+    if (!manager && this.referenceDataLoading) {
+      return this.referenceDataLoading;
+    }
+
+    const loading = (async () => {
+      const departementRepository = manager
+        ? manager.getRepository(Departement)
+        : this.departementRepository;
+      const regionRepository = manager
+        ? manager.getRepository(Region)
+        : this.regionRepository;
+      const bassinVersantRepository = manager
+        ? manager.getRepository(BassinVersant)
+        : this.bassinVersantRepository;
+      const departements = (
+        await departementRepository
+          .createQueryBuilder('departement')
+          .select('departement.id', 'id')
+          .addSelect('departement.code', 'code')
+          .addSelect('departement.nom', 'nom')
+          .addSelect('ST_Area(departement.geom::geography)/1000000', 'area')
+          .addSelect('ST_Extent(departement.geom)', 'bounds')
+          .groupBy('id')
+          .orderBy('nom', 'ASC')
+          .getRawMany()
+      ).map((departement) => ({
+        ...departement,
+        bounds: {
+          minLat: departement.bounds.split('(')[1].split(' ')[0],
+          maxLat: departement.bounds.split(',')[1].split(' ')[0],
+          minLong: departement.bounds.split(' ')[1].split(',')[0],
+          maxLong: departement.bounds.split(' ')[2].split(')')[0],
+        },
+      }));
+      const regions = await regionRepository.find({
+        relations: ['departements'],
+        order: {
+          nom: 'ASC',
+        },
+      });
+      const bassinsVersants = await bassinVersantRepository.find({
+        relations: ['departements'],
+        order: {
+          nom: 'ASC',
+        },
+      });
+      const fullArea = departements.reduce(
+        (acc, departement) => acc + departement.area,
+        0,
+      );
+      const metropoleArea = departements
+        .filter((departement) => departement.code.length < 3)
+        .reduce((acc, departement) => acc + departement.area, 0);
+      const referenceData: ReferenceDataCache = {
+        departements,
+        regions,
+        bassinsVersants,
+        fullArea,
+        metropoleArea,
       };
-      d.bounds = bounds;
-      return d;
-    });
-    this.regions = await this.regionRepository.find({
-      relations: ['departements'],
-      order: {
-        nom: 'ASC',
-      },
-    });
-    this.bassinsVersants = await this.bassinVersantRepository.find({
-      relations: ['departements'],
-      order: {
-        nom: 'ASC',
-      },
-    });
-    this.fullArea = this.departements.reduce((acc, d) => acc + d.area, 0);
-    this.metropoleArea = this.departements.filter(d => d.code.length < 3).reduce((acc, d) => acc + d.area, 0);
+
+      if (!manager) {
+        // One synchronous pointer swap makes partial reference loads invisible.
+        this.publishReferenceData(referenceData);
+      }
+      return referenceData;
+    })();
+    if (manager) {
+      return loading;
+    }
+    this.referenceDataLoading = loading;
+    try {
+      return await loading;
+    } catch (error) {
+      this.referenceDataRefreshFailedAt = Date.now();
+      throw error;
+    } finally {
+      if (this.referenceDataLoading === loading) {
+        this.referenceDataLoading = null;
+      }
+    }
+  }
+
+  private async ensureReferenceDataCache(): Promise<ReferenceDataCache> {
+    if (this.referenceDataCache) {
+      this.startReferenceDataRefresh();
+      return this.referenceDataCache;
+    }
+    return this.loadRefData();
+  }
+
+  private isReferenceDataCacheStale(): boolean {
+    return (
+      !this.referenceDataCache ||
+      Date.now() - this.referenceDataLoadedAt >=
+        this.referenceDataRefreshIntervalMs
+    );
+  }
+
+  private async refreshReferenceDataCacheIfStale(): Promise<void> {
+    if (!this.isReferenceDataCacheStale()) {
+      return;
+    }
+    try {
+      await this.loadRefData();
+    } catch (error) {
+      if (!this.referenceDataCache) {
+        throw error;
+      }
+      this.logger.warn(
+        `REFERENCE DATA CACHE REFRESH FAILED - SERVING LAST VALID CACHE: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private startReferenceDataRefresh(): void {
+    if (
+      !this.isReferenceDataCacheStale() ||
+      this.referenceDataLoading ||
+      Date.now() - this.referenceDataRefreshFailedAt <
+        this.referenceDataRefreshRetryIntervalMs
+    ) {
+      return;
+    }
+    void this.loadRefData().catch((error) =>
+      this.logger.warn(
+        `REFERENCE DATA CACHE REFRESH FAILED - SERVING LAST VALID CACHE: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      ),
+    );
   }
 
   /**
    * Charge les données départementales à partir de la base de données et les associe aux dates correspondantes.
    */
-  async loadDepartementData() {
-    let statisticsDepartement = await this.statisticDepartementRepository.find({
+  async loadDepartementData(
+    publicationState = this.publicationState,
+    manager?: EntityManager,
+    referenceData = this.getInstanceReferenceData(),
+  ): Promise<DepartmentDataLoad> {
+    if (!publicationState || this.data.length === 0) {
+      throw new Error('Publication state is required to load department data');
+    }
+    const statisticDepartementRepository = manager
+      ? manager.getRepository(StatisticDepartement)
+      : this.statisticDepartementRepository;
+    const statisticsDepartement = await statisticDepartementRepository.find({
       relations: ['departement'],
+      order: { departement: { code: 'ASC' } },
     });
+    const firstDate = this.data[0].date;
+    const lastDate = this.data[this.data.length - 1].date;
+    const query = manager
+      ? manager.query.bind(manager)
+      : this.dataSource.query.bind(this.dataSource);
+    const incompleteSnapshots: Array<{ snapshotDate: string | Date }> =
+      await query(
+        `
+          SELECT "snapshotDate"
+          FROM statistic_commune_snapshot
+          WHERE status <> 'completed'
+            AND scope <> 'bootstrap'
+            AND "snapshotDate" BETWEEN $1::date AND $2::date
+        `,
+        [firstDate, lastDate],
+      );
+    const unavailableDates = new Set(
+      incompleteSnapshots.map(({ snapshotDate }) =>
+        this.normalizeDate(snapshotDate),
+      ),
+    );
 
+    if (
+      this.getStatisticCacheMode(publicationState) === 'versioned' &&
+      publicationState.historicDirtyFrom
+    ) {
+      const dirtyThrough =
+        publicationState.historicDirtyThrough ??
+        publicationState.currentPublishedDate;
+      for (const entry of this.data) {
+        if (
+          entry.date >= publicationState.historicDirtyFrom &&
+          dirtyThrough !== null &&
+          entry.date <= dirtyThrough
+        ) {
+          unavailableDates.add(entry.date);
+        }
+      }
+    }
+    this.data = this.data.filter((entry) => !unavailableDates.has(entry.date));
+
+    const dataByDate = new Map(this.data.map((entry) => [entry.date, entry]));
+    const coverageByDate = new Map<string, Set<string>>();
     for (const statisticDepartement of statisticsDepartement) {
-      for (const restriction of statisticDepartement.restrictions) {
-        const d = this.data.find(x => x.date === restriction.date);
-        d.departements.push({
-          ...{ departement: statisticDepartement.departement.code },
+      const departmentCode = String(statisticDepartement.departement.code);
+      for (const restriction of statisticDepartement.restrictions ?? []) {
+        const restrictionDate = this.normalizeDate(restriction.date);
+        if (
+          !restrictionDate ||
+          restrictionDate < this.beginDate ||
+          unavailableDates.has(restrictionDate)
+        ) {
+          continue;
+        }
+        const dateEntry = dataByDate.get(restrictionDate);
+        if (!dateEntry) {
+          continue;
+        }
+        let coveredDepartments = coverageByDate.get(restrictionDate);
+        if (!coveredDepartments) {
+          coveredDepartments = new Set();
+          coverageByDate.set(restrictionDate, coveredDepartments);
+        }
+        if (coveredDepartments.has(departmentCode)) {
+          throw new Error(
+            `Duplicate raw department statistic for ${departmentCode} on ${restrictionDate}`,
+          );
+        }
+        coveredDepartments.add(departmentCode);
+        dateEntry.departements.push({
+          ...{ departement: departmentCode },
           ...restriction,
+          date: restrictionDate,
         });
       }
     }
 
-    this.computeDataArea();
+    this.computeDataArea(referenceData);
     this.logMemoryUsage();
 
-    this.computeDataDepartement();
+    this.computeDataDepartement(referenceData);
     this.logMemoryUsage();
 
     for (const d of this.data) {
       d.departements = [];
     }
+    return { coverageByDate };
   }
 
   /**
    * Charge les données communales en utilisant un traitement paginé pour limiter l'utilisation de la mémoire.
    */
-  async loadCommuneData() {
+  async loadCommuneData(
+    publicationState = this.publicationState,
+    manager?: EntityManager,
+  ): Promise<number> {
+    if (!publicationState?.currentPublishedDate) {
+      throw new Error('Publication state is required to load commune data');
+    }
     this.logger.log('COMPUTE DATA COMMUNE - BEGIN');
     this.dataCommune = [];
-    const communesCount = await this.statisticCommuneRepository.count();
+    const statisticCommuneRepository = manager
+      ? manager.getRepository(StatisticCommune)
+      : this.statisticCommuneRepository;
+    const unavailableMonths = await this.findUnavailableSnapshotMonths(
+      publicationState,
+      manager,
+    );
+    const currentPublishedMonth = publicationState.currentPublishedDate.slice(
+      0,
+      7,
+    );
+    const communesCount = await statisticCommuneRepository.count();
 
     for (let i = 0; i < communesCount; i = i + 1000) {
-      for (const d of this.data) {
-        d.communes = [];
-      }
-      let statisticsCommune = await this.statisticCommuneRepository.find(<FindManyOptions> {
+      const statisticsCommune = await statisticCommuneRepository.find(<
+        FindManyOptions
+      >{
         select: {
           id: true,
           restrictionsByMonth: true,
@@ -474,13 +1947,37 @@ export class DataService {
         relations: ['commune'],
         take: 1000,
         skip: i,
+        order: { commune: { code: 'ASC' } },
       });
 
-      this.computeDataCommune(statisticsCommune);
+      this.assertMonthlyStatisticCoverage(
+        statisticsCommune,
+        currentPublishedMonth,
+        !unavailableMonths.has(currentPublishedMonth),
+      );
+      this.computeDataCommune(
+        statisticsCommune,
+        unavailableMonths,
+        currentPublishedMonth,
+      );
+    }
+
+    const unavailableMonthsAfterLoad = await this.findUnavailableSnapshotMonths(
+      publicationState,
+      manager,
+    );
+    for (const month of unavailableMonthsAfterLoad) {
+      unavailableMonths.add(month);
+    }
+    for (const commune of this.dataCommune) {
+      commune.restrictions = commune.restrictions?.filter(
+        (restriction) => !unavailableMonths.has(restriction.d),
+      );
     }
 
     this.logger.log('COMPUTE DATA COMMUNE - END');
     this.logMemoryUsage();
+    return communesCount;
   }
 
   /**
@@ -488,7 +1985,7 @@ export class DataService {
    *
    * @param statisticsCommune - Les données statistiques des communes.
    */
-  computeDataDepartement() {
+  computeDataDepartement(referenceData = this.getInstanceReferenceData()) {
     this.logger.log('COMPUTE DATA DEPARTEMENT');
     this.dataDepartement = [];
     for (const d of this.data) {
@@ -496,13 +1993,28 @@ export class DataService {
         date: d.date,
         departements: [],
       };
-      this.departements.forEach(departement => {
+      referenceData.departements.forEach((departement) => {
         tmp.departements.push({
           code: departement.code,
-          niveauGravite: this.findMaxNiveauGravite(d.departements, departement.code),
-          niveauGraviteSup: this.findMaxNiveauGravite(d.departements, departement.code, 'SUP'),
-          niveauGraviteSou: this.findMaxNiveauGravite(d.departements, departement.code, 'SOU'),
-          niveauGraviteAep: this.findMaxNiveauGravite(d.departements, departement.code, 'AEP'),
+          niveauGravite: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+          ),
+          niveauGraviteSup: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+            'SUP',
+          ),
+          niveauGraviteSou: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+            'SOU',
+          ),
+          niveauGraviteAep: this.findMaxNiveauGravite(
+            d.departements,
+            departement.code,
+            'AEP',
+          ),
         });
       });
       this.dataDepartement.push(tmp);
@@ -514,20 +2026,109 @@ export class DataService {
    *
    * @param statisticsCommune - Les données statistiques des communes.
    */
-  computeDataCommune(statisticsCommune) {
-    const communesFiltered = this.communes.filter(c => statisticsCommune.some(sc => sc.commune.code === c.code));
-    this.logger.log('COMMUNES FILTERED', communesFiltered.length);
+  computeDataCommune(
+    statisticsCommune,
+    unavailableMonths: Set<string> = new Set(),
+    currentPublishedMonth: string | null = null,
+  ) {
+    this.logger.log('COMMUNES FILTERED', statisticsCommune.length);
     for (const sc of statisticsCommune) {
       this.dataCommune.push({
         code: sc.commune.code,
-        restrictions: sc.restrictionsByMonth?.map(r => {
-          return {
-            d: r.date,
-            p: r.ponderation,
-          };
-        }),
+        restrictions: sc.restrictionsByMonth
+          ?.filter(
+            (restriction) =>
+              !unavailableMonths.has(restriction.date) &&
+              (!currentPublishedMonth ||
+                restriction.date <= currentPublishedMonth),
+          )
+          .map((r) => {
+            return {
+              d: r.date,
+              p: r.ponderation,
+            };
+          }),
       });
     }
+  }
+
+  private assertMonthlyStatisticCoverage(
+    statisticsCommune: any[],
+    currentPublishedMonth: string,
+    requireCurrentMonth: boolean,
+  ): void {
+    for (const statistic of statisticsCommune) {
+      const dates = (statistic.restrictionsByMonth ?? []).map(
+        ({ date }) => date,
+      );
+      let previousDate: string | null = null;
+      for (const date of dates) {
+        if (
+          typeof date !== 'string' ||
+          !/^\d{4}-(0[1-9]|1[0-2])$/.test(date) ||
+          date > currentPublishedMonth ||
+          (previousDate !== null && date <= previousDate)
+        ) {
+          throw new Error(
+            `Invalid monthly statistic sequence for commune ${statistic.commune?.code ?? 'unknown'}`,
+          );
+        }
+        previousDate = date;
+      }
+      if (requireCurrentMonth && !dates.includes(currentPublishedMonth)) {
+        throw new Error(
+          `Monthly statistics for commune ${statistic.commune?.code ?? 'unknown'} do not include ${currentPublishedMonth}`,
+        );
+      }
+    }
+  }
+
+  private async findUnavailableSnapshotMonths(
+    publicationState = this.publicationState,
+    manager?: EntityManager,
+  ): Promise<Set<string>> {
+    if (!publicationState) {
+      throw new Error('Publication state is required to filter commune data');
+    }
+    const query = manager
+      ? manager.query.bind(manager)
+      : this.dataSource.query.bind(this.dataSource);
+    const rows: Array<{ month: string }> = await query(
+      `
+      SELECT DISTINCT unavailable.month
+      FROM (
+        SELECT to_char("snapshotDate", 'YYYY-MM') AS month
+        FROM statistic_commune_snapshot
+        WHERE status <> 'completed'
+          AND scope <> 'bootstrap'
+
+        UNION ALL
+
+        SELECT to_char(dirty_month.value, 'YYYY-MM') AS month
+        FROM statistic_publication_state state
+        CROSS JOIN LATERAL generate_series(
+          date_trunc('month', state."historicDirtyFrom"),
+          date_trunc(
+            'month',
+            COALESCE(
+              state."historicDirtyThrough",
+              state."currentPublishedDate"
+            )
+          ),
+          interval '1 month'
+        ) AS dirty_month(value)
+        WHERE state.id = 1
+          AND $1::boolean
+          AND state."historicDirtyFrom" IS NOT NULL
+          AND COALESCE(
+            state."historicDirtyThrough",
+            state."currentPublishedDate"
+          ) IS NOT NULL
+      ) unavailable
+    `,
+      [this.getStatisticCacheMode(publicationState) === 'versioned'],
+    );
+    return new Set(rows.map(({ month }) => month));
   }
 
   /**
@@ -538,14 +2139,20 @@ export class DataService {
    * @param zoneType - (Optionnel) Type de zone spécifique (ex: 'SUP', 'SOU', 'AEP').
    * @returns Le niveau de gravité maximal trouvé ou `null` si aucune restriction n'est trouvée.
    */
-  findMaxNiveauGravite(restrictions: any[], departementCode: string, zoneType?: string) {
-    const restrictionsDepartement = restrictions.find(r => r.departement === departementCode);
+  findMaxNiveauGravite(
+    restrictions: any[],
+    departementCode: string,
+    zoneType?: string,
+  ) {
+    const restrictionsDepartement = restrictions.find(
+      (r) => r.departement === departementCode,
+    );
     if (!restrictionsDepartement) {
       return null;
     }
     let zonesType = ['SUP', 'SOU', 'AEP'];
     if (zoneType) {
-      zonesType = zonesType.filter(z => z === zoneType);
+      zonesType = zonesType.filter((z) => z === zoneType);
     }
     const niveauxGravite = ['crise', 'alerte_renforcee', 'alerte', 'vigilance'];
     for (const niveauGravite of niveauxGravite) {
@@ -565,7 +2172,7 @@ export class DataService {
    * @returns Une chaîne de caractères représentant la taille en Mo (ex: '12.34 MB').
    */
   formatMemoryUsage(data) {
-    return `${Math.round(data / 1024 / 1024 * 100) / 100} MB`;
+    return `${Math.round((data / 1024 / 1024) * 100) / 100} MB`;
   }
 
   /**

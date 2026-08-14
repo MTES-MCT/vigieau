@@ -1,9 +1,7 @@
 import { useAddressStore } from "../store/address";
 import { storeToRefs } from "pinia";
-import api from "../api";
-import utils from "../utils";
 
-export default defineNuxtRouteMiddleware(async (to: any, from: any) => {
+export default defineNuxtRouteMiddleware(async (to: any) => {
   const addressStore = useAddressStore();
   const {profile, typeEau} = storeToRefs(addressStore);
   

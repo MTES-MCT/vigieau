@@ -16,10 +16,11 @@ const router = useRouter();
 const refDataStore = useRefDataStore();
 const alertStore = useAlertStore();
 const utils = useUtils();
+const apiErrorHandler = useApiErrorHandler();
 const loading = ref(false);
 const componentKey = ref(0);
 const asc = ref(true);
-const checkReturn: Ref<{ errors: string[], warnings: string[] } | undefined> = ref();
+const checkReturn: Ref<{ errors: string[], warnings: string[] } | null | undefined> = ref();
 
 const currentStep: Ref<number> = ref(1);
 
@@ -73,75 +74,148 @@ const previousStep = () => {
   utils.scrollToTop();
 };
 
-const saveArrete = async (publish: boolean = false) => {
-  if (loading.value) {
-    return;
-  }
-  publish ? v$.value.$validate() : generalFormRef.value?.v$.$validate();
-  if (publish ? v$.value.$error : generalFormRef.value?.v$.$error) {
-    showErrors(publish ? v$.value.$errors : generalFormRef.value?.v$.$errors, publish);
-    return;
-  }
-  loading.value = true;
-  const arToSend = JSON.parse(JSON.stringify(props.arreteRestriction));
-  arToSend.arretesCadre = arToSend.arretesCadre.map((ac: any) => {
-    return {
-      id: ac.id,
-    };
-  });
-  arToSend.restrictions = arToSend.restrictions.map((r: any) => {
-    r.zoneAlerte = r.zoneAlerte ? { id: r.zoneAlerte.id } : null;
-    r.communes = r.communes ? r.communes.map((c: any) => {
-      return { id: c.id };
-    }) : [];
-    return r;
-  });
-  const { data, error } = props.arreteRestriction.id
-    ? await api.arreteRestriction.update(props.arreteRestriction.id.toString(), arToSend)
-    : await api.arreteRestriction.create({ ...arToSend });
-  if (data.value?.id) {
-    // Mise à jour des ids des objets nouvellement crées
-    props.arreteRestriction.id = data.value.id;
-    props.arreteRestriction.restrictions.map((restriction: Restriction) => {
-      const restrictionReturned = (<ArreteRestriction>data.value).restrictions.find(
-        (r: Restriction) => r.zoneAlerte ? r.zoneAlerte.id === restriction.zoneAlerte?.id : r.nomGroupementAep === restriction.nomGroupementAep,
+const publicationContext = (action: string) => ({
+  action,
+  arreteType: 'arrete_restriction',
+  arreteId: props.arreteRestriction.id,
+  numero: props.arreteRestriction.numero,
+  statut: props.arreteRestriction.statut,
+  departement: props.arreteRestriction.departement?.code,
+});
+
+const getRestrictionLabel = (restriction: Restriction) =>
+  restriction.zoneAlerte?.nom || restriction.nomGroupementAep || 'restriction sans libellé';
+
+const syncSavedRestrictionIds = (savedArreteRestriction: ArreteRestriction) => {
+  props.arreteRestriction.restrictions.forEach((restriction: Restriction) => {
+    const restrictionReturned = savedArreteRestriction.restrictions?.find(
+      (r: Restriction) => r.zoneAlerte ? r.zoneAlerte.id === restriction.zoneAlerte?.id : r.nomGroupementAep === restriction.nomGroupementAep,
+    );
+
+    if (!restrictionReturned?.id) {
+      throw new Error(`La restriction "${getRestrictionLabel(restriction)}" n'a pas été renvoyée par l'API après enregistrement.`);
+    }
+
+    restriction.id = restrictionReturned.id;
+    restriction.usages.forEach((usagesArreteRestriction: Usage) => {
+      const savedUsage = restrictionReturned.usages?.find(
+        (u: Usage) => u.nom === usagesArreteRestriction.nom,
       );
-      restriction.id = restrictionReturned.id;
-      restriction.usages.map((usagesArreteRestriction: Usage) => {
-        usagesArreteRestriction.id = restrictionReturned.usages.find(
-          (u: Usage) => u.nom === usagesArreteRestriction.nom,
-        ).id;
-        return usagesArreteRestriction;
-      });
-      return restriction;
+
+      if (!savedUsage?.id) {
+        throw new Error(`L'usage "${usagesArreteRestriction.nom}" de la restriction "${getRestrictionLabel(restriction)}" n'a pas été renvoyé par l'API après enregistrement.`);
+      }
+
+      usagesArreteRestriction.id = savedUsage.id;
     });
-    componentKey.value++;
-    loading.value = false;
-    if (props.arreteRestriction.statut !== 'a_valider') {
-      await publishArrete(props.arreteRestriction);
-    }
-    if (!publish) {
-      alertStore.addAlert({
-        description: 'Enregistrement réussi',
-        type: 'success',
-      });
-    }
-  }
-  loading.value = false;
+  });
 };
 
-const checkArrete = async (ar: ArreteRestriction) => {
+const saveArrete = async (publish: boolean = false): Promise<boolean> => {
   if (loading.value) {
-    return;
+    return false;
+  }
+  if (publish) {
+    await v$.value.$validate();
+  } else {
+    await generalFormRef.value?.v$.$validate();
+  }
+  if (publish ? v$.value.$error : generalFormRef.value?.v$.$error) {
+    showErrors(publish ? v$.value.$errors : generalFormRef.value?.v$.$errors, publish);
+    return false;
+  }
+
+  let shouldPublishAfterSave = false;
+  loading.value = true;
+
+  try {
+    const arToSend = JSON.parse(JSON.stringify(props.arreteRestriction));
+    arToSend.arretesCadre = arToSend.arretesCadre.map((ac: any) => {
+      return {
+        id: ac.id,
+      };
+    });
+    arToSend.restrictions = arToSend.restrictions.map((r: any) => {
+      r.zoneAlerte = r.zoneAlerte ? { id: r.zoneAlerte.id } : null;
+      r.communes = r.communes ? r.communes.map((c: any) => {
+        return { id: c.id };
+      }) : [];
+      return r;
+    });
+    const { data, error } = props.arreteRestriction.id
+      ? await api.arreteRestriction.update(props.arreteRestriction.id.toString(), arToSend)
+      : await api.arreteRestriction.create({ ...arToSend });
+
+    if (error.value) {
+      apiErrorHandler.captureClientError(error.value, publicationContext(publish ? 'save_before_publish' : 'save'));
+      return false;
+    }
+
+    if (!data.value?.id) {
+      throw new Error('La réponse de l’API ne contient pas d’identifiant d’arrêté de restriction.');
+    }
+
+    // Mise à jour des ids des objets nouvellement crées
+    props.arreteRestriction.id = data.value.id;
+    syncSavedRestrictionIds(<ArreteRestriction>data.value);
+    componentKey.value++;
+
+    shouldPublishAfterSave = props.arreteRestriction.statut !== 'a_valider';
+  } catch (error) {
+    apiErrorHandler.showError(
+      error,
+      publish ? 'Impossible de préparer la publication de l\'arrêté de restriction' : 'Impossible d\'enregistrer l\'arrêté de restriction',
+      'Une erreur technique empêche l’enregistrement de l’arrêté de restriction.',
+      publicationContext(publish ? 'save_before_publish_exception' : 'save_exception'),
+    );
+    return false;
+  } finally {
+    loading.value = false;
+  }
+
+  if (shouldPublishAfterSave) {
+    return await publishArrete(props.arreteRestriction);
+  }
+
+  if (!publish) {
+    alertStore.addAlert({
+      description: 'Enregistrement réussi',
+      type: 'success',
+    });
+  }
+
+  return true;
+};
+
+const checkArrete = async (ar: ArreteRestriction): Promise<boolean> => {
+  if (loading.value) {
+    return false;
   }
   loading.value = true;
-  const { data, error } = await api.arreteRestriction.check(ar.id?.toString(), ar);
-  if (data.value) {
-    checkReturn.value = data.value;
-  } else {
+
+  try {
+    const { data, error } = await api.arreteRestriction.check(ar.id?.toString(), ar);
+
+    if (error.value) {
+      checkReturn.value = null;
+      apiErrorHandler.captureClientError(error.value, publicationContext('check_before_publish'));
+      return false;
+    }
+
+    checkReturn.value = data.value || null;
+    return true;
+  } catch (error) {
     checkReturn.value = null;
+    apiErrorHandler.showError(
+      error,
+      'Impossible de vérifier l\'arrêté de restriction',
+      'Une erreur technique empêche la vérification avant publication.',
+      publicationContext('check_before_publish_exception'),
+    );
+    return false;
+  } finally {
+    loading.value = false;
   }
-  loading.value = false;
 };
 
 const showErrors = (errors, publish) => {
@@ -153,36 +227,61 @@ const showErrors = (errors, publish) => {
 };
 
 const askPublishArrete = async () => {
-  await saveArrete(true);
-  if (!v$.value.$error) {
+  const saved = await saveArrete(true);
+  if (saved && !v$.value.$error) {
     modalPublishOpened.value = true;
   }
 };
 
-const publishArrete = async (ar: ArreteRestriction) => {
+const publishArrete = async (ar: ArreteRestriction): Promise<boolean> => {
   if (loading.value) {
-    return;
+    return false;
   }
-  await checkArrete(ar);
+
+  const checked = await checkArrete(ar);
+  if (!checked) {
+    return false;
+  }
   if (checkReturn.value?.errors?.length > 0) {
     alertStore.addAlert({
       title: 'Impossible de publier l\'arrêté de restriction',
       description: checkReturn.value?.errors.join(', '),
       type: 'error',
     });
-    return;
+    return false;
   }
   loading.value = true;
-  const { data, error } = await api.arreteRestriction.publish(ar.id?.toString(), ar);
-  if (data.value) {
-    utils.closeModal(modalPublishOpened);
-    navigateTo('/arrete-restriction');
+
+  try {
+    const { data, error } = await api.arreteRestriction.publish(ar.id?.toString(), ar);
+
+    if (error.value) {
+      apiErrorHandler.captureClientError(error.value, publicationContext('publish'));
+      return false;
+    }
+
+    if (!data.value) {
+      throw new Error('La réponse de l’API ne confirme pas la publication de l’arrêté de restriction.');
+    }
+
+    modalPublishOpened.value = utils.closeModal(modalPublishOpened);
+    await navigateTo('/arrete-restriction');
     alertStore.addAlert({
       description: 'Publication réussie',
       type: 'success',
     });
+    return true;
+  } catch (error) {
+    apiErrorHandler.showError(
+      error,
+      'Impossible de publier l\'arrêté de restriction',
+      'Une erreur technique empêche la publication de l’arrêté de restriction.',
+      publicationContext('publish_exception'),
+    );
+    return false;
+  } finally {
+    loading.value = false;
   }
-  loading.value = false;
 };
 
 const getRestrictionByNiveauDeGravite = (niveauGravite: string) => {
@@ -356,7 +455,7 @@ const graviteFormRef = ref(null);
              icon="ri-arrow-right-line"
              :title="modalTitle"
              @close="modalPublishOpened = utils.closeModal(modalPublishOpened);">
-    <p>
+    <div>
       Cet arrêté de restriction contient&nbsp;:
       <ul>
         <li v-if="getRestrictionByNiveauDeGravite('vigilance').length > 0">
@@ -376,7 +475,7 @@ const graviteFormRef = ref(null);
         {{ subscriptions }} usagers de VigiEau seront prévenus par mail.
       </span>
       <div class="divider fr-mt-1w"></div>
-    </p>
+    </div>
     <ArreteRestrictionFormPublier ref="publierFormRef"
                                   :arreteRestriction="arreteRestriction"
                                   :warnings="checkReturn?.warnings"

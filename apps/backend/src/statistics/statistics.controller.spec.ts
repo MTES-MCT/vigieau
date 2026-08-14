@@ -21,8 +21,8 @@ describe('StatisticsController', () => {
       ],
     }).compile();
 
-    controller = <StatisticsController> module.get(StatisticsController);
-    service = <StatisticsService> module.get(StatisticsService);
+    controller = <StatisticsController>module.get(StatisticsController);
+    service = <StatisticsService>module.get(StatisticsService);
   });
 
   it('devrait être défini', () => {
@@ -50,7 +50,9 @@ describe('StatisticsController', () => {
         throw new Error('Erreur lors du chargement des statistiques');
       });
 
-      expect(() => controller.findAll()).toThrow('Erreur lors du chargement des statistiques');
+      expect(() => controller.findAll()).toThrow(
+        'Erreur lors du chargement des statistiques',
+      );
     });
   });
 });

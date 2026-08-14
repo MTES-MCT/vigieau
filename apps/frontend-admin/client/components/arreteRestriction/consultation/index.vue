@@ -9,20 +9,25 @@ const router = useRouter();
 const utils = useUtils();
 const authStore = useAuthStore();
 
-const arreteRestriction: Ref<ArreteRestriction> = ref();
 const { data, error } = await api.arreteRestriction.get(<string>route.params.id);
-if (data.value) {
-  arreteRestriction.value = <ArreteRestriction>data.value;
-  arreteRestriction.value.restrictions.map((r) => {
-    if (!r.zoneAlerte) {
-      r.isAep = true;
-    }
-    return r;
+if (!data.value) {
+  throw createError({
+    statusCode: error.value?.statusCode || 404,
+    statusMessage: 'Arrêté de restriction introuvable',
   });
 }
+const arreteRestriction: Ref<ArreteRestriction> = ref(<ArreteRestriction>data.value);
+arreteRestriction.value.restrictions.map((r) => {
+  if (!r.zoneAlerte) {
+    r.isAep = true;
+  }
+  return r;
+});
 
-const isArOnDepartementUser: boolean = authStore.isMte || authStore.user?.roleDepartements.includes(arreteRestriction.value.departement?.code);
-const isZaOutdated: boolean = arreteRestriction.value.statut !== 'abroge' && arreteRestriction.value.restrictions.some((r) => r.zoneAlerte?.disabled);
+const isArOnDepartementUser: boolean =
+  authStore.isMte || authStore.user?.roleDepartements?.includes(arreteRestriction.value.departement?.code);
+const isZaOutdated: boolean =
+  arreteRestriction.value.statut !== 'abroge' && arreteRestriction.value.restrictions.some((r) => r.zoneAlerte?.disabled);
 
 const consultationButtons: Ref<any[]> = ref([
   {
@@ -41,7 +46,14 @@ if (authStore.isMte || (arreteRestriction.value.statut !== 'abroge' && isArOnDep
     icon: 'ri-edit-2-fill',
     secondary: true,
     onclick: () => {
-      utils.askEditArreteRestriction(arreteRestriction.value, modalTitle, modalDescription, modalActions, modalOpened, editArreteRestriction);
+      utils.askEditArreteRestriction(
+        arreteRestriction.value,
+        modalTitle,
+        modalDescription,
+        modalActions,
+        modalOpened,
+        editArreteRestriction,
+      );
     },
   });
 }
@@ -59,7 +71,8 @@ const modalActions: Ref<any[]> = ref([]);
 
 <template>
   <template v-if="arreteRestriction">
-    <h1>Arrêté de restriction&nbsp;: {{ arreteRestriction.numero }}
+    <h1>
+      Arrêté de restriction&nbsp;: {{ arreteRestriction.numero }}
       <MixinsStatutBadge :statut="arreteRestriction.statut" />
     </h1>
 
@@ -73,16 +86,15 @@ const modalActions: Ref<any[]> = ref([]);
       </div>
     </div>
 
-    <DsfrButtonGroup :buttons="consultationButtons"
-                     class="fr-mt-2w fr-btns-group--sticky"
-                     align="right"
-                     inlineLayoutWhen="always" />
+    <DsfrButtonGroup :buttons="consultationButtons" class="fr-mt-2w fr-btns-group--sticky" align="right" inlineLayoutWhen="always" />
 
-    <DsfrModal :opened="modalOpened"
-               icon="ri-arrow-right-line"
-               :title="modalTitle"
-               :actions="modalActions"
-               @close="modalOpened = utils.closeModal(modalOpened);">
+    <DsfrModal
+      :opened="modalOpened"
+      icon="ri-arrow-right-line"
+      :title="modalTitle"
+      :actions="modalActions"
+      @close="modalOpened = utils.closeModal(modalOpened)"
+    >
       <div v-html="modalDescription"></div>
     </DsfrModal>
   </template>

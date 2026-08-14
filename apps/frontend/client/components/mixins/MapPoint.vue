@@ -1,7 +1,16 @@
 <script setup lang="ts">
-import { Ref } from 'vue';
+import type { Ref } from 'vue';
 import * as maplibregl from 'maplibre-gl';
 import api from '../../api';
+import { getFrenchMapLocale } from '../../utils/map-locale';
+import { createPointSelectionPopupContent } from '../../utils/map-popup-content';
+
+const props = defineProps({
+  disabled: {
+    type: Boolean,
+    default: false,
+  },
+});
 
 const emit = defineEmits<{
   selectPoint: any;
@@ -21,12 +30,6 @@ const popup = new maplibregl.Popup({
 
 const marker = new maplibregl.Marker();
 
-const popupHtml = `<div>
-<button class="fr-btn btn-map-popup">
-Sélectionner ce point
-</button>
-</div>`;
-
 onMounted(() => {
   if (!isMapSupported) {
     return;
@@ -37,6 +40,9 @@ onMounted(() => {
     style: `https://openmaptiles.data.gouv.fr/styles/osm-bright/style.json`,
     bounds: initialState,
     preserveDrawingBuffer: true,
+    locale: getFrenchMapLocale(
+      'Carte interactive de sélection d’un point géographique',
+    ),
   });
 
   // Add zoom and rotation controls to the map.
@@ -53,21 +59,20 @@ onMounted(() => {
   );
 
   map.value?.on('click', async (e: any) => {
-    if (loading.value) {
+    if (loading.value || props.disabled) {
       return;
     }
     loading.value = true;
     const coordinates = e.lngLat;
     const dataAddress = (await api.searchAddressByLatlon(coordinates.lng, coordinates.lat)).data;
     const dataGeo = (await api.searchGeoByLatlon(coordinates.lng, coordinates.lat)).data;
-    let html = popupHtml;
-    if (dataAddress.value?.features[0]?.properties?.label) {
-      html = `Adresse proche&nbsp: ${dataAddress.value.features[0].properties.label}<br/><br/>` + html;
-    } else if (dataGeo.value && dataGeo.value[0]?.code) {
-      html = `Commune&nbsp: ${dataGeo.value[0].nom} (${dataGeo.value[0].code})<br/><br/>` + html;
-    }
+    const popupContent = createPointSelectionPopupContent({
+      addressLabel: dataAddress.value?.features[0]?.properties?.label,
+      communeName: dataGeo.value?.[0]?.nom,
+      communeCode: dataGeo.value?.[0]?.code,
+    });
     loading.value = false;
-    popup.setLngLat(coordinates).setHTML(html).addTo(map.value);
+    popup.setLngLat(coordinates).setDOMContent(popupContent).addTo(map.value);
 
     const btn = document.getElementsByClassName('btn-map-popup')[0];
     if (!btn) {
@@ -113,38 +118,57 @@ const mapTags: Ref<any[]> = ref([{
 }]);
 
 const flyToLocation = (bounds: any) => {
+  if (props.disabled) {
+    return;
+  }
   map.value?.fitBounds(bounds);
 };
 
 </script>
 
 <template>
-
-  <div class="full-width" v-if="isMapSupported">
+  <div
+    v-if="isMapSupported"
+    class="full-width"
+  >
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 overall-wrapper">
         <div class="map-pre-actions">
-          <div class="map-pre-actions-card fr-p-1w fr-m-1w">
-            <h6 class="fr-mb-1w fr-mr-2w">Raccourcis&nbsp;:</h6>
-            <DsfrTag v-for="tag in mapTags"
-                     :label="tag.label"
-                     class="fr-m-1w"
-                     small
-                     @click="flyToLocation(tag.bounds)"
-                     tag-name="button" />
+          <div
+            class="map-pre-actions-card fr-p-1w fr-m-1w"
+            role="group"
+            aria-label="Raccourcis de la carte"
+          >
+            <p class="fr-mb-1w fr-mr-2w">
+              Raccourcis&nbsp;:
+            </p>
+            <button
+              v-for="tag in mapTags"
+              :key="tag.label"
+              type="button"
+              class="fr-tag fr-tag--sm fr-m-1w"
+              :disabled="disabled"
+              @click="flyToLocation(tag.bounds)"
+            >
+              {{ tag.label }}
+            </button>
           </div>
         </div>
         <div class="map-wrap" :class="{'map-wrap--loading': loading}">
-          <div class="map" ref="mapContainer"></div>
+          <div
+            ref="mapContainer"
+            class="map"
+          />
         </div>
       </div>
     </div>
   </div>
   <template v-else>
-    <DsfrAlert title="Votre navigateur ne supporte pas les cartographies"
-               description="Impossible d'afficher la carte de la situation de la sécheresse en France"
-               type="error"
-               :closeable="false"
+    <DsfrAlert
+      title="Votre navigateur ne supporte pas les cartographies"
+      description="Impossible d'afficher la carte de la situation de la sécheresse en France"
+      type="error"
+      :closeable="false"
     />
   </template>
 </template>

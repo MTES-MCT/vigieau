@@ -9,6 +9,25 @@ import { VigieauLogger } from '../logger/vigieau.logger';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { HttpException, HttpStatus } from '@nestjs/common';
 
+jest.mock('@shared/entities/departement.entity', () => ({
+  Departement: class Departement {},
+}));
+jest.mock('@shared/entities/statistic.entity', () => ({
+  Statistic: class Statistic {},
+}));
+jest.mock('@shared/entities/region.entity', () => ({
+  Region: class Region {},
+}));
+jest.mock('@shared/entities/bassin_versant.entity', () => ({
+  BassinVersant: class BassinVersant {},
+}));
+jest.mock('@shared/entities/zone_publication.entity', () => ({
+  ZonePublication: class ZonePublication {},
+}));
+jest.mock('@shared/entities/zone_publication_aggregate.entity', () => ({
+  ZonePublicationAggregate: class ZonePublicationAggregate {},
+}));
+
 describe('DepartementsService', () => {
   let service: DepartementsService;
   let mockDepartementRepository: Partial<Repository<Departement>>;
@@ -34,15 +53,24 @@ describe('DepartementsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DepartementsService,
-        { provide: getRepositoryToken(Departement), useValue: mockDepartementRepository },
-        { provide: getRepositoryToken(Statistic), useValue: mockStatisticRepository },
+        {
+          provide: getRepositoryToken(Departement),
+          useValue: mockDepartementRepository,
+        },
+        {
+          provide: getRepositoryToken(Statistic),
+          useValue: mockStatisticRepository,
+        },
         { provide: getRepositoryToken(Region), useValue: mockRegionRepository },
-        { provide: getRepositoryToken(BassinVersant), useValue: mockBassinVersantRepository },
+        {
+          provide: getRepositoryToken(BassinVersant),
+          useValue: mockBassinVersantRepository,
+        },
         VigieauLogger,
       ],
     }).compile();
 
-    service = <DepartementsService> module.get(DepartementsService);
+    service = <DepartementsService>module.get(DepartementsService);
   });
 
   afterEach(() => {
@@ -55,7 +83,9 @@ describe('DepartementsService', () => {
         { id: 1, code: '75', region: { id: 1, code: 'IDF' } },
         { id: 2, code: '33', region: { id: 2, code: 'NAQ' } },
       ];
-      mockDepartementRepository.find = jest.fn().mockResolvedValue(mockDepartements);
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockDepartements);
 
       const result = await service.getAllLight();
 
@@ -72,6 +102,63 @@ describe('DepartementsService', () => {
   });
 
   describe('situationByDepartement', () => {
+    it('returns the aggregate pinned to the requested publication', async () => {
+      const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+      service['departements'] = [
+        {
+          id: 65,
+          code: '65',
+          nom: 'Hautes-Pyrenees',
+          region: { nom: 'Occitanie' },
+        },
+      ] as any;
+      service['situationDepartements'] = [
+        {
+          date: '2026-08-01',
+          departementSituation: [
+            { code: '65', niveauGraviteMax: 'pas_de_restrictions' },
+          ],
+        },
+      ];
+      (service as any).zonePublicationRepository = {
+        findOne: jest.fn().mockResolvedValue({
+          id: publicationId,
+          status: 'retired',
+        }),
+      } as any;
+      (service as any).zonePublicationAggregateRepository = {
+        findOne: jest.fn().mockResolvedValue({
+          publicationId,
+          payload: {
+            departments: {
+              '65': {
+                max: 'crise',
+                sup: 'crise',
+                sou: null,
+                aep: 'alerte',
+              },
+            },
+          },
+        }),
+      } as any;
+
+      await expect(
+        service.situationByDepartement(
+          '2026-08-01',
+          undefined,
+          undefined,
+          undefined,
+          publicationId,
+        ),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          code: '65',
+          niveauGraviteMax: 'crise',
+          niveauGraviteAepMax: 'alerte',
+        }),
+      ]);
+    });
+
     it('should throw an exception if the date is not found', () => {
       service['situationDepartements'] = [];
 
@@ -91,7 +178,7 @@ describe('DepartementsService', () => {
       };
 
       service['situationDepartements'] = [mockSituation];
-      service['bassinsVersants'] = <any> [mockBassinVersant];
+      service['bassinsVersants'] = <any>[mockBassinVersant];
 
       const result = service.situationByDepartement('2023-01-01', '1');
 
@@ -122,9 +209,13 @@ describe('DepartementsService', () => {
       };
 
       service['situationDepartements'] = [mockSituation];
-      service['regions'] = <any> [mockRegion];
+      service['regions'] = <any>[mockRegion];
 
-      const result = service.situationByDepartement('2023-01-01', undefined, '1');
+      const result = service.situationByDepartement(
+        '2023-01-01',
+        undefined,
+        '1',
+      );
 
       expect(result).toEqual([{ code: '75', niveauGraviteMax: 'Alerte' }]);
     });
@@ -137,9 +228,9 @@ describe('DepartementsService', () => {
       service['situationDepartements'] = [mockSituation];
       service['regions'] = [];
 
-      expect(() => service.situationByDepartement('2023-01-01', undefined, '999')).toThrow(
-        new HttpException('Région non trouvée.', HttpStatus.NOT_FOUND),
-      );
+      expect(() =>
+        service.situationByDepartement('2023-01-01', undefined, '999'),
+      ).toThrow(new HttpException('Région non trouvée.', HttpStatus.NOT_FOUND));
     });
 
     it('should filter by departement', () => {
@@ -152,7 +243,12 @@ describe('DepartementsService', () => {
       service['situationDepartements'] = [mockSituation];
       service['departements'] = [mockDepartement];
 
-      const result = service.situationByDepartement('2023-01-01', undefined, undefined, '1');
+      const result = service.situationByDepartement(
+        '2023-01-01',
+        undefined,
+        undefined,
+        '1',
+      );
 
       expect(result).toEqual([{ code: '75', niveauGraviteMax: 'Alerte' }]);
     });
@@ -165,7 +261,14 @@ describe('DepartementsService', () => {
       service['situationDepartements'] = [mockSituation];
       service['departements'] = [];
 
-      expect(() => service.situationByDepartement('2023-01-01', undefined, undefined, '999')).toThrow(
+      expect(() =>
+        service.situationByDepartement(
+          '2023-01-01',
+          undefined,
+          undefined,
+          '999',
+        ),
+      ).toThrow(
         new HttpException('Département non trouvé.', HttpStatus.NOT_FOUND),
       );
     });
@@ -187,12 +290,20 @@ describe('DepartementsService', () => {
   describe('loadRefData', () => {
     it('should load reference data (departements, regions, bassins versants)', async () => {
       const mockDepartements = [{ id: 1, nom: 'Paris' }];
-      const mockRegions = [{ id: 1, nom: 'Île-de-France', departements: mockDepartements }];
-      const mockBassinsVersants = [{ id: 1, nom: 'Bassin 1', departements: mockDepartements }];
+      const mockRegions = [
+        { id: 1, nom: 'Île-de-France', departements: mockDepartements },
+      ];
+      const mockBassinsVersants = [
+        { id: 1, nom: 'Bassin 1', departements: mockDepartements },
+      ];
 
-      mockDepartementRepository.find = jest.fn().mockResolvedValue(mockDepartements);
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockDepartements);
       mockRegionRepository.find = jest.fn().mockResolvedValue(mockRegions);
-      mockBassinVersantRepository.find = jest.fn().mockResolvedValue(mockBassinsVersants);
+      mockBassinVersantRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockBassinsVersants);
 
       await service.loadRefData();
 
@@ -200,7 +311,10 @@ describe('DepartementsService', () => {
       expect(service['regions']).toEqual(mockRegions);
       expect(service['bassinsVersants']).toEqual(mockBassinsVersants);
 
-      expect(mockDepartementRepository.find).toHaveBeenCalledWith({ order: { nom: 'ASC' } });
+      expect(mockDepartementRepository.find).toHaveBeenCalledWith({
+        relations: ['region'],
+        order: { nom: 'ASC' },
+      });
       expect(mockRegionRepository.find).toHaveBeenCalledWith({
         relations: ['departements'],
         order: { nom: 'ASC' },
@@ -214,19 +328,32 @@ describe('DepartementsService', () => {
 
   describe('loadSituation', () => {
     it('should load departement situations based on statistics and current zones', async () => {
-      const mockDepartements = [{ code: '75', nom: 'Paris', region: { nom: 'Île-de-France' } }];
+      const mockDepartements = [
+        { code: '75', nom: 'Paris', region: { nom: 'Île-de-France' } },
+      ];
       const mockStatistics = [
         {
           date: '2023-01-01',
           departementSituation: {
-            '75': { max: 'Alerte', sup: 'Alerte', sou: 'Alerte', aep: 'Alerte' },
+            '75': {
+              max: 'Alerte',
+              sup: 'Alerte',
+              sou: 'Alerte',
+              aep: 'Alerte',
+            },
           },
         },
       ];
-      const mockCurrentZones = [{ departement: '75', niveauGravite: 'Alerte', type: 'SUP' }];
+      const mockCurrentZones = [
+        { departement: '75', niveauGravite: 'Alerte', type: 'SUP' },
+      ];
 
-      mockDepartementRepository.find = jest.fn().mockResolvedValue(mockDepartements);
-      mockStatisticRepository.find = jest.fn().mockResolvedValue(mockStatistics);
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockDepartements);
+      mockStatisticRepository.find = jest
+        .fn()
+        .mockResolvedValue(mockStatistics);
 
       await service.loadSituation(mockCurrentZones);
 
@@ -246,6 +373,87 @@ describe('DepartementsService', () => {
           ],
         },
       ]);
+    });
+
+    it('never lets an older asynchronous load replace the latest situation', async () => {
+      const today = new Date().toISOString().split('T')[0];
+      let resolveFirstDepartements!: (value: any[]) => void;
+      let resolveSecondDepartements!: (value: any[]) => void;
+      let resolveFirstStatistics!: (value: any[]) => void;
+      let resolveSecondStatistics!: (value: any[]) => void;
+      const departements = [
+        { code: '65', nom: 'Hautes-Pyrenees', region: { nom: 'Occitanie' } },
+      ];
+      const statistics = [{ date: today, departementSituation: {} }];
+
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirstDepartements = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveSecondDepartements = resolve;
+          }),
+        );
+      mockStatisticRepository.find = jest
+        .fn()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirstStatistics = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveSecondStatistics = resolve;
+          }),
+        );
+
+      const oldLoad = service.loadSituation([
+        { departement: '65', niveauGravite: 'vigilance', type: 'SUP' },
+      ]);
+      const latestLoad = service.loadSituation([
+        { departement: '65', niveauGravite: 'crise', type: 'SUP' },
+      ]);
+
+      resolveSecondDepartements(departements);
+      resolveSecondStatistics(statistics);
+      await latestLoad;
+      resolveFirstDepartements(departements);
+      resolveFirstStatistics(statistics);
+      await oldLoad;
+
+      expect(
+        service['situationDepartements'][0].departementSituation[0],
+      ).toEqual(
+        expect.objectContaining({
+          code: '65',
+          niveauGraviteMax: 'crise',
+          niveauGraviteSupMax: 'crise',
+        }),
+      );
+    });
+
+    it('retries a transient situation load failure without exposing a partial cache', async () => {
+      const previousSituation = [
+        { date: '2026-07-30', departementSituation: [{ code: '65' }] },
+      ];
+      service['situationDepartements'] = previousSituation;
+      Object.defineProperty(service, 'situationLoadRetryDelayMs', { value: 0 });
+      mockDepartementRepository.find = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('database unavailable'))
+        .mockResolvedValueOnce([]);
+      mockStatisticRepository.find = jest.fn().mockResolvedValue([]);
+
+      const loading = service.loadSituation([]);
+      expect(service['situationDepartements']).toBe(previousSituation);
+      await loading;
+
+      expect(mockDepartementRepository.find).toHaveBeenCalledTimes(2);
+      expect(service['situationDepartements']).toEqual([]);
     });
   });
 });

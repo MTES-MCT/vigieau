@@ -20,7 +20,7 @@ export class UserService {
             role: currentUser.role,
             role_departement: In(currentUser.role_departements),
           };
-    return this.userRepository.find({ where, order: { email: 'ASC' }});
+    return this.userRepository.find({ where, order: { email: 'ASC' } });
   }
 
   findOne(email: string): Promise<User> {
@@ -45,7 +45,11 @@ export class UserService {
   updateName(email: string, firstName: string, lastName: string) {
     return this.userRepository.update(
       { email },
-      { first_name: firstName, last_name: lastName, last_login: (new Date()).toISOString() },
+      {
+        first_name: firstName,
+        last_name: lastName,
+        last_login: new Date().toISOString(),
+      },
     );
   }
 
@@ -78,7 +82,9 @@ export class UserService {
     if (
       currentUser.role === 'departement' &&
       (user.role !== 'departement' ||
-        user.role_departements.some(d => !currentUser.role_departements.includes(d)))
+        user.role_departements.some(
+          (d) => !currentUser.role_departements.includes(d),
+        ))
     ) {
       throw new HttpException(
         "Vous ne pouvez créer un utilisateur qu'avec un droit sur votre département.",
@@ -112,7 +118,9 @@ export class UserService {
       }
       if (
         userToDelete.role !== currentUser.role ||
-        userToDelete.role_departements.some(d => !currentUser.role_departements.includes(d))
+        userToDelete.role_departements.some(
+          (d) => !currentUser.role_departements.includes(d),
+        )
       ) {
         throw new HttpException(
           'Vous ne pouvez supprimer des utilisateurs que sur vos départements.',

@@ -1,15 +1,15 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { ConfigService as NestConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Departement } from '@shared/entities/departement.entity';
 import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity';
-import { exec } from 'child_process';
 import * as fs from 'fs';
 import moment from 'moment';
 import { writeFile } from 'node:fs/promises';
 import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
-import util from 'util';
 import { Worker } from 'worker_threads';
+import { createHash } from 'node:crypto';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '../config/config.service';
@@ -27,17 +27,149 @@ import {
   workerThreadFilePath,
 } from '../worker_threads/config';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
-import { ZoneAlerteComputedHistoricService } from './zone_alerte_computed_historic.service';
+import {
+  HistoricCursorState,
+  ZoneAlerteComputedHistoricService,
+} from './zone_alerte_computed_historic.service';
+import {
+  DailyZonePublicationReuseContext,
+  ZonePublicationService,
+} from '../zone_publication/zone_publication.service';
+import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import { generateEmptyPmtiles } from './empty-pmtiles';
+import {
+  collectPmtilesFeatureIds,
+  generatePmtiles,
+} from './pmtiles-generation';
+import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
+import {
+  getCivilDateAtUtcNoon,
+  getScheduledCivilDate,
+  NATIONAL_COMPUTE_START_HOUR,
+} from '../core/scheduling/daily-job-schedule';
+
+export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
+const ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS = 30 * 1000;
+const HISTORIC_COMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
+export const HISTORIC_COMPUTE_WORKER_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+export const HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT = 7;
+const HISTORIC_COMPUTE_CHUNK_DAYS_MAX = 3660;
+
+export function readHistoricComputeChunkDays(
+  value = process.env.HISTORIC_COMPUTE_CHUNK_DAYS,
+): number {
+  if (value === undefined || value.trim() === '') {
+    return HISTORIC_COMPUTE_CHUNK_DAYS_DEFAULT;
+  }
+  const normalized = value.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error('HISTORIC_COMPUTE_CHUNK_DAYS must be a positive integer');
+  }
+  const parsed = Number(normalized);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed > HISTORIC_COMPUTE_CHUNK_DAYS_MAX
+  ) {
+    throw new Error(
+      `HISTORIC_COMPUTE_CHUNK_DAYS must be at most ${HISTORIC_COMPUTE_CHUNK_DAYS_MAX}`,
+    );
+  }
+  return parsed;
+}
+
+interface QueuedComputeWaiter {
+  resolve: (result: unknown) => void;
+  reject: (error: unknown) => void;
+}
+
+type ComputedZoneGeoJsonSource = Pick<
+  ZoneAlerteComputed,
+  | 'id'
+  | 'idSandre'
+  | 'nom'
+  | 'code'
+  | 'type'
+  | 'niveauGravite'
+  | 'departement'
+  | 'restriction'
+>;
+
+export function buildComputedZoneGeoJsonFeature(
+  z: ComputedZoneGeoJsonSource,
+  geometry: unknown,
+) {
+  const niveauGravite = z.niveauGravite;
+
+  return {
+    type: 'Feature',
+    geometry,
+    properties: {
+      id: z.id,
+      idSandre: z.idSandre,
+      nom: z.nom,
+      code: z.code,
+      type: z.type,
+      niveauGravite,
+      departement: z.departement,
+      arreteRestriction: {
+        id: z.restriction?.arreteRestriction.id,
+        numero: z.restriction?.arreteRestriction.numero,
+        dateDebut: z.restriction?.arreteRestriction.dateDebut,
+        dateFin: z.restriction?.arreteRestriction.dateFin,
+        dateSignature: z.restriction?.arreteRestriction.dateSignature,
+        fichier: z.restriction?.arreteRestriction.fichier?.url,
+      },
+      restrictions: z.restriction?.usages.map((u) => {
+        let description;
+        switch (niveauGravite) {
+          case 'vigilance':
+            description = u.descriptionVigilance;
+            break;
+          case 'alerte':
+            description = u.descriptionAlerte;
+            break;
+          case 'alerte_renforcee':
+            description = u.descriptionAlerteRenforcee;
+            break;
+          case 'crise':
+            description = u.descriptionCrise;
+            break;
+        }
+        return {
+          nom: u.nom,
+          thematique: u.thematique.nom,
+          concerneParticulier: u.concerneParticulier,
+          concerneEntreprise: u.concerneEntreprise,
+          concerneCollectivite: u.concerneCollectivite,
+          concerneExploitation: u.concerneExploitation,
+          concerneEso: u.concerneEso,
+          concerneEsu: u.concerneEsu,
+          concerneAep: u.concerneAep,
+          description,
+        };
+      }),
+    },
+  };
+}
 
 @Injectable()
 export class ZoneAlerteComputedService {
   private readonly logger = new RegleauLogger('ZoneAlerteComputedService');
   private isComputing = false;
   private askForCompute = false;
-  private departementsToUpdate = [];
-  // Promisifier exec
-  private execPromise = util.promisify(exec);
-
+  private departementsToUpdate: number[] = [];
+  private pendingNationalCompute = false;
+  private pendingNormalCompute = false;
+  private pendingDailyPublicationReuse:
+    | DailyZonePublicationReuseContext
+    | null
+    | undefined;
+  private pendingPublicationScheduledFor: string | null | undefined;
+  private activeComputeWorker: Worker | null = null;
+  private computeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private queuedComputeWaiters: QueuedComputeWaiter[] = [];
+  private publicationWatchdogInProgress = false;
+  private readonly historicComputedStartDate = '2024-04-29';
   constructor(
     @InjectRepository(ZoneAlerteComputed)
     private readonly zoneAlerteComputedRepository: Repository<ZoneAlerteComputed>,
@@ -60,6 +192,7 @@ export class ZoneAlerteComputedService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
+    private readonly zonePublicationService: ZonePublicationService,
   ) {}
 
   findOne(id: number): Promise<any> {
@@ -78,59 +211,255 @@ export class ZoneAlerteComputedService {
       .getRawOne();
   }
 
-  async askCompute(depsIds?: number[], force = false, computeHistoric = false) {
-    this.departementsToUpdate = this.departementsToUpdate.concat(depsIds);
+  async askCompute(
+    depsIds?: number[],
+    force = false,
+    _computeHistoric = false,
+    skipIfBusy = false,
+    dailyPublicationReuse?: DailyZonePublicationReuseContext,
+    publicationScheduledFor?: string,
+  ) {
+    // Historic catch-up is exclusively owned by the persistent clock scheduler.
+    void _computeHistoric;
     if (
-      (this.isComputing && this.askForCompute && !force) ||
-      (!this.askForCompute && force)
+      publicationScheduledFor !== undefined &&
+      dailyPublicationReuse !== undefined
     ) {
+      throw new Error(
+        'A zone computation cannot use legacy and versioned daily contexts together',
+      );
+    }
+    if (publicationScheduledFor !== undefined) {
+      getCivilDateAtUtcNoon(publicationScheduledFor);
+    }
+    this.departementsToUpdate = this.departementsToUpdate.concat(depsIds ?? []);
+    if (!force && (!depsIds || depsIds.length === 0)) {
+      this.pendingNationalCompute = true;
+    }
+    this.pendingNormalCompute ||= !skipIfBusy;
+    if (!skipIfBusy && !dailyPublicationReuse) {
+      this.pendingDailyPublicationReuse = null;
+    }
+    if (!skipIfBusy && publicationScheduledFor === undefined) {
+      this.pendingPublicationScheduledFor = null;
+    }
+    if (publicationScheduledFor !== undefined) {
+      if (this.pendingPublicationScheduledFor === undefined) {
+        this.pendingPublicationScheduledFor = publicationScheduledFor;
+      } else if (
+        this.pendingPublicationScheduledFor !== null &&
+        this.pendingPublicationScheduledFor !== publicationScheduledFor
+      ) {
+        this.pendingPublicationScheduledFor = null;
+      }
+    }
+    if (dailyPublicationReuse) {
+      if (this.pendingDailyPublicationReuse === undefined) {
+        this.pendingDailyPublicationReuse = { ...dailyPublicationReuse };
+      } else if (
+        this.pendingDailyPublicationReuse !== null &&
+        (this.pendingDailyPublicationReuse.scheduledFor !==
+          dailyPublicationReuse.scheduledFor ||
+          this.pendingDailyPublicationReuse.sourceRevision !==
+            dailyPublicationReuse.sourceRevision)
+      ) {
+        this.pendingDailyPublicationReuse = null;
+      }
+    }
+    if (force && !this.askForCompute) {
       return;
     }
     if (this.isComputing) {
       this.askForCompute = true;
-      // On check toutes les 10s si on peut calculer
-      setTimeout(() => {
-        this.askCompute([], true, computeHistoric);
-      }, 10 * 1000);
-      return;
+      this.scheduleComputeRetry();
+      return new Promise((resolve, reject) => {
+        this.queuedComputeWaiters.push({ resolve, reject });
+      });
     }
+    let queuedWaiters: QueuedComputeWaiter[] = [];
     try {
       this.askForCompute = false;
       this.isComputing = true;
 
-      const uniqueDepsIds = [...new Set(this.departementsToUpdate)];
+      const uniqueDepsIds = this.pendingNationalCompute
+        ? []
+        : [...new Set(this.departementsToUpdate)];
+      this.departementsToUpdate = [];
+      this.pendingNationalCompute = false;
+      const effectiveSkipIfBusy = !this.pendingNormalCompute;
+      const effectiveDailyPublicationReuse =
+        this.pendingDailyPublicationReuse ?? undefined;
+      const effectivePublicationScheduledFor =
+        this.pendingPublicationScheduledFor ?? undefined;
+      this.pendingNormalCompute = false;
+      this.pendingDailyPublicationReuse = undefined;
+      this.pendingPublicationScheduledFor = undefined;
+      queuedWaiters = this.queuedComputeWaiters.splice(0);
+
+      const resolveQueuedWaiters = (result: unknown) => {
+        queuedWaiters.splice(0).forEach(({ resolve }) => resolve(result));
+      };
+      const rejectQueuedWaiters = (error: unknown) => {
+        queuedWaiters.splice(0).forEach(({ reject }) => reject(error));
+      };
+
+      if (effectiveSkipIfBusy && (await this.isGlobalZoneComputeBusy())) {
+        const result = { success: true, skipped: true };
+        this.isComputing = false;
+        resolveQueuedWaiters(result);
+        return result;
+      }
 
       const worker = new Worker(workerThreadFilePath, {
         workerData: {
           depsIds: uniqueDepsIds,
-          computeHistoric,
+          skipIfBusy: effectiveSkipIfBusy,
+          ...(effectiveDailyPublicationReuse
+            ? { dailyPublicationReuse: effectiveDailyPublicationReuse }
+            : {}),
+          ...(effectivePublicationScheduledFor
+            ? { publicationScheduledFor: effectivePublicationScheduledFor }
+            : {}),
         },
       });
+      this.activeComputeWorker = worker;
 
       return new Promise((resolve, reject) => {
+        let currentResultReceived = false;
+        let promiseSettled = false;
+        let timedOut = false;
+        const releaseComputeSlot = () => {
+          if (this.activeComputeWorker === worker) {
+            this.activeComputeWorker = null;
+            this.isComputing = false;
+          }
+        };
+        const timeout = setTimeout(async () => {
+          timedOut = true;
+          const timeoutError = new Error('COMPUTE ALL worker timed out');
+          this.logger.error(timeoutError.message, '');
+          try {
+            await worker.terminate();
+          } catch (error) {
+            this.logger.error(
+              'COMPUTE ALL WORKER TERMINATION ERROR',
+              error instanceof Error ? error.toString() : String(error),
+            );
+          }
+          if (!promiseSettled) {
+            promiseSettled = true;
+            releaseComputeSlot();
+            rejectQueuedWaiters(timeoutError);
+            reject(timeoutError);
+          }
+        }, ZONE_COMPUTE_WORKER_TIMEOUT_MS);
+
         worker.on('message', (result) => {
-          this.isComputing = false;
+          if (timedOut) {
+            return;
+          }
+          currentResultReceived = true;
+          if (result?.success === false) {
+            clearTimeout(timeout);
+            promiseSettled = true;
+            releaseComputeSlot();
+            const error = new Error(
+              result.error || 'COMPUTE ALL worker reported an error',
+            );
+            this.logger.error('COMPUTE ALL WORKER ERROR', error.toString());
+            rejectQueuedWaiters(error);
+            reject(error);
+            return;
+          }
+          clearTimeout(timeout);
+          promiseSettled = true;
+          releaseComputeSlot();
+          resolveQueuedWaiters(result);
           resolve(result);
         });
 
         worker.on('error', (error) => {
+          if (timedOut) {
+            return;
+          }
+          clearTimeout(timeout);
+          releaseComputeSlot();
+          if (promiseSettled) {
+            return;
+          }
+          promiseSettled = true;
           this.logger.error('COMPUTE ALL WORKER ERROR', error.toString());
-          this.isComputing = false;
+          rejectQueuedWaiters(error);
           reject(error);
         });
 
         worker.on('exit', (code) => {
-          if (code !== 0) {
-            const errorMessage = `COMPUTE ALL Worker stopped with exit code ${code}`;
-            this.logger.error(errorMessage, '');
-            reject(new Error(errorMessage));
+          clearTimeout(timeout);
+          releaseComputeSlot();
+          if (timedOut) {
+            return;
           }
+          if (promiseSettled || currentResultReceived) {
+            return;
+          }
+          promiseSettled = true;
+          const errorMessage =
+            code === 0
+              ? 'COMPUTE ALL worker exited without a result'
+              : `COMPUTE ALL Worker stopped with exit code ${code}`;
+          this.logger.error(errorMessage, '');
+          const error = new Error(errorMessage);
+          rejectQueuedWaiters(error);
+          reject(error);
         });
       });
     } catch (e) {
       this.logger.error('COMPUTE ALL', e.toString());
+      this.activeComputeWorker = null;
       this.isComputing = false;
+      queuedWaiters.splice(0).forEach(({ reject }) => reject(e));
+      throw e;
     }
+  }
+
+  private async isGlobalZoneComputeBusy(): Promise<boolean> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    let locked = false;
+    try {
+      const [lockResult] = await queryRunner.query(
+        "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS locked",
+      );
+      locked = lockResult?.locked === true;
+      return !locked;
+    } finally {
+      try {
+        if (locked) {
+          const [unlockResult] = await queryRunner.query(
+            "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-global')) AS unlocked",
+          );
+          if (unlockResult?.unlocked !== true) {
+            throw new Error(
+              'Unable to release the zone compute preflight lock',
+            );
+          }
+        }
+      } finally {
+        await queryRunner.release();
+      }
+    }
+  }
+
+  private scheduleComputeRetry(): void {
+    if (this.computeRetryTimer) {
+      return;
+    }
+    this.computeRetryTimer = setTimeout(() => {
+      this.computeRetryTimer = null;
+      void this.askCompute([], true, false, true).catch((error) => {
+        this.logger.error('COMPUTE ALL QUEUED WORKER ERROR', error);
+      });
+    }, 10 * 1000);
   }
 
   async findOneWithCommuneZone(id: number, communeId: number): Promise<any> {
@@ -150,8 +479,64 @@ export class ZoneAlerteComputedService {
     return zoneFull;
   }
 
-  async computeAll(depsId?: number[], computeHistoric?: boolean) {
+  @Interval(ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS)
+  async ensureFreshZonePublication(): Promise<void> {
+    if (
+      !shouldRunWebScheduledJobs() ||
+      !isZonePublicationEnabled() ||
+      this.isComputing ||
+      this.publicationWatchdogInProgress
+    ) {
+      return;
+    }
+    this.publicationWatchdogInProgress = true;
+    try {
+      if (
+        await this.zonePublicationService.promoteCertifiedPublicationIfAvailable()
+      ) {
+        return;
+      }
+      if (await this.zonePublicationService.isRecomputeRequired()) {
+        await this.askCompute([], false, false, true);
+      }
+    } catch (error) {
+      this.logger.error('ZONE PUBLICATION WATCHDOG ERROR', error);
+    } finally {
+      this.publicationWatchdogInProgress = false;
+    }
+  }
+
+  async computeAll(
+    depsId?: number[],
+    computeHistoric?: boolean,
+    scheduledFor?: string,
+  ) {
     this.logger.log(`COMPUTING ZONES D'ALERTES - BEGIN`);
+    const isNationalCompute = !depsId?.length;
+    const requiresStatisticCertificationContext =
+      isNationalCompute || !isZonePublicationEnabled();
+    const publicationScheduledFor = requiresStatisticCertificationContext
+      ? (scheduledFor ??
+        getScheduledCivilDate(new Date(), NATIONAL_COMPUTE_START_HOUR))
+      : undefined;
+    if (publicationScheduledFor !== undefined) {
+      getCivilDateAtUtcNoon(publicationScheduledFor);
+    }
+    const sourceRevision = requiresStatisticCertificationContext
+      ? await this.zonePublicationService.getSourceRevision()
+      : undefined;
+    const historicComputeEpoch = requiresStatisticCertificationContext
+      ? String(
+          (await this.configService.getConfig())?.historicComputeEpoch ?? '',
+        )
+      : undefined;
+    if (
+      requiresStatisticCertificationContext &&
+      (historicComputeEpoch === undefined ||
+        !/^\d+$/.test(historicComputeEpoch))
+    ) {
+      throw new Error('National computation is missing its historic epoch');
+    }
     this.departementsToUpdate = [];
     let departements = await this.departementService.findAllLight();
     if (depsId && depsId.length > 0) {
@@ -194,7 +579,40 @@ export class ZoneAlerteComputedService {
     }
     // On récupère toutes les restrictions en cours
     this.logger.log(`COMPUTING ZONES D'ALERTES - END`);
-    await this.computeGeoJson(computeHistoric);
+    return this.computeGeoJson(
+      computeHistoric,
+      sourceRevision,
+      publicationScheduledFor,
+      historicComputeEpoch,
+      isNationalCompute,
+    );
+  }
+
+  async computeAllOrReuseDailyPublication(
+    depsIds: number[],
+    dailyPublicationReuse?: DailyZonePublicationReuseContext,
+    publicationScheduledFor?: string,
+  ) {
+    if (depsIds.length === 0 && dailyPublicationReuse) {
+      const reusablePublication =
+        await this.zonePublicationService.findReusableDailyPublication(
+          dailyPublicationReuse,
+        );
+      if (reusablePublication) {
+        this.logger.log(
+          `Reusing daily zone publication ${reusablePublication.publicationId} for ${dailyPublicationReuse.scheduledFor}`,
+        );
+        return reusablePublication;
+      }
+      return this.computeAll(
+        depsIds,
+        false,
+        dailyPublicationReuse.scheduledFor,
+      );
+    }
+    return publicationScheduledFor === undefined
+      ? this.computeAll(depsIds, false)
+      : this.computeAll(depsIds, false, publicationScheduledFor);
   }
 
   async computeRegleAr(departement: Departement) {
@@ -208,9 +626,10 @@ export class ZoneAlerteComputedService {
       await Promise.all(
         ar.restrictions.map(async (restriction) => {
           if (restriction.zoneAlerte) {
+            const arreteCadreId = restriction.arreteCadre?.id;
             const za = await this.zoneAlerteService.findOne(
               restriction.zoneAlerte.id,
-              [restriction.arreteCadre.id],
+              arreteCadreId === undefined ? undefined : [arreteCadreId],
             );
             za.restriction = {
               id: restriction.id,
@@ -291,7 +710,7 @@ export class ZoneAlerteComputedService {
       await this.getZonesAlerteComputedByDepartement(departement);
     let zonesToSave = [];
     for (const ar of arretesRestrictions) {
-      let zonesAr = zonesDepartement.filter(
+      const zonesAr = zonesDepartement.filter(
         (z) => z.restriction.arreteRestriction.id === ar.id,
       );
       if (
@@ -541,7 +960,7 @@ export class ZoneAlerteComputedService {
           zonesSameType[0].niveauGravite !== maxNiveauGravite
         ) {
           // Si il n'y a qu'une zone et que ce n'est pas son niveau de gravité de base, on la duplique pour avoir la zone au niveau de la commune avec le bon niveau de gravité
-          let zoneToDuplicate = await this.findOneWithCommuneZone(
+          const zoneToDuplicate = await this.findOneWithCommuneZone(
             zonesSameType[0].id,
             commune.id,
           );
@@ -571,7 +990,7 @@ export class ZoneAlerteComputedService {
             zoneToKeep = zoneToKeep[0];
           }
           if (zoneToKeep.niveauGravite !== maxNiveauGravite) {
-            let zoneToDuplicate = await this.findOneWithCommuneZone(
+            const zoneToDuplicate = await this.findOneWithCommuneZone(
               zoneToKeep.id,
               commune.id,
             );
@@ -662,6 +1081,51 @@ export class ZoneAlerteComputedService {
       .set({ geom: () => 'ST_CollectionExtract(geom, 3)' })
       .where('"departementId" = :id', { id: departement.id })
       .execute();
+    await this.dataSource.query(
+      `
+        UPDATE zone_alerte_computed
+        SET geom = ST_CollectionExtract(
+          ST_MakeValid(geom, 'method=structure keepcollapsed=false'),
+          3
+        )
+        WHERE "departementId" = $1
+          AND geom IS NOT NULL
+          AND NOT ST_IsEmpty(geom)
+          AND NOT ST_IsValid(geom, 0)
+      `,
+      [departement.id],
+    );
+    await this.dataSource.query(
+      `
+        DELETE FROM zone_alerte_computed
+        WHERE "departementId" = $1
+          AND (
+            geom IS NULL
+            OR ST_IsEmpty(geom)
+            OR ST_GeometryType(geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')
+          )
+      `,
+      [departement.id],
+    );
+    const [validation] = await this.dataSource.query(
+      `
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::integer[])
+          AS "invalidIds"
+        FROM zone_alerte_computed
+        WHERE "departementId" = $1
+          AND geom IS NOT NULL
+          AND NOT ST_IsEmpty(geom)
+          AND ST_GeometryType(geom) IN ('ST_Polygon', 'ST_MultiPolygon')
+          AND NOT ST_IsValid(geom, 0)
+      `,
+      [departement.id],
+    );
+    const invalidIds = (validation?.invalidIds ?? []).map(Number);
+    if (invalidIds.length > 0) {
+      throw new Error(
+        `Geometries de zones calculees invalides apres nettoyage: ${invalidIds.join(',')}`,
+      );
+    }
     // Clean des résidus de moins de 100m²
     await this.dataSource.query(
       `
@@ -674,6 +1138,7 @@ WITH cleaned_geometries AS (
               id,
               (ST_Dump(geom)).geom AS geom
           FROM zone_alerte_computed
+          WHERE "departementId" = $1
       ) AS dumped
       WHERE ST_GeometryType(geom) = 'ST_Polygon' AND ST_Area(ST_Transform(geom, 2154)) > 100
       GROUP BY id
@@ -683,6 +1148,19 @@ WITH cleaned_geometries AS (
     FROM cleaned_geometries
     WHERE zone_alerte_computed.id = cleaned_geometries.id AND zone_alerte_computed."departementId" = $1;
   `,
+      [departement.id],
+    );
+    await this.dataSource.query(
+      `
+        DELETE FROM zone_alerte_computed zone
+        WHERE zone."departementId" = $1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM ST_Dump(zone.geom) dumped
+            WHERE ST_GeometryType(dumped.geom) = 'ST_Polygon'
+              AND ST_Area(ST_Transform(dumped.geom, 2154)) > 100
+          )
+      `,
       [departement.id],
     );
     return;
@@ -703,7 +1181,7 @@ WITH cleaned_geometries AS (
 
     await Promise.all(
       groupedResults.map(async (row) => {
-        const { id, nom, type, niveauGravite, merged_geom } = row;
+        const { id, merged_geom } = row;
         return this.dataSource.query(
           `
 UPDATE zone_alerte_computed 
@@ -729,8 +1207,32 @@ DELETE FROM zone_alerte_computed
     );
   }
 
-  async computeGeoJson(computeHistoric?: boolean) {
-    let allZonesComputed: any = await this.zoneAlerteComputedRepository.find(<
+  async computeGeoJson(
+    computeHistoric?: boolean,
+    sourceRevision?: string,
+    scheduledFor?: string,
+    historicComputeEpoch?: string,
+    isNationalCompute = sourceRevision !== undefined,
+  ) {
+    const publicationEnabled = isZonePublicationEnabled();
+    if (
+      !publicationEnabled &&
+      (sourceRevision === undefined ||
+        historicComputeEpoch === undefined ||
+        scheduledFor === undefined)
+    ) {
+      throw new Error(
+        'Legacy computation is missing its statistic certification context',
+      );
+    }
+    const isNationalVersionedCompute =
+      isNationalCompute && publicationEnabled && sourceRevision !== undefined;
+    if (isNationalVersionedCompute && scheduledFor === undefined) {
+      throw new Error(
+        'National versioned computation is missing its scheduled civil date',
+      );
+    }
+    const allZonesComputed: any = await this.zoneAlerteComputedRepository.find(<
       FindManyOptions
     >{
       select: {
@@ -739,6 +1241,7 @@ DELETE FROM zone_alerte_computed
         code: true,
         nom: true,
         type: true,
+        niveauGravite: true,
         departement: {
           code: true,
           nom: true,
@@ -787,56 +1290,7 @@ DELETE FROM zone_alerte_computed
     const allZones = await Promise.all(
       allZonesComputed.map(async (z) => {
         z.geom = JSON.parse((await this.findOne(z.id)).geom);
-        return {
-          type: 'Feature',
-          geometry: z.geom,
-          properties: {
-            id: z.id,
-            idSandre: z.idSandre,
-            nom: z.nom,
-            code: z.code,
-            type: z.type,
-            niveauGravite: z.restriction?.niveauGravite,
-            departement: z.departement,
-            arreteRestriction: {
-              id: z.restriction?.arreteRestriction.id,
-              numero: z.restriction?.arreteRestriction.numero,
-              dateDebut: z.restriction?.arreteRestriction.dateDebut,
-              dateFin: z.restriction?.arreteRestriction.dateFin,
-              dateSignature: z.restriction?.arreteRestriction.dateSignature,
-              fichier: z.restriction?.arreteRestriction.fichier?.url,
-            },
-            restrictions: z.restriction?.usages.map((u) => {
-              let d;
-              switch (z.restriction.niveauGravite) {
-                case 'vigilance':
-                  d = u.descriptionVigilance;
-                  break;
-                case 'alerte':
-                  d = u.descriptionAlerte;
-                  break;
-                case 'alerte_renforcee':
-                  d = u.descriptionAlerteRenforcee;
-                  break;
-                case 'crise':
-                  d = u.descriptionCrise;
-                  break;
-              }
-              return {
-                nom: u.nom,
-                thematique: u.thematique.nom,
-                concerneParticulier: u.concerneParticulier,
-                concerneEntreprise: u.concerneEntreprise,
-                concerneCollectivite: u.concerneCollectivite,
-                concerneExploitation: u.concerneExploitation,
-                concerneEso: u.concerneEso,
-                concerneEsu: u.concerneEsu,
-                concerneAep: u.concerneAep,
-                description: d,
-              };
-            }),
-          },
-        };
+        return buildComputedZoneGeoJsonFeature(z, z.geom);
       }),
     );
 
@@ -844,10 +1298,14 @@ DELETE FROM zone_alerte_computed
       type: 'FeatureCollection',
       features: allZones,
     };
+    const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(allZones);
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
-    const date = new Date();
+    const date =
+      sourceRevision !== undefined && scheduledFor !== undefined
+        ? getCivilDateAtUtcNoon(scheduledFor)
+        : new Date();
     await writeFile(
       `${path}/zones_arretes_en_vigueur.geojson`,
       JSON.stringify(geojson),
@@ -859,78 +1317,368 @@ DELETE FROM zone_alerte_computed
       originalname: `zones_arretes_en_vigueur.geojson`,
       buffer: dataGeojson,
     };
+    const geojsonChecksum = createHash('sha256')
+      .update(dataGeojson)
+      .digest('hex');
+    let pmtilesChecksum: string | undefined;
+    let fileToTransferPmtiles:
+      | { originalname: string; buffer: Buffer }
+      | undefined;
     try {
-      // @ts-ignore
-      const s3ResponseGeojson = await this.s3Service.uploadFile(
-        fileToTransferGeojson as Express.Multer.File,
-        'geojson/',
-      );
-      const fileNameToSaveGeoJson = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.geojson`;
-      await this.s3Service.copyFile(
-        fileToTransferGeojson.originalname,
-        fileNameToSaveGeoJson,
-        'geojson/',
-      );
-      await this.datagouvService.uploadToDatagouv(
-        'geojson',
-        s3ResponseGeojson.Location,
-        'Carte des zones et arrêtés en vigueur - GeoJSON',
-        true,
-      );
-    } catch (e) {
-      this.logger.error('ERROR COPYING GEOJSON', e);
-    }
-    try {
-      await this.execPromise(
-        `${path}/tippecanoe_program/bin/tippecanoe -Z4 -zg -pg -ai -pn -f --drop-densest-as-needed -l zones_arretes_en_vigueur --read-parallel --detect-shared-borders --simplification=10 --output=${path}/zones_arretes_en_vigueur.pmtiles ${path}/zones_arretes_en_vigueur.geojson`,
-      );
+      if (allZones.length === 0) {
+        await generateEmptyPmtiles({
+          workingDirectory: path,
+          outputPath: `${path}/zones_arretes_en_vigueur.pmtiles`,
+        });
+      } else {
+        await generatePmtiles({
+          workingDirectory: path,
+          inputPath: `${path}/zones_arretes_en_vigueur.geojson`,
+          outputPath: `${path}/zones_arretes_en_vigueur.pmtiles`,
+          expectedFeatureIds: expectedPmtilesFeatureIds,
+        });
+      }
       const data = fs.readFileSync(`${path}/zones_arretes_en_vigueur.pmtiles`);
-      const fileToTransfer = {
+      pmtilesChecksum = createHash('sha256').update(data).digest('hex');
+      fileToTransferPmtiles = {
         originalname: 'zones_arretes_en_vigueur.pmtiles',
         buffer: data,
       };
-      // @ts-ignore
-      const s3Response = await this.s3Service.uploadFile(
-        fileToTransfer as Express.Multer.File,
-        'pmtiles/',
-      );
-      try {
-        const fileNameToSave = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.pmtiles`;
-        await this.s3Service.copyFile(
-          fileToTransfer.originalname,
-          fileNameToSave,
-          'pmtiles/',
-        );
-      } catch (e) {
-        this.logger.error('ERROR COPYING PMTILES', e);
-      }
-
-      await this.datagouvService.uploadToDatagouv(
-        'pmtiles',
-        s3Response.Location,
-        'Carte des zones et arrêtés en vigueur - PMTILES',
-        true,
-      );
     } catch (e) {
       this.logger.error('ERROR GENERATING PMTILES', e);
+      throw e;
     }
-    await this.zoneAlerteComputedRepository.update({}, { enabled: true });
-    await this.configService.setConfig(null, null, new Date());
-    await this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+
+    let immutableArtifacts: { geojsonUrl?: string; pmtilesUrl?: string } = {};
+    if (publicationEnabled) {
+      immutableArtifacts = await this.publishGeneratedZoneArtifacts({
+        sourceRevision,
+        geojsonFile: fileToTransferGeojson,
+        geojsonChecksum,
+        pmtilesFile: fileToTransferPmtiles,
+        pmtilesChecksum,
+      });
+    }
+    await this.zoneAlerteComputedRepository
+      .createQueryBuilder()
+      .update()
+      .set({ enabled: true })
+      .where('1 = 1')
+      .execute();
+    await this.computePublicationStatistics(
       allZonesComputed,
       date,
+      Boolean(computeHistoric),
+      publicationEnabled,
+      isNationalCompute || !publicationEnabled ? sourceRevision : undefined,
+      isNationalCompute || !publicationEnabled
+        ? historicComputeEpoch
+        : undefined,
+      isNationalCompute,
     );
+    if (!publicationEnabled) {
+      const stableArtifacts = await this.publishLegacyZoneArtifacts({
+        geojsonFile: fileToTransferGeojson,
+        pmtilesFile: fileToTransferPmtiles,
+      });
+      await this.statisticCommuneService.finalizeLegacyCurrentPublication(
+        date,
+        sourceRevision!,
+        historicComputeEpoch!,
+      );
+      await this.markLegacyComputationAvailable(new Date(), false);
+      try {
+        await this.publishLegacyZoneArtifactSideEffects({
+          geojsonFile: fileToTransferGeojson,
+          geojsonUrl: stableArtifacts.geojsonUrl,
+          pmtilesFile: fileToTransferPmtiles!,
+          pmtilesUrl: stableArtifacts.pmtilesUrl,
+          date,
+        });
+      } catch (error) {
+        this.logger.error(
+          'ERROR PUBLISHING LEGACY ZONE ARTIFACT SIDE EFFECTS',
+          error,
+        );
+      }
+    }
+    const publicationId = await this.buildVersionedPublicationIfNational({
+      sourceRevision: isNationalCompute ? sourceRevision : undefined,
+      sourceComputedAt: date,
+      artifactZoneCount: allZones.length,
+      geojsonUrl: immutableArtifacts.geojsonUrl,
+      geojsonChecksum,
+      pmtilesUrl: immutableArtifacts.pmtilesUrl,
+      pmtilesChecksum,
+    });
+    return { publicationId, sourceRevision };
+  }
+
+  private async computePublicationStatistics(
+    allZonesComputed: ZoneAlerteComputed[],
+    date: Date,
+    computeHistoric: boolean,
+    publicationEnabled: boolean,
+    sourceRevision?: string,
+    historicComputeEpoch?: string,
+    certifyCurrentPublication = true,
+  ): Promise<void> {
+    if (publicationEnabled && sourceRevision === undefined) {
+      return;
+    }
+    const certifyCompleteCurrentSnapshot =
+      certifyCurrentPublication || !publicationEnabled;
     await this.statisticCommuneService.computeCommuneStatisticsRestrictions(
       allZonesComputed,
       date,
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeCommuneStatistics: () =>
+          this.statisticDepartementService.computeDepartementStatisticsRestrictions(
+            allZonesComputed,
+            date,
+          ),
+        beforeCertification: async () => {
+          await this.statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
+            date,
+            undefined,
+            true,
+          );
+          await this.statisticService.computeDepartementsSituation(
+            allZonesComputed,
+            date.toISOString().slice(0, 10),
+          );
+        },
+        deferCertificationUntilPublication: true,
+        sourceRevision,
+        historicComputeEpoch,
+        requireNationalCoverage:
+          certifyCompleteCurrentSnapshot &&
+          sourceRevision !== undefined &&
+          historicComputeEpoch !== undefined,
+        publishCurrentDate: false,
+      },
     );
-    await this.statisticCommuneService.computeCommuneStatisticsRestrictionsByMonth(
-      date,
-    );
-    await this.statisticService.computeDepartementsSituation(allZonesComputed);
-    if (computeHistoric) {
-      this.computeHistoric();
+    if (computeHistoric && publicationEnabled) {
+      const historicThrough = moment
+        .utc(date.toISOString().slice(0, 10), 'YYYY-MM-DD')
+        .subtract(1, 'day')
+        .format('YYYY-MM-DD');
+      await this.computeHistoric(true, historicThrough, sourceRevision);
     }
+    if (computeHistoric && !publicationEnabled) {
+      void this.computeHistoric();
+    }
+  }
+
+  private async publishGeneratedZoneArtifacts(input: {
+    sourceRevision?: string;
+    geojsonFile: { originalname: string; buffer: Buffer };
+    geojsonChecksum: string;
+    pmtilesFile?: { originalname: string; buffer: Buffer };
+    pmtilesChecksum?: string;
+  }): Promise<{ geojsonUrl?: string; pmtilesUrl?: string }> {
+    if (!isZonePublicationEnabled() || input.sourceRevision === undefined) {
+      return {};
+    }
+    if (!input.pmtilesFile || !input.pmtilesChecksum) {
+      throw new Error('Versioned publication requires a PMTiles artifact');
+    }
+
+    const geojsonUrl = await this.uploadImmutableArtifact(
+      input.geojsonFile,
+      input.geojsonChecksum,
+      'geojson',
+    );
+    const pmtilesUrl = await this.uploadImmutableArtifact(
+      input.pmtilesFile,
+      input.pmtilesChecksum,
+      'pmtiles',
+    );
+    return { geojsonUrl, pmtilesUrl };
+  }
+
+  private async markLegacyComputationAvailable(
+    date: Date,
+    publicationEnabled = isZonePublicationEnabled(),
+  ): Promise<void> {
+    if (!publicationEnabled) {
+      await this.configService.setConfig(null, null, date);
+    }
+  }
+
+  private async publishLegacyZoneArtifacts(input: {
+    geojsonFile: { originalname: string; buffer: Buffer };
+    pmtilesFile?: { originalname: string; buffer: Buffer };
+  }): Promise<{ geojsonUrl: string; pmtilesUrl: string }> {
+    if (!input.pmtilesFile) {
+      throw new Error('Legacy publication requires a PMTiles artifact');
+    }
+    const geojsonUrl = await this.uploadStableLegacyArtifact(
+      input.geojsonFile,
+      'geojson',
+    );
+    const pmtilesUrl = await this.uploadStableLegacyArtifact(
+      input.pmtilesFile,
+      'pmtiles',
+    );
+    return { geojsonUrl, pmtilesUrl };
+  }
+
+  private async uploadStableLegacyArtifact(
+    file: { originalname: string; buffer: Buffer },
+    kind: 'geojson' | 'pmtiles',
+  ): Promise<string> {
+    const timeoutMs = this.getZonePublicationS3TimeoutMs();
+    const stableResponse = await this.s3Service.uploadFile(
+      file as Express.Multer.File,
+      `${kind}/`,
+      {
+        abortSignal: AbortSignal.timeout(timeoutMs),
+        cacheControl: 'public, max-age=0, must-revalidate',
+        contentType:
+          kind === 'geojson'
+            ? 'application/geo+json'
+            : 'application/vnd.pmtiles',
+      },
+    );
+    const stableUrl = stableResponse?.Location;
+    if (!stableUrl) {
+      throw new Error(`Stable ${kind} upload returned no URL`);
+    }
+    return stableUrl;
+  }
+
+  private async publishLegacyZoneArtifactSideEffects(input: {
+    geojsonFile: { originalname: string; buffer: Buffer };
+    geojsonUrl: string;
+    pmtilesFile: { originalname: string; buffer: Buffer };
+    pmtilesUrl: string;
+    date: Date;
+  }): Promise<void> {
+    await this.publishLegacyArtifactSideEffects(
+      input.geojsonFile,
+      input.geojsonUrl,
+      input.date,
+      'geojson',
+      'Carte des zones et arrêtés en vigueur - GeoJSON',
+    );
+    await this.publishLegacyArtifactSideEffects(
+      input.pmtilesFile,
+      input.pmtilesUrl,
+      input.date,
+      'pmtiles',
+      'Carte des zones et arrêtés en vigueur - PMTILES',
+    );
+  }
+
+  private async publishLegacyArtifactSideEffects(
+    file: { originalname: string; buffer: Buffer },
+    stableUrl: string,
+    date: Date,
+    kind: 'geojson' | 'pmtiles',
+    dataGouvTitle: string,
+  ): Promise<void> {
+    let datedCopySucceeded = false;
+    try {
+      const datedFileName = `zones_arretes_en_vigueur_${date.toISOString().split('T')[0]}.${kind}`;
+      await this.s3Service.copyFile(
+        file.originalname,
+        datedFileName,
+        `${kind}/`,
+        {
+          abortSignal: AbortSignal.timeout(
+            this.getZonePublicationS3TimeoutMs(),
+          ),
+          cacheControl: 'public, max-age=0, must-revalidate',
+          contentType:
+            kind === 'geojson'
+              ? 'application/geo+json'
+              : 'application/vnd.pmtiles',
+        },
+      );
+      datedCopySucceeded = true;
+    } catch (error) {
+      this.logger.error(`ERROR COPYING ${kind.toUpperCase()}`, error);
+    }
+
+    if (kind === 'pmtiles' || datedCopySucceeded) {
+      try {
+        await this.datagouvService.uploadToDatagouv(
+          kind,
+          stableUrl,
+          dataGouvTitle,
+          true,
+        );
+      } catch (error) {
+        this.logger.error(
+          `ERROR UPLOADING ${kind.toUpperCase()} TO DATAGOUV`,
+          error,
+        );
+      }
+    }
+  }
+
+  private async uploadImmutableArtifact(
+    file: { originalname: string; buffer: Buffer },
+    checksum: string,
+    kind: 'geojson' | 'pmtiles',
+  ): Promise<string> {
+    const timeoutMs = this.getZonePublicationS3TimeoutMs();
+    const immutableResponse = await this.s3Service.uploadFile(
+      {
+        ...file,
+        originalname: `zones_arretes_en_vigueur_${checksum}.${kind}`,
+      } as Express.Multer.File,
+      `${kind}/`,
+      {
+        abortSignal: AbortSignal.timeout(timeoutMs),
+        cacheControl: 'public, max-age=31536000, immutable',
+        contentType:
+          kind === 'geojson'
+            ? 'application/geo+json'
+            : 'application/vnd.pmtiles',
+      },
+    );
+    const immutableUrl = immutableResponse?.Location;
+    if (!immutableUrl) {
+      throw new Error(`Immutable ${kind} upload returned no URL`);
+    }
+    return immutableUrl;
+  }
+
+  private getZonePublicationS3TimeoutMs(): number {
+    const configuredTimeoutMs = Number(
+      this.nestConfigService.get?.('ZONE_PUBLICATION_S3_TIMEOUT_MS'),
+    );
+    return Number.isInteger(configuredTimeoutMs) && configuredTimeoutMs > 0
+      ? configuredTimeoutMs
+      : 60_000;
+  }
+
+  private async buildVersionedPublicationIfNational(input: {
+    sourceRevision?: string;
+    sourceComputedAt: Date;
+    artifactZoneCount: number;
+    geojsonUrl?: string;
+    geojsonChecksum?: string;
+    pmtilesUrl?: string;
+    pmtilesChecksum?: string;
+  }): Promise<string | undefined> {
+    if (!isZonePublicationEnabled() || input.sourceRevision === undefined) {
+      return;
+    }
+    return this.zonePublicationService.buildCandidateFromCurrentComputed({
+      sourceRevision: input.sourceRevision,
+      sourceComputedAt: input.sourceComputedAt,
+      artifactZoneCount: input.artifactZoneCount,
+      geojsonUrl: input.geojsonUrl,
+      geojsonChecksum: input.geojsonChecksum,
+      pmtilesUrl: input.pmtilesUrl,
+      pmtilesChecksum: input.pmtilesChecksum,
+    });
   }
 
   async computeCommunesIntersected(departement: Departement) {
@@ -975,58 +1723,789 @@ DELETE FROM zone_alerte_computed
     await this.zoneAlerteComputedRepository.save(toSave);
   }
 
-  async computeHistoric() {
-    const config = await this.configService.getConfig();
-    if (
-      config.computeMapDate &&
-      moment().diff(moment(config.computeMapDate, 'YYYY-MM-DD'), 'days') >= 1
-    ) {
-      try {
-        const dateMin = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(
-          moment('2024-04-29'),
-        )
-          ? config.computeMapDate
-          : '2024-04-29';
-        const type = moment(config.computeMapDate, 'YYYY-MM-DD').isBefore(
-          moment('2024-04-29'),
-        )
-          ? 'maps'
-          : 'mapsComputed';
+  async computeHistoric(
+    rethrowWorkerError = false,
+    requiredThrough?: string,
+    expectedSourceRevision?: string,
+  ) {
+    let historicSourceRevision: string | undefined;
+    let historicDirtyFromForRetry: string | undefined;
+    try {
+      const publicationEnabled = isZonePublicationEnabled();
+      historicSourceRevision =
+        expectedSourceRevision ??
+        (await this.zonePublicationService.getSourceRevision());
+      const config = await this.configService.getConfig();
+      if (!config) {
+        throw new Error('Historic cursor configuration is missing');
+      }
+      const historicComputeEpoch = String(config.historicComputeEpoch ?? 0);
+      let certifiedCursorState = this.toHistoricCursorState(config);
+      const dirtyDates = [config.computeMapDate, config.computeStatsDate]
+        .filter(Boolean)
+        .map((date) => moment(date, 'YYYY-MM-DD'));
+      const dirtyDate = dirtyDates.reduce((minDate, date) => {
+        return date.isBefore(minDate, 'day') ? date : minDate;
+      }, dirtyDates[0]);
+      let historicPublicationStarted = false;
+      let historicCompletedThrough: string | undefined;
+      const dirtyThrough =
+        requiredThrough ?? moment().subtract(1, 'day').format('YYYY-MM-DD');
+      const dirtyThroughDate = moment(dirtyThrough, 'YYYY-MM-DD', true);
+      if (!dirtyThroughDate.isValid()) {
+        throw new Error(`Invalid historic catch-up date: ${dirtyThrough}`);
+      }
 
-        const worker = new Worker(historicWorkerThreadFilePath, {
-          workerData: {
-            dateMin,
-            dateStats: config.computeStatsDate,
-            type,
-          },
-        });
+      if (dirtyDate && !dirtyDate.isAfter(dirtyThroughDate, 'day')) {
+        const computedStartDate = moment(
+          this.historicComputedStartDate,
+          'YYYY-MM-DD',
+        );
+        const dirtyDateString = dirtyDate.format('YYYY-MM-DD');
+        const statisticsStartDate = config.computeStatsDate ?? dirtyDateString;
+        historicDirtyFromForRetry = dirtyDateString;
+        await this.beginHistoricStatisticsPublication(
+          dirtyDateString,
+          dirtyThrough,
+        );
+        historicPublicationStarted = true;
 
-        await new Promise((resolve, reject) => {
-          worker.on('message', (result) => {
-            resolve(result.result);
-          });
+        if (dirtyDate.isBefore(computedStartDate, 'day')) {
+          const naturalLegacyEnd = computedStartDate.clone().subtract(1, 'day');
+          const legacyEnd = dirtyThroughDate.isBefore(naturalLegacyEnd, 'day')
+            ? dirtyThroughDate.clone()
+            : naturalLegacyEnd;
+          const legacyState = await this.runHistoricWorkerInChunks(
+            'maps',
+            dirtyDateString,
+            statisticsStartDate,
+            config.computeMapDate,
+            config.computeStatsDate,
+            String(config.computeMapGeneration ?? 0),
+            String(config.computeStatsGeneration ?? 0),
+            legacyEnd.format('YYYY-MM-DD'),
+            historicSourceRevision,
+            historicComputeEpoch,
+          );
+          historicCompletedThrough =
+            this.getHistoricCompletedThrough(legacyState);
+          certifiedCursorState = legacyState;
 
-          worker.on('error', (error) => {
-            this.logger.error(
-              `COMPUTE HISTORIC ${type.toUpperCase()} WORKER ERROR`,
-              error.toString(),
+          if (!dirtyThroughDate.isBefore(computedStartDate, 'day')) {
+            const resumedConfig = await this.configService.getConfig();
+            this.assertHistoricCursorState(
+              legacyState,
+              resumedConfig,
+              historicComputeEpoch,
             );
-            reject(error);
-          });
-
-          worker.on('exit', (code) => {
-            const errorMessage = `COMPUTE HISTORIC ${type.toUpperCase()} Worker stopped with exit code ${code}`;
-            this.logger.error(errorMessage, '');
-            reject(new Error(errorMessage));
-          });
-        });
-      } catch (error) {
-        this.logger.error('Error in computeHistoric', error.toString());
+            const resumedDirtyDates = [
+              resumedConfig.computeMapDate,
+              resumedConfig.computeStatsDate,
+            ]
+              .filter(Boolean)
+              .map((value) => moment(value, 'YYYY-MM-DD'));
+            const resumedDirtyDate = resumedDirtyDates.reduce(
+              (minimum, value) =>
+                value.isBefore(minimum, 'day') ? value : minimum,
+              resumedDirtyDates[0],
+            );
+            if (!resumedDirtyDate) {
+              throw new Error(
+                'Historic cursors disappeared during legacy computation',
+              );
+            }
+            const legacyCompletedThrough = moment(computedStartDate).subtract(
+              1,
+              'day',
+            );
+            if (resumedDirtyDate.isBefore(legacyCompletedThrough, 'day')) {
+              throw new Error(
+                `Historic cursor rewound during legacy computation to ${resumedDirtyDate.format('YYYY-MM-DD')}`,
+              );
+            }
+            const computedState = await this.runHistoricWorkerInChunks(
+              'mapsComputed',
+              this.historicComputedStartDate,
+              resumedConfig.computeStatsDate,
+              resumedConfig.computeMapDate,
+              resumedConfig.computeStatsDate,
+              String(resumedConfig.computeMapGeneration ?? 0),
+              String(resumedConfig.computeStatsGeneration ?? 0),
+              dirtyThrough,
+              historicSourceRevision,
+              historicComputeEpoch,
+            );
+            historicCompletedThrough =
+              this.getHistoricCompletedThrough(computedState);
+            certifiedCursorState = computedState;
+          }
+        } else {
+          const computedState = await this.runHistoricWorkerInChunks(
+            'mapsComputed',
+            dirtyDateString,
+            statisticsStartDate,
+            config.computeMapDate,
+            config.computeStatsDate,
+            String(config.computeMapGeneration ?? 0),
+            String(config.computeStatsGeneration ?? 0),
+            dirtyThrough,
+            historicSourceRevision,
+            historicComputeEpoch,
+          );
+          historicCompletedThrough =
+            this.getHistoricCompletedThrough(computedState);
+          certifiedCursorState = computedState;
+        }
+      }
+      const statsMonthDate =
+        config.computeStatsDate || dirtyDate?.format('YYYY-MM-DD');
+      const historicComputedThrough =
+        requiredThrough ?? historicCompletedThrough;
+      const candidateSnapshotDate =
+        requiredThrough && expectedSourceRevision !== undefined
+          ? moment
+              .utc(requiredThrough, 'YYYY-MM-DD')
+              .add(1, 'day')
+              .format('YYYY-MM-DD')
+          : undefined;
+      const monthlyAggregateThrough = publicationEnabled
+        ? (candidateSnapshotDate ?? historicComputedThrough)
+        : undefined;
+      if (statsMonthDate) {
+        await this.statisticCommuneService.computeByMonth(
+          moment(statsMonthDate, 'YYYY-MM-DD'),
+          undefined,
+          monthlyAggregateThrough
+            ? {
+                aggregateThrough: moment(monthlyAggregateThrough, 'YYYY-MM-DD'),
+                allowedReadySnapshot:
+                  candidateSnapshotDate && expectedSourceRevision !== undefined
+                    ? {
+                        date: candidateSnapshotDate,
+                        sourceRevision: expectedSourceRevision,
+                      }
+                    : undefined,
+              }
+            : undefined,
+        );
+      }
+      if (requiredThrough) {
+        await this.assertHistoricCatchUpComplete(
+          requiredThrough,
+          historicSourceRevision,
+          historicDirtyFromForRetry,
+        );
+      }
+      if (historicPublicationStarted) {
+        const publishedThrough = historicComputedThrough;
+        if (!publishedThrough) {
+          throw new Error(
+            'Historic statistics publication has no completed cursor',
+          );
+        }
+        await this.publishHistoricStatistics(
+          publishedThrough,
+          historicSourceRevision,
+        );
+      }
+      await this.assertCurrentHistoricCursorState(
+        certifiedCursorState,
+        historicComputeEpoch,
+      );
+      return certifiedCursorState;
+    } catch (error) {
+      this.logger.error('Error in computeHistoric', error.toString());
+      await this.rewindHistoricAfterSourceRevisionChange(
+        historicDirtyFromForRetry,
+        historicSourceRevision,
+      );
+      if (rethrowWorkerError) {
+        throw error;
       }
     }
-    await this.statisticCommuneService.computeByMonth(
-      moment(config.computeMapDate, 'YYYY-MM-DD'),
+  }
+
+  private async beginHistoricStatisticsPublication(
+    dirtyFrom: string,
+    dirtyThrough: string,
+  ): Promise<void> {
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(dirtyFrom) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dirtyThrough) ||
+      dirtyFrom > dirtyThrough
+    ) {
+      throw new Error(
+        `Invalid historic statistics dirty range: ${dirtyFrom}..${dirtyThrough}`,
+      );
+    }
+    await this.dataSource.query(
+      `
+        INSERT INTO "statistic_publication_state" (
+          "id", "revision", "historicDirtyFrom", "historicDirtyThrough",
+          "updatedAt"
+        ) VALUES (1, 1, $1::date, $2::date, now())
+        ON CONFLICT ("id") DO UPDATE SET
+          "revision" = "statistic_publication_state"."revision" + CASE
+            WHEN "statistic_publication_state"."historicDirtyFrom"
+                  IS DISTINCT FROM CASE
+                    WHEN "statistic_publication_state"."historicDirtyFrom" IS NULL
+                      THEN EXCLUDED."historicDirtyFrom"
+                    ELSE LEAST(
+                      "statistic_publication_state"."historicDirtyFrom",
+                      EXCLUDED."historicDirtyFrom"
+                    )
+                  END
+              OR "statistic_publication_state"."historicDirtyThrough"
+                  IS DISTINCT FROM CASE
+                    WHEN "statistic_publication_state"."historicDirtyThrough" IS NULL
+                      THEN EXCLUDED."historicDirtyThrough"
+                    ELSE GREATEST(
+                      "statistic_publication_state"."historicDirtyThrough",
+                      EXCLUDED."historicDirtyThrough"
+                    )
+                  END
+              THEN 1
+            ELSE 0
+          END,
+          "historicDirtyFrom" = CASE
+            WHEN "statistic_publication_state"."historicDirtyFrom" IS NULL
+              THEN EXCLUDED."historicDirtyFrom"
+            ELSE LEAST(
+              "statistic_publication_state"."historicDirtyFrom",
+              EXCLUDED."historicDirtyFrom"
+            )
+          END,
+          "historicDirtyThrough" = CASE
+            WHEN "statistic_publication_state"."historicDirtyThrough" IS NULL
+              THEN EXCLUDED."historicDirtyThrough"
+            ELSE GREATEST(
+              "statistic_publication_state"."historicDirtyThrough",
+              EXCLUDED."historicDirtyThrough"
+            )
+          END,
+          "updatedAt" = now()
+      `,
+      [dirtyFrom, dirtyThrough],
     );
+  }
+
+  private async publishHistoricStatistics(
+    publishedThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(publishedThrough)) {
+      throw new Error(
+        `Invalid historic statistics publication date: ${publishedThrough}`,
+      );
+    }
+    const [result] = await this.dataSource.query(
+      `
+        WITH source_guard AS MATERIALIZED (
+          SELECT source_state."revision"::text AS revision
+          FROM "zone_publication_source_state" source_state
+          WHERE source_state."id" = 1
+          FOR UPDATE
+        ), publication_guard AS MATERIALIZED (
+          SELECT
+            state."id",
+            state."historicDirtyFrom",
+            state."historicDirtyThrough"
+          FROM "statistic_publication_state" state
+          CROSS JOIN source_guard
+          WHERE state."id" = 1
+          FOR UPDATE OF state
+        ), incomplete_snapshot AS MATERIALIZED (
+          SELECT snapshot."snapshotDate"
+          FROM "statistic_commune_snapshot" snapshot
+          CROSS JOIN publication_guard publication_state
+          WHERE snapshot."scope" <> 'bootstrap'
+            AND (
+              snapshot."status" <> 'completed'
+              OR (
+                $2::bigint IS NOT NULL
+                AND snapshot."sourceRevision" IS DISTINCT FROM $2::bigint
+              )
+            )
+            AND snapshot."snapshotDate" >= publication_state."historicDirtyFrom"
+            AND snapshot."snapshotDate" <= $1::date
+          ORDER BY snapshot."snapshotDate" ASC
+          LIMIT 1
+        ), published AS (
+          UPDATE "statistic_publication_state" state
+          SET "revision" = state."revision" + 1,
+              "historicPublishedThrough" = CASE
+                WHEN state."historicPublishedThrough" IS NULL THEN $1::date
+                ELSE GREATEST(state."historicPublishedThrough", $1::date)
+              END,
+              "historicDirtyFrom" = NULL,
+              "historicDirtyThrough" = NULL,
+              "updatedAt" = now()
+          FROM publication_guard publication_state
+          WHERE state."id" = publication_state."id"
+            AND publication_state."historicDirtyFrom" IS NOT NULL
+            AND publication_state."historicDirtyThrough" IS NOT NULL
+            AND $1::date >= publication_state."historicDirtyThrough"
+            AND (
+              $2::bigint IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM source_guard
+                WHERE source_guard.revision = $2::text
+              )
+            )
+            AND NOT EXISTS (SELECT 1 FROM incomplete_snapshot)
+          RETURNING state."revision"
+        )
+        SELECT
+          EXISTS(SELECT 1 FROM published) AS published,
+          (SELECT "snapshotDate" FROM incomplete_snapshot) AS "incompleteDate",
+          (SELECT revision FROM source_guard) AS "currentSourceRevision"
+      `,
+      [publishedThrough, expectedSourceRevision ?? null],
+    );
+    if (result?.published !== true) {
+      if (
+        expectedSourceRevision !== undefined &&
+        String(result?.currentSourceRevision) !== expectedSourceRevision
+      ) {
+        throw new Error(
+          `Historic statistics source revision changed (${expectedSourceRevision} -> ${String(result?.currentSourceRevision ?? 'missing')})`,
+        );
+      }
+      const incompleteDate = result?.incompleteDate
+        ? String(result.incompleteDate).slice(0, 10)
+        : 'unknown';
+      throw new Error(
+        `Historic statistics publication blocked by snapshot ${incompleteDate}`,
+      );
+    }
+  }
+
+  async computeHistoricPersistently(
+    requiredThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<HistoricCursorState> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    let locked = false;
+    const deadline = Date.now() + HISTORIC_COMPUTE_LOCK_TIMEOUT_MS;
+    try {
+      while (!locked) {
+        const [lock] = await queryRunner.query(
+          "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS locked",
+        );
+        locked = lock?.locked === true;
+        if (locked) {
+          break;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(
+            'Timed out waiting for the historic zone compute lock',
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      const state = await this.computeHistoric(
+        true,
+        requiredThrough,
+        expectedSourceRevision,
+      );
+      if (!state) {
+        throw new Error('Historic computation returned no cursor state');
+      }
+      return state;
+    } finally {
+      try {
+        if (locked) {
+          await queryRunner.query(
+            "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
+          );
+        }
+      } finally {
+        await queryRunner.release();
+      }
+    }
+  }
+
+  private async assertHistoricCatchUpComplete(
+    requiredThrough: string,
+    expectedSourceRevision?: string,
+    historicDirtyFrom?: string,
+  ): Promise<void> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requiredThrough)) {
+      throw new Error(`Invalid historic catch-up date: ${requiredThrough}`);
+    }
+    const startDate = `${requiredThrough.slice(0, 4)}-01-01`;
+    const rewindDate = historicDirtyFrom ?? startDate;
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(rewindDate) ||
+      rewindDate > requiredThrough
+    ) {
+      throw new Error(`Invalid historic dirty date: ${rewindDate}`);
+    }
+    const [config] = await this.dataSource.query(
+      `SELECT "computeMapDate", "computeStatsDate" FROM "config" WHERE "id" = 1`,
+    );
+    const toDateString = (value: unknown): string | null => {
+      if (!value) {
+        return null;
+      }
+      if (value instanceof Date) {
+        return value.toISOString().slice(0, 10);
+      }
+      return String(value).slice(0, 10);
+    };
+    const mapDate = toDateString(config?.computeMapDate);
+    const statsDate = toDateString(config?.computeStatsDate);
+    if (
+      !mapDate ||
+      !statsDate ||
+      mapDate < requiredThrough ||
+      statsDate < requiredThrough
+    ) {
+      await this.configService.setConfig(rewindDate, rewindDate);
+      throw new Error(
+        `Historic catch-up incomplete through ${requiredThrough}: map=${mapDate || 'null'}, stats=${statsDate || 'null'}`,
+      );
+    }
+
+    const [incompleteSnapshot] = await this.dataSource.query(
+      `
+        SELECT "snapshotDate"
+        FROM "statistic_commune_snapshot"
+        WHERE "scope" <> 'bootstrap'
+          AND (
+            "status" <> 'completed'
+            OR (
+              $3::bigint IS NOT NULL
+              AND "sourceRevision" IS DISTINCT FROM $3::bigint
+            )
+          )
+          AND "snapshotDate" >= $2::date
+          AND "snapshotDate" <= $1::date
+        ORDER BY "snapshotDate" ASC
+        LIMIT 1
+      `,
+      [requiredThrough, rewindDate, expectedSourceRevision ?? null],
+    );
+    if (incompleteSnapshot) {
+      const snapshotDate = toDateString(incompleteSnapshot.snapshotDate);
+      if (!snapshotDate) {
+        throw new Error('Incomplete commune snapshot has no date');
+      }
+      await this.configService.setConfig(rewindDate, rewindDate);
+      throw new Error(
+        `Historic catch-up blocked by incompatible commune snapshot ${snapshotDate}`,
+      );
+    }
+
+    const [coverage] = await this.dataSource.query(
+      `
+        WITH expected AS (
+          SELECT ($2::date - $1::date + 1)::integer AS "dayCount"
+        ), commune_coverage AS (
+          SELECT
+            commune."id",
+            COUNT(DISTINCT restriction.value ->> 'date')::integer AS "dayCount"
+          FROM "commune" commune
+          LEFT JOIN "statistic_commune" statistic
+            ON statistic."communeId" = commune."id"
+          LEFT JOIN LATERAL jsonb_array_elements(
+            COALESCE(statistic."restrictions", '[]'::jsonb)
+          ) restriction(value)
+            ON restriction.value ->> 'date' >= $1
+           AND restriction.value ->> 'date' <= $2
+          GROUP BY commune."id"
+        )
+        SELECT
+          COUNT(*) FILTER (
+            WHERE commune_coverage."dayCount" <> expected."dayCount"
+          )::integer AS "incompleteCommuneCount",
+          expected."dayCount" AS "expectedDayCount"
+        FROM commune_coverage
+        CROSS JOIN expected
+        GROUP BY expected."dayCount"
+      `,
+      [startDate, requiredThrough],
+    );
+    if (!coverage) {
+      throw new Error('Historic commune coverage contains no commune');
+    }
+    if (Number(coverage.incompleteCommuneCount || 0) > 0) {
+      const coverageRewindDate =
+        rewindDate < startDate ? rewindDate : startDate;
+      await this.configService.setConfig(null, coverageRewindDate);
+      throw new Error(
+        `Historic commune coverage incomplete through ${requiredThrough}: ${Number(coverage.incompleteCommuneCount)} communes do not contain ${Number(coverage.expectedDayCount)} daily entries`,
+      );
+    }
+  }
+
+  private async runHistoricWorkerInChunks(
+    type: 'maps' | 'mapsComputed',
+    dateMin: string,
+    dateStats: string | Date | null | undefined,
+    expectedMapCursor: string | Date | null | undefined,
+    expectedStatsCursor: string | Date | null | undefined,
+    expectedMapGeneration: string,
+    expectedStatsGeneration: string,
+    requiredThrough: string,
+    expectedSourceRevision?: string,
+    expectedHistoricComputeEpoch?: string,
+  ): Promise<HistoricCursorState> {
+    const startDate = moment.utc(dateMin, 'YYYY-MM-DD', true);
+    const endDate = moment.utc(requiredThrough, 'YYYY-MM-DD', true);
+    if (
+      !startDate.isValid() ||
+      !endDate.isValid() ||
+      startDate.isAfter(endDate, 'day')
+    ) {
+      throw new Error(
+        `Invalid historic worker range: ${dateMin}..${requiredThrough}`,
+      );
+    }
+    const dateString = (value: string | Date | null | undefined) =>
+      value instanceof Date
+        ? value.toISOString().slice(0, 10)
+        : value
+          ? String(value).slice(0, 10)
+          : null;
+    const chunkDays = readHistoricComputeChunkDays();
+    let chunkStart = startDate;
+    let cursorState: HistoricCursorState = {
+      mapCursor: dateString(expectedMapCursor),
+      statsCursor: dateString(expectedStatsCursor),
+      mapGeneration: expectedMapGeneration,
+      statsGeneration: expectedStatsGeneration,
+    };
+    const initialStatsDate = dateString(dateStats) ?? undefined;
+
+    while (!chunkStart.isAfter(endDate, 'day')) {
+      const naturalChunkEnd = chunkStart.clone().add(chunkDays - 1, 'days');
+      const chunkEnd = naturalChunkEnd.isAfter(endDate, 'day')
+        ? endDate.clone()
+        : naturalChunkEnd;
+      const chunkEndString = chunkEnd.format('YYYY-MM-DD');
+      cursorState = await this.runHistoricWorker(
+        type,
+        chunkStart.format('YYYY-MM-DD'),
+        cursorState.statsCursor ?? initialStatsDate,
+        cursorState.mapCursor,
+        cursorState.statsCursor,
+        cursorState.mapGeneration,
+        cursorState.statsGeneration,
+        expectedSourceRevision,
+        chunkEndString,
+        expectedHistoricComputeEpoch,
+      );
+      await this.assertCurrentHistoricCursorState(
+        cursorState,
+        expectedHistoricComputeEpoch,
+      );
+      this.assertHistoricChunkCompleted(cursorState, chunkEndString);
+      chunkStart = chunkEnd.add(1, 'day');
+    }
+
+    return cursorState;
+  }
+
+  private assertHistoricChunkCompleted(
+    state: HistoricCursorState,
+    requiredThrough: string,
+  ): void {
+    if (
+      !state.mapCursor ||
+      !state.statsCursor ||
+      state.mapCursor < requiredThrough ||
+      state.statsCursor < requiredThrough
+    ) {
+      throw new Error(
+        `Historic worker did not complete its chunk through ${requiredThrough}: map=${state.mapCursor || 'null'}, stats=${state.statsCursor || 'null'}`,
+      );
+    }
+  }
+
+  private getHistoricCompletedThrough(state: HistoricCursorState): string {
+    if (!state.mapCursor || !state.statsCursor) {
+      throw new Error(
+        `Historic computation has incomplete cursors: map=${state.mapCursor || 'null'}, stats=${state.statsCursor || 'null'}`,
+      );
+    }
+    return state.mapCursor < state.statsCursor
+      ? state.mapCursor
+      : state.statsCursor;
+  }
+
+  private async rewindHistoricAfterSourceRevisionChange(
+    dirtyFrom?: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (!dirtyFrom || expectedSourceRevision === undefined) {
+      return;
+    }
+    try {
+      const currentSourceRevision =
+        await this.zonePublicationService.getSourceRevision();
+      if (currentSourceRevision === expectedSourceRevision) {
+        return;
+      }
+      await this.configService.setConfig(dirtyFrom, dirtyFrom);
+      this.logger.log(
+        `Historic cursors rewound to ${dirtyFrom} after source revision changed (${expectedSourceRevision} -> ${currentSourceRevision})`,
+      );
+    } catch (rewindError) {
+      this.logger.error(
+        'Unable to verify or rewind historic cursors after a failure',
+        rewindError instanceof Error
+          ? rewindError.toString()
+          : String(rewindError),
+      );
+    }
+  }
+
+  private async runHistoricWorker(
+    type: 'maps' | 'mapsComputed',
+    dateMin: string,
+    dateStats?: string,
+    expectedMapCursor?: string | null,
+    expectedStatsCursor?: string | null,
+    expectedMapGeneration?: string,
+    expectedStatsGeneration?: string,
+    expectedSourceRevision?: string,
+    dateMax?: string,
+    expectedHistoricComputeEpoch?: string,
+  ): Promise<HistoricCursorState> {
+    const worker = new Worker(historicWorkerThreadFilePath, {
+      workerData: {
+        dateMin,
+        dateStats,
+        expectedMapCursor,
+        expectedStatsCursor,
+        expectedMapGeneration,
+        expectedStatsGeneration,
+        expectedSourceRevision,
+        dateMax,
+        expectedHistoricComputeEpoch,
+        type,
+      },
+    });
+
+    return new Promise<HistoricCursorState>((resolve, reject) => {
+      let settled = false;
+      let terminationInProgress = false;
+      const settle = (callback: (value?: unknown) => void, value?: unknown) => {
+        if (settled || terminationInProgress) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        callback(value);
+      };
+      const timeout = setTimeout(() => {
+        if (settled || terminationInProgress) {
+          return;
+        }
+        terminationInProgress = true;
+        const error = new Error(
+          `COMPUTE HISTORIC ${type.toUpperCase()} worker timed out`,
+        );
+        void (async () => {
+          try {
+            await worker.terminate();
+          } catch (terminationError) {
+            this.logger.error(
+              `COMPUTE HISTORIC ${type.toUpperCase()} WORKER TERMINATION ERROR`,
+              terminationError,
+            );
+          }
+          terminationInProgress = false;
+          settle(reject, error);
+        })();
+      }, HISTORIC_COMPUTE_WORKER_TIMEOUT_MS);
+
+      worker.on('message', (result) => {
+        if (result?.success === false) {
+          settle(reject, new Error(result.error));
+          return;
+        }
+        settle(resolve, result?.result);
+      });
+
+      worker.on('error', (error) => {
+        this.logger.error(
+          `COMPUTE HISTORIC ${type.toUpperCase()} WORKER ERROR`,
+          error.toString(),
+        );
+        settle(reject, error);
+      });
+
+      worker.on('exit', (code) => {
+        if (code === 0) {
+          return;
+        }
+        const errorMessage = `COMPUTE HISTORIC ${type.toUpperCase()} Worker stopped with exit code ${code}`;
+        this.logger.error(errorMessage, '');
+        settle(reject, new Error(errorMessage));
+      });
+    });
+  }
+
+  private async assertCurrentHistoricCursorState(
+    expected: HistoricCursorState,
+    expectedHistoricComputeEpoch?: string,
+  ): Promise<void> {
+    this.assertHistoricCursorState(
+      expected,
+      await this.configService.getConfig(),
+      expectedHistoricComputeEpoch,
+    );
+  }
+
+  private assertHistoricCursorState(
+    expected: HistoricCursorState,
+    persisted: {
+      computeMapDate?: string | Date | null;
+      computeStatsDate?: string | Date | null;
+      computeMapGeneration?: string | number | null;
+      computeStatsGeneration?: string | number | null;
+      historicComputeEpoch?: string | number | null;
+    },
+    expectedHistoricComputeEpoch?: string,
+  ): void {
+    const actual = this.toHistoricCursorState(persisted);
+    if (
+      actual.mapCursor !== expected.mapCursor ||
+      actual.statsCursor !== expected.statsCursor ||
+      actual.mapGeneration !== expected.mapGeneration ||
+      actual.statsGeneration !== expected.statsGeneration ||
+      (expectedHistoricComputeEpoch !== undefined &&
+        String(persisted.historicComputeEpoch ?? 0) !==
+          expectedHistoricComputeEpoch)
+    ) {
+      throw new Error(
+        `Historic cursors changed after worker completion: expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)}`,
+      );
+    }
+  }
+
+  private toHistoricCursorState(persisted: {
+    computeMapDate?: string | Date | null;
+    computeStatsDate?: string | Date | null;
+    computeMapGeneration?: string | number | null;
+    computeStatsGeneration?: string | number | null;
+  }): HistoricCursorState {
+    const dateString = (value: string | Date | null | undefined) =>
+      value instanceof Date
+        ? value.toISOString().slice(0, 10)
+        : value
+          ? String(value).slice(0, 10)
+          : null;
+    return {
+      mapCursor: dateString(persisted.computeMapDate),
+      statsCursor: dateString(persisted.computeStatsDate),
+      mapGeneration: String(persisted.computeMapGeneration ?? 0),
+      statsGeneration: String(persisted.computeStatsGeneration ?? 0),
+    };
   }
 
   async getZonesAlerteComputedByDepartement(
@@ -1052,7 +2531,6 @@ DELETE FROM zone_alerte_computed
       .leftJoin('zone_alerte_computed.departement', 'departement')
       .where('departement.id = :id', { id: departement.id })
       .getRawMany();
-    // @ts-ignore
     await Promise.all(
       zonesDepartement.map(async (z) => {
         z.restriction =

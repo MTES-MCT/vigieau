@@ -1,45 +1,116 @@
 import { NestFactory } from '@nestjs/core';
 import { workerData, parentPort } from 'worker_threads';
-import { AppModule } from '../app.module';
-import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import moment from 'moment';
+import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
 
 const logger = new RegleauLogger('ComputeHistoricWorker');
 
 interface WorkerData {
   dateMin: string;
   dateStats?: string;
+  expectedMapCursor?: string | null;
+  expectedStatsCursor?: string | null;
+  expectedMapGeneration?: string;
+  expectedStatsGeneration?: string;
+  expectedSourceRevision?: string;
+  dateMax?: string;
+  expectedHistoricComputeEpoch?: string;
   type: 'maps' | 'mapsComputed';
 }
 
 async function run() {
+  let app;
+  let response: { success: boolean; result?: any; error?: string };
   try {
-    const app = await NestFactory.createApplicationContext(AppModule);
-    const zoneAlerteComputedHistoricService = app.get(ZoneAlerteComputedHistoricService);
+    process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
+    process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
+    process.env.SANDRE_ZONE_SYNC_MODE = 'paused';
+    process.env.DISABLE_SCHEDULED_JOBS = 'true';
+    process.env.SKIP_SCHEMA_BOOTSTRAP = 'true';
+    const [{ AppModule }, { ZoneAlerteComputedHistoricService }] =
+      await Promise.all([
+        import('../app.module.js'),
+        import('../zone_alerte_computed/zone_alerte_computed_historic.service.js'),
+      ]);
+    app = await NestFactory.createApplicationContext(AppModule);
+    const zoneAlerteComputedHistoricService = app.get(
+      ZoneAlerteComputedHistoricService,
+    );
 
-    const { dateMin, dateStats, type } = workerData as WorkerData;
+    const {
+      dateMin,
+      dateStats,
+      expectedMapCursor,
+      expectedStatsCursor,
+      expectedMapGeneration,
+      expectedStatsGeneration,
+      expectedSourceRevision,
+      dateMax,
+      expectedHistoricComputeEpoch,
+      type,
+    } = workerData as WorkerData;
     const dateMinMoment = moment(dateMin);
     const dateStatsMoment = dateStats ? moment(dateStats) : null;
 
-    logger.log(`Starting compute historic ${type} with dateMin: ${dateMin} and dateStats: ${dateStats}`);
-    
+    logger.log(
+      `Starting compute historic ${type} with dateMin: ${dateMin} and dateStats: ${dateStats}`,
+    );
+
     let result;
     if (type === 'maps') {
-      result = await zoneAlerteComputedHistoricService.computeHistoricMaps(dateMinMoment, dateStatsMoment);
+      result = await zoneAlerteComputedHistoricService.computeHistoricMaps(
+        dateMinMoment,
+        dateStatsMoment,
+        expectedMapCursor,
+        expectedStatsCursor,
+        expectedMapGeneration,
+        expectedStatsGeneration,
+        expectedSourceRevision,
+        dateMax,
+        expectedHistoricComputeEpoch,
+      );
     } else {
-      result = await zoneAlerteComputedHistoricService.computeHistoricMapsComputed(dateMinMoment, dateStatsMoment);
+      result =
+        await zoneAlerteComputedHistoricService.computeHistoricMapsComputed(
+          dateMinMoment,
+          dateStatsMoment,
+          expectedMapCursor,
+          expectedStatsCursor,
+          expectedMapGeneration,
+          expectedStatsGeneration,
+          expectedSourceRevision,
+          dateMax,
+          expectedHistoricComputeEpoch,
+        );
     }
-    
-    if (parentPort) {
-      parentPort.postMessage({ success: true, result });
-    }
+
+    response = { success: true, result };
   } catch (error) {
     logger.error('Error in compute historic worker', error.toString());
-    if (parentPort) {
-      parentPort.postMessage({ success: false, error: error.toString() });
+    response = {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    try {
+      await app?.close();
+    } catch (error) {
+      logger.error(
+        'Error while closing compute historic worker',
+        String(error),
+      );
+      response = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    try {
+      parentPort?.postMessage(response);
+    } finally {
+      parentPort?.close();
     }
   }
 }
 
-run(); 
+run();

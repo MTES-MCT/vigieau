@@ -1,78 +1,184 @@
-import {Injectable} from '@nestjs/common';
-import {InjectRepository} from '@nestjs/typeorm';
-import {Brackets, Repository} from 'typeorm';
-import {Config} from '@shared/entities/config.entity';
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Brackets, Repository } from 'typeorm';
+import { Config } from '@shared/entities/config.entity';
+import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
 @Injectable()
 export class ConfigService {
-
-    constructor(
-        @InjectRepository(Config)
-        private readonly configRepository: Repository<Config>,
-    ) {
-        this.initConfig();
+  constructor(
+    @InjectRepository(Config)
+    private readonly configRepository: Repository<Config>,
+  ) {
+    if (!shouldSkipStartupDataLoads()) {
+      void this.initConfig();
     }
+  }
 
-    async initConfig() {
-        const count = await this.configRepository.count();
-        if (count > 0) {
-            return;
-        }
-        await this.configRepository.save({});
+  async initConfig() {
+    const count = await this.configRepository.count();
+    if (count > 0) {
+      return;
     }
+    await this.configRepository.save({});
+  }
 
-    getConfig() {
-        return this.configRepository.findOne({where: {id: 1}});
+  getConfig() {
+    return this.configRepository.findOne({ where: { id: 1 } });
+  }
+
+  async advanceComputeMapDate(
+    expectedCurrent: string | null,
+    expectedGeneration: string,
+    completedThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<boolean> {
+    const query = this.configRepository
+      .createQueryBuilder()
+      .update()
+      .set({
+        computeMapDate: completedThrough,
+        computeMapGeneration: () => '"computeMapGeneration" + 1',
+        computeMapUpdatedAt: () => 'now()',
+      })
+      .where('id = 1')
+      .andWhere('"computeMapDate" IS NOT DISTINCT FROM :expectedCurrent', {
+        expectedCurrent,
+      })
+      .andWhere('"computeMapGeneration" = :expectedGeneration', {
+        expectedGeneration,
+      });
+    if (expectedSourceRevision !== undefined) {
+      query.andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM "zone_publication_source_state" source_state
+          WHERE source_state."id" = 1
+            AND source_state."revision" = :expectedSourceRevision
+          FOR SHARE
+        )`,
+        { expectedSourceRevision },
+      );
     }
+    const result = await query.execute();
+    return result.affected === 1;
+  }
 
-    async setConfig(computeMapDate?: string, computeStatsDate?: string, computeZoneAlerteComputedDate?: Date, force?: boolean) {
+  async advanceComputeStatsDate(
+    expectedCurrent: string | null,
+    expectedGeneration: string,
+    completedThrough: string,
+    expectedSourceRevision?: string,
+  ): Promise<boolean> {
+    const query = this.configRepository
+      .createQueryBuilder()
+      .update()
+      .set({
+        computeStatsDate: completedThrough,
+        computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+        computeStatsUpdatedAt: () => 'now()',
+      })
+      .where('id = 1')
+      .andWhere('"computeStatsDate" IS NOT DISTINCT FROM :expectedCurrent', {
+        expectedCurrent,
+      })
+      .andWhere('"computeStatsGeneration" = :expectedGeneration', {
+        expectedGeneration,
+      });
+    if (expectedSourceRevision !== undefined) {
+      query.andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM "zone_publication_source_state" source_state
+          WHERE source_state."id" = 1
+            AND source_state."revision" = :expectedSourceRevision
+          FOR SHARE
+        )`,
+        { expectedSourceRevision },
+      );
+    }
+    const result = await query.execute();
+    return result.affected === 1;
+  }
+
+  async setConfig(
+    computeMapDate?: string,
+    computeStatsDate?: string,
+    computeZoneAlerteComputedDate?: Date,
+    force?: boolean,
+  ) {
+    if (computeMapDate || computeStatsDate) {
+      // Cursor generations protect daily CAS updates. This separate epoch only
+      // changes when the historic input range is invalidated.
+      const invalidation = {
+        ...(computeMapDate
+          ? {
+              computeMapDate: force
+                ? computeMapDate
+                : () =>
+                    'LEAST(COALESCE("computeMapDate", CAST(:computeMapDate AS date)), CAST(:computeMapDate AS date))',
+              computeMapGeneration: () => '"computeMapGeneration" + 1',
+            }
+          : {}),
+        ...(computeStatsDate
+          ? {
+              computeStatsDate: force
+                ? computeStatsDate
+                : () =>
+                    'LEAST(COALESCE("computeStatsDate", CAST(:computeStatsDate AS date)), CAST(:computeStatsDate AS date))',
+              computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+            }
+          : {}),
+        historicComputeEpoch: () => '"historicComputeEpoch" + 1',
+      };
+      const qb = this.configRepository
+        .createQueryBuilder()
+        .update()
+        .set(invalidation)
+        .where('id = 1');
+      if (!force) {
         if (computeMapDate) {
-            const qb = this.configRepository.createQueryBuilder()
-                .update()
-                .set({computeMapDate})
-                .where('id = 1');
-            if (!force) {
-                qb.andWhere(new Brackets(qb => {
-                    qb.where("computeMapDate > :computeMapDate", {computeMapDate})
-                        .orWhere("computeMapDate IS NULL");
-                }));
-            }
-            await qb.execute();
+          qb.setParameter('computeMapDate', computeMapDate);
         }
-
         if (computeStatsDate) {
-            const qb = this.configRepository.createQueryBuilder()
-                .update()
-                .set({computeStatsDate})
-                .where('id = 1');
-            if (!force) {
-                qb.andWhere(new Brackets(qb => {
-                    qb.where("computeStatsDate > :computeStatsDate", {computeStatsDate})
-                        .orWhere("computeStatsDate IS NULL");
-                }));
-            }
-            await qb.execute();
+          qb.setParameter('computeStatsDate', computeStatsDate);
         }
-
-        if (computeZoneAlerteComputedDate) {
-            const qb = this.configRepository.createQueryBuilder()
-                .update()
-                .set({computeZoneAlerteComputedDate})
-                .where('id = 1');
-            if (!force) {
-                qb.andWhere(new Brackets(qb => {
-                    qb.where("computeZoneAlerteComputedDate < :computeZoneAlerteComputedDate", {computeZoneAlerteComputedDate})
-                        .orWhere("computeZoneAlerteComputedDate IS NULL");
-                }));
-            }
-            await qb.execute();
-        }
+      }
+      await qb.execute();
     }
 
-    async resetConfig() {
-        return this.configRepository.update({id: 1}, {
-            computeMapDate: null,
-            computeStatsDate: null,
-        });
+    if (computeZoneAlerteComputedDate) {
+      const qb = this.configRepository
+        .createQueryBuilder()
+        .update()
+        .set({ computeZoneAlerteComputedDate })
+        .where('id = 1');
+      if (!force) {
+        qb.andWhere(
+          new Brackets((qb) => {
+            qb.where(
+              'computeZoneAlerteComputedDate < :computeZoneAlerteComputedDate',
+              { computeZoneAlerteComputedDate },
+            ).orWhere('computeZoneAlerteComputedDate IS NULL');
+          }),
+        );
+      }
+      await qb.execute();
     }
+  }
+
+  async resetConfig() {
+    return this.configRepository
+      .createQueryBuilder()
+      .update()
+      .set({
+        computeMapDate: null,
+        computeStatsDate: null,
+        computeMapGeneration: () => '"computeMapGeneration" + 1',
+        computeStatsGeneration: () => '"computeStatsGeneration" + 1',
+        historicComputeEpoch: () => '"historicComputeEpoch" + 1',
+      })
+      .where('id = 1')
+      .execute();
+  }
 }

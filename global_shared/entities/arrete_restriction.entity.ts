@@ -35,6 +35,15 @@ export class ArreteRestriction extends BaseEntity {
   @Column({ type: 'date', nullable: true })
   dateFin: string;
 
+  @Column({ type: 'date', nullable: true, select: false })
+  dateFinSaisie: string;
+
+  @Column({ default: false, select: false })
+  dateFinCalculee: boolean;
+
+  @Column({ default: true, select: false })
+  dateFinSaisieConnue: boolean;
+
   @OneToOne(() => Fichier, (fichier) => fichier.arreteRestriction)
   @JoinColumn()
   fichier: Fichier;

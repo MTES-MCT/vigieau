@@ -5,12 +5,10 @@ import { AbonnementMail } from '@shared/entities/abonnement_mail.entity';
 
 @Injectable()
 export class AbonnementMailService {
-
   constructor(
     @InjectRepository(AbonnementMail)
     private readonly abonnementMailRepository: Repository<AbonnementMail>,
-  ) {
-  }
+  ) {}
 
   getCountByDepartement(depCode: string) {
     return this.abonnementMailRepository.count({

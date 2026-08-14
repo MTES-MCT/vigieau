@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24
+  NPM_VERSION: 11.17.0
+
+jobs:
+  security:
+    name: npm audit (${{ matrix.root }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        root:
+          - .
+          - apps/backend
+          - apps/backend-admin
+          - apps/frontend
+          - apps/frontend-admin
+    defaults:
+      run:
+        working-directory: ${{ matrix.root }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.root }}/package-lock.json
+      - run: npm install --global npm@${NPM_VERSION}
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=low
+      - run: npm audit --audit-level=low
+
+  tests:
+    name: Tests and changed-file lint
+    runs-on: ubuntu-latest
+    env:
+      LINT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/backend/package-lock.json
+            apps/backend-admin/package-lock.json
+            apps/frontend/package-lock.json
+            apps/frontend-admin/package-lock.json
+      - run: npm install --global npm@${NPM_VERSION}
+      - run: npm ci
+      - run: npm ci --prefix apps/backend
+      - run: npm ci --prefix apps/backend-admin
+      - run: npm ci --prefix apps/frontend
+      - run: npm ci --prefix apps/frontend-admin
+      - run: for script in scripts/*.mjs; do node --check "$script"; done
+      - run: node --test --test-isolation=none scripts/*.test.mjs
+      - run: npm run lint:changed
+      - run: npm test
+      - run: npm --prefix apps/frontend run test:unit
+
+  build:
+    name: Build (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - apps/backend
+          - apps/backend-admin
+          - apps/frontend
+          - apps/frontend-admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - run: npm install --global npm@${NPM_VERSION}
+      - run: npm ci --prefix ${{ matrix.app }}
+      - run: npm --prefix ${{ matrix.app }} run build
+      - if: matrix.app == 'apps/frontend'
+        run: node scripts/verify-pwa-build.mjs
+
+  migrations:
+    name: PostgreSQL/PostGIS migrations (fresh and upgrade)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: vigieau_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vigieau_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/backend-admin/package-lock.json
+      - run: npm install --global npm@${NPM_VERSION}
+      - run: npm ci --prefix apps/backend-admin
+      - name: Verify concurrent SANDRE reference guard
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/zone_alerte/sandre-disabled-zone-reference-guard.migration.spec.ts
+        env:
+          SANDRE_GUARD_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - run: npm --prefix apps/backend-admin run build
+      - name: Verify a fresh database
+        run: node scripts/verify-admin-migrations.mjs
+        env:
+          MIGRATION_VERIFY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify statistic snapshot finalization against PostgreSQL
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/arrete_restriction/current-zone-recompute-queue.postgres.spec.ts
+          src/statistic_commune/statistic_commune.postgres.spec.ts
+          src/health/zone-publication-health.postgres.spec.ts
+          src/zone_publication/zone_publication.postgres.spec.ts
+        env:
+          STATISTIC_COMMUNE_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Create the upgrade database
+        run: >-
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres
+          --set ON_ERROR_STOP=1
+          --command 'CREATE DATABASE vigieau_upgrade_ci'
+      - name: Verify an upgrade from the base revision
+        run: node scripts/verify-admin-migrations.mjs
+        env:
+          MIGRATION_VERIFY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_upgrade_ci
+          MIGRATION_VERIFY_MODE: upgrade
+          MIGRATION_VERIFY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}

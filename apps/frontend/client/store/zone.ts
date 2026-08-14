@@ -18,7 +18,7 @@ export const useZoneStore = defineStore('zoneStore', () => {
     if (!zones || zones.length < 1) {
       return zones;
     }
-    zones.map(zone => {
+    zones.forEach(zone => {
       zone.usages = zone.usages?.sort((a, b) => a.nom.localeCompare(b.nom));
     })
 

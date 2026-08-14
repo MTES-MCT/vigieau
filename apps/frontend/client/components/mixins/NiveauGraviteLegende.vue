@@ -4,7 +4,7 @@ import niveauxGravite from '../../dto/niveauGravite';
 
 <template>
   <div class="fr-grid-row">
-    <template v-for="legend in niveauxGravite">
+    <template v-for="legend in niveauxGravite" :key="legend.niveauGravite ?? 'none'">
       <DsfrTooltip on-hover
                    :content="legend.description">
         <DsfrBadge small

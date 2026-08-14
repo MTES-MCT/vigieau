@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import * as Brevo from '@getbrevo/brevo';
+import { BrevoClient } from '@getbrevo/brevo';
 import { JwtService } from '@nestjs/jwt';
 import { CommunesService } from '../communes/communes.service';
 import { ConfigService } from '@nestjs/config';
@@ -8,14 +8,21 @@ import { VigieauLogger } from '../logger/vigieau.logger';
 @Injectable()
 export class BrevoService {
   private readonly logger = new VigieauLogger('BrevoService');
-  private readonly apiInstance;
+  private readonly brevoClient?: BrevoClient;
 
-  constructor(private readonly jwtService: JwtService,
-              private readonly configService: ConfigService,
-              private readonly communesService: CommunesService) {
-    this.apiInstance = new Brevo.TransactionalEmailsApi();
-    const apiKey = this.apiInstance.authentications['apiKey'];
-    apiKey.apiKey = this.configService.get<string>('BREVO_API_KEY');
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private readonly communesService: CommunesService,
+  ) {
+    const apiKey = this.configService.get<string>('BREVO_API_KEY');
+
+    if (apiKey) {
+      this.brevoClient = new BrevoClient({
+        apiKey,
+        maxRetries: 0,
+      });
+    }
   }
 
   /**
@@ -45,16 +52,21 @@ export class BrevoService {
     libelleLocalisation: string,
     profil: string,
   ) {
-    const isEmailEnabled = this.configService.get<string>('EMAIL_NOTIFICATIONS_ENABLED') === '1';
+    const isEmailEnabled =
+      this.configService.get<string>('EMAIL_NOTIFICATIONS_ENABLED') === '1';
     if (!isEmailEnabled) {
       return;
     }
 
-    const recipient = this.configService.get<string>('EMAIL_NOTIFICATIONS_DEV_RECIPIENT') || email;
+    const recipient =
+      this.configService.get<string>('EMAIL_NOTIFICATIONS_DEV_RECIPIENT') ||
+      email;
 
     const params = {
       address: libelleLocalisation,
-      city: this.communesService.getCommune(codeCommune).nom,
+      city:
+        this.communesService.getCommune(codeCommune)?.nom ||
+        libelleLocalisation,
       unsubscribeUrl: this.computeUnsubscribeUrl(email),
       niveauGraviteAep: this.getniveauGraviteFr(niveauGraviteAep),
       changementAep,
@@ -119,10 +131,13 @@ export class BrevoService {
    * @returns URL de désinscription avec le token JWT.
    */
   computeUnsubscribeUrl(email: string): string {
-    const token = this.jwtService.sign({ email }, {
-      secret: this.configService.get<string>('JWT_SECRET'),
-      expiresIn: '7d',
-    });
+    const token = this.jwtService.sign(
+      { email },
+      {
+        secret: this.configService.get<string>('JWT_SECRET'),
+        expiresIn: '7d',
+      },
+    );
     return `${this.configService.get<string>('WEBSITE_URL')}/abonnements?token=${token}`;
   }
 
@@ -133,8 +148,8 @@ export class BrevoService {
    * @param to Adresse email du destinataire.
    * @param params Paramètres dynamiques à injecter dans le template.
    */
-  sendMail(templateId, to, params) {
-    if (!this.configService.get<string>('BREVO_API_KEY')) {
+  sendMail(templateId: number, to: string, params: Record<string, unknown>) {
+    if (!this.brevoClient) {
       if (this.configService.get<string>('NODE_ENV') === 'production') {
         throw new Error('BREVO_API_KEY is required');
       } else {
@@ -142,13 +157,12 @@ export class BrevoService {
       }
     }
 
-    const sendSmtpEmail = new Brevo.SendSmtpEmail();
-    sendSmtpEmail.templateId = templateId;
-    sendSmtpEmail.to = [{ email: to }];
-    sendSmtpEmail.params = params;
-
     try {
-      return this.apiInstance.sendTransacEmail(sendSmtpEmail);
+      return this.brevoClient.transactionalEmails.sendTransacEmail({
+        templateId,
+        to: [{ email: to }],
+        params,
+      });
     } catch (error) {
       this.logger.error(`Error sending email`, error.message);
     }

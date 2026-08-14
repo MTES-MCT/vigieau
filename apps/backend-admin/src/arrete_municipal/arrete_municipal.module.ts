@@ -12,7 +12,7 @@ import { SharedModule } from '../shared/shared.module';
     TypeOrmModule.forFeature([ArreteMunicipal]),
     FichierModule,
     CommuneModule,
-    SharedModule
+    SharedModule,
   ],
   controllers: [ArreteMunicipalController],
   providers: [ArreteMunicipalService],

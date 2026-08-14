@@ -1,4 +1,3 @@
-import type { Commune } from '~/dto/commune.dto';
 import type { Departement } from '~/dto/departement.dto';
 import type { Thematique } from '~/dto/thematique.dto';
 import type { Usage } from '~/dto/usage.dto';
@@ -29,10 +28,6 @@ export default defineNuxtPlugin((nuxtApp) => {
       }
       if (fetchZoneAlerteMaxUpdatedAt.data.value) {
         useRefDataStore().setZoneAlerteMaxUpdatedAt(<string>fetchZoneAlerteMaxUpdatedAt.data.value);
-      }
-      const fetchCommune = await api.commune.list();
-      if (fetchCommune.data.value) {
-        useRefDataStore().setCommunes(<Commune[]>fetchCommune.data.value);
       }
     }
   };
