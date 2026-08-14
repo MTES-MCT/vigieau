@@ -12,6 +12,8 @@ Node n’est pas dockerisé : les applications Node/Nuxt/Nest se lancent en loca
 
 ## Branche de travail
 
+`master` est la branche canonique pour les contributions, la CI et les déploiements.
+
 ```bash
 git switch master
 ```
