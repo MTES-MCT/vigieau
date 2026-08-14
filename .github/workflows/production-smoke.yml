@@ -38,6 +38,8 @@ jobs:
     env:
       VIGIEAU_MIN_ZONE_COUNT: 1
       VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: legacy
+      VIGIEAU_ZONE_PUBLICATION_DEADLINE: "06:00"
+      VIGIEAU_LEGACY_ARTIFACT_MAX_SKEW_MINUTES: "30"
     steps:
       - uses: actions/checkout@v4
         with:
