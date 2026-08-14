@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 20
     env:
       VIGIEAU_MIN_ZONE_COUNT: 1
+      VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: legacy
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,6 +49,8 @@ jobs:
         run: node scripts/smoke-public.mjs
       - name: Public map rendering and real PMTiles ranges
         run: node scripts/smoke-browser.mjs
+      - name: Verify admin smoke zone publication policy
+        run: node --test scripts/smoke-admin.test.mjs
       - name: Admin API, clock and external publications
         run: node scripts/smoke-admin.mjs
       - name: data.gouv.fr resources
