@@ -12,6 +12,17 @@ import {
 import { normalizeSandreZoneGeometries } from './sandre-zone-geometry';
 import { fingerprint } from './sandre-zone-reconciliation';
 import {
+  assertSandreApprovedMaterializedTargets,
+  auditSandreApprovedSyncGeometry,
+  SandreApprovedSyncMapping,
+} from './sandre-zone-sync-approvals';
+import {
+  applySandreApprovedPartitionReferences,
+  loadSandreApprovedReferenceEvidence,
+  lockSandreApprovedSyncReferences,
+  markSandreApprovedHistoricalRecomputeDebt,
+} from './sandre-zone-sync-approved-references';
+import {
   applySandreReconciliationActions,
   auditSandreReconciliationPlan,
   loadSandreReconciliationState,
@@ -48,7 +59,10 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       CREATE TABLE config (
         id integer PRIMARY KEY,
         "computeMapDate" date,
-        "computeStatsDate" date
+        "computeMapGeneration" bigint NOT NULL DEFAULT 0,
+        "computeStatsDate" date,
+        "computeStatsGeneration" bigint NOT NULL DEFAULT 0,
+        "historicComputeEpoch" bigint NOT NULL DEFAULT 0
       );
       CREATE TABLE sandre_zone_sync_state (
         id serial PRIMARY KEY,
@@ -98,7 +112,7 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         "dateDebut" date
       );
       CREATE TABLE restriction (
-        id integer PRIMARY KEY,
+        id serial PRIMARY KEY,
         "arreteRestrictionId" integer NOT NULL
           REFERENCES arrete_restriction(id),
         "zoneAlerteId" integer NOT NULL REFERENCES zone_alerte(id),
@@ -108,13 +122,22 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         UNIQUE ("arreteRestrictionId", "zoneAlerteId")
       );
       CREATE TABLE usage (
-        id integer PRIMARY KEY,
+        id serial PRIMARY KEY,
         nom text NOT NULL,
         "thematiqueId" integer NOT NULL,
         "restrictionId" integer REFERENCES restriction(id) ON DELETE CASCADE,
         "arreteCadreId" integer,
         "isTemplate" boolean NOT NULL DEFAULT false,
         "concerneParticulier" boolean,
+        "concerneEntreprise" boolean,
+        "concerneCollectivite" boolean,
+        "concerneExploitation" boolean,
+        "concerneEso" boolean NOT NULL DEFAULT true,
+        "concerneEsu" boolean NOT NULL DEFAULT true,
+        "concerneAep" boolean NOT NULL DEFAULT true,
+        "descriptionVigilance" text,
+        "descriptionAlerte" text,
+        "descriptionAlerteRenforcee" text,
         "descriptionCrise" text,
         UNIQUE (nom, "thematiqueId", "restrictionId")
       );
@@ -123,6 +146,14 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
           ON DELETE CASCADE,
         "communeId" integer NOT NULL,
         PRIMARY KEY ("restrictionId", "communeId")
+      );
+      CREATE TABLE zone_alerte_computed (
+        id integer PRIMARY KEY,
+        "restrictionId" integer REFERENCES restriction(id) ON DELETE CASCADE
+      );
+      CREATE TABLE zone_alerte_computed_historic (
+        id integer PRIMARY KEY,
+        "restrictionId" integer REFERENCES restriction(id) ON DELETE CASCADE
       );
       CREATE TABLE arrete_cadre_zone_alerte_communes (
         id integer PRIMARY KEY,
@@ -219,6 +250,13 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       expect(result.audits.get(code)!.relativeAreaDelta).toBeLessThanOrEqual(
         1e-9,
       );
+      expect(
+        result.audits.get(code)!.absoluteGeodesicAreaDeltaSquareMeters,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        Number.isFinite(result.audits.get(code)!.rawGeodesicAreaSquareMeters),
+      ).toBe(true);
+      expect(result.audits.get(code)!.normalizationApprovalId).toBeNull();
     }
   });
 
@@ -539,6 +577,551 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     } finally {
       await runner.rollbackTransaction();
     }
+  }, 30_000);
+
+  it('canonicalizes an exact duplicate with a zero-conflict policy', async () => {
+    await runner.query(`
+      INSERT INTO zone_alerte (
+        id, "departementId", type, code, "idSandre", disabled, geom,
+        "sandreProvenance"
+      ) VALUES
+        (9708, 49, 'SOU', '52_49_15', 409, false,
+          ST_GeomFromText('POLYGON((4 0,6 0,6 2,4 2,4 0))', 4326),
+          'legacy_unverified'),
+        (16677, 49, 'SOU', '52_49_15', 409, false,
+          ST_GeomFromText('POLYGON((4 0,6 0,6 2,4 2,4 0))', 4326),
+          'legacy_unverified');
+      INSERT INTO arrete_cadre (id, statut) VALUES (20, 'publie');
+      INSERT INTO arrete_cadre_zone_alerte (
+        "arreteCadreId", "zoneAlerteId"
+      ) VALUES (20, 9708);
+      INSERT INTO arrete_restriction (id, statut, "dateDebut")
+      VALUES (20, 'a_valider', DATE '2026-06-22');
+      INSERT INTO restriction (
+        id, "arreteRestrictionId", "zoneAlerteId", "arreteCadreId",
+        "niveauGravite"
+      ) VALUES (200, 20, 9708, 20, 'alerte');
+    `);
+    const plan = parseSandreReconciliationPlan({
+      schemaVersion: 1,
+      operationId: 'postgres-zero-conflict-duplicate',
+      description: 'PostgreSQL zero-conflict duplicate fixture',
+      actions: [
+        {
+          strategy: 'canonicalize_duplicate',
+          departmentCode: '49',
+          zoneType: 'SOU',
+          sourceZoneId: 16677,
+          targetZoneId: 9708,
+          expectedSourceCode: '52_49_15',
+          expectedSandreGid: 409,
+          officialCode: '301',
+          restrictionConflictPolicy: {
+            mode: 'prefer_source',
+            expectedCount: 0,
+            expectedFingerprint: fingerprint([]),
+            allowedDifferingFields: ['niveauGravite'],
+            requiredParentStatus: 'abroge',
+            requireSourceSeverityStrictlyHigher: true,
+          },
+        },
+      ],
+    });
+    const official = [officialAubanceFeature()];
+
+    const audits = await auditSandreReconciliationPlan(runner, plan, official);
+    expect(audits).toEqual([
+      expect.objectContaining({
+        status: 'ready',
+        restrictionConflicts: {
+          policy: 'prefer_source',
+          count: 0,
+          fingerprint: fingerprint([]),
+        },
+        geometry: expect.objectContaining({
+          officialCode: '301',
+          officialGid: 409,
+          targetEqualsOfficial: true,
+          sourceCoverage: 1,
+          targetCoverage: 1,
+          iou: 1,
+        }),
+      }),
+    ]);
+
+    await runner.startTransaction('SERIALIZABLE');
+    try {
+      await lockSandreReconciliationPlan(runner, plan);
+      await applySandreReconciliationActions(runner, audits);
+      await runner.commitTransaction();
+    } catch (error) {
+      await runner.rollbackTransaction();
+      throw error;
+    }
+
+    const [state] = await runner.query(`
+      SELECT
+        source.disabled AS "sourceDisabled",
+        source."idSandre" AS "sourceGid",
+        source."sandreProvenance" AS "sourceProvenance",
+        (SELECT count(*)::integer FROM arrete_cadre_zone_alerte
+          WHERE "zoneAlerteId" = 16677) AS "sourceFrameworks",
+        (SELECT count(*)::integer FROM restriction
+          WHERE "zoneAlerteId" = 16677) AS "sourceRestrictions",
+        (SELECT count(*)::integer FROM arrete_cadre_zone_alerte
+          WHERE "zoneAlerteId" = 9708) AS "targetFrameworks",
+        (SELECT count(*)::integer FROM restriction
+          WHERE "zoneAlerteId" = 9708) AS "targetRestrictions"
+      FROM zone_alerte source
+      WHERE source.id = 16677
+    `);
+    expect(state).toEqual({
+      sourceDisabled: true,
+      sourceGid: null,
+      sourceProvenance: 'legacy_unverified',
+      sourceFrameworks: 0,
+      sourceRestrictions: 0,
+      targetFrameworks: 1,
+      targetRestrictions: 1,
+    });
+    await expect(
+      auditSandreReconciliationPlan(runner, plan, official),
+    ).resolves.toEqual([
+      expect.objectContaining({ status: 'already_applied' }),
+    ]);
+  }, 30_000);
+
+  it('preserves restriction history while applying and replaying an approved sync split', async () => {
+    await runner.query(`
+      INSERT INTO departement (id, code) VALUES (86, '86');
+      INSERT INTO config (
+        id, "computeMapDate", "computeMapGeneration", "computeStatsDate",
+        "computeStatsGeneration", "historicComputeEpoch"
+      ) VALUES (1, DATE '2026-08-15', 7, DATE '2026-08-15', 8, 9)
+      ON CONFLICT (id) DO UPDATE SET
+        "computeMapDate" = EXCLUDED."computeMapDate",
+        "computeMapGeneration" = EXCLUDED."computeMapGeneration",
+        "computeStatsDate" = EXCLUDED."computeStatsDate",
+        "computeStatsGeneration" = EXCLUDED."computeStatsGeneration",
+        "historicComputeEpoch" = EXCLUDED."historicComputeEpoch";
+      INSERT INTO zone_alerte (
+        id, "departementId", type, code, "idSandre", "codeSandre",
+        disabled, geom, "sandreProvenance"
+      ) VALUES
+        (20582, 86, 'SUP', 'SOURCE', 464, '355', true,
+          ST_GeomFromText('POLYGON((0 8,2 8,2 10,0 10,0 8))', 4326),
+          'official'),
+        (20583, 86, 'SUP', 'TARGET-A', 3947, '3947', false,
+          ST_GeomFromText('POLYGON((0 8,1 8,1 10,0 10,0 8))', 4326),
+          'official'),
+        (20584, 86, 'SUP', 'TARGET-B', 3946, '3948', false,
+          ST_GeomFromText('POLYGON((1 8,2 8,2 10,1 10,1 8))', 4326),
+          'official');
+      INSERT INTO arrete_cadre (id, statut) VALUES
+        (130, 'publie'),
+        (131, 'abroge');
+      INSERT INTO arrete_cadre_zone_alerte (
+        "arreteCadreId", "zoneAlerteId"
+      ) VALUES (130, 20582), (131, 20582);
+      INSERT INTO arrete_restriction (id, statut, "dateDebut") VALUES
+        (130, 'publie', DATE '2026-05-01'),
+        (131, 'a_venir', DATE '2026-07-01'),
+        (132, 'abroge', DATE '2025-01-01');
+      INSERT INTO restriction (
+        id, "arreteRestrictionId", "zoneAlerteId", "arreteCadreId",
+        "nomGroupementAep", "niveauGravite"
+      ) VALUES
+        (1300, 130, 20582, 130, NULL, 'alerte_renforcee'),
+        (1301, 131, 20582, 130, 'GROUPEMENT', 'crise'),
+        (1302, 132, 20582, 131, NULL, 'alerte');
+      INSERT INTO usage (
+        id, nom, "thematiqueId", "restrictionId", "arreteCadreId",
+        "isTemplate", "concerneParticulier", "concerneEntreprise",
+        "concerneCollectivite", "concerneExploitation", "concerneEso",
+        "concerneEsu", "concerneAep", "descriptionAlerte",
+        "descriptionCrise"
+      ) VALUES
+        (1300, 'Usage split A', 1, 1300, NULL, false, true, false, false,
+          false, true, true, false, 'Alerte A', 'Crise A'),
+        (1301, 'Usage split B', 2, 1301, NULL, false, false, true, true,
+          false, false, true, true, 'Alerte B', 'Crise B'),
+        (1302, 'Usage historique', 3, 1302, NULL, false, false, false,
+          false, false, true, true, true, 'Historique', 'Historique');
+      INSERT INTO restriction_commune ("restrictionId", "communeId") VALUES
+        (1300, 86001), (1300, 86002), (1301, 86003), (1302, 86004);
+      INSERT INTO zone_alerte_computed (id, "restrictionId") VALUES
+        (1300, 1300), (1301, 1301);
+      INSERT INTO zone_alerte_computed_historic (id, "restrictionId") VALUES
+        (2300, 1300), (2301, 1301), (2302, 1302);
+      SELECT setval(
+        pg_get_serial_sequence('restriction', 'id'),
+        (SELECT max(id) FROM restriction)
+      );
+      SELECT setval(
+        pg_get_serial_sequence('usage', 'id'),
+        (SELECT max(id) FROM usage)
+      );
+    `);
+    const expected = await loadSandreApprovedReferenceEvidence(
+      runner,
+      20582,
+      [20583, 20584],
+    );
+    expect(
+      expected.restrictions.map((restriction) => restriction.restrictionId),
+    ).toEqual([1300, 1301]);
+
+    await runner.startTransaction('SERIALIZABLE');
+    try {
+      await lockSandreApprovedSyncReferences(runner, [20582], [20583, 20584]);
+      await expect(
+        applySandreApprovedPartitionReferences(
+          runner,
+          expected,
+          [
+            { codeSandre: '3948', zoneAlerteId: 20584 },
+            { codeSandre: '3947', zoneAlerteId: 20583 },
+          ],
+          '2026-06-30',
+        ),
+      ).resolves.toEqual({ applied: true });
+      await runner.commitTransaction();
+    } catch (error) {
+      await runner.rollbackTransaction();
+      throw error;
+    }
+
+    const restrictions = await runner.query(`
+      SELECT id, "zoneAlerteId", "arreteRestrictionId"
+      FROM restriction
+      WHERE "arreteRestrictionId" IN (130, 131, 132)
+      ORDER BY "arreteRestrictionId", "zoneAlerteId"
+    `);
+    expect(restrictions).toEqual([
+      { id: 1300, zoneAlerteId: 20583, arreteRestrictionId: 130 },
+      {
+        id: expect.any(Number),
+        zoneAlerteId: 20584,
+        arreteRestrictionId: 130,
+      },
+      { id: 1301, zoneAlerteId: 20583, arreteRestrictionId: 131 },
+      {
+        id: expect.any(Number),
+        zoneAlerteId: 20584,
+        arreteRestrictionId: 131,
+      },
+      { id: 1302, zoneAlerteId: 20582, arreteRestrictionId: 132 },
+    ]);
+    const computed = await runner.query(`
+      SELECT 'current' AS kind, id, "restrictionId"
+      FROM zone_alerte_computed
+      UNION ALL
+      SELECT 'historic' AS kind, id, "restrictionId"
+      FROM zone_alerte_computed_historic
+      ORDER BY kind, id
+    `);
+    expect(computed).toEqual(
+      expect.arrayContaining([
+        { kind: 'current', id: 1300, restrictionId: 1300 },
+        { kind: 'current', id: 1301, restrictionId: 1301 },
+        { kind: 'historic', id: 2300, restrictionId: 1300 },
+        { kind: 'historic', id: 2301, restrictionId: 1301 },
+        { kind: 'historic', id: 2302, restrictionId: 1302 },
+      ]),
+    );
+    const cloneRestrictionIds = restrictions
+      .filter((row) => row.zoneAlerteId === 20584)
+      .map((row) => Number(row.id));
+    expect(cloneRestrictionIds).toHaveLength(2);
+    expect(
+      computed.filter((row) => cloneRestrictionIds.includes(row.restrictionId)),
+    ).toEqual([]);
+    await runner.query(
+      `
+        INSERT INTO zone_alerte_computed (id, "restrictionId") VALUES
+          (91300, $1), (91301, $2)
+      `,
+      cloneRestrictionIds,
+    );
+    await runner.query(
+      `
+        INSERT INTO zone_alerte_computed_historic (id, "restrictionId") VALUES
+          (92300, $1), (92301, $2)
+      `,
+      cloneRestrictionIds,
+    );
+    const initialLineage = await loadSandreApprovedReferenceEvidence(
+      runner,
+      20582,
+      [20583, 20584],
+      expected,
+    );
+    expect(initialLineage.lifecycle).toBe('post_apply');
+    const [cursor] = await runner.query(`
+      SELECT
+        "computeMapDate"::text AS "computeMapDate",
+        "computeMapGeneration"::integer AS "computeMapGeneration",
+        "computeStatsDate"::text AS "computeStatsDate",
+        "computeStatsGeneration"::integer AS "computeStatsGeneration",
+        "historicComputeEpoch"::integer AS "historicComputeEpoch"
+      FROM config WHERE id = 1
+    `);
+    expect(cursor).toEqual({
+      computeMapDate: '2026-06-30',
+      computeMapGeneration: 8,
+      computeStatsDate: '2026-06-30',
+      computeStatsGeneration: 9,
+      historicComputeEpoch: 10,
+    });
+
+    await runner.startTransaction('SERIALIZABLE');
+    try {
+      await lockSandreApprovedSyncReferences(runner, [20582], [20583, 20584]);
+      await expect(
+        applySandreApprovedPartitionReferences(
+          runner,
+          expected,
+          [
+            { codeSandre: '3947', zoneAlerteId: 20583 },
+            { codeSandre: '3948', zoneAlerteId: 20584 },
+          ],
+          '2026-06-30',
+        ),
+      ).resolves.toEqual({ applied: false });
+      await markSandreApprovedHistoricalRecomputeDebt(runner, '2026-08-01');
+      await runner.commitTransaction();
+    } catch (error) {
+      await runner.rollbackTransaction();
+      throw error;
+    }
+    const [replayedCursor] = await runner.query(`
+      SELECT
+        "computeMapGeneration"::integer AS map,
+        "computeStatsGeneration"::integer AS stats,
+        "historicComputeEpoch"::integer AS epoch
+      FROM config WHERE id = 1
+    `);
+    expect(replayedCursor).toEqual({ map: 8, stats: 9, epoch: 10 });
+
+    await runner.query(`
+      INSERT INTO arrete_cadre (id, statut) VALUES (86130, 'publie');
+      INSERT INTO arrete_cadre_zone_alerte (
+        "arreteCadreId", "zoneAlerteId"
+      ) VALUES (86130, 20584);
+      INSERT INTO arrete_restriction (id, statut, "dateDebut")
+      VALUES (86130, 'publie', DATE '2026-08-10');
+    `);
+    const [futureRestriction] = await runner.query(`
+      INSERT INTO restriction (
+        "arreteRestrictionId", "zoneAlerteId", "arreteCadreId",
+        "nomGroupementAep", "niveauGravite"
+      ) VALUES (86130, 20584, 86130, NULL, 'alerte')
+      RETURNING id
+    `);
+    const auditedFutureState = await loadSandreApprovedReferenceEvidence(
+      runner,
+      20582,
+      [20583, 20584],
+      initialLineage,
+    );
+    expect(auditedFutureState.lifecycle).toBe('post_apply');
+    expect(auditedFutureState.fingerprint).not.toBe(initialLineage.fingerprint);
+    await expect(
+      applySandreApprovedPartitionReferences(
+        runner,
+        auditedFutureState,
+        [
+          { codeSandre: '3947', zoneAlerteId: 20583 },
+          { codeSandre: '3948', zoneAlerteId: 20584 },
+        ],
+        '2026-06-30',
+      ),
+    ).resolves.toEqual({ applied: false });
+
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'crise' WHERE id = $1`,
+      [futureRestriction.id],
+    );
+    await expect(
+      applySandreApprovedPartitionReferences(
+        runner,
+        auditedFutureState,
+        [
+          { codeSandre: '3947', zoneAlerteId: 20583 },
+          { codeSandre: '3948', zoneAlerteId: 20584 },
+        ],
+        '2026-06-30',
+      ),
+    ).rejects.toThrow('restriction lineage is incomplete');
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'alerte' WHERE id = $1`,
+      [futureRestriction.id],
+    );
+
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'crise' WHERE id = $1`,
+      [cloneRestrictionIds[0]],
+    );
+    await expect(
+      loadSandreApprovedReferenceEvidence(
+        runner,
+        20582,
+        [20583, 20584],
+        initialLineage,
+      ),
+    ).rejects.toThrow('restriction lineage is incomplete');
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'alerte_renforcee' WHERE id = $1`,
+      [cloneRestrictionIds[0]],
+    );
+
+    await runner.query(`
+      UPDATE arrete_cadre SET statut = 'abroge' WHERE id = 130;
+      UPDATE arrete_restriction SET statut = 'abroge' WHERE id = 130;
+    `);
+    await expect(
+      loadSandreApprovedReferenceEvidence(
+        runner,
+        20582,
+        [20583, 20584],
+        initialLineage,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ lifecycle: 'post_apply' }));
+
+    await runner.query(`
+      INSERT INTO arrete_cadre_zone_alerte_communes (
+        id, "arreteCadreId", "zoneAlerteId"
+      ) VALUES (86130, 86130, 20582)
+    `);
+    await expect(
+      loadSandreApprovedReferenceEvidence(
+        runner,
+        20582,
+        [20583, 20584],
+        initialLineage,
+      ),
+    ).rejects.toThrow('source regained operational references');
+    await runner.query(
+      `DELETE FROM arrete_cadre_zone_alerte_communes WHERE id = 86130`,
+    );
+  }, 30_000);
+
+  it('pins approved split geometry and its materialized target rows', async () => {
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_Multi(geom) WHERE id IN (20583, 20584)`,
+    );
+    const targetFeatures = [
+      {
+        codeSandre: '3947',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [0, 8],
+              [1, 8],
+              [1, 10],
+              [0, 10],
+              [0, 8],
+            ],
+          ],
+        },
+      },
+      {
+        codeSandre: '3948',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [1, 8],
+              [2, 8],
+              [2, 10],
+              [1, 10],
+              [1, 8],
+            ],
+          ],
+        },
+      },
+    ] as any[];
+    const mapping: SandreApprovedSyncMapping = {
+      sourceCode: '355',
+      sourceZoneId: 20582,
+      targetCodes: ['3947', '3948'],
+      requireTopologicalEquality: false,
+      effectiveDate: '2026-06-30',
+      expectedGeometry: null,
+      minimumGeometry: {
+        sourceCoverage: 0.9999,
+        targetCoverage: 0.9999,
+        iou: 0.9999,
+      },
+    };
+    const observed = await auditSandreApprovedSyncGeometry(
+      runner,
+      mapping,
+      targetFeatures,
+    );
+    expect(observed).toEqual(
+      expect.objectContaining({
+        sourceCoverage: 1,
+        targetCoverage: 1,
+        iou: 1,
+        pairwiseOverlapRatio: 0,
+        topologicallyEqual: true,
+      }),
+    );
+    const pinned: SandreApprovedSyncMapping = {
+      ...mapping,
+      expectedGeometry: {
+        sourceGeometryHash: observed.sourceGeometryHash,
+        targetGeometryHashes: observed.targetGeometryHashes,
+        unionGeometryHash: observed.unionGeometryHash,
+        sourceCoverage: observed.sourceCoverage,
+        targetCoverage: observed.targetCoverage,
+        iou: observed.iou,
+      },
+    };
+    await expect(
+      auditSandreApprovedSyncGeometry(runner, pinned, targetFeatures),
+    ).resolves.toEqual(observed);
+    await expect(
+      assertSandreApprovedMaterializedTargets(runner, 86, [
+        { feature: targetFeatures[0], zoneAlerteId: 20583 },
+        { feature: targetFeatures[1], zoneAlerteId: 20584 },
+      ]),
+    ).resolves.toBeUndefined();
+
+    const [stored] = await runner.query(`
+      SELECT
+        ST_AsEWKB(source.geom) AS source,
+        ST_AsEWKB(target.geom) AS target
+      FROM zone_alerte source
+      CROSS JOIN zone_alerte target
+      WHERE source.id = 20582 AND target.id = 20583
+    `);
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_Translate(geom, 0.000001, 0) WHERE id = 20582`,
+    );
+    await expect(
+      auditSandreApprovedSyncGeometry(runner, pinned, targetFeatures),
+    ).rejects.toThrow('Approved Sandre geometry changed');
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_GeomFromEWKB($1) WHERE id = 20582`,
+      [stored.source],
+    );
+
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_Translate(geom, 0.000001, 0) WHERE id = 20583`,
+    );
+    await expect(
+      assertSandreApprovedMaterializedTargets(runner, 86, [
+        { feature: targetFeatures[0], zoneAlerteId: 20583 },
+        { feature: targetFeatures[1], zoneAlerteId: 20584 },
+      ]),
+    ).rejects.toThrow('materialized target geometry changed');
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_GeomFromEWKB($1) WHERE id = 20583`,
+      [stored.target],
+    );
   }, 30_000);
 
   it('persists the historical cursors and resumes an existing recompute debt', async () => {
@@ -909,6 +1492,30 @@ function officialErdreFeature(): any {
           [2, 2],
           [0, 2],
           [0, 0],
+        ],
+      ],
+    },
+  };
+}
+
+function officialAubanceFeature(): any {
+  return {
+    codeSandre: '301',
+    gid: 409,
+    departmentCode: '49',
+    type: 'SOU',
+    status: 'Validé',
+    payloadHash: 'official-301-hash',
+    basinCode: 1,
+    geometry: {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [4, 0],
+          [6, 0],
+          [6, 2],
+          [4, 2],
+          [4, 0],
         ],
       ],
     },

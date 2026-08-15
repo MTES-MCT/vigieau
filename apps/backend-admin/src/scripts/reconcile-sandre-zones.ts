@@ -29,6 +29,7 @@ import {
   reconciliationIdentity,
   ReconciliationResult,
   SANDRE_GENEALOGY_METADATA_URL,
+  SANDRE_GENEALOGY_REQUEST_HEADERS,
   SandreGenealogyRelation,
   transformDatabaseState,
   ZoneReferenceCounts,
@@ -56,7 +57,7 @@ import {
 } from '../zone_alerte/sandre-zone-reconciliation-actions';
 
 export const RECONCILIATION_REPORT_VERSION = 6;
-export const SANDRE_OPERATION_REPORT_VERSION = 3;
+export const SANDRE_OPERATION_REPORT_VERSION = 4;
 const MAX_SOURCE_SIZE = 10 * 1024 * 1024;
 const HISTORICAL_RECOMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -821,7 +822,10 @@ function operationOfficialSourceEvidence(
     .sort((left, right) =>
       left.departmentCode.localeCompare(right.departmentCode),
     );
-  return { snapshots, fingerprint: fingerprint(snapshots) };
+  return {
+    snapshots,
+    fingerprint: fingerprint(snapshots),
+  };
 }
 
 function assertOfficialSourceUnchanged(
@@ -1141,7 +1145,7 @@ function createOperationReport(
   };
 }
 
-async function readOperationReportIfPresent(
+export async function readOperationReportIfPresent(
   reportPath: string | null,
 ): Promise<SandreOperationReport | null> {
   if (!reportPath) {
@@ -1645,29 +1649,29 @@ export async function fetchText(
   enforceSizeLimit = true,
 ): Promise<string> {
   const response = await fetch(url, {
-    headers: {
-      accept: 'application/xml,text/xml,text/csv,text/html;q=0.9',
-      'accept-language': 'fr',
-    },
+    headers: SANDRE_GENEALOGY_REQUEST_HEADERS,
     signal: AbortSignal.timeout(60_000),
   });
   if (!response.ok) {
     throw new Error(`Unable to fetch ${url}: HTTP ${response.status}`);
   }
-  const text = await readResponseText(response, enforceSizeLimit);
+  const text = await readResponseTextWithLimit(
+    response,
+    enforceSizeLimit ? MAX_SOURCE_SIZE : null,
+  );
   if (!text) {
     throw new Error(`Invalid source size for ${url}`);
   }
   return text;
 }
 
-async function readResponseText(
+async function readResponseTextWithLimit(
   response: Response,
-  enforceSizeLimit: boolean,
+  maxBytes: number | null,
 ): Promise<string> {
   if (!response.body) {
     const text = await response.text();
-    if (enforceSizeLimit && Buffer.byteLength(text, 'utf8') > MAX_SOURCE_SIZE) {
+    if (maxBytes !== null && Buffer.byteLength(text, 'utf8') > maxBytes) {
       throw new Error('Source exceeds the configured size limit');
     }
     return text;
@@ -1684,7 +1688,7 @@ async function readResponseText(
         break;
       }
       byteCount += value.byteLength;
-      if (enforceSizeLimit && byteCount > MAX_SOURCE_SIZE) {
+      if (maxBytes !== null && byteCount > maxBytes) {
         await reader.cancel();
         throw new Error('Source exceeds the configured size limit');
       }

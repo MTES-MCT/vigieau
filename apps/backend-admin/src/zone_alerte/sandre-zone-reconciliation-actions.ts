@@ -41,6 +41,7 @@ export interface CanonicalizeDuplicateAction extends SandreReconciliationActionB
   targetZoneId: number;
   expectedSandreGid: number;
   officialCode: string;
+  requiredSourceBusinessReferenceCount?: number;
   restrictionConflictPolicy: {
     mode: 'prefer_source';
     expectedCount: number;
@@ -349,6 +350,12 @@ export async function auditSandreSyncExpectations(
       const normalized = await normalizeSandreZoneGeometries(
         executor,
         features as any,
+        {
+          departmentCode: snapshot.departmentCode,
+          snapshotHash: snapshot.snapshotHash,
+          sourceUpdatedAt: snapshot.sourceUpdatedAt,
+          featureCount: snapshot.featureCount,
+        },
       );
       const featureEvidence = features.map((feature) => {
         const geometry = normalized.audits.get(feature.codeSandre);
@@ -794,6 +801,15 @@ async function auditAction(
 
   let restrictionConflicts: SandreActionAudit['restrictionConflicts'] = null;
   if (action.strategy === 'canonicalize_duplicate') {
+    if (
+      action.requiredSourceBusinessReferenceCount !== undefined &&
+      Number(source.allBusinessReferences) !==
+        action.requiredSourceBusinessReferenceCount
+    ) {
+      throw new Error(
+        `Duplicate canonicalization source references changed for ${action.sourceZoneId}`,
+      );
+    }
     if (
       (!alreadyApplied &&
         Number(source.idSandre) !== action.expectedSandreGid) ||
@@ -1472,6 +1488,15 @@ function actionIsAlreadyApplied(
     return (
       source.disabled === true &&
       source.idSandre === null &&
+      source.codeSandre === null &&
+      source.statutSandre === null &&
+      source.dateMajSandre === null &&
+      source.numeroVersionSandre === null &&
+      (source.codesAlternatifs === null ||
+        (Array.isArray(source.codesAlternatifs) &&
+          source.codesAlternatifs.length === 0)) &&
+      source.sandrePayloadHash === null &&
+      source.sandreProvenance === 'legacy_unverified' &&
       Number(source.allBusinessReferences) === 0 &&
       references.aliases === 0
     );
@@ -1528,7 +1553,10 @@ function parseAction(value: unknown): SandreReconciliationAction {
       typeof action.officialCode !== 'string' ||
       action.officialCode.length === 0 ||
       action.officialCode.length > 32 ||
-      !isCanonicalRestrictionConflictPolicy(action.restrictionConflictPolicy))
+      !isCanonicalRestrictionConflictPolicy(action.restrictionConflictPolicy) ||
+      (action.requiredSourceBusinessReferenceCount !== undefined &&
+        (!Number.isInteger(action.requiredSourceBusinessReferenceCount) ||
+          Number(action.requiredSourceBusinessReferenceCount) < 0)))
   ) {
     throw new Error('Invalid canonical Sandre duplicate action');
   }
@@ -1539,6 +1567,12 @@ function parseAction(value: unknown): SandreReconciliationAction {
     throw new Error(
       'Restriction conflict resolution is only valid for canonical duplicates',
     );
+  }
+  if (
+    action.restrictionReplicationPolicy !== undefined ||
+    action.officialSplitEvidence !== undefined
+  ) {
+    throw new Error('Legacy partition evidence is not supported');
   }
   return action as unknown as SandreReconciliationAction;
 }

@@ -14,6 +14,7 @@ import {
   lockAffectedRows,
   moveOperationalReferences,
   parseCliOptions,
+  readOperationReportIfPresent,
   RECONCILIATION_REPORT_VERSION,
   SANDRE_OPERATION_REPORT_VERSION,
   releaseReconciliationResources,
@@ -253,7 +254,25 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
 
   it('invalidates reports created with the previous fingerprint semantics', () => {
     expect(RECONCILIATION_REPORT_VERSION).toBe(6);
-    expect(SANDRE_OPERATION_REPORT_VERSION).toBe(3);
+    expect(SANDRE_OPERATION_REPORT_VERSION).toBe(4);
+  });
+
+  it('rejects audited operation reports from the previous evidence epoch', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-sandre-v3-'));
+    const reportPath = join(directory, 'approved-v3.json');
+    await writeFile(
+      reportPath,
+      JSON.stringify({ kind: 'audited_sandre_operation', version: 3 }),
+      'utf8',
+    );
+
+    try {
+      await expect(readOperationReportIfPresent(reportPath)).rejects.toThrow(
+        'Unsupported operation report version 3',
+      );
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 
   it('verifies exact post-safe snapshot and global health convergence', async () => {

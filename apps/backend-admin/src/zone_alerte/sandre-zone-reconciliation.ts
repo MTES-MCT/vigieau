@@ -5,6 +5,11 @@ import { csv2json } from 'json-2-csv';
 export const SANDRE_GENEALOGY_METADATA_URL =
   'https://www.sandre.eaufrance.fr/atlas/srv/api/records/0391a8b8-c850-45c7-a372-1f95bd204159/formatters/xml';
 
+export const SANDRE_GENEALOGY_REQUEST_HEADERS = {
+  accept: 'application/xml,text/xml,text/csv,text/html;q=0.9',
+  'accept-language': 'fr',
+} as const;
+
 const SANDRE_GENEALOGY_RESOURCE_NAME =
   "Télécharger la généalogie des zones d'alerte sécheresse";
 

@@ -1,5 +1,9 @@
 import { createHash } from 'crypto';
 import { SandreZoneFeature } from './sandre-zone-sync';
+import {
+  findSandreGeometryNormalizationApproval,
+  SandreGeometryNormalizationContext,
+} from './sandre-zone-geometry-approvals';
 
 export const SANDRE_GEOMETRY_MAX_RELATIVE_AREA_DELTA = 1e-9;
 
@@ -18,6 +22,10 @@ export interface SandreGeometryAudit {
   rawArea: number;
   normalizedArea: number;
   relativeAreaDelta: number;
+  rawGeodesicAreaSquareMeters: number;
+  normalizedGeodesicAreaSquareMeters: number;
+  absoluteGeodesicAreaDeltaSquareMeters: number;
+  normalizationApprovalId: string | null;
 }
 
 export interface SandreGeometryQueryExecutor {
@@ -27,6 +35,7 @@ export interface SandreGeometryQueryExecutor {
 export async function normalizeSandreZoneGeometries(
   executor: SandreGeometryQueryExecutor,
   features: SandreZoneFeature[],
+  context?: SandreGeometryNormalizationContext,
 ): Promise<{
   features: SandreZoneFeature[];
   audits: Map<string, SandreGeometryAudit>;
@@ -75,7 +84,9 @@ export async function normalizeSandreZoneGeometries(
         SELECT
           *,
           ST_Area(raw_geom) AS raw_area,
-          ST_Area(normalized_geom) AS normalized_area
+          ST_Area(normalized_geom) AS normalized_area,
+          ST_Area(raw_geom::geography) AS raw_geodesic_area,
+          ST_Area(normalized_geom::geography) AS normalized_geodesic_area
         FROM repaired
       )
       SELECT
@@ -97,6 +108,11 @@ export async function normalizeSandreZoneGeometries(
           ELSE abs(normalized_area - raw_area)
             / GREATEST(abs(raw_area), abs(normalized_area))
         END::text AS relative_area_delta,
+        raw_geodesic_area::text AS raw_geodesic_area,
+        normalized_geodesic_area::text AS normalized_geodesic_area,
+        abs(
+          normalized_geodesic_area - raw_geodesic_area
+        )::text AS absolute_geodesic_area_delta,
         (
           ST_XMin(Box3D(normalized_geom)) = ST_XMin(Box3D(raw_geom))
           AND ST_XMax(Box3D(normalized_geom)) = ST_XMax(Box3D(raw_geom))
@@ -140,18 +156,51 @@ export async function normalizeSandreZoneGeometries(
       throw new Error('Sandre geometry normalization order changed');
     }
     const relativeAreaDelta = Number(row.relative_area_delta);
+    const rawGeodesicAreaSquareMeters = Number(row.raw_geodesic_area);
+    const normalizedGeodesicAreaSquareMeters = Number(
+      row.normalized_geodesic_area,
+    );
+    const absoluteGeodesicAreaDeltaSquareMeters = Number(
+      row.absolute_geodesic_area_delta,
+    );
+    const rawGeometryHash = hashGeometry(feature.geometry);
+    const normalizedGeometryHash = hashGeometry(
+      row.raw_valid === true ? feature.geometry : row.geometry,
+    );
+    const approval =
+      relativeAreaDelta > SANDRE_GEOMETRY_MAX_RELATIVE_AREA_DELTA
+        ? findSandreGeometryNormalizationApproval(context, {
+            codeSandre: feature.codeSandre,
+            gid: feature.gid,
+            payloadHash: feature.payloadHash,
+            rawGeometryHash,
+            normalizedGeometryHash,
+            rawGeometryType: String(row.raw_geometry_type),
+            normalizedGeometryType: String(row.normalized_geometry_type),
+            rawParts: Number(row.raw_parts),
+            normalizedParts: Number(row.normalized_parts),
+            rawPoints: Number(row.raw_points),
+            normalizedPoints: Number(row.normalized_points),
+            relativeAreaDelta,
+            absoluteGeodesicAreaDeltaSquareMeters,
+          })
+        : null;
     if (
       row.normalized_valid !== true ||
       row.bbox_unchanged !== true ||
       !row.geometry ||
       !Number.isFinite(relativeAreaDelta) ||
-      relativeAreaDelta > SANDRE_GEOMETRY_MAX_RELATIVE_AREA_DELTA
+      !Number.isFinite(rawGeodesicAreaSquareMeters) ||
+      !Number.isFinite(normalizedGeodesicAreaSquareMeters) ||
+      !Number.isFinite(absoluteGeodesicAreaDeltaSquareMeters) ||
+      (relativeAreaDelta > SANDRE_GEOMETRY_MAX_RELATIVE_AREA_DELTA && !approval)
     ) {
       throw new Error(
         `Unsafe Sandre geometry normalization for zone ${feature.codeSandre}: ` +
           `valid=${row.normalized_valid === true}, ` +
           `bboxUnchanged=${row.bbox_unchanged === true}, ` +
-          `areaDelta=${relativeAreaDelta}`,
+          `areaDelta=${relativeAreaDelta}, ` +
+          `absoluteGeodesicAreaDeltaSquareMeters=${absoluteGeodesicAreaDeltaSquareMeters}`,
       );
     }
 
@@ -165,8 +214,8 @@ export async function normalizeSandreZoneGeometries(
       codeSandre: feature.codeSandre,
       normalized: row.raw_valid !== true,
       invalidReason: String(row.invalid_reason),
-      rawGeometryHash: hashGeometry(feature.geometry),
-      normalizedGeometryHash: hashGeometry(normalizedGeometry),
+      rawGeometryHash,
+      normalizedGeometryHash,
       rawGeometryType: String(row.raw_geometry_type),
       normalizedGeometryType: String(row.normalized_geometry_type),
       rawParts: Number(row.raw_parts),
@@ -176,6 +225,10 @@ export async function normalizeSandreZoneGeometries(
       rawArea: Number(row.raw_area),
       normalizedArea: Number(row.normalized_area),
       relativeAreaDelta,
+      rawGeodesicAreaSquareMeters,
+      normalizedGeodesicAreaSquareMeters,
+      absoluteGeodesicAreaDeltaSquareMeters,
+      normalizationApprovalId: approval?.id ?? null,
     };
     normalizedFeatures.push(normalizedFeature);
     audits.set(feature.codeSandre, audit);
