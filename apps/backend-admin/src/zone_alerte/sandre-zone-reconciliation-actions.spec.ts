@@ -1,11 +1,15 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import {
+  assertCanonicalDuplicateRestrictionConflicts,
   auditSandreSyncExpectations,
+  CanonicalDuplicateRestrictionConflict,
+  CanonicalizeDuplicateAction,
   parseSandreReconciliationPlan,
   reconciliationPlanFingerprint,
   SandreReconciliationPlan,
 } from './sandre-zone-reconciliation-actions';
+import { fingerprint } from './sandre-zone-reconciliation';
 
 describe('audited Sandre reconciliation plans', () => {
   const planPath = resolve(
@@ -52,9 +56,74 @@ describe('audited Sandre reconciliation plans', () => {
       ]),
     );
     expect(reconciliationPlanFingerprint(plan)).toMatch(/^[a-f0-9]{64}$/);
+    expect(plan.actions[5]).toEqual(
+      expect.objectContaining({
+        restrictionConflictPolicy: {
+          mode: 'prefer_source',
+          expectedCount: 23,
+          expectedFingerprint:
+            'c1e3bad0f1b327b861ec60c7153703680b0541fe0d268dd4596aba55b5f3ea56',
+          allowedDifferingFields: ['niveauGravite'],
+          requiredParentStatus: 'abroge',
+          requireSourceSeverityStrictlyHigher: true,
+        },
+      }),
+    );
     expect(serializedPlan).not.toMatch(
       /DATABASE_|API_SANDRE|PASSWORD|SECRET|postgres(?:ql)?:\/\//i,
     );
+  });
+
+  it('requires an exact restriction conflict policy for canonical duplicates', () => {
+    const conflict = canonicalConflict();
+    const action = canonicalAction([conflict]);
+
+    expect(
+      assertCanonicalDuplicateRestrictionConflicts(action, [conflict]),
+    ).toEqual({
+      policy: 'prefer_source',
+      count: 1,
+      fingerprint: fingerprint([conflict]),
+    });
+
+    expect(() =>
+      parseSandreReconciliationPlan({
+        schemaVersion: 1,
+        operationId: 'missing-conflict-policy',
+        description: 'test',
+        actions: [
+          {
+            strategy: 'canonicalize_duplicate',
+            departmentCode: '49',
+            zoneType: 'SOU',
+            sourceZoneId: 9707,
+            targetZoneId: 9704,
+            expectedSandreGid: 408,
+            officialCode: '300',
+          },
+        ],
+      }),
+    ).toThrow('Invalid canonical Sandre duplicate action');
+  });
+
+  it('fails closed when canonical restriction conflicts drift', () => {
+    const conflict = canonicalConflict();
+    const action = canonicalAction([conflict]);
+
+    expect(() =>
+      assertCanonicalDuplicateRestrictionConflicts(action, [
+        { ...conflict, targetRestrictionId: 999 },
+      ]),
+    ).toThrow('restriction conflicts changed');
+    expect(() =>
+      assertCanonicalDuplicateRestrictionConflicts(action, [
+        {
+          ...conflict,
+          sourceNiveauGravite: 'vigilance',
+          targetNiveauGravite: 'alerte',
+        },
+      ]),
+    ).toThrow('source severity is not stronger');
   });
 
   it('rejects duplicate sources and unknown metadata instead of silently dropping it', () => {
@@ -250,6 +319,51 @@ function expectationPlan(
       },
     ],
   });
+}
+
+function canonicalAction(
+  conflicts: CanonicalDuplicateRestrictionConflict[],
+): CanonicalizeDuplicateAction {
+  const plan = parseSandreReconciliationPlan({
+    schemaVersion: 1,
+    operationId: 'canonical-conflict-test',
+    description: 'test',
+    actions: [
+      {
+        strategy: 'canonicalize_duplicate',
+        departmentCode: '49',
+        zoneType: 'SOU',
+        sourceZoneId: 9707,
+        targetZoneId: 9704,
+        expectedSandreGid: 408,
+        officialCode: '300',
+        restrictionConflictPolicy: {
+          mode: 'prefer_source',
+          expectedCount: conflicts.length,
+          expectedFingerprint: fingerprint(conflicts),
+          allowedDifferingFields: ['niveauGravite'],
+          requiredParentStatus: 'abroge',
+          requireSourceSeverityStrictlyHigher: true,
+        },
+      },
+    ],
+  });
+  return plan.actions[0] as CanonicalizeDuplicateAction;
+}
+
+function canonicalConflict(): CanonicalDuplicateRestrictionConflict {
+  return {
+    arreteRestrictionId: 10,
+    parentStatus: 'abroge',
+    sourceRestrictionId: 101,
+    targetRestrictionId: 100,
+    sourceArreteCadreId: 3,
+    targetArreteCadreId: 3,
+    sourceNomGroupementAep: null,
+    targetNomGroupementAep: null,
+    sourceNiveauGravite: 'crise',
+    targetNiveauGravite: 'alerte',
+  };
 }
 
 function officialSnapshot(departmentCode: string, features: any[]): any {

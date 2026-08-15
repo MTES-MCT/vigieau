@@ -41,6 +41,14 @@ export interface CanonicalizeDuplicateAction extends SandreReconciliationActionB
   targetZoneId: number;
   expectedSandreGid: number;
   officialCode: string;
+  restrictionConflictPolicy: {
+    mode: 'prefer_source';
+    expectedCount: number;
+    expectedFingerprint: string;
+    allowedDifferingFields: ['niveauGravite'];
+    requiredParentStatus: 'abroge';
+    requireSourceSeverityStrictlyHigher: true;
+  };
 }
 
 export type SandreReconciliationAction =
@@ -136,6 +144,24 @@ export interface SandreActionAudit {
     customizations: number;
     aliases: number;
   };
+  restrictionConflicts: {
+    policy: 'prefer_source';
+    count: number;
+    fingerprint: string;
+  } | null;
+}
+
+export interface CanonicalDuplicateRestrictionConflict {
+  arreteRestrictionId: number;
+  parentStatus: string;
+  sourceRestrictionId: number;
+  targetRestrictionId: number;
+  sourceArreteCadreId: number | null;
+  targetArreteCadreId: number | null;
+  sourceNomGroupementAep: string | null;
+  targetNomGroupementAep: string | null;
+  sourceNiveauGravite: string;
+  targetNiveauGravite: string;
 }
 
 export interface SandreReconciliationQueryExecutor {
@@ -748,6 +774,7 @@ async function auditAction(
         departmentId: Number(source.departementId),
         geometry: null,
         operationalReferences: references,
+        restrictionConflicts: null,
       };
     }
     if (source.idSandre !== null || source.codeSandre !== null) {
@@ -761,9 +788,11 @@ async function auditAction(
       departmentId: Number(source.departementId),
       geometry: null,
       operationalReferences: references,
+      restrictionConflicts: null,
     };
   }
 
+  let restrictionConflicts: SandreActionAudit['restrictionConflicts'] = null;
   if (action.strategy === 'canonicalize_duplicate') {
     if (
       (!alreadyApplied &&
@@ -777,7 +806,12 @@ async function auditAction(
         `Duplicate canonicalization identity mismatch for ${action.sourceZoneId}`,
       );
     }
-    await assertCanonicalDuplicatePayloads(executor, action);
+    if (!alreadyApplied) {
+      restrictionConflicts = await assertCanonicalDuplicatePayloads(
+        executor,
+        action,
+      );
+    }
   } else {
     if (source.disabled !== true || targets.some((target) => target.disabled)) {
       throw new Error(
@@ -832,6 +866,7 @@ async function auditAction(
       departmentId: Number(source.departementId),
       geometry,
       operationalReferences: references,
+      restrictionConflicts: null,
     };
   }
 
@@ -841,6 +876,7 @@ async function auditAction(
     departmentId: Number(source.departementId),
     geometry,
     operationalReferences: references,
+    restrictionConflicts,
   };
 }
 
@@ -974,29 +1010,97 @@ async function loadActionGeometryEvidence(
 async function assertCanonicalDuplicatePayloads(
   executor: SandreReconciliationQueryExecutor,
   action: CanonicalizeDuplicateAction,
-): Promise<void> {
+): Promise<NonNullable<SandreActionAudit['restrictionConflicts']>> {
   const rows = await executor.query(
     `
-      SELECT source.id
+      SELECT
+        source."arreteRestrictionId" AS "arreteRestrictionId",
+        parent.statut AS "parentStatus",
+        source.id AS "sourceRestrictionId",
+        target.id AS "targetRestrictionId",
+        source."arreteCadreId" AS "sourceArreteCadreId",
+        target."arreteCadreId" AS "targetArreteCadreId",
+        source."nomGroupementAep" AS "sourceNomGroupementAep",
+        target."nomGroupementAep" AS "targetNomGroupementAep",
+        source."niveauGravite" AS "sourceNiveauGravite",
+        target."niveauGravite" AS "targetNiveauGravite",
+        ARRAY(
+          SELECT link."communeId"
+          FROM restriction_commune link
+          WHERE link."restrictionId" = source.id
+          ORDER BY link."communeId"
+        ) AS "sourceCommuneIds",
+        ARRAY(
+          SELECT link."communeId"
+          FROM restriction_commune link
+          WHERE link."restrictionId" = target.id
+          ORDER BY link."communeId"
+        ) AS "targetCommuneIds"
       FROM restriction source
       JOIN restriction target
         ON target."arreteRestrictionId" = source."arreteRestrictionId"
        AND target."zoneAlerteId" = $2
+      JOIN arrete_restriction parent
+        ON parent.id = source."arreteRestrictionId"
       WHERE source."zoneAlerteId" = $1
-        AND (
-          source."arreteCadreId" IS DISTINCT FROM target."arreteCadreId"
-          OR source."nomGroupementAep" IS DISTINCT FROM target."nomGroupementAep"
-          OR source."niveauGravite" IS DISTINCT FROM target."niveauGravite"
-        )
-      LIMIT 1
+      ORDER BY source."arreteRestrictionId", source.id, target.id
     `,
     [action.sourceZoneId, action.targetZoneId],
   );
-  if (rows.length > 0) {
+  if (
+    rows.some(
+      (row) =>
+        row.sourceArreteCadreId !== row.targetArreteCadreId ||
+        row.sourceNomGroupementAep !== row.targetNomGroupementAep,
+    )
+  ) {
     throw new Error(
-      `Canonical duplicate restrictions differ for zone ${action.sourceZoneId}`,
+      `Canonical duplicate restriction fields differ for zone ${action.sourceZoneId}`,
     );
   }
+  if (
+    rows.some(
+      (row) =>
+        row.parentStatus !==
+        action.restrictionConflictPolicy.requiredParentStatus,
+    )
+  ) {
+    throw new Error(
+      `Canonical duplicate restriction parent status changed for zone ${action.sourceZoneId}`,
+    );
+  }
+  if (
+    rows.some(
+      (row) =>
+        fingerprint(row.sourceCommuneIds) !== fingerprint(row.targetCommuneIds),
+    )
+  ) {
+    throw new Error(
+      `Canonical duplicate restriction communes differ for zone ${action.sourceZoneId}`,
+    );
+  }
+  const restrictionConflicts = rows
+    .filter((row) => row.sourceNiveauGravite !== row.targetNiveauGravite)
+    .map((row) => ({
+      arreteRestrictionId: Number(row.arreteRestrictionId),
+      parentStatus: String(row.parentStatus),
+      sourceRestrictionId: Number(row.sourceRestrictionId),
+      targetRestrictionId: Number(row.targetRestrictionId),
+      sourceArreteCadreId:
+        row.sourceArreteCadreId === null
+          ? null
+          : Number(row.sourceArreteCadreId),
+      targetArreteCadreId:
+        row.targetArreteCadreId === null
+          ? null
+          : Number(row.targetArreteCadreId),
+      sourceNomGroupementAep: row.sourceNomGroupementAep ?? null,
+      targetNomGroupementAep: row.targetNomGroupementAep ?? null,
+      sourceNiveauGravite: String(row.sourceNiveauGravite),
+      targetNiveauGravite: String(row.targetNiveauGravite),
+    }));
+  const restrictionConflictEvidence =
+    assertCanonicalDuplicateRestrictionConflicts(action, restrictionConflicts);
   const usageRows = await executor.query(
     `
       SELECT source.id
@@ -1026,6 +1130,45 @@ async function assertCanonicalDuplicatePayloads(
       `Canonical duplicate usages differ for zone ${action.sourceZoneId}`,
     );
   }
+  return restrictionConflictEvidence;
+}
+
+const RESTRICTION_SEVERITY_RANK: Record<string, number> = {
+  vigilance: 1,
+  alerte: 2,
+  alerte_renforcee: 3,
+  crise: 4,
+};
+
+export function assertCanonicalDuplicateRestrictionConflicts(
+  action: CanonicalizeDuplicateAction,
+  conflicts: CanonicalDuplicateRestrictionConflict[],
+): NonNullable<SandreActionAudit['restrictionConflicts']> {
+  for (const conflict of conflicts) {
+    const sourceRank = RESTRICTION_SEVERITY_RANK[conflict.sourceNiveauGravite];
+    const targetRank = RESTRICTION_SEVERITY_RANK[conflict.targetNiveauGravite];
+    if (!sourceRank || !targetRank || sourceRank <= targetRank) {
+      throw new Error(
+        `Canonical duplicate source severity is not stronger for restriction ${conflict.arreteRestrictionId}`,
+      );
+    }
+  }
+  const count = conflicts.length;
+  const conflictFingerprint = fingerprint(conflicts);
+  const expected = action.restrictionConflictPolicy;
+  if (
+    count !== expected.expectedCount ||
+    conflictFingerprint !== expected.expectedFingerprint
+  ) {
+    throw new Error(
+      `Canonical duplicate restriction conflicts changed for zone ${action.sourceZoneId}`,
+    );
+  }
+  return {
+    policy: expected.mode,
+    count,
+    fingerprint: conflictFingerprint,
+  };
 }
 
 async function preserveLocalZone(
@@ -1172,6 +1315,14 @@ async function canonicalizeDuplicate(
     `,
     parameters,
   );
+  await executor.query(`
+      UPDATE restriction target
+      SET "niveauGravite" = source."niveauGravite"
+      FROM sandre_duplicate_restriction duplicate
+      JOIN restriction source ON source.id = duplicate.source_id
+      WHERE target.id = duplicate.target_id
+        AND source."niveauGravite" IS DISTINCT FROM target."niveauGravite"
+  `);
   await executor.query(`
       INSERT INTO restriction_commune ("restrictionId", "communeId")
       SELECT duplicate.target_id, link."communeId"
@@ -1376,11 +1527,41 @@ function parseAction(value: unknown): SandreReconciliationAction {
     (!positiveInteger(action.expectedSandreGid) ||
       typeof action.officialCode !== 'string' ||
       action.officialCode.length === 0 ||
-      action.officialCode.length > 32)
+      action.officialCode.length > 32 ||
+      !isCanonicalRestrictionConflictPolicy(action.restrictionConflictPolicy))
   ) {
-    throw new Error('Invalid canonical Sandre gid');
+    throw new Error('Invalid canonical Sandre duplicate action');
+  }
+  if (
+    action.strategy !== 'canonicalize_duplicate' &&
+    action.restrictionConflictPolicy !== undefined
+  ) {
+    throw new Error(
+      'Restriction conflict resolution is only valid for canonical duplicates',
+    );
   }
   return action as unknown as SandreReconciliationAction;
+}
+
+function isCanonicalRestrictionConflictPolicy(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const policy = value as Record<string, unknown>;
+  return (
+    Object.keys(policy).sort().join(',') ===
+      'allowedDifferingFields,expectedCount,expectedFingerprint,mode,requireSourceSeverityStrictlyHigher,requiredParentStatus' &&
+    policy.mode === 'prefer_source' &&
+    Number.isInteger(policy.expectedCount) &&
+    Number(policy.expectedCount) >= 0 &&
+    typeof policy.expectedFingerprint === 'string' &&
+    /^[a-f0-9]{64}$/.test(policy.expectedFingerprint) &&
+    Array.isArray(policy.allowedDifferingFields) &&
+    policy.allowedDifferingFields.length === 1 &&
+    policy.allowedDifferingFields[0] === 'niveauGravite' &&
+    policy.requiredParentStatus === 'abroge' &&
+    policy.requireSourceSeverityStrictlyHigher === true
+  );
 }
 
 function positiveInteger(value: unknown): value is number {

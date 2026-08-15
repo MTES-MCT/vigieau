@@ -89,7 +89,15 @@
       "targetZoneId": 9704,
       "expectedSourceCode": "52_49_14",
       "expectedSandreGid": 408,
-      "officialCode": "300"
+      "officialCode": "300",
+      "restrictionConflictPolicy": {
+        "mode": "prefer_source",
+        "expectedCount": 23,
+        "expectedFingerprint": "c1e3bad0f1b327b861ec60c7153703680b0541fe0d268dd4596aba55b5f3ea56",
+        "allowedDifferingFields": ["niveauGravite"],
+        "requiredParentStatus": "abroge",
+        "requireSourceSeverityStrictlyHigher": true
+      }
     }
   ]
 }
