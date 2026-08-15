@@ -223,6 +223,20 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
 
   it('applies and replays every reconciliation strategy without losing history', async () => {
     await seedReconciliationFixture(runner);
+    const canonicalRestrictionConflicts = [
+      {
+        arreteRestrictionId: 10,
+        parentStatus: 'abroge',
+        sourceRestrictionId: 101,
+        targetRestrictionId: 100,
+        sourceArreteCadreId: 3,
+        targetArreteCadreId: 3,
+        sourceNomGroupementAep: null,
+        targetNomGroupementAep: null,
+        sourceNiveauGravite: 'crise',
+        targetNiveauGravite: 'alerte',
+      },
+    ];
     const plan = parseSandreReconciliationPlan({
       schemaVersion: 1,
       operationId: 'postgres-all-strategies',
@@ -258,10 +272,70 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
           expectedSourceCode: '52_49_14',
           expectedSandreGid: 408,
           officialCode: '300',
+          restrictionConflictPolicy: {
+            mode: 'prefer_source',
+            expectedCount: canonicalRestrictionConflicts.length,
+            expectedFingerprint: fingerprint(canonicalRestrictionConflicts),
+            allowedDifferingFields: ['niveauGravite'],
+            requiredParentStatus: 'abroge',
+            requireSourceSeverityStrictlyHigher: true,
+          },
         },
       ],
     });
     const official = [officialErdreFeature()];
+    const [sourceOnlyBefore] = await runner.query(`
+      SELECT count(*)::integer AS count
+      FROM restriction source
+      WHERE source."zoneAlerteId" = 9707
+        AND NOT EXISTS (
+          SELECT 1
+          FROM restriction target
+          WHERE target."arreteRestrictionId" = source."arreteRestrictionId"
+            AND target."zoneAlerteId" = 9704
+        )
+    `);
+    expect(sourceOnlyBefore.count).toBe(1);
+
+    await runner.query(
+      `UPDATE restriction SET "nomGroupementAep" = 'drift' WHERE id = 101`,
+    );
+    await expect(
+      auditSandreReconciliationPlan(runner, plan, official),
+    ).rejects.toThrow('restriction fields differ');
+    await runner.query(
+      `UPDATE restriction SET "nomGroupementAep" = NULL WHERE id = 101`,
+    );
+
+    await runner.query(
+      `UPDATE arrete_restriction SET statut = 'publie' WHERE id = 10`,
+    );
+    await expect(
+      auditSandreReconciliationPlan(runner, plan, official),
+    ).rejects.toThrow('restriction parent status changed');
+    await runner.query(
+      `UPDATE arrete_restriction SET statut = 'abroge' WHERE id = 10`,
+    );
+
+    await runner.query(
+      `DELETE FROM restriction_commune WHERE "restrictionId" = 100 AND "communeId" = 2`,
+    );
+    await expect(
+      auditSandreReconciliationPlan(runner, plan, official),
+    ).rejects.toThrow('restriction communes differ');
+    await runner.query(
+      `INSERT INTO restriction_commune ("restrictionId", "communeId") VALUES (100, 2)`,
+    );
+
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'vigilance' WHERE id = 100`,
+    );
+    await expect(
+      auditSandreReconciliationPlan(runner, plan, official),
+    ).rejects.toThrow('restriction conflicts changed');
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'alerte' WHERE id = 100`,
+    );
 
     await runner.query(
       `UPDATE usage SET "descriptionCrise" = 'different' WHERE id = 2`,
@@ -278,6 +352,11 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     expect(beforeState.restrictions).toHaveLength(3);
     const audits = await auditSandreReconciliationPlan(runner, plan, official);
     expect(audits.every((audit) => audit.status === 'ready')).toBe(true);
+    expect(audits[3].restrictionConflicts).toEqual({
+      policy: 'prefer_source',
+      count: 1,
+      fingerprint: fingerprint(canonicalRestrictionConflicts),
+    });
     expect(audits[3].geometry).toEqual(
       expect.objectContaining({
         officialCode: '300',
@@ -411,6 +490,16 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       communes: 3,
       source_refs: 0,
     });
+    const canonicalRestrictions = await runner.query(`
+      SELECT id, "zoneAlerteId", "niveauGravite"
+      FROM restriction
+      WHERE id IN (100, 101, 102)
+      ORDER BY id
+    `);
+    expect(canonicalRestrictions).toEqual([
+      { id: 100, zoneAlerteId: 9704, niveauGravite: 'crise' },
+      { id: 102, zoneAlerteId: 9704, niveauGravite: 'crise' },
+    ]);
 
     await runner.startTransaction('SERIALIZABLE');
     try {
@@ -871,7 +960,7 @@ async function seedReconciliationFixture(runner: QueryRunner): Promise<void> {
       "nomGroupementAep", "niveauGravite"
     ) VALUES
       (100, 10, 9704, 3, NULL, 'alerte'),
-      (101, 10, 9707, 3, NULL, 'alerte'),
+      (101, 10, 9707, 3, NULL, 'crise'),
       (102, 11, 9707, 4, NULL, 'crise');
     INSERT INTO usage (
       id, nom, "thematiqueId", "restrictionId", "arreteCadreId",
@@ -882,6 +971,7 @@ async function seedReconciliationFixture(runner: QueryRunner): Promise<void> {
       (3, 'Unique', 1, 102, NULL, false, true, 'unique');
     INSERT INTO restriction_commune ("restrictionId", "communeId") VALUES
       (100, 1),
+      (100, 2),
       (101, 1),
       (101, 2),
       (102, 3);
