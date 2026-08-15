@@ -181,7 +181,8 @@ describe('StatisticCacheArtifactService', () => {
     const { service } = createService();
     const statements: string[] = [];
     const manager = {
-      query: jest.fn(async (sql: string) => {
+      query: jest.fn(async (...args: [string, unknown[]?]) => {
+        const [sql] = args;
         statements.push(sql);
         if (sql.includes('AS "invalidSnapshotCount"')) {
           return [
@@ -232,7 +233,7 @@ describe('StatisticCacheArtifactService', () => {
     expect(index('UPDATE "statistic_cache_state"')).toBeLessThan(
       index('DELETE FROM "statistic_cache_publication" publication'),
     );
-    expect(manager.query.mock.calls[0][1].at(-1)).toBe(false);
+    expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBe(false);
   });
 
   it.each([
@@ -246,8 +247,9 @@ describe('StatisticCacheArtifactService', () => {
     }
     const { service } = createService();
     const manager = {
-      query: jest.fn(async (sql: string) =>
-        sql.includes('AS "invalidSnapshotCount"')
+      query: jest.fn(async (...args: [string, unknown[]?]) => {
+        const [sql] = args;
+        return sql.includes('AS "invalidSnapshotCount"')
           ? [
               {
                 revision: '12',
@@ -264,8 +266,8 @@ describe('StatisticCacheArtifactService', () => {
                 ...override,
               },
             ]
-          : [],
-      ),
+          : [];
+      }),
     };
 
     await expect(
@@ -285,7 +287,7 @@ describe('StatisticCacheArtifactService', () => {
       'AS "legacyBoundaryEligible"',
     );
     if ('legacyBoundaryEligible' in override) {
-      expect(manager.query.mock.calls[0][1].at(-1)).toBe(true);
+      expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBe(true);
     }
   });
 
