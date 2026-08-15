@@ -130,6 +130,7 @@ const sandreSummaryKeys = [
   "appliedDepartments",
   "staleAppliedDepartments",
   "pendingApplicationDepartments",
+  "recomputePendingDepartments",
   "blockedDepartments",
   "failedBatches",
   "blockedBatches",
@@ -153,6 +154,7 @@ assert.equal(
 );
 for (const key of [
   "staleDepartments",
+  "recomputePendingDepartments",
   "blockedDepartments",
   "failedBatches",
   "blockedBatches",

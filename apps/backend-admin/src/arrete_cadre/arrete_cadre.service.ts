@@ -1786,8 +1786,35 @@ export class ArreteCadreService {
   async catchUpHistoricComputations(
     requiredThrough: string,
     expectedSourceRevision?: string,
+    assertBoundary?: () => Promise<void>,
+    expectedStatisticPublication?: {
+      statisticRevision: string;
+      currentPublishedDate: string;
+    },
   ) {
     return this.arreteRestrictionService.catchUpHistoricComputations(
+      requiredThrough,
+      expectedSourceRevision,
+      assertBoundary,
+      expectedStatisticPublication,
+    );
+  }
+
+  async prepareHistoricComputations(
+    requiredThrough: string,
+    expectedSourceRevision: string,
+  ): Promise<void> {
+    await this.arreteRestrictionService.prepareHistoricComputations(
+      requiredThrough,
+      expectedSourceRevision,
+    );
+  }
+
+  async recoverIncompleteHistoricComputations(
+    requiredThrough: string,
+    expectedSourceRevision: string,
+  ): Promise<string[]> {
+    return this.arreteRestrictionService.recoverIncompleteHistoricComputations(
       requiredThrough,
       expectedSourceRevision,
     );

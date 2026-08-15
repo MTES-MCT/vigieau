@@ -222,7 +222,11 @@ export class DatagouvService {
       'historique-communes',
       'HISTORIQUE COMMUNES',
       scheduledFor,
-      () => this.updateHistoriqueCommunes(scheduledFor),
+      () =>
+        this.updateHistoriqueCommunes(
+          scheduledFor,
+          publicationContext?.sourceRevision,
+        ),
       failures,
       publicationContext,
     );
@@ -1167,7 +1171,10 @@ export class DatagouvService {
     );
   }
 
-  async updateHistoriqueCommunes(expectedSourceDate?: string): Promise<void> {
+  async updateHistoriqueCommunes(
+    expectedSourceDate?: string,
+    expectedSourceRevision?: string,
+  ): Promise<void> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
     }
@@ -1186,6 +1193,7 @@ export class DatagouvService {
     const queryRunner = this.dataSource.createQueryRunner();
     let connected = false;
     let locked = false;
+    let operationError: unknown;
     try {
       await queryRunner.connect();
       connected = true;
@@ -1199,18 +1207,50 @@ export class DatagouvService {
         );
       }
 
+      await queryRunner.startTransaction('REPEATABLE READ');
+
+      const expectedCommuneCount = expectedSourceDate
+        ? await this.getCertifiedHistoricCommuneCount(
+            expectedSourceDate,
+            expectedSourceRevision,
+            queryRunner,
+          )
+        : undefined;
+
       const stream =
-        await this.statisticCommuneService.getStatisticCommuneStream();
+        await this.statisticCommuneService.getStatisticCommuneStream(
+          queryRunner,
+        );
       const artifact = await this.writeCommunesArchive(
         stream,
         'historique_communes.json',
         'historique_communes.zip',
+        expectedSourceDate
+          ? {
+              endDate: expectedSourceDate,
+              requireEndDateForEveryRecord: true,
+              expectedRecordCount: expectedCommuneCount,
+            }
+          : undefined,
       );
       this.assertExpectedSourceDate(
         'historique_communes.zip',
         artifact,
         expectedSourceDate,
       );
+      if (expectedSourceDate) {
+        const lockedCommuneCount = await this.getCertifiedHistoricCommuneCount(
+          expectedSourceDate,
+          expectedSourceRevision,
+          queryRunner,
+          true,
+        );
+        if (lockedCommuneCount !== expectedCommuneCount) {
+          throw new Error(
+            `La couverture communale ${expectedSourceDate} a changé pendant la génération`,
+          );
+        }
+      }
       await this.uploadToDatagouv(
         'historique_communes',
         'historique_communes.zip',
@@ -1218,21 +1258,105 @@ export class DatagouvService {
         false,
         { sourceDate: artifact.sourceDate },
       );
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
+      let cleanupError: unknown;
+      if (queryRunner.isTransactionActive) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (error) {
+          cleanupError = error;
+        }
+      }
       try {
         if (locked) {
-          await queryRunner.query(
+          const [unlock] = await queryRunner.query(
             "SELECT pg_advisory_unlock(hashtext('vigieau:datagouv-historique-communes')) AS unlocked",
           );
+          if (unlock?.unlocked !== true) {
+            throw new Error(
+              "Impossible de libérer le verrou de publication de l'historique des communes",
+            );
+          }
         }
-      } finally {
-        if (connected) {
+      } catch (error) {
+        cleanupError ??= error;
+        try {
+          await queryRunner.query('SELECT pg_advisory_unlock_all()');
+        } catch {
+          // Releasing the connection is the final lock cleanup fallback.
+        }
+      }
+      if (connected) {
+        try {
           await queryRunner.release();
+        } catch (error) {
+          cleanupError ??= error;
+        }
+      }
+      if (cleanupError !== undefined) {
+        if (operationError !== undefined) {
+          this.logger.error(
+            "ERREUR LORS DU NETTOYAGE DE LA PUBLICATION DE L'HISTORIQUE DES COMMUNES",
+            cleanupError instanceof Error
+              ? (cleanupError.stack ?? cleanupError.message)
+              : String(cleanupError),
+          );
+        } else {
+          throw cleanupError;
         }
       }
     }
 
     this.logger.log('MISE A JOUR DATAGOUV - HISTORIQUE COMMUNES - FIN');
+  }
+
+  private async getCertifiedHistoricCommuneCount(
+    expectedSourceDate: string,
+    expectedSourceRevision: string | undefined,
+    queryRunner: QueryRunner,
+    lockForUpload = false,
+  ): Promise<number> {
+    const [coverage] = await queryRunner.query(
+      `
+        SELECT
+          snapshot."status",
+          snapshot."expectedCommuneCount",
+          snapshot."processedCommuneCount",
+          snapshot."sourceRevision"::text AS "snapshotSourceRevision",
+          source_state."revision"::text AS "currentSourceRevision",
+          (SELECT COUNT(*)::integer FROM "commune") AS "communeCount"
+        FROM "zone_publication_source_state" source_state
+        JOIN "statistic_commune_snapshot" snapshot
+          ON snapshot."snapshotDate" = $1::date
+         AND snapshot."scope" = 'national'
+        WHERE source_state."id" = 1
+        ${lockForUpload ? 'FOR SHARE OF source_state, snapshot' : ''}
+      `,
+      [expectedSourceDate],
+    );
+    const expectedCommuneCount = Number(coverage?.expectedCommuneCount ?? 0);
+    const processedCommuneCount = Number(coverage?.processedCommuneCount ?? 0);
+    const communeCount = Number(coverage?.communeCount ?? 0);
+    if (
+      coverage?.status !== 'completed' ||
+      expectedCommuneCount <= 0 ||
+      processedCommuneCount !== expectedCommuneCount ||
+      communeCount !== expectedCommuneCount ||
+      String(coverage?.snapshotSourceRevision ?? '') !==
+        String(coverage?.currentSourceRevision ?? '') ||
+      (expectedSourceRevision !== undefined &&
+        String(coverage?.currentSourceRevision ?? '') !==
+          expectedSourceRevision)
+    ) {
+      throw new Error(
+        `Snapshot communal ${expectedSourceDate} non certifié pour l'archive historique (${processedCommuneCount}/${expectedCommuneCount}/${communeCount})`,
+      );
+    }
+    return expectedCommuneCount;
   }
 
   async createOrUpdateCommunesResource(
@@ -1467,7 +1591,12 @@ export class DatagouvService {
     source: Readable,
     jsonFileName: string,
     zipFileName: string,
-    expectedCoverage?: { startDate: string; endDate: string },
+    expectedCoverage?: {
+      startDate?: string;
+      endDate: string;
+      requireEndDateForEveryRecord?: boolean;
+      expectedRecordCount?: number;
+    },
   ): Promise<LocalArtifact> {
     const zipFilePath = `${this.path}/${zipFileName}`;
     const temporaryZipFilePath = `${zipFilePath}.tmp`;
@@ -1508,6 +1637,14 @@ export class DatagouvService {
       if (contentStats.recordCount === 0) {
         throw new Error(`L'archive ${zipFileName} ne contient aucune commune`);
       }
+      if (
+        expectedCoverage?.expectedRecordCount !== undefined &&
+        contentStats.recordCount !== expectedCoverage.expectedRecordCount
+      ) {
+        throw new Error(
+          `L'archive ${zipFileName} contient ${contentStats.recordCount}/${expectedCoverage.expectedRecordCount} communes`,
+        );
+      }
       await rename(temporaryZipFilePath, zipFilePath);
     } catch (error) {
       archive.abort();
@@ -1530,10 +1667,15 @@ export class DatagouvService {
       recordCount: number;
       sourceDate?: string;
     },
-    expectedCoverage?: { startDate: string; endDate: string },
+    expectedCoverage?: {
+      startDate?: string;
+      endDate: string;
+      requireEndDateForEveryRecord?: boolean;
+      expectedRecordCount?: number;
+    },
   ): Transform {
     let first = true;
-    const expectedDayCount = expectedCoverage
+    const expectedDayCount = expectedCoverage?.startDate
       ? Math.floor(
           (Date.parse(`${expectedCoverage.endDate}T00:00:00Z`) -
             Date.parse(`${expectedCoverage.startDate}T00:00:00Z`)) /
@@ -1565,7 +1707,7 @@ export class DatagouvService {
           if (typeof restriction.date === 'string') {
             restrictionDates.add(restriction.date);
             if (
-              expectedCoverage &&
+              expectedCoverage?.startDate &&
               (restriction.date < expectedCoverage.startDate ||
                 restriction.date > expectedCoverage.endDate)
             ) {
@@ -1574,7 +1716,7 @@ export class DatagouvService {
           }
         }
         if (
-          expectedCoverage &&
+          expectedCoverage?.startDate &&
           (restrictions.length !== expectedDayCount ||
             restrictionDates.size !== expectedDayCount ||
             hasOutOfRangeDate ||
@@ -1584,6 +1726,17 @@ export class DatagouvService {
           callback(
             new Error(
               `Historique incomplet pour la commune ${chunk.commune_code}: ${restrictionDates.size}/${expectedDayCount} jours entre ${expectedCoverage.startDate} et ${expectedCoverage.endDate}`,
+            ),
+          );
+          return;
+        }
+        if (
+          expectedCoverage?.requireEndDateForEveryRecord &&
+          !restrictionDates.has(expectedCoverage.endDate)
+        ) {
+          callback(
+            new Error(
+              `Couverture communale incomplète pour ${chunk.commune_code || 'inconnue'}: date ${expectedCoverage.endDate} absente`,
             ),
           );
           return;

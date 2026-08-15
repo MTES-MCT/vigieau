@@ -50,15 +50,22 @@ describe('ZoneAlerteComputedService', () => {
   let preflightQueryRunner: {
     connect: jest.Mock;
     query: jest.Mock;
+    startTransaction: jest.Mock;
+    commitTransaction: jest.Mock;
+    rollbackTransaction: jest.Mock;
     release: jest.Mock;
+    isTransactionActive: boolean;
   };
   let dataSource: { createQueryRunner: jest.Mock; query: jest.Mock };
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
   const previousHistoricChunkDays = process.env.HISTORIC_COMPUTE_CHUNK_DAYS;
+  const previousStatisticArtifactRequired =
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
     process.env.HISTORIC_COMPUTE_CHUNK_DAYS = '3000';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'false';
     jest.clearAllMocks();
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
@@ -85,8 +92,21 @@ describe('ZoneAlerteComputedService', () => {
           ? [{ locked: true }]
           : [{ unlocked: true }],
       ),
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      rollbackTransaction: jest.fn(),
       release: jest.fn().mockResolvedValue(undefined),
+      isTransactionActive: false,
     };
+    preflightQueryRunner.startTransaction.mockImplementation(async () => {
+      preflightQueryRunner.isTransactionActive = true;
+    });
+    preflightQueryRunner.commitTransaction.mockImplementation(async () => {
+      preflightQueryRunner.isTransactionActive = false;
+    });
+    preflightQueryRunner.rollbackTransaction.mockImplementation(async () => {
+      preflightQueryRunner.isTransactionActive = false;
+    });
     dataSource = {
       createQueryRunner: jest.fn().mockReturnValue(preflightQueryRunner),
       query: jest.fn(async (sql: string) =>
@@ -147,6 +167,12 @@ describe('ZoneAlerteComputedService', () => {
       delete process.env.HISTORIC_COMPUTE_CHUNK_DAYS;
     } else {
       process.env.HISTORIC_COMPUTE_CHUNK_DAYS = previousHistoricChunkDays;
+    }
+    if (previousStatisticArtifactRequired === undefined) {
+      delete process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+    } else {
+      process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED =
+        previousStatisticArtifactRequired;
     }
   });
 
@@ -315,6 +341,519 @@ describe('ZoneAlerteComputedService', () => {
     expect((service as any).runHistoricWorker).toHaveBeenCalledTimes(1);
   });
 
+  it('prepares the historic statistic boundary atomically under the worker lock', async () => {
+    preflightQueryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('FROM "zone_publication_source_state"')) {
+        return [{ revision: '1' }];
+      }
+      if (sql.includes('FROM "config"')) {
+        return [
+          {
+            computeMapDate: '2026-06-20',
+            computeStatsDate: '2026-06-22',
+            historicComputeEpoch: '7',
+          },
+        ];
+      }
+      if (sql.includes('FROM "statistic_publication_state"')) {
+        return [
+          {
+            revision: '10',
+            currentPublishedDate: '2026-06-23',
+            historicPublishedThrough: '2026-06-21',
+            historicDirtyFrom: '2026-06-21',
+            historicDirtyThrough: '2026-06-21',
+          },
+        ];
+      }
+      if (sql.includes('FROM "statistic_cache_state"')) {
+        return [
+          {
+            statisticRevision: '10',
+            mode: 'legacy-bootstrap',
+            currentPublishedDate: '2026-06-23',
+            historicDirtyFrom: '2026-06-21',
+            historicDirtyThrough: '2026-06-22',
+            historicMapCursor: '2026-06-20',
+            historicStatsCursor: '2026-06-22',
+            sourceRevision: '1',
+            historicComputeEpoch: '6',
+          },
+        ];
+      }
+      if (sql.includes('INSERT INTO "statistic_publication_state"')) {
+        return [
+          {
+            revision: '11',
+            currentPublishedDate: '2026-06-23',
+            historicDirtyFrom: '2026-06-20',
+            historicDirtyThrough: '2026-06-22',
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+
+    await expect(
+      service.prepareHistoricStatisticsPublication('2026-06-22', '1'),
+    ).resolves.toEqual({
+      status: 'prepared',
+      statisticRevision: '11',
+      currentPublishedDate: '2026-06-23',
+      historicDirtyFrom: '2026-06-20',
+      historicDirtyThrough: '2026-06-22',
+    });
+
+    expect(preflightQueryRunner.startTransaction).toHaveBeenCalledWith(
+      'SERIALIZABLE',
+    );
+    expect(preflightQueryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    const statements = preflightQueryRunner.query.mock.calls.map(
+      ([sql]) => sql as string,
+    );
+    expect(
+      statements.findIndex((sql) =>
+        sql.includes('FROM "zone_publication_source_state"'),
+      ),
+    ).toBeLessThan(
+      statements.findIndex((sql) => sql.includes('FROM "config"')),
+    );
+    expect(
+      statements.findIndex((sql) => sql.includes('FROM "config"')),
+    ).toBeLessThan(
+      statements.findIndex((sql) =>
+        sql.includes('FROM "statistic_publication_state"'),
+      ),
+    );
+    expect(preflightQueryRunner.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO "statistic_publication_state"'),
+      ['2026-06-20', '2026-06-22', true],
+    );
+  });
+
+  it('cleans the historic lock session independently without masking a primary error', async () => {
+    const runner = {
+      rollbackTransaction: jest
+        .fn()
+        .mockRejectedValue(new Error('rollback failed')),
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('pg_advisory_unlock_all')) return [];
+        throw new Error('unlock failed');
+      }),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      (service as any).cleanupHistoricLockSession(
+        runner,
+        true,
+        true,
+        new Error('primary'),
+      ),
+    ).resolves.toBeUndefined();
+    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(runner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(runner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails successful historic work when PostgreSQL reports a retained lock', async () => {
+    const runner = {
+      rollbackTransaction: jest.fn(),
+      query: jest.fn(async (sql: string) =>
+        sql.includes('pg_advisory_unlock_all') ? [] : [{ unlocked: false }],
+      ),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      (service as any).cleanupHistoricLockSession(runner, true, false, null),
+    ).rejects.toThrow('Failed to clean up historic statistic lock session');
+    expect(runner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(runner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reopen an already published boundary on repeated scheduler ticks', async () => {
+    preflightQueryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('FROM "zone_publication_source_state"')) {
+        return [{ revision: '1' }];
+      }
+      if (sql.includes('FROM "config"')) {
+        return [
+          {
+            computeMapDate: '2026-06-22',
+            computeStatsDate: '2026-06-22',
+            historicComputeEpoch: '7',
+          },
+        ];
+      }
+      if (sql.includes('FROM "statistic_publication_state"')) {
+        return [
+          {
+            revision: '12',
+            currentPublishedDate: '2026-06-23',
+            historicPublishedThrough: '2026-06-22',
+            historicDirtyFrom: null,
+            historicDirtyThrough: null,
+          },
+        ];
+      }
+      if (sql.includes('FROM "statistic_cache_state"')) {
+        return [
+          {
+            mode: 'legacy-bootstrap',
+            currentPublishedDate: '2026-06-23',
+            sourceRevision: '1',
+            historicComputeEpoch: '7',
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+
+    await expect(
+      service.prepareHistoricStatisticsPublication('2026-06-22', '1'),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: 'already-completed',
+        statisticRevision: '12',
+      }),
+    );
+    await expect(
+      service.prepareHistoricStatisticsPublication('2026-06-22', '1'),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: 'already-completed',
+        statisticRevision: '12',
+      }),
+    );
+
+    expect(
+      preflightQueryRunner.query.mock.calls.some(([sql]) =>
+        sql.includes('INSERT INTO "statistic_publication_state"'),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['epoch rewind', '8', true, '11'],
+    ['normal cursor progress', '7', false, '10'],
+  ])(
+    'uses an explicit revision bump for %s with unchanged dirty bounds',
+    async (_label, configEpoch, expectedForceBump, returnedRevision) => {
+      preflightQueryRunner.query.mockImplementation(
+        async (sql: string, parameters?: unknown[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+          if (sql.includes('FROM "zone_publication_source_state"')) {
+            return [{ revision: '1' }];
+          }
+          if (sql.includes('FROM "config"')) {
+            return [
+              {
+                computeMapDate: '2026-06-21',
+                computeStatsDate: '2026-06-22',
+                historicComputeEpoch: configEpoch,
+              },
+            ];
+          }
+          if (sql.includes('FROM "statistic_publication_state"')) {
+            return [
+              {
+                revision: '10',
+                currentPublishedDate: '2026-06-23',
+                historicPublishedThrough: '2026-06-19',
+                historicDirtyFrom: '2026-06-20',
+                historicDirtyThrough: '2026-06-22',
+              },
+            ];
+          }
+          if (sql.includes('FROM "statistic_cache_state"')) {
+            return [
+              {
+                statisticRevision: '10',
+                mode: 'legacy-bootstrap',
+                currentPublishedDate: '2026-06-23',
+                historicDirtyFrom: '2026-06-20',
+                historicDirtyThrough: '2026-06-22',
+                historicMapCursor: '2026-06-20',
+                historicStatsCursor: '2026-06-20',
+                sourceRevision: '1',
+                historicComputeEpoch: '7',
+                historicRecoveryMonthlyFrom: null,
+              },
+            ];
+          }
+          if (sql.includes('INSERT INTO "statistic_publication_state"')) {
+            expect(parameters).toEqual([
+              '2026-06-20',
+              '2026-06-22',
+              expectedForceBump,
+            ]);
+            return [
+              {
+                revision: returnedRevision,
+                currentPublishedDate: '2026-06-23',
+                historicDirtyFrom: '2026-06-20',
+                historicDirtyThrough: '2026-06-22',
+              },
+            ];
+          }
+          if (sql.includes('pg_advisory_unlock')) {
+            return [{ unlocked: true }];
+          }
+          return [];
+        },
+      );
+
+      await expect(
+        service.prepareHistoricStatisticsPublication('2026-06-22', '1'),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          status: 'prepared',
+          statisticRevision: returnedRevision,
+        }),
+      );
+    },
+  );
+
+  it('recovers only pre-existing incomplete historic snapshots before rebuilding monthly data', async () => {
+    let contextReadCount = 0;
+    preflightQueryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('AS "incompleteSnapshotDate"')) {
+        contextReadCount += 1;
+        return [
+          {
+            sourceRevision: '1',
+            mapCursor: contextReadCount === 1 ? '2026-06-20' : '2026-06-21',
+            statsCursor: contextReadCount === 1 ? '2026-06-20' : '2026-06-21',
+            mapGeneration: contextReadCount === 1 ? '3' : '4',
+            statsGeneration: contextReadCount === 1 ? '5' : '6',
+            historicComputeEpoch: '7',
+            currentPublishedDate: '2026-06-23',
+            historicDirtyFrom: '2026-06-19',
+            historicDirtyThrough: '2026-06-22',
+            historicRecoveryMonthlyFrom: '2026-06-21',
+            incompleteSnapshotDate:
+              contextReadCount === 1 ? '2026-06-21' : null,
+          },
+        ];
+      }
+      if (sql.includes('SELECT EXISTS(SELECT 1 FROM cleared)')) {
+        return [{ cleared: true }];
+      }
+      if (sql.includes('AS "reconciledCount"')) {
+        return [{ certified: true, reconciledCount: 0 }];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    (service as any).runHistoricWorker.mockResolvedValue({
+      mapCursor: '2026-06-21',
+      statsCursor: '2026-06-21',
+      mapGeneration: '4',
+      statsGeneration: '6',
+    });
+
+    await expect(
+      service.recoverIncompleteHistoricSnapshots('2026-06-22', '1'),
+    ).resolves.toEqual(['2026-06-21']);
+
+    expect((service as any).runHistoricWorker).toHaveBeenCalledWith(
+      'mapsComputed',
+      '2026-06-21',
+      '2026-06-21',
+      '2026-06-20',
+      '2026-06-20',
+      '3',
+      '5',
+      '1',
+      '2026-06-21',
+      '7',
+    );
+    expect(statisticCommuneService.computeByMonth).toHaveBeenCalledWith(
+      expect.objectContaining({ _isAMomentObject: true }),
+    );
+    expect(contextReadCount).toBe(2);
+  });
+
+  it('finishes a durable monthly recovery after a crash that already completed the snapshot', async () => {
+    preflightQueryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('AS "incompleteSnapshotDate"')) {
+        return [
+          {
+            sourceRevision: '1',
+            mapCursor: '2026-06-21',
+            statsCursor: '2026-06-21',
+            mapGeneration: '4',
+            statsGeneration: '6',
+            historicComputeEpoch: '7',
+            currentPublishedDate: '2026-06-23',
+            historicDirtyFrom: '2026-06-19',
+            historicDirtyThrough: '2026-06-22',
+            historicRecoveryMonthlyFrom: '2026-06-21',
+            incompleteSnapshotDate: null,
+          },
+        ];
+      }
+      if (sql.includes('SELECT EXISTS(SELECT 1 FROM cleared)')) {
+        return [{ cleared: true }];
+      }
+      if (sql.includes('AS "reconciledCount"')) {
+        return [{ certified: true, reconciledCount: 0 }];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+
+    await expect(
+      service.recoverIncompleteHistoricSnapshots('2026-06-22', '1'),
+    ).resolves.toEqual([]);
+
+    expect((service as any).runHistoricWorker).not.toHaveBeenCalled();
+    expect(statisticCommuneService.computeByMonth).toHaveBeenCalledTimes(1);
+    expect(preflightQueryRunner.query).toHaveBeenCalledWith(
+      expect.stringContaining('SET "historicRecoveryMonthlyFrom" = NULL'),
+      ['2026-06-21', '1', '7', '2026-06-22'],
+    );
+  });
+
+  it('repairs non-contiguous incomplete scopes newest-first before rewinding catch-up', async () => {
+    const contexts = [
+      {
+        sourceRevision: '1',
+        mapCursor: '2026-06-20',
+        statsCursor: '2026-06-20',
+        mapGeneration: '3',
+        statsGeneration: '5',
+        historicComputeEpoch: '7',
+        currentPublishedDate: '2026-06-23',
+        historicDirtyFrom: '2026-06-18',
+        historicDirtyThrough: '2026-06-22',
+        historicRecoveryMonthlyFrom: '2026-06-18',
+        incompleteSnapshotDate: '2026-06-19',
+        incompleteSnapshotScope: 'departements:02',
+      },
+      {
+        sourceRevision: '1',
+        mapCursor: '2026-06-19',
+        statsCursor: '2026-06-19',
+        mapGeneration: '4',
+        statsGeneration: '6',
+        historicComputeEpoch: '8',
+        currentPublishedDate: '2026-06-23',
+        historicDirtyFrom: '2026-06-18',
+        historicDirtyThrough: '2026-06-22',
+        historicRecoveryMonthlyFrom: '2026-06-18',
+        incompleteSnapshotDate: '2026-06-19',
+      },
+      {
+        sourceRevision: '1',
+        mapCursor: '2026-06-19',
+        statsCursor: '2026-06-19',
+        mapGeneration: '5',
+        statsGeneration: '7',
+        historicComputeEpoch: '8',
+        currentPublishedDate: '2026-06-23',
+        historicDirtyFrom: '2026-06-18',
+        historicDirtyThrough: '2026-06-22',
+        historicRecoveryMonthlyFrom: '2026-06-18',
+        incompleteSnapshotDate: '2026-06-18',
+      },
+      {
+        sourceRevision: '1',
+        mapCursor: '2026-06-18',
+        statsCursor: '2026-06-18',
+        mapGeneration: '7',
+        statsGeneration: '9',
+        historicComputeEpoch: '9',
+        currentPublishedDate: '2026-06-23',
+        historicDirtyFrom: '2026-06-18',
+        historicDirtyThrough: '2026-06-22',
+        historicRecoveryMonthlyFrom: '2026-06-18',
+        incompleteSnapshotDate: '2026-06-18',
+      },
+      {
+        sourceRevision: '1',
+        mapCursor: '2026-06-18',
+        statsCursor: '2026-06-18',
+        mapGeneration: '8',
+        statsGeneration: '10',
+        historicComputeEpoch: '9',
+        currentPublishedDate: '2026-06-23',
+        historicDirtyFrom: '2026-06-18',
+        historicDirtyThrough: '2026-06-22',
+        historicRecoveryMonthlyFrom: '2026-06-18',
+        incompleteSnapshotDate: null,
+      },
+    ];
+    let contextIndex = 0;
+    preflightQueryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('AS "incompleteSnapshotDate"')) {
+        return [contexts[contextIndex++]];
+      }
+      if (sql.includes('SELECT EXISTS(SELECT 1 FROM cleared)')) {
+        return [{ cleared: true }];
+      }
+      if (sql.includes('AS "reconciledCount"')) {
+        return [{ certified: true, reconciledCount: 1 }];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    (service as any).runHistoricWorker.mockImplementation(
+      async (...args: unknown[]) => ({
+        mapCursor: args[1],
+        statsCursor: args[1],
+        mapGeneration: (BigInt(String(args[5])) + 1n).toString(),
+        statsGeneration: (BigInt(String(args[6])) + 1n).toString(),
+      }),
+    );
+
+    await expect(
+      service.recoverIncompleteHistoricSnapshots('2026-06-22', '1'),
+    ).resolves.toEqual(['2026-06-19', '2026-06-18']);
+
+    expect(configService.setConfig.mock.calls).toEqual([
+      ['2026-06-19', '2026-06-19'],
+      ['2026-06-18', '2026-06-18'],
+    ]);
+    expect((service as any).runHistoricWorker).toHaveBeenCalledTimes(2);
+    expect(
+      (service as any).runHistoricWorker.mock.calls.map((call) => call[1]),
+    ).toEqual(['2026-06-19', '2026-06-18']);
+    expect(statisticCommuneService.computeByMonth).toHaveBeenCalledTimes(1);
+    expect(
+      preflightQueryRunner.query.mock.calls.find(([sql]) =>
+        String(sql).includes('AS "reconciledCount"'),
+      )?.[1],
+    ).toEqual(['2026-06-19', '1']);
+    expect(
+      preflightQueryRunner.query.mock.calls.find(([sql]) =>
+        String(sql).includes('AS "incompleteSnapshotDate"'),
+      )?.[0],
+    ).toContain('snapshot."scope" <> \'bootstrap\'');
+    expect(
+      preflightQueryRunner.query.mock.calls.find(([sql]) =>
+        String(sql).includes('AS "incompleteSnapshotDate"'),
+      )?.[0],
+    ).toContain('ORDER BY snapshot."snapshotDate" DESC');
+    expect(
+      preflightQueryRunner.query.mock.calls.some(([sql]) =>
+        sql.includes('UPDATE "statistic_publication_state" statistic_state'),
+      ),
+    ).toBe(false);
+  });
+
   it('runs legacy then computed historic workers when the dirty date predates computed maps', async () => {
     configService.getConfig
       .mockResolvedValueOnce({
@@ -414,7 +953,7 @@ describe('ZoneAlerteComputedService', () => {
     );
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('"historicDirtyFrom"'),
-      ['2026-03-25', '2026-06-22'],
+      ['2026-03-25', '2026-06-22', false],
     );
     const dirtyRangeSql = dataSource.query.mock.calls.find(([sql]) =>
       sql.includes('INSERT INTO "statistic_publication_state"'),
@@ -426,7 +965,17 @@ describe('ZoneAlerteComputedService', () => {
     expect(dirtyRangeSql).toContain('IS DISTINCT FROM CASE');
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
-      ['2026-06-22', '1'],
+      [
+        '2026-06-22',
+        '1',
+        null,
+        null,
+        '24',
+        '2026-06-22',
+        '2026-06-22',
+        '370',
+        '371',
+      ],
     );
     expect(
       dataSource.query.mock.calls.find(([sql]) =>
@@ -530,7 +1079,17 @@ describe('ZoneAlerteComputedService', () => {
     ).toBe('2026-06-23');
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
-      ['2026-06-22', '1'],
+      [
+        '2026-06-22',
+        '1',
+        null,
+        null,
+        '0',
+        '2026-06-22',
+        '2026-06-22',
+        '30',
+        '31',
+      ],
     );
     expect(completedState).toEqual({
       mapCursor: '2026-06-22',
@@ -541,6 +1100,70 @@ describe('ZoneAlerteComputedService', () => {
     expect(
       (service as any).assertCurrentHistoricCursorState,
     ).toHaveBeenLastCalledWith(completedState, '0');
+  });
+
+  it('finalizes a prepared publication after restart when every worker cursor is already past the boundary', async () => {
+    configService.getConfig.mockResolvedValue({
+      computeMapDate: '2026-06-23',
+      computeStatsDate: '2026-06-23',
+      computeMapGeneration: '30',
+      computeStatsGeneration: '31',
+      historicComputeEpoch: '7',
+    });
+    dataSource.query.mockImplementation(async (sql: string) => {
+      if (
+        sql.includes('FROM "statistic_publication_state"') &&
+        !sql.includes('EXISTS(SELECT 1 FROM published)')
+      ) {
+        return [
+          {
+            revision: '11',
+            currentPublishedDate: '2026-06-23',
+            historicPublishedThrough: '2026-06-21',
+            historicDirtyFrom: '2026-06-01',
+            historicDirtyThrough: '2026-06-22',
+          },
+        ];
+      }
+      if (sql.includes('EXISTS(SELECT 1 FROM published)')) {
+        return [
+          {
+            published: true,
+            incompleteDate: null,
+            currentSourceRevision: '1',
+            currentStatisticRevision: '11',
+            currentStatisticPublishedDate: '2026-06-23',
+          },
+        ];
+      }
+      return [];
+    });
+    jest
+      .spyOn(service as any, 'assertHistoricCatchUpComplete')
+      .mockResolvedValue(undefined);
+    const boundary = jest.fn().mockResolvedValue(undefined);
+
+    await service.computeHistoric(true, '2026-06-22', '1', boundary, {
+      statisticRevision: '11',
+      currentPublishedDate: '2026-06-23',
+    });
+
+    expect((service as any).runHistoricWorker).not.toHaveBeenCalled();
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('EXISTS(SELECT 1 FROM published)'),
+      [
+        '2026-06-22',
+        '1',
+        '11',
+        '2026-06-23',
+        '7',
+        '2026-06-23',
+        '2026-06-23',
+        '30',
+        '31',
+      ],
+    );
+    expect(boundary).toHaveBeenCalledTimes(3);
   });
 
   it('does not compute monthly aggregates after a historic worker failure', async () => {
@@ -705,7 +1328,17 @@ describe('ZoneAlerteComputedService', () => {
     const [publicationSql, parameters] = dataSource.query.mock.calls.find(
       ([sql]) => sql.includes('EXISTS(SELECT 1 FROM published)'),
     );
-    expect(parameters).toEqual(['2026-06-22', '1']);
+    expect(parameters).toEqual([
+      '2026-06-22',
+      '1',
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
     expect(publicationSql).toContain('publication_guard AS MATERIALIZED');
     expect(publicationSql).toContain('CROSS JOIN source_guard');
     expect(publicationSql).toContain('FOR UPDATE OF state');
@@ -727,6 +1360,51 @@ describe('ZoneAlerteComputedService', () => {
     expect(publicationSql).not.toContain(
       'snapshot."snapshotDate" >= state."historicDirtyFrom"',
     );
+  });
+
+  it('keeps the dirty publication open when a cursor is rewound before the final CAS', async () => {
+    dataSource.query.mockResolvedValue([
+      {
+        published: false,
+        incompleteDate: null,
+        currentSourceRevision: '1',
+        currentStatisticRevision: '11',
+        currentStatisticPublishedDate: '2026-06-23',
+        currentCursorState: {
+          mapCursor: '2026-06-21',
+          statsCursor: '2026-06-22',
+          mapGeneration: '31',
+          statsGeneration: '31',
+          historicComputeEpoch: '8',
+        },
+      },
+    ]);
+
+    await expect(
+      (service as any).publishHistoricStatistics(
+        '2026-06-22',
+        '1',
+        {
+          statisticRevision: '11',
+          currentPublishedDate: '2026-06-23',
+        },
+        {
+          mapCursor: '2026-06-22',
+          statsCursor: '2026-06-22',
+          mapGeneration: '30',
+          statsGeneration: '31',
+        },
+        '7',
+      ),
+    ).rejects.toThrow('Historic cursor publication changed');
+
+    const publicationSql = dataSource.query.mock.calls[0][0];
+    expect(publicationSql).toContain('config_guard AS MATERIALIZED');
+    expect(publicationSql).toContain('FOR UPDATE OF config');
+    expect(publicationSql).toContain(
+      'config."historicComputeEpoch" = $5::text',
+    );
+    expect(publicationSql).toContain('config."mapGeneration" = $8::text');
   });
 
   it('rejects an equal-date invalidation after a historic worker completed', () => {
@@ -1907,6 +2585,27 @@ describe('ZoneAlerteComputedService', () => {
     );
   });
 
+  it('refuses the unguarded legacy historic entrypoint when artifact boundaries are required', async () => {
+    delete process.env.ZONE_PUBLICATION_ENABLED;
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    (service as any).statisticCommuneService = {
+      computeCommuneStatisticsRestrictions: jest
+        .fn()
+        .mockResolvedValue(undefined),
+    };
+
+    await expect(
+      (service as any).computePublicationStatistics(
+        [],
+        new Date('2026-08-11T12:00:00.000Z'),
+        true,
+        false,
+        '42',
+        '9',
+      ),
+    ).rejects.toThrow('Direct legacy historic computation is disabled');
+  });
+
   it('certifies complete current statistics after a partial legacy recompute', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const computeCommuneStatisticsRestrictions = jest
@@ -2232,7 +2931,7 @@ describe('ZoneAlerteComputedService', () => {
     expect(configService.setConfig).toHaveBeenCalledWith(null, '2025-12-20');
   });
 
-  it('rejects a completed historic snapshot from another source revision', async () => {
+  it('rejects an invalid historic snapshot without replaying stale-source siblings', async () => {
     const incompatibleDate = '2026-07-22';
     const dataSource = {
       query: jest.fn(async (sql: string, parameters?: unknown[]) => {
@@ -2268,6 +2967,11 @@ describe('ZoneAlerteComputedService', () => {
     );
     expect(snapshotSql).toContain(
       '"sourceRevision" IS DISTINCT FROM $3::bigint',
+    );
+    expect(snapshotSql).toContain('"processedCommuneCount" <>');
+    expect(snapshotSql).toContain('"expectedCommuneCount"');
+    expect(snapshotSql).toMatch(
+      /"scope" = 'national'[\s\S]+"sourceRevision" IS DISTINCT FROM \$3::bigint/,
     );
     expect(snapshotSql).toContain('"snapshotDate" >= $2::date');
     expect(parameters).toEqual(['2026-07-31', '2026-07-20', '42']);

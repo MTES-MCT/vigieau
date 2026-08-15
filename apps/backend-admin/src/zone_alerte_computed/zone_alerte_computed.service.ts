@@ -7,7 +7,13 @@ import { ZoneAlerteComputed } from '@shared/entities/zone_alerte_computed.entity
 import * as fs from 'fs';
 import moment from 'moment';
 import { writeFile } from 'node:fs/promises';
-import { DataSource, FindManyOptions, IsNull, Repository } from 'typeorm';
+import {
+  DataSource,
+  FindManyOptions,
+  IsNull,
+  QueryRunner,
+  Repository,
+} from 'typeorm';
 import { Worker } from 'worker_threads';
 import { createHash } from 'node:crypto';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
@@ -36,6 +42,7 @@ import {
   ZonePublicationService,
 } from '../zone_publication/zone_publication.service';
 import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import {
   collectPmtilesFeatureIds,
@@ -75,6 +82,21 @@ export function readHistoricComputeChunkDays(
     );
   }
   return parsed;
+}
+
+export type HistoricBoundaryAssertion = () => Promise<void>;
+
+export interface HistoricStatisticPublicationTarget {
+  statisticRevision: string;
+  currentPublishedDate: string;
+}
+
+export interface HistoricStatisticPreparation {
+  status: 'prepared' | 'already-completed';
+  statisticRevision: string;
+  currentPublishedDate: string;
+  historicDirtyFrom: string | null;
+  historicDirtyThrough: string | null;
 }
 
 interface QueuedComputeWaiter {
@@ -1469,6 +1491,11 @@ DELETE FROM zone_alerte_computed
       await this.computeHistoric(true, historicThrough, sourceRevision);
     }
     if (computeHistoric && !publicationEnabled) {
+      if (isStatisticCacheArtifactRequired()) {
+        throw new Error(
+          'Direct legacy historic computation is disabled while the statistic artifact boundary is required',
+        );
+      }
       void this.computeHistoric();
     }
   }
@@ -1727,6 +1754,8 @@ DELETE FROM zone_alerte_computed
     rethrowWorkerError = false,
     requiredThrough?: string,
     expectedSourceRevision?: string,
+    assertBoundary?: HistoricBoundaryAssertion,
+    expectedStatisticPublication?: HistoricStatisticPublicationTarget,
   ) {
     let historicSourceRevision: string | undefined;
     let historicDirtyFromForRetry: string | undefined;
@@ -1748,12 +1777,43 @@ DELETE FROM zone_alerte_computed
         return date.isBefore(minDate, 'day') ? date : minDate;
       }, dirtyDates[0]);
       let historicPublicationStarted = false;
+      let historicAlreadyPublished = false;
       let historicCompletedThrough: string | undefined;
       const dirtyThrough =
         requiredThrough ?? moment().subtract(1, 'day').format('YYYY-MM-DD');
       const dirtyThroughDate = moment(dirtyThrough, 'YYYY-MM-DD', true);
       if (!dirtyThroughDate.isValid()) {
         throw new Error(`Invalid historic catch-up date: ${dirtyThrough}`);
+      }
+
+      await assertBoundary?.();
+
+      if (assertBoundary) {
+        if (!requiredThrough || !expectedStatisticPublication) {
+          throw new Error(
+            'A guarded historic computation requires an exact statistic publication target',
+          );
+        }
+        const prepared = await this.assertHistoricStatisticsPublicationPrepared(
+          dirtyDate?.format('YYYY-MM-DD'),
+          requiredThrough,
+          expectedStatisticPublication,
+        );
+        historicPublicationStarted = prepared.status === 'prepared';
+        historicAlreadyPublished = prepared.status === 'already-completed';
+        historicDirtyFromForRetry = prepared.historicDirtyFrom ?? undefined;
+      }
+
+      if (historicAlreadyPublished) {
+        await this.assertHistoricCatchUpComplete(
+          requiredThrough!,
+          historicSourceRevision,
+        );
+        await this.assertCurrentHistoricCursorState(
+          certifiedCursorState,
+          historicComputeEpoch,
+        );
+        return certifiedCursorState;
       }
 
       if (dirtyDate && !dirtyDate.isAfter(dirtyThroughDate, 'day')) {
@@ -1764,11 +1824,13 @@ DELETE FROM zone_alerte_computed
         const dirtyDateString = dirtyDate.format('YYYY-MM-DD');
         const statisticsStartDate = config.computeStatsDate ?? dirtyDateString;
         historicDirtyFromForRetry = dirtyDateString;
-        await this.beginHistoricStatisticsPublication(
-          dirtyDateString,
-          dirtyThrough,
-        );
-        historicPublicationStarted = true;
+        if (!assertBoundary) {
+          await this.beginHistoricStatisticsPublication(
+            dirtyDateString,
+            dirtyThrough,
+          );
+          historicPublicationStarted = true;
+        }
 
         if (dirtyDate.isBefore(computedStartDate, 'day')) {
           const naturalLegacyEnd = computedStartDate.clone().subtract(1, 'day');
@@ -1786,6 +1848,7 @@ DELETE FROM zone_alerte_computed
             legacyEnd.format('YYYY-MM-DD'),
             historicSourceRevision,
             historicComputeEpoch,
+            assertBoundary,
           );
           historicCompletedThrough =
             this.getHistoricCompletedThrough(legacyState);
@@ -1834,6 +1897,7 @@ DELETE FROM zone_alerte_computed
               dirtyThrough,
               historicSourceRevision,
               historicComputeEpoch,
+              assertBoundary,
             );
             historicCompletedThrough =
               this.getHistoricCompletedThrough(computedState);
@@ -1851,6 +1915,7 @@ DELETE FROM zone_alerte_computed
             dirtyThrough,
             historicSourceRevision,
             historicComputeEpoch,
+            assertBoundary,
           );
           historicCompletedThrough =
             this.getHistoricCompletedThrough(computedState);
@@ -1872,6 +1937,7 @@ DELETE FROM zone_alerte_computed
         ? (candidateSnapshotDate ?? historicComputedThrough)
         : undefined;
       if (statsMonthDate) {
+        await assertBoundary?.();
         await this.statisticCommuneService.computeByMonth(
           moment(statsMonthDate, 'YYYY-MM-DD'),
           undefined,
@@ -1903,9 +1969,13 @@ DELETE FROM zone_alerte_computed
             'Historic statistics publication has no completed cursor',
           );
         }
+        await assertBoundary?.();
         await this.publishHistoricStatistics(
           publishedThrough,
           historicSourceRevision,
+          expectedStatisticPublication,
+          certifiedCursorState,
+          historicComputeEpoch,
         );
       }
       await this.assertCurrentHistoricCursorState(
@@ -1925,10 +1995,545 @@ DELETE FROM zone_alerte_computed
     }
   }
 
+  async prepareHistoricStatisticsPublication(
+    requiredThrough: string,
+    expectedSourceRevision: string,
+  ): Promise<HistoricStatisticPreparation> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requiredThrough)) {
+      throw new Error(`Invalid historic catch-up date: ${requiredThrough}`);
+    }
+    const expectedCurrentPublishedDate = moment
+      .utc(requiredThrough, 'YYYY-MM-DD', true)
+      .add(1, 'day')
+      .format('YYYY-MM-DD');
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    let locked = false;
+    let primaryError: unknown = null;
+    const deadline = Date.now() + HISTORIC_COMPUTE_LOCK_TIMEOUT_MS;
+    try {
+      while (!locked) {
+        const [lock] = await queryRunner.query(
+          "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS locked",
+        );
+        locked = lock?.locked === true;
+        if (!locked) {
+          if (Date.now() >= deadline) {
+            throw new Error(
+              'Timed out waiting to prepare the historic zone compute boundary',
+            );
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      await queryRunner.startTransaction('SERIALIZABLE');
+      const [source] = await queryRunner.query(`
+        SELECT "revision"::text AS "revision"
+        FROM "zone_publication_source_state"
+        WHERE "id" = 1
+        FOR UPDATE
+      `);
+      if (String(source?.revision ?? 'missing') !== expectedSourceRevision) {
+        throw new Error(
+          `Historic source revision changed (${expectedSourceRevision} -> ${String(source?.revision ?? 'missing')})`,
+        );
+      }
+      const [config] = await queryRunner.query(`
+        SELECT
+          "computeMapDate"::text AS "computeMapDate",
+          "computeStatsDate"::text AS "computeStatsDate",
+          "historicComputeEpoch"::text AS "historicComputeEpoch"
+        FROM "config"
+        WHERE "id" = 1
+        FOR UPDATE
+      `);
+      if (!config) {
+        throw new Error('Historic cursor configuration is missing');
+      }
+      const [state] = await queryRunner.query(`
+        SELECT
+          "revision"::text AS "revision",
+          "currentPublishedDate"::text AS "currentPublishedDate",
+          "historicPublishedThrough"::text AS "historicPublishedThrough",
+          "historicDirtyFrom"::text AS "historicDirtyFrom",
+          "historicDirtyThrough"::text AS "historicDirtyThrough"
+        FROM "statistic_publication_state"
+        WHERE "id" = 1
+        FOR UPDATE
+      `);
+      if (!state) {
+        throw new Error('Statistic publication state is unavailable');
+      }
+      if (state.currentPublishedDate !== expectedCurrentPublishedDate) {
+        throw new Error(
+          `Historic boundary requires current statistic date ${expectedCurrentPublishedDate}, got ${state.currentPublishedDate ?? 'missing'}`,
+        );
+      }
+      const [incompleteSnapshot] = await queryRunner.query(
+        `
+          SELECT snapshot."snapshotDate"::text AS "snapshotDate"
+          FROM "statistic_commune_snapshot" snapshot
+          WHERE snapshot."scope" <> 'bootstrap'
+            AND (
+              snapshot."status" <> 'completed'
+              OR snapshot."processedCommuneCount" <>
+                 snapshot."expectedCommuneCount"
+            )
+            AND snapshot."snapshotDate" <= $1::date
+          ORDER BY snapshot."snapshotDate" ASC
+          LIMIT 1
+          FOR UPDATE OF snapshot
+        `,
+        [requiredThrough],
+      );
+      const [activeArtifact] = await queryRunner.query(`
+        SELECT
+          publication."statisticRevision"::text AS "statisticRevision",
+          publication."mode",
+          publication."currentPublishedDate"::text
+            AS "currentPublishedDate",
+          publication."historicDirtyFrom"::text AS "historicDirtyFrom",
+          publication."historicDirtyThrough"::text AS "historicDirtyThrough",
+          publication."historicMapCursor"::text AS "historicMapCursor",
+          publication."historicStatsCursor"::text AS "historicStatsCursor",
+          publication."sourceRevision"::text AS "sourceRevision",
+          publication."historicComputeEpoch"::text
+            AS "historicComputeEpoch",
+          cache_state."historicRecoveryMonthlyFrom"::text
+            AS "historicRecoveryMonthlyFrom"
+        FROM "statistic_cache_state" cache_state
+        JOIN "statistic_cache_publication" publication
+          ON publication."id" = cache_state."activePublicationId"
+        WHERE cache_state."id" = 1
+          AND publication."status" = 'active'
+        FOR SHARE OF cache_state, publication
+      `);
+      if (incompleteSnapshot?.snapshotDate) {
+        await queryRunner.query(
+          `
+            UPDATE "statistic_cache_state"
+            SET "historicRecoveryMonthlyFrom" = CASE
+                  WHEN "historicRecoveryMonthlyFrom" IS NULL THEN $1::date
+                  ELSE LEAST("historicRecoveryMonthlyFrom", $1::date)
+                END,
+                "updatedAt" = now()
+            WHERE "id" = 1
+          `,
+          [String(incompleteSnapshot.snapshotDate).slice(0, 10)],
+        );
+      }
+      const cursorValues = [config.computeMapDate, config.computeStatsDate]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => String(value).slice(0, 10));
+      const cursorCoverageComplete =
+        cursorValues.length === 2 &&
+        cursorValues.every((value) => value >= requiredThrough);
+      const artifactBoundaryMatches = Boolean(
+        activeArtifact?.mode === 'legacy-bootstrap' &&
+        activeArtifact.currentPublishedDate === expectedCurrentPublishedDate &&
+        String(activeArtifact.sourceRevision ?? '') ===
+          expectedSourceRevision &&
+        String(activeArtifact.historicComputeEpoch ?? '') ===
+          String(config.historicComputeEpoch ?? ''),
+      );
+      const alreadyCompleted = Boolean(
+        !state.historicDirtyFrom &&
+        !state.historicDirtyThrough &&
+        !incompleteSnapshot &&
+        !activeArtifact?.historicRecoveryMonthlyFrom &&
+        state.historicPublishedThrough >= requiredThrough &&
+        cursorCoverageComplete &&
+        artifactBoundaryMatches,
+      );
+      if (alreadyCompleted) {
+        await queryRunner.commitTransaction();
+        return {
+          status: 'already-completed',
+          statisticRevision: String(state.revision),
+          currentPublishedDate: state.currentPublishedDate,
+          historicDirtyFrom: null,
+          historicDirtyThrough: null,
+        };
+      }
+
+      const dirtyDates = cursorValues.map((date) =>
+        moment.utc(date, 'YYYY-MM-DD', true),
+      );
+      const dirtyDate = dirtyDates.reduce(
+        (minimum, date) => (date.isBefore(minimum, 'day') ? date : minimum),
+        dirtyDates[0],
+      );
+      const existingDirtyFrom = state.historicDirtyFrom
+        ? String(state.historicDirtyFrom).slice(0, 10)
+        : null;
+      const cursorDirtyFrom =
+        dirtyDate && !dirtyDate.isAfter(requiredThrough, 'day')
+          ? dirtyDate.format('YYYY-MM-DD')
+          : requiredThrough;
+      const proposedDirtyFrom = [
+        existingDirtyFrom,
+        cursorDirtyFrom,
+        incompleteSnapshot?.snapshotDate
+          ? String(incompleteSnapshot.snapshotDate).slice(0, 10)
+          : null,
+        activeArtifact?.historicRecoveryMonthlyFrom
+          ? String(activeArtifact.historicRecoveryMonthlyFrom).slice(0, 10)
+          : null,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .sort()[0];
+      const proposedDirtyThrough = state.historicDirtyThrough
+        ? String(state.historicDirtyThrough).slice(0, 10) > requiredThrough
+          ? String(state.historicDirtyThrough).slice(0, 10)
+          : requiredThrough
+        : requiredThrough;
+      const activeArtifactPreparedBoundaryMatches = Boolean(
+        activeArtifact?.mode === 'legacy-bootstrap' &&
+        activeArtifact.currentPublishedDate === expectedCurrentPublishedDate &&
+        activeArtifact.historicDirtyFrom === proposedDirtyFrom &&
+        activeArtifact.historicDirtyThrough === proposedDirtyThrough &&
+        String(activeArtifact.sourceRevision ?? '') ===
+          expectedSourceRevision &&
+        String(activeArtifact.historicComputeEpoch ?? '') ===
+          String(config.historicComputeEpoch ?? ''),
+      );
+      const forceRevisionBump = Boolean(
+        activeArtifact &&
+        String(activeArtifact.statisticRevision ?? '') ===
+          String(state.revision) &&
+        !activeArtifactPreparedBoundaryMatches,
+      );
+      const [prepared] = await this.beginHistoricStatisticsPublication(
+        proposedDirtyFrom,
+        requiredThrough,
+        queryRunner,
+        forceRevisionBump,
+      );
+      await queryRunner.commitTransaction();
+      return {
+        status: 'prepared',
+        statisticRevision: String(prepared.revision),
+        currentPublishedDate: String(prepared.currentPublishedDate).slice(
+          0,
+          10,
+        ),
+        historicDirtyFrom: String(prepared.historicDirtyFrom).slice(0, 10),
+        historicDirtyThrough: String(prepared.historicDirtyThrough).slice(
+          0,
+          10,
+        ),
+      };
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await this.cleanupHistoricLockSession(
+        queryRunner,
+        locked,
+        queryRunner.isTransactionActive,
+        primaryError,
+      );
+    }
+  }
+
+  async recoverIncompleteHistoricSnapshots(
+    requiredThrough: string,
+    expectedSourceRevision: string,
+  ): Promise<string[]> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requiredThrough)) {
+      throw new Error(`Invalid historic recovery date: ${requiredThrough}`);
+    }
+    const expectedCurrentPublishedDate = moment
+      .utc(requiredThrough, 'YYYY-MM-DD', true)
+      .add(1, 'day')
+      .format('YYYY-MM-DD');
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    let locked = false;
+    let primaryError: unknown = null;
+    const deadline = Date.now() + HISTORIC_COMPUTE_LOCK_TIMEOUT_MS;
+    const recoveredDates: string[] = [];
+    let recoveryEpoch: string | null = null;
+    try {
+      while (!locked) {
+        const [lock] = await queryRunner.query(
+          "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS locked",
+        );
+        locked = lock?.locked === true;
+        if (!locked) {
+          if (Date.now() >= deadline) {
+            throw new Error(
+              'Timed out waiting to recover incomplete historic snapshots',
+            );
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+
+      while (true) {
+        const [context] = await queryRunner.query(
+          `
+            SELECT
+              source_state."revision"::text AS "sourceRevision",
+              config."computeMapDate"::text AS "mapCursor",
+              config."computeStatsDate"::text AS "statsCursor",
+              config."computeMapGeneration"::text AS "mapGeneration",
+              config."computeStatsGeneration"::text AS "statsGeneration",
+              config."historicComputeEpoch"::text AS "historicComputeEpoch",
+              publication_state."currentPublishedDate"::text
+                AS "currentPublishedDate",
+              publication_state."historicDirtyFrom"::text
+                AS "historicDirtyFrom",
+              publication_state."historicDirtyThrough"::text
+                AS "historicDirtyThrough",
+              cache_state."historicRecoveryMonthlyFrom"::text
+                AS "historicRecoveryMonthlyFrom",
+              incomplete."snapshotDate"::text AS "incompleteSnapshotDate",
+              incomplete."scope" AS "incompleteSnapshotScope"
+            FROM "zone_publication_source_state" source_state
+            CROSS JOIN "config" config
+            CROSS JOIN "statistic_publication_state" publication_state
+            CROSS JOIN "statistic_cache_state" cache_state
+            LEFT JOIN LATERAL (
+              SELECT snapshot."snapshotDate", snapshot."scope"
+              FROM "statistic_commune_snapshot" snapshot
+              WHERE snapshot."scope" <> 'bootstrap'
+                AND (
+                  snapshot."status" <> 'completed'
+                  OR snapshot."processedCommuneCount" <>
+                     snapshot."expectedCommuneCount"
+                )
+                AND snapshot."snapshotDate" <= $1::date
+              ORDER BY snapshot."snapshotDate" DESC
+              LIMIT 1
+            ) incomplete ON true
+            WHERE source_state."id" = 1
+              AND config."id" = 1
+              AND publication_state."id" = 1
+              AND cache_state."id" = 1
+          `,
+          [requiredThrough],
+        );
+        if (!context) {
+          throw new Error('Historic recovery context is unavailable');
+        }
+        if (String(context.sourceRevision) !== expectedSourceRevision) {
+          throw new Error(
+            `Historic source revision changed (${expectedSourceRevision} -> ${String(context.sourceRevision ?? 'missing')})`,
+          );
+        }
+        if (context.currentPublishedDate !== expectedCurrentPublishedDate) {
+          throw new Error(
+            `Historic recovery requires current statistic date ${expectedCurrentPublishedDate}, got ${String(context.currentPublishedDate ?? 'missing')}`,
+          );
+        }
+        const snapshotDate = context.incompleteSnapshotDate
+          ? String(context.incompleteSnapshotDate).slice(0, 10)
+          : null;
+        const currentEpoch = String(context.historicComputeEpoch ?? '0');
+        if (recoveryEpoch !== null && currentEpoch !== recoveryEpoch) {
+          throw new Error(
+            `Historic recovery epoch changed (${recoveryEpoch} -> ${currentEpoch})`,
+          );
+        }
+        recoveryEpoch = currentEpoch;
+        if (!snapshotDate) {
+          const monthlyFrom = context.historicRecoveryMonthlyFrom
+            ? String(context.historicRecoveryMonthlyFrom).slice(0, 10)
+            : null;
+          if (monthlyFrom) {
+            await this.statisticCommuneService.computeByMonth(
+              moment.utc(monthlyFrom, 'YYYY-MM-DD', true),
+            );
+            const [cleared] = await queryRunner.query(
+              `
+                WITH source_guard AS MATERIALIZED (
+                  SELECT "revision"::text AS "sourceRevision"
+                  FROM "zone_publication_source_state"
+                  WHERE "id" = 1
+                ), config_guard AS MATERIALIZED (
+                  SELECT "historicComputeEpoch"::text
+                    AS "historicComputeEpoch"
+                  FROM "config"
+                  CROSS JOIN source_guard
+                  WHERE "id" = 1
+                ), cleared AS (
+                  UPDATE "statistic_cache_state" cache_state
+                  SET "historicRecoveryMonthlyFrom" = NULL,
+                      "updatedAt" = now()
+                  FROM source_guard, config_guard
+                  WHERE cache_state."id" = 1
+                    AND cache_state."historicRecoveryMonthlyFrom" = $1::date
+                    AND source_guard."sourceRevision" = $2::text
+                    AND config_guard."historicComputeEpoch" = $3::text
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM "statistic_commune_snapshot" snapshot
+                      WHERE snapshot."scope" <> 'bootstrap'
+                        AND (
+                          snapshot."status" <> 'completed'
+                          OR snapshot."processedCommuneCount" <>
+                             snapshot."expectedCommuneCount"
+                        )
+                        AND snapshot."snapshotDate" <= $4::date
+                    )
+                  RETURNING 1
+                )
+                SELECT EXISTS(SELECT 1 FROM cleared) AS cleared
+              `,
+              [
+                monthlyFrom,
+                expectedSourceRevision,
+                recoveryEpoch,
+                requiredThrough,
+              ],
+            );
+            if (cleared?.cleared !== true) {
+              throw new Error(
+                `Historic monthly recovery ${monthlyFrom} could not be certified`,
+              );
+            }
+          }
+          break;
+        }
+        const dirtyFrom = context.historicDirtyFrom
+          ? String(context.historicDirtyFrom).slice(0, 10)
+          : null;
+        const dirtyThrough = context.historicDirtyThrough
+          ? String(context.historicDirtyThrough).slice(0, 10)
+          : null;
+        if (
+          !dirtyFrom ||
+          !dirtyThrough ||
+          snapshotDate < dirtyFrom ||
+          snapshotDate > dirtyThrough
+        ) {
+          throw new Error(
+            `Incomplete historic snapshot ${snapshotDate} is outside the prepared dirty range ${dirtyFrom ?? 'null'}..${dirtyThrough ?? 'null'}`,
+          );
+        }
+        if (recoveredDates.includes(snapshotDate)) {
+          throw new Error(
+            `Historic snapshot ${snapshotDate} remained incomplete after recovery`,
+          );
+        }
+        await queryRunner.query(
+          `
+            UPDATE "statistic_cache_state"
+            SET "historicRecoveryMonthlyFrom" = CASE
+                  WHEN "historicRecoveryMonthlyFrom" IS NULL THEN $1::date
+                  ELSE LEAST("historicRecoveryMonthlyFrom", $1::date)
+                END,
+                "updatedAt" = now()
+            WHERE "id" = 1
+          `,
+          [snapshotDate],
+        );
+        const mapCursor = context.mapCursor
+          ? String(context.mapCursor).slice(0, 10)
+          : null;
+        const statsCursor = context.statsCursor
+          ? String(context.statsCursor).slice(0, 10)
+          : null;
+        const predecessor = moment
+          .utc(snapshotDate, 'YYYY-MM-DD', true)
+          .subtract(1, 'day')
+          .format('YYYY-MM-DD');
+        if (
+          (mapCursor && mapCursor < predecessor) ||
+          (statsCursor && statsCursor < predecessor)
+        ) {
+          throw new Error(
+            `Historic snapshot ${snapshotDate} cannot be recovered without opening unstarted dates (map=${mapCursor ?? 'null'}, stats=${statsCursor ?? 'null'})`,
+          );
+        }
+        if (
+          (mapCursor && mapCursor > snapshotDate) ||
+          (statsCursor && statsCursor > snapshotDate)
+        ) {
+          await this.configService.setConfig(snapshotDate, snapshotDate);
+          recoveryEpoch = null;
+          continue;
+        }
+        const recovered = await this.runHistoricWorker(
+          snapshotDate < this.historicComputedStartDate
+            ? 'maps'
+            : 'mapsComputed',
+          snapshotDate,
+          snapshotDate,
+          mapCursor,
+          statsCursor,
+          String(context.mapGeneration ?? '0'),
+          String(context.statsGeneration ?? '0'),
+          expectedSourceRevision,
+          snapshotDate,
+          currentEpoch,
+        );
+        await this.assertCurrentHistoricCursorState(recovered, currentEpoch);
+        const [reconciled] = await queryRunner.query(
+          `
+            WITH certified_national AS MATERIALIZED (
+              SELECT 1
+              FROM "statistic_commune_snapshot" national
+              WHERE national."snapshotDate" = $1::date
+                AND national."scope" = 'national'
+                AND national."status" = 'completed'
+                AND national."processedCommuneCount" =
+                    national."expectedCommuneCount"
+                AND national."sourceRevision" = $2::bigint
+            ), reconciled AS (
+              UPDATE "statistic_commune_snapshot" snapshot
+              SET "status" = 'completed',
+                  "processedCommuneCount" = snapshot."expectedCommuneCount",
+                  "sourceRevision" = $2::bigint,
+                  "completedAt" = COALESCE(snapshot."completedAt", now()),
+                  "lastError" = NULL,
+                  "updatedAt" = now()
+              FROM certified_national
+              WHERE snapshot."snapshotDate" = $1::date
+                AND snapshot."scope" NOT IN ('national', 'bootstrap')
+                AND (
+                  snapshot."status" <> 'completed'
+                  OR snapshot."processedCommuneCount" <>
+                     snapshot."expectedCommuneCount"
+                  OR snapshot."sourceRevision" IS DISTINCT FROM $2::bigint
+                )
+              RETURNING 1
+            )
+            SELECT
+              EXISTS(SELECT 1 FROM certified_national) AS "certified",
+              COUNT(*)::integer AS "reconciledCount"
+            FROM reconciled
+          `,
+          [snapshotDate, expectedSourceRevision],
+        );
+        if (reconciled?.certified !== true) {
+          throw new Error(
+            `Historic snapshot ${snapshotDate} was not nationally certified after recovery`,
+          );
+        }
+        recoveredDates.push(snapshotDate);
+      }
+      return recoveredDates;
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await this.cleanupHistoricLockSession(
+        queryRunner,
+        locked,
+        false,
+        primaryError,
+      );
+    }
+  }
+
   private async beginHistoricStatisticsPublication(
     dirtyFrom: string,
     dirtyThrough: string,
-  ): Promise<void> {
+    queryable: Pick<DataSource, 'query'> = this.dataSource,
+    forceRevisionBump = false,
+  ): Promise<any[]> {
     if (
       !/^\d{4}-\d{2}-\d{2}$/.test(dirtyFrom) ||
       !/^\d{4}-\d{2}-\d{2}$/.test(dirtyThrough) ||
@@ -1938,7 +2543,7 @@ DELETE FROM zone_alerte_computed
         `Invalid historic statistics dirty range: ${dirtyFrom}..${dirtyThrough}`,
       );
     }
-    await this.dataSource.query(
+    return queryable.query(
       `
         INSERT INTO "statistic_publication_state" (
           "id", "revision", "historicDirtyFrom", "historicDirtyThrough",
@@ -1946,7 +2551,8 @@ DELETE FROM zone_alerte_computed
         ) VALUES (1, 1, $1::date, $2::date, now())
         ON CONFLICT ("id") DO UPDATE SET
           "revision" = "statistic_publication_state"."revision" + CASE
-            WHEN "statistic_publication_state"."historicDirtyFrom"
+            WHEN $3::boolean
+              OR "statistic_publication_state"."historicDirtyFrom"
                   IS DISTINCT FROM CASE
                     WHEN "statistic_publication_state"."historicDirtyFrom" IS NULL
                       THEN EXCLUDED."historicDirtyFrom"
@@ -1984,14 +2590,81 @@ DELETE FROM zone_alerte_computed
             )
           END,
           "updatedAt" = now()
+        RETURNING
+          "revision"::text AS "revision",
+          "currentPublishedDate"::text AS "currentPublishedDate",
+          "historicDirtyFrom"::text AS "historicDirtyFrom",
+          "historicDirtyThrough"::text AS "historicDirtyThrough"
       `,
-      [dirtyFrom, dirtyThrough],
+      [dirtyFrom, dirtyThrough, forceRevisionBump],
     );
+  }
+
+  private async assertHistoricStatisticsPublicationPrepared(
+    dirtyFrom: string | undefined,
+    dirtyThrough: string,
+    expected: HistoricStatisticPublicationTarget,
+  ): Promise<HistoricStatisticPreparation> {
+    const [state] = await this.dataSource.query(
+      `
+        SELECT
+          "revision"::text AS "revision",
+          "currentPublishedDate"::text AS "currentPublishedDate",
+          "historicPublishedThrough"::text AS "historicPublishedThrough",
+          "historicDirtyFrom"::text AS "historicDirtyFrom",
+          "historicDirtyThrough"::text AS "historicDirtyThrough"
+        FROM "statistic_publication_state"
+        WHERE "id" = 1
+          AND "revision" = $1::bigint
+          AND "currentPublishedDate" = $2::date
+      `,
+      [expected.statisticRevision, expected.currentPublishedDate],
+    );
+    if (!state) {
+      throw new Error(
+        `Historic statistics publication identity changed before ${dirtyThrough}`,
+      );
+    }
+    const alreadyCompleted = Boolean(
+      !state.historicDirtyFrom &&
+      !state.historicDirtyThrough &&
+      state.historicPublishedThrough >= dirtyThrough,
+    );
+    if (alreadyCompleted) {
+      return {
+        status: 'already-completed',
+        statisticRevision: String(state.revision),
+        currentPublishedDate: String(state.currentPublishedDate).slice(0, 10),
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+      };
+    }
+    const prepared = Boolean(
+      state.historicDirtyFrom &&
+      state.historicDirtyThrough &&
+      (!dirtyFrom || state.historicDirtyFrom <= dirtyFrom) &&
+      state.historicDirtyThrough >= dirtyThrough,
+    );
+    if (!prepared) {
+      throw new Error(
+        `Historic statistics publication was not prepared for ${dirtyFrom ?? 'completed cursors'}..${dirtyThrough}`,
+      );
+    }
+    return {
+      status: 'prepared',
+      statisticRevision: String(state.revision),
+      currentPublishedDate: String(state.currentPublishedDate).slice(0, 10),
+      historicDirtyFrom: String(state.historicDirtyFrom).slice(0, 10),
+      historicDirtyThrough: String(state.historicDirtyThrough).slice(0, 10),
+    };
   }
 
   private async publishHistoricStatistics(
     publishedThrough: string,
     expectedSourceRevision?: string,
+    expectedStatisticPublication?: HistoricStatisticPublicationTarget,
+    expectedCursorState?: HistoricCursorState,
+    expectedHistoricComputeEpoch?: string,
   ): Promise<void> {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(publishedThrough)) {
       throw new Error(
@@ -2005,13 +2678,26 @@ DELETE FROM zone_alerte_computed
           FROM "zone_publication_source_state" source_state
           WHERE source_state."id" = 1
           FOR UPDATE
+        ), config_guard AS MATERIALIZED (
+          SELECT
+            config."computeMapDate"::text AS "mapCursor",
+            config."computeStatsDate"::text AS "statsCursor",
+            config."computeMapGeneration"::text AS "mapGeneration",
+            config."computeStatsGeneration"::text AS "statsGeneration",
+            config."historicComputeEpoch"::text AS "historicComputeEpoch"
+          FROM "config" config
+          CROSS JOIN source_guard
+          WHERE config."id" = 1
+          FOR UPDATE OF config
         ), publication_guard AS MATERIALIZED (
           SELECT
             state."id",
+            state."revision"::text AS "revision",
+            state."currentPublishedDate"::text AS "currentPublishedDate",
             state."historicDirtyFrom",
             state."historicDirtyThrough"
           FROM "statistic_publication_state" state
-          CROSS JOIN source_guard
+          CROSS JOIN config_guard
           WHERE state."id" = 1
           FOR UPDATE OF state
         ), incomplete_snapshot AS MATERIALIZED (
@@ -2021,8 +2707,11 @@ DELETE FROM zone_alerte_computed
           WHERE snapshot."scope" <> 'bootstrap'
             AND (
               snapshot."status" <> 'completed'
+              OR snapshot."processedCommuneCount" <>
+                 snapshot."expectedCommuneCount"
               OR (
                 $2::bigint IS NOT NULL
+                AND snapshot."scope" = 'national'
                 AND snapshot."sourceRevision" IS DISTINCT FROM $2::bigint
               )
             )
@@ -2044,6 +2733,40 @@ DELETE FROM zone_alerte_computed
           WHERE state."id" = publication_state."id"
             AND publication_state."historicDirtyFrom" IS NOT NULL
             AND publication_state."historicDirtyThrough" IS NOT NULL
+            AND (
+              $3::bigint IS NULL
+              OR publication_state."revision" = $3::bigint
+            )
+            AND (
+              $4::date IS NULL
+              OR publication_state."currentPublishedDate" = $4::date
+            )
+            AND EXISTS (
+              SELECT 1
+              FROM config_guard config
+              WHERE config."mapCursor"::date >= $1::date
+                AND config."statsCursor"::date >= $1::date
+                AND (
+                  $5::bigint IS NULL
+                  OR config."historicComputeEpoch" = $5::text
+                )
+                AND (
+                  $6::date IS NULL
+                  OR config."mapCursor"::date = $6::date
+                )
+                AND (
+                  $7::date IS NULL
+                  OR config."statsCursor"::date = $7::date
+                )
+                AND (
+                  $8::bigint IS NULL
+                  OR config."mapGeneration" = $8::text
+                )
+                AND (
+                  $9::bigint IS NULL
+                  OR config."statsGeneration" = $9::text
+                )
+            )
             AND $1::date >= publication_state."historicDirtyThrough"
             AND (
               $2::bigint IS NULL
@@ -2059,9 +2782,25 @@ DELETE FROM zone_alerte_computed
         SELECT
           EXISTS(SELECT 1 FROM published) AS published,
           (SELECT "snapshotDate" FROM incomplete_snapshot) AS "incompleteDate",
-          (SELECT revision FROM source_guard) AS "currentSourceRevision"
+          (SELECT revision FROM source_guard) AS "currentSourceRevision",
+          (SELECT revision FROM publication_guard)
+            AS "currentStatisticRevision",
+          (SELECT "currentPublishedDate" FROM publication_guard)
+            AS "currentStatisticPublishedDate",
+          (SELECT row_to_json(config_guard) FROM config_guard)
+            AS "currentCursorState"
       `,
-      [publishedThrough, expectedSourceRevision ?? null],
+      [
+        publishedThrough,
+        expectedSourceRevision ?? null,
+        expectedStatisticPublication?.statisticRevision ?? null,
+        expectedStatisticPublication?.currentPublishedDate ?? null,
+        expectedHistoricComputeEpoch ?? null,
+        expectedCursorState?.mapCursor ?? null,
+        expectedCursorState?.statsCursor ?? null,
+        expectedCursorState?.mapGeneration ?? null,
+        expectedCursorState?.statsGeneration ?? null,
+      ],
     );
     if (result?.published !== true) {
       if (
@@ -2072,11 +2811,45 @@ DELETE FROM zone_alerte_computed
           `Historic statistics source revision changed (${expectedSourceRevision} -> ${String(result?.currentSourceRevision ?? 'missing')})`,
         );
       }
-      const incompleteDate = result?.incompleteDate
-        ? String(result.incompleteDate).slice(0, 10)
-        : 'unknown';
+      if (
+        expectedStatisticPublication &&
+        (String(result?.currentStatisticRevision ?? 'missing') !==
+          expectedStatisticPublication.statisticRevision ||
+          String(result?.currentStatisticPublishedDate ?? '').slice(0, 10) !==
+            expectedStatisticPublication.currentPublishedDate)
+      ) {
+        throw new Error(
+          `Historic statistic publication changed (${expectedStatisticPublication.statisticRevision}/${expectedStatisticPublication.currentPublishedDate} -> ${String(result?.currentStatisticRevision ?? 'missing')}/${String(result?.currentStatisticPublishedDate ?? 'missing').slice(0, 10)})`,
+        );
+      }
+      if (result?.incompleteDate) {
+        const incompleteDate = String(result.incompleteDate).slice(0, 10);
+        throw new Error(
+          `Historic statistics publication blocked by snapshot ${incompleteDate}`,
+        );
+      }
+      const currentCursorState = result?.currentCursorState ?? {};
+      const cursorStateChanged = Boolean(
+        (expectedHistoricComputeEpoch !== undefined &&
+          String(currentCursorState.historicComputeEpoch ?? '') !==
+            expectedHistoricComputeEpoch) ||
+        (expectedCursorState &&
+          (String(currentCursorState.mapCursor ?? '').slice(0, 10) !==
+            expectedCursorState.mapCursor ||
+            String(currentCursorState.statsCursor ?? '').slice(0, 10) !==
+              expectedCursorState.statsCursor ||
+            String(currentCursorState.mapGeneration ?? '') !==
+              expectedCursorState.mapGeneration ||
+            String(currentCursorState.statsGeneration ?? '') !==
+              expectedCursorState.statsGeneration)),
+      );
+      if (cursorStateChanged) {
+        throw new Error(
+          `Historic cursor publication changed before finalization (${JSON.stringify(currentCursorState)})`,
+        );
+      }
       throw new Error(
-        `Historic statistics publication blocked by snapshot ${incompleteDate}`,
+        'Historic statistics publication preconditions changed before finalization',
       );
     }
   }
@@ -2084,10 +2857,13 @@ DELETE FROM zone_alerte_computed
   async computeHistoricPersistently(
     requiredThrough: string,
     expectedSourceRevision?: string,
+    assertBoundary?: HistoricBoundaryAssertion,
+    expectedStatisticPublication?: HistoricStatisticPublicationTarget,
   ): Promise<HistoricCursorState> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     let locked = false;
+    let primaryError: unknown = null;
     const deadline = Date.now() + HISTORIC_COMPUTE_LOCK_TIMEOUT_MS;
     try {
       while (!locked) {
@@ -2109,21 +2885,71 @@ DELETE FROM zone_alerte_computed
         true,
         requiredThrough,
         expectedSourceRevision,
+        assertBoundary,
+        expectedStatisticPublication,
       );
       if (!state) {
         throw new Error('Historic computation returned no cursor state');
       }
       return state;
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
+      await this.cleanupHistoricLockSession(
+        queryRunner,
+        locked,
+        false,
+        primaryError,
+      );
+    }
+  }
+
+  private async cleanupHistoricLockSession(
+    queryRunner: QueryRunner,
+    locked: boolean,
+    rollbackTransaction: boolean,
+    primaryError: unknown,
+  ): Promise<void> {
+    const cleanupErrors: unknown[] = [];
+    if (rollbackTransaction) {
       try {
-        if (locked) {
-          await queryRunner.query(
-            "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
-          );
-        }
-      } finally {
-        await queryRunner.release();
+        await queryRunner.rollbackTransaction();
+      } catch (error) {
+        cleanupErrors.push(error);
       }
+    }
+    let advisoryCleanupFailed = false;
+    if (locked) {
+      try {
+        const [result] = await queryRunner.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-historic')) AS unlocked",
+        );
+        if (result?.unlocked !== true) {
+          throw new Error('Historic advisory lock was not released');
+        }
+      } catch (error) {
+        advisoryCleanupFailed = true;
+        cleanupErrors.push(error);
+      }
+    }
+    if (advisoryCleanupFailed) {
+      try {
+        await queryRunner.query('SELECT pg_advisory_unlock_all()');
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      await queryRunner.release();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (cleanupErrors.length > 0 && primaryError === null) {
+      throw new AggregateError(
+        cleanupErrors,
+        'Failed to clean up historic statistic lock session',
+      );
     }
   }
 
@@ -2176,7 +3002,10 @@ DELETE FROM zone_alerte_computed
         WHERE "scope" <> 'bootstrap'
           AND (
             "status" <> 'completed'
+            OR "processedCommuneCount" <> "expectedCommuneCount"
             OR (
+              "scope" = 'national'
+              AND
               $3::bigint IS NOT NULL
               AND "sourceRevision" IS DISTINCT FROM $3::bigint
             )
@@ -2252,6 +3081,7 @@ DELETE FROM zone_alerte_computed
     requiredThrough: string,
     expectedSourceRevision?: string,
     expectedHistoricComputeEpoch?: string,
+    assertBoundary?: HistoricBoundaryAssertion,
   ): Promise<HistoricCursorState> {
     const startDate = moment.utc(dateMin, 'YYYY-MM-DD', true);
     const endDate = moment.utc(requiredThrough, 'YYYY-MM-DD', true);
@@ -2270,7 +3100,7 @@ DELETE FROM zone_alerte_computed
         : value
           ? String(value).slice(0, 10)
           : null;
-    const chunkDays = readHistoricComputeChunkDays();
+    const chunkDays = assertBoundary ? 1 : readHistoricComputeChunkDays();
     let chunkStart = startDate;
     let cursorState: HistoricCursorState = {
       mapCursor: dateString(expectedMapCursor),
@@ -2281,6 +3111,7 @@ DELETE FROM zone_alerte_computed
     const initialStatsDate = dateString(dateStats) ?? undefined;
 
     while (!chunkStart.isAfter(endDate, 'day')) {
+      await assertBoundary?.();
       const naturalChunkEnd = chunkStart.clone().add(chunkDays - 1, 'days');
       const chunkEnd = naturalChunkEnd.isAfter(endDate, 'day')
         ? endDate.clone()

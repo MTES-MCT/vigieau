@@ -20,6 +20,9 @@ async function runSmoke({
   latestDate,
   healthStatus = 200,
   healthOverrides = {},
+  healthOverridesBySample = [],
+  expectArtifact = false,
+  minimumInstanceCount = 2,
   expectedExitCode = 0,
 }) {
   const policy = getStatisticFreshnessPolicy({
@@ -34,6 +37,7 @@ async function runSmoke({
         86_400_000,
     ),
   );
+  let healthRequestIndex = 0;
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
     const send = (body, status = 200) => {
@@ -45,11 +49,21 @@ async function runSmoke({
       return send({ status: "ok" });
     }
     if (url.pathname === "/api/health/statistics") {
+      const sampledOverrides =
+        healthOverridesBySample[
+          Math.min(healthRequestIndex, healthOverridesBySample.length - 1)
+        ] || {};
+      healthRequestIndex += 1;
       return send(
         {
           status: healthStatus === 200 ? "ready" : "degraded",
           usable: true,
           fresh: healthStatus === 200,
+          currentFresh: healthStatus === 200,
+          historicComplete: true,
+          artifactPublicationId: null,
+          artifactLiveInstances: expectArtifact ? 2 : null,
+          artifactReadyInstances: expectArtifact ? 2 : null,
           mode: "legacy-bootstrap",
           currentPublishedDate: latestDate,
           expectedPublishedDate: policy.expectedPublishedDate,
@@ -68,6 +82,7 @@ async function runSmoke({
           oldestIncompleteSnapshot: null,
           lastError: null,
           ...healthOverrides,
+          ...sampledOverrides,
         },
         healthStatus,
       );
@@ -116,6 +131,8 @@ async function runSmoke({
         VIGIEAU_STATISTICS_DEADLINE: "06:00",
         VIGIEAU_STATISTICS_MAXIMUM_LAG_DAYS: "",
         VIGIEAU_STATISTICS_SAMPLE_COUNT: "2",
+        VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT: String(minimumInstanceCount),
+        VIGIEAU_EXPECT_STATISTIC_ARTIFACT: expectArtifact ? "true" : "false",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -213,6 +230,250 @@ test("accepts one recently active historic snapshot", async () => {
     },
   });
   assert.equal(result.degradation, "historic-rebuild");
+});
+
+test("accepts one recently active current snapshot", async () => {
+  const now = "2026-08-11T04:30:00.000Z";
+  const result = await runSmoke({
+    now,
+    latestDate: "2026-08-11",
+    healthStatus: 503,
+    healthOverrides: {
+      incompleteSnapshotCount: 1,
+      oldestIncompleteSnapshot: {
+        date: "2026-08-11",
+        scope: "national",
+        status: "running",
+        processedCommuneCount: 17_000,
+        expectedCommuneCount: 34_943,
+        updatedAt: now,
+      },
+    },
+  });
+  assert.equal(result.degradation, "current-recompute");
+});
+
+test("accepts today's running snapshot before the publication deadline", async () => {
+  const now = "2026-08-11T03:30:00.000Z";
+  const result = await runSmoke({
+    now,
+    latestDate: "2026-08-10",
+    healthOverrides: {
+      incompleteSnapshotCount: 1,
+      oldestIncompleteSnapshot: {
+        date: "2026-08-11",
+        scope: "national",
+        status: "running",
+        processedCommuneCount: 17_000,
+        expectedCommuneCount: 34_943,
+        updatedAt: now,
+      },
+    },
+  });
+  assert.equal(result.healthStatus, 200);
+  assert.equal(result.latestDate, "2026-08-10");
+});
+
+test("accepts a recent ready snapshot during atomic finalization", async () => {
+  const now = "2026-08-11T04:30:00.000Z";
+  const result = await runSmoke({
+    now,
+    latestDate: "2026-08-11",
+    healthOverrides: {
+      incompleteSnapshotCount: 1,
+      oldestIncompleteSnapshot: {
+        date: "2026-08-11",
+        scope: "national",
+        status: "ready",
+        processedCommuneCount: 34_943,
+        expectedCommuneCount: 34_943,
+        updatedAt: now,
+      },
+    },
+  });
+  assert.equal(result.healthStatus, 200);
+});
+
+test("does not count two loads from one public API instance as a quorum", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    expectArtifact: true,
+    healthOverrides: {
+      artifactPublicationId: "2a71d0ae-6526-4a65-a497-c503b2ffe023",
+      artifactLiveInstances: 1,
+      artifactReadyInstances: 1,
+    },
+    healthOverridesBySample: [
+      { loadedAt: "2026-08-11T04:29:00.000Z" },
+      { loadedAt: "2026-08-11T04:30:00.000Z" },
+    ],
+    expectedExitCode: 1,
+  });
+  assert.match(
+    result.stderr,
+    /live instance count must be an integer greater than or equal to 2/i,
+  );
+});
+
+test("rejects a live public API instance that has not acknowledged the artifact", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    expectArtifact: true,
+    healthOverrides: {
+      artifactPublicationId: "2a71d0ae-6526-4a65-a497-c503b2ffe023",
+      artifactLiveInstances: 2,
+      artifactReadyInstances: 1,
+    },
+    minimumInstanceCount: 1,
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /not every live public API instance/i);
+});
+
+test("accepts progress differences between consecutive samples", async () => {
+  const now = "2026-08-11T04:30:00.000Z";
+  const baseSnapshot = {
+    date: "2014-05-11",
+    scope: "national",
+    status: "running",
+    expectedCommuneCount: 34_943,
+  };
+  const result = await runSmoke({
+    now,
+    latestDate: "2026-08-11",
+    healthStatus: 503,
+    healthOverrides: {
+      historicDirtyFrom: "2013-01-01",
+      historicDirtyThrough: "2026-08-10",
+    },
+    healthOverridesBySample: [
+      {
+        incompleteSnapshotCount: 1,
+        oldestIncompleteSnapshot: {
+          ...baseSnapshot,
+          processedCommuneCount: 1_000,
+          updatedAt: "2026-08-11T04:29:00.000Z",
+        },
+      },
+      {
+        incompleteSnapshotCount: 1,
+        oldestIncompleteSnapshot: {
+          ...baseSnapshot,
+          processedCommuneCount: 20_000,
+          updatedAt: now,
+        },
+      },
+    ],
+  });
+  assert.equal(result.healthStatus, 503);
+});
+
+test("accepts a running snapshot completing between samples", async () => {
+  const now = "2026-08-11T04:30:00.000Z";
+  const result = await runSmoke({
+    now,
+    latestDate: "2026-08-11",
+    healthStatus: 503,
+    healthOverrides: {
+      historicDirtyFrom: "2013-01-01",
+      historicDirtyThrough: "2026-08-10",
+    },
+    healthOverridesBySample: [
+      {
+        incompleteSnapshotCount: 1,
+        oldestIncompleteSnapshot: {
+          date: "2014-05-11",
+          scope: "national",
+          status: "running",
+          processedCommuneCount: 34_000,
+          expectedCommuneCount: 34_943,
+          updatedAt: now,
+        },
+      },
+      { incompleteSnapshotCount: 0, oldestIncompleteSnapshot: null },
+    ],
+  });
+  assert.equal(result.healthStatus, 503);
+});
+
+test("rejects a fingerprint divergence between samples", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    healthOverridesBySample: [
+      { fingerprint: "a".repeat(64) },
+      { fingerprint: "b".repeat(64) },
+    ],
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /field fingerprint differs/i);
+});
+
+test("requires one current immutable artifact on every sampled instance", async () => {
+  const artifactPublicationId = "2a71d0ae-6526-4a65-a497-c503b2ffe023";
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    expectArtifact: true,
+    healthOverrides: {
+      artifactPublicationId,
+      currentFresh: true,
+      historicComplete: false,
+      historicDirtyFrom: "2013-01-01",
+      historicDirtyThrough: "2026-08-10",
+    },
+  });
+  assert.equal(result.healthStatus, 200);
+  assert.equal(result.liveInstanceCount, 2);
+  assert.equal(result.readyInstanceCount, 2);
+});
+
+test("rejects a missing immutable artifact when production requires it", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    expectArtifact: true,
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /artifact publication id is missing or invalid/i);
+});
+
+test("rejects an immutable artifact identity divergence between instances", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    expectArtifact: true,
+    healthOverridesBySample: [
+      {
+        artifactPublicationId: "2a71d0ae-6526-4a65-a497-c503b2ffe023",
+      },
+      {
+        artifactPublicationId: "598b0532-1ed6-45a0-841a-b40f1860b2d2",
+      },
+    ],
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /field artifactPublicationId differs/i);
+});
+
+test("rejects a degraded response when an immutable artifact is required", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    healthStatus: 503,
+    expectArtifact: true,
+    healthOverrides: {
+      artifactPublicationId: "2a71d0ae-6526-4a65-a497-c503b2ffe023",
+      currentFresh: false,
+      historicComplete: false,
+      historicDirtyFrom: "2013-01-01",
+      historicDirtyThrough: "2026-08-10",
+    },
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /immutable statistics artifact is not current/i);
 });
 
 test("rejects a cache error hidden behind an historic rebuild", async () => {

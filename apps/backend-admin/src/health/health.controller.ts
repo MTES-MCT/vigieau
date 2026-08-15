@@ -23,6 +23,7 @@ type SandreSynchronizationStatus =
   | 'never_applied'
   | 'application_stale'
   | 'pending_application'
+  | 'pending_recompute'
   | 'blocked'
   | 'failed';
 
@@ -42,6 +43,7 @@ interface SandreSynchronizationHealth {
     appliedDepartments: number;
     staleAppliedDepartments: number;
     pendingApplicationDepartments: number;
+    recomputePendingDepartments: number;
     blockedDepartments: number;
     failedBatches: number;
     blockedBatches: number;
@@ -252,6 +254,9 @@ export class HealthController {
                  OR state."observedSourceUpdatedAt" IS DISTINCT FROM state."appliedSourceUpdatedAt"
             )::integer AS "pendingApplicationDepartments",
             count(DISTINCT state."departementId") FILTER (
+              WHERE state."needsRecompute" = true
+            )::integer AS "recomputePendingDepartments",
+            count(DISTINCT state."departementId") FILTER (
               WHERE state."blockedAt" IS NOT NULL
             )::integer AS "blockedDepartments",
             count(DISTINCT latest_batches."departementId") FILTER (
@@ -287,6 +292,9 @@ export class HealthController {
         pendingApplicationDepartments: Number(
           row?.pendingApplicationDepartments ?? 0,
         ),
+        recomputePendingDepartments: Number(
+          row?.recomputePendingDepartments ?? 0,
+        ),
         blockedDepartments: Number(row?.blockedDepartments ?? 0),
         failedBatches: Number(row?.failedBatches ?? 0),
         blockedBatches: Number(row?.blockedBatches ?? 0),
@@ -300,6 +308,8 @@ export class HealthController {
         status = 'blocked';
       } else if (summary.failedBatches > 0) {
         status = 'failed';
+      } else if (summary.recomputePendingDepartments > 0) {
+        status = 'pending_recompute';
       } else if (
         summary.totalDepartments === 0 ||
         summary.trackedDepartments === 0

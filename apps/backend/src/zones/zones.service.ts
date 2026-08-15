@@ -1805,6 +1805,8 @@ export class ZonesService implements OnModuleInit {
     const acknowledgedSnapshot = candidateSnapshot || activeSnapshot;
     this.lastPublicationHeartbeatAt = Date.now();
     try {
+      const statisticAcknowledgement =
+        this.dataService.getStatisticCacheAcknowledgement();
       await this.zonePublicationInstanceRepository.upsert(
         {
           instanceId: this.instanceId,
@@ -1815,6 +1817,7 @@ export class ZonesService implements OnModuleInit {
             acknowledgedSnapshot?.communeAssociationCount ?? null,
           contentFingerprint:
             acknowledgedSnapshot?.publication?.contentFingerprint ?? null,
+          ...statisticAcknowledgement,
           lastError: this.lastCacheError?.phase || null,
           heartbeatAt: () => 'now()',
         },

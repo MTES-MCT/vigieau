@@ -6,6 +6,7 @@ import {
   isBusinessSchedulerProcess,
 } from '../core/scheduling/business-cron';
 import {
+  DATAGOUV_DAILY_JOB_KEY,
   getScheduledCivilDate,
   NATIONAL_COMPUTE_START_HOUR,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
@@ -28,6 +29,11 @@ import {
 } from '../zone_publication/zone_publication.config';
 import { ZonePublicationService } from '../zone_publication/zone_publication.service';
 import { ArreteCadreService } from './arrete_cadre.service';
+import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
+import {
+  StatisticCacheReadinessService,
+  type StatisticCacheReadyIdentity,
+} from '../statistic_cache/statistic_cache_readiness.service';
 
 interface DailyComputationContext {
   scheduledFor: string;
@@ -49,12 +55,17 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     scheduledFor: string;
     run: Promise<void>;
   } | null = null;
+  private historicBoundaryInFlight: {
+    scheduledFor: string;
+    run: Promise<void>;
+  } | null = null;
 
   constructor(
     private readonly arreteCadreService: ArreteCadreService,
     private readonly registry: ExternalPublicationRegistryService,
     private readonly zonePublicationService: ZonePublicationService,
     private readonly configService: ConfigService,
+    private readonly statisticCacheReadiness: StatisticCacheReadinessService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -260,6 +271,16 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     current: DailyComputationContext,
     now: Date,
   ): Promise<void> {
+    if (this.historicUpdateInFlight?.scheduledFor === current.scheduledFor) {
+      return;
+    }
+    const statisticArtifactRequired =
+      current.publicationMode === 'legacy'
+        ? isStatisticCacheArtifactRequired()
+        : false;
+    if (current.publicationMode === 'legacy' && statisticArtifactRequired) {
+      await this.ensureLegacyHistoricBoundary(current);
+    }
     if (this.historicUpdateInFlight) {
       if (this.historicUpdateInFlight.scheduledFor !== current.scheduledFor) {
         this.logger.log(
@@ -282,11 +303,61 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     }
   }
 
+  private async ensureLegacyHistoricBoundary(
+    current: DailyComputationContext,
+  ): Promise<void> {
+    while (this.historicBoundaryInFlight) {
+      const boundary = this.historicBoundaryInFlight;
+      await boundary.run;
+      if (boundary.scheduledFor === current.scheduledFor) {
+        return;
+      }
+    }
+
+    const requiredThrough = shiftCivilDate(current.scheduledFor, -1);
+    const run = (async () => {
+      await this.arreteCadreService.prepareHistoricComputations(
+        requiredThrough,
+        current.sourceRevision,
+      );
+      await this.arreteCadreService.recoverIncompleteHistoricComputations(
+        requiredThrough,
+        current.sourceRevision,
+      );
+    })();
+    this.historicBoundaryInFlight = {
+      scheduledFor: current.scheduledFor,
+      run,
+    };
+    try {
+      await run;
+    } finally {
+      if (this.historicBoundaryInFlight?.run === run) {
+        this.historicBoundaryInFlight = null;
+      }
+    }
+  }
+
   private async runHistoricIfDue(
     current: DailyComputationContext,
     now: Date,
   ): Promise<void> {
     const materializationVersion = current.materializationVersion;
+    const statisticArtifactRequired =
+      current.publicationMode === 'legacy'
+        ? isStatisticCacheArtifactRequired()
+        : false;
+    const statisticIdentity =
+      current.publicationMode === 'legacy' && statisticArtifactRequired
+        ? await this.getLegacyStatisticBoundary(current)
+        : null;
+    if (
+      current.publicationMode === 'legacy' &&
+      statisticArtifactRequired &&
+      !statisticIdentity
+    ) {
+      return;
+    }
     const historicIdentity = await this.getHistoricRunIdentity(
       current.sourceRevision,
       materializationVersion,
@@ -294,17 +365,33 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     const publicationIdentity =
       current.publicationMode === 'versioned'
         ? historicIdentity
-        : { publicationMode: 'legacy' as const, ...historicIdentity };
+        : {
+            publicationMode: 'legacy' as const,
+            ...historicIdentity,
+            ...(statisticIdentity
+              ? this.toStatisticRunIdentity(statisticIdentity)
+              : {}),
+          };
 
     const historicResult = await this.registry.executeDailyRun(
       NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
       current.scheduledFor,
       async () => {
-        const completedState =
-          await this.arreteCadreService.catchUpHistoricComputations(
-            shiftCivilDate(current.scheduledFor, -1),
-            current.sourceRevision,
-          );
+        const requiredThrough = shiftCivilDate(current.scheduledFor, -1);
+        const completedState = statisticIdentity
+          ? await this.arreteCadreService.catchUpHistoricComputations(
+              requiredThrough,
+              current.sourceRevision,
+              () => this.assertLegacyStatisticBoundary(statisticIdentity),
+              {
+                statisticRevision: statisticIdentity.statisticRevision,
+                currentPublishedDate: statisticIdentity.statisticPublishedDate,
+              },
+            )
+          : await this.arreteCadreService.catchUpHistoricComputations(
+              requiredThrough,
+              current.sourceRevision,
+            );
         await this.assertSourceRevision(current.sourceRevision);
         const completedIdentity = buildHistoricRunIdentity(completedState, {
           sourceRevision: current.sourceRevision,
@@ -341,6 +428,69 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
         );
       }
     }
+  }
+
+  private async getLegacyStatisticBoundary(
+    current: DailyComputationContext,
+  ): Promise<StatisticCacheReadyIdentity | null> {
+    const statisticIdentity =
+      await this.statisticCacheReadiness.getReadyPublication(
+        current.scheduledFor,
+        current.sourceRevision,
+      );
+    if (!statisticIdentity) {
+      return null;
+    }
+    const datagouvSucceeded = await this.registry.hasSucceeded(
+      DATAGOUV_DAILY_JOB_KEY,
+      current.scheduledFor,
+      {
+        publicationMode: 'legacy',
+        sourceRevision: current.sourceRevision,
+        ...this.toStatisticRunIdentity(statisticIdentity),
+      },
+    );
+    return datagouvSucceeded ? statisticIdentity : null;
+  }
+
+  private async assertLegacyStatisticBoundary(
+    expected: StatisticCacheReadyIdentity,
+    now = new Date(),
+  ): Promise<void> {
+    const currentBusinessDate = getScheduledCivilDate(
+      now,
+      NATIONAL_COMPUTE_START_HOUR,
+    );
+    if (currentBusinessDate > expected.statisticPublishedDate) {
+      throw new Error(
+        `Statistic boundary ${expected.statisticPublishedDate} expired at business date ${currentBusinessDate}`,
+      );
+    }
+    await this.assertSourceRevision(expected.sourceRevision);
+    await this.statisticCacheReadiness.assertReadyPublication(expected);
+    const datagouvSucceeded = await this.registry.hasSucceeded(
+      DATAGOUV_DAILY_JOB_KEY,
+      expected.statisticPublishedDate,
+      {
+        publicationMode: 'legacy',
+        sourceRevision: expected.sourceRevision,
+        ...this.toStatisticRunIdentity(expected),
+      },
+    );
+    if (!datagouvSucceeded) {
+      throw new Error(
+        `Datagouv boundary changed for ${expected.statisticPublishedDate}/${expected.sourceRevision}`,
+      );
+    }
+  }
+
+  private toStatisticRunIdentity(identity: StatisticCacheReadyIdentity) {
+    return {
+      statisticCachePublicationId: identity.publicationId,
+      statisticRevision: identity.statisticRevision,
+      statisticPublishedDate: identity.statisticPublishedDate,
+      statisticFingerprint: identity.statisticFingerprint,
+    };
   }
 
   private async assertSourceRevision(expected: string): Promise<void> {

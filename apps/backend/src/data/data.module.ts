@@ -8,6 +8,7 @@ import { Region } from '@shared/entities/region.entity';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { StatisticCommune } from '@shared/entities/statistic_commune.entity';
 import { Commune } from '@shared/entities/commune.entity';
+import { StatisticCacheArtifactService } from './statistic-cache-artifact.service';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { Commune } from '@shared/entities/commune.entity';
     ]),
   ],
   controllers: [DataController],
-  providers: [DataService],
+  providers: [DataService, StatisticCacheArtifactService],
   exports: [DataService],
 })
 export class DataModule {}

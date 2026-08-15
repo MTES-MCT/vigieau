@@ -10,8 +10,11 @@ import {
   moveOperationalReferences,
   parseCliOptions,
   RECONCILIATION_REPORT_VERSION,
+  SANDRE_OPERATION_REPORT_VERSION,
   releaseReconciliationResources,
+  rollbackAndReleaseQueryRunner,
   releaseSandreGlobalLock,
+  verifySandrePostSafeConvergence,
 } from './reconcile-sandre-zones';
 import { fingerprint } from '../zone_alerte/sandre-zone-reconciliation';
 
@@ -38,8 +41,10 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
       apply: false,
       departments: ['31', '65'],
       mappingPairs: [],
+      operationPlanPath: null,
       recordDecisions: false,
       reportPath: null,
+      verifyPostSafe: false,
     });
   });
 
@@ -60,8 +65,10 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
         { oldZoneId: 16581, newZoneId: 16773 },
         { oldZoneId: 16582, newZoneId: 16772 },
       ],
+      operationPlanPath: null,
       recordDecisions: true,
       reportPath: null,
+      verifyPostSafe: false,
     });
   });
 
@@ -98,6 +105,47 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     ).toThrow('--apply and --dry-run are mutually exclusive');
   });
 
+  it('parses an audited operation plan only in dry-run mode', () => {
+    expect(parseCliOptions(['--plan', 'plans/sandre.json'])).toEqual({
+      apply: false,
+      departments: [],
+      mappingPairs: [],
+      operationPlanPath: 'plans/sandre.json',
+      recordDecisions: false,
+      reportPath: null,
+      verifyPostSafe: false,
+    });
+    expect(() =>
+      parseCliOptions(['--plan', 'plans/sandre.json', '--department', '2A']),
+    ).toThrow('--plan cannot be combined');
+  });
+
+  it('parses post-safe verification as a report-only read', () => {
+    expect(
+      parseCliOptions(['--verify-post-safe', '--report', '/tmp/approved.json']),
+    ).toEqual({
+      apply: false,
+      departments: [],
+      mappingPairs: [],
+      operationPlanPath: null,
+      recordDecisions: false,
+      reportPath: '/tmp/approved.json',
+      verifyPostSafe: true,
+    });
+    expect(() => parseCliOptions(['--verify-post-safe'])).toThrow(
+      '--verify-post-safe requires --report',
+    );
+    expect(() =>
+      parseCliOptions([
+        '--verify-post-safe',
+        '--report',
+        '/tmp/approved.json',
+        '--department',
+        '2A',
+      ]),
+    ).toThrow('accepts only an approved --report');
+  });
+
   it('binds reports to the non-secret database target', () => {
     const preprodFingerprint = currentTargetFingerprint();
     process.env.DATABASE_NAME = 'vigieau-prod';
@@ -107,7 +155,111 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
   });
 
   it('invalidates reports created with the previous fingerprint semantics', () => {
-    expect(RECONCILIATION_REPORT_VERSION).toBe(5);
+    expect(RECONCILIATION_REPORT_VERSION).toBe(6);
+    expect(SANDRE_OPERATION_REPORT_VERSION).toBe(3);
+  });
+
+  it('verifies exact post-safe snapshot and global health convergence', async () => {
+    const snapshot = {
+      departmentCode: '2A',
+      snapshotHash:
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      sourceUpdatedAt: '2026-08-15',
+      featureCount: 2,
+      features: [],
+    };
+    const executor = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('LEFT JOIN LATERAL')) {
+          return [
+            {
+              departmentCode: '2A',
+              appliedSnapshotHash: snapshot.snapshotHash,
+              appliedSourceUpdatedAt: snapshot.sourceUpdatedAt,
+              appliedFeatureCount: 2,
+              lastAppliedAt: '2026-08-15T10:00:00.000Z',
+              blockedAt: null,
+              needsRecompute: false,
+              latestBatchStatus: 'applied',
+            },
+          ];
+        }
+        if (sql.includes('AS "arreteRestrictions"')) {
+          return [
+            {
+              arreteRestrictions: 0,
+              arreteCadres: 0,
+              customizations: 0,
+            },
+          ];
+        }
+        return [
+          {
+            totalDepartments: 101,
+            trackedDepartments: 101,
+            staleDepartments: 0,
+            forcedAuditCompletedDepartments: 101,
+            appliedDepartments: 101,
+            staleAppliedDepartments: 0,
+            pendingApplicationDepartments: 0,
+            blockedDepartments: 0,
+            recomputePendingDepartments: 0,
+            failedBatches: 0,
+            blockedBatches: 0,
+          },
+        ];
+      }),
+    };
+
+    const verification = await verifySandrePostSafeConvergence(
+      executor,
+      [snapshot],
+      {
+        staleAfterSeconds: 30 * 60 * 60,
+        forceFullAuditAfter: new Date('2026-08-14T00:00:00.000Z'),
+      },
+    );
+
+    expect(verification.health.totalDepartments).toBe(101);
+    expect(verification.invalidReferences.total).toBe(0);
+    expect(verification.departments).toEqual([
+      expect.objectContaining({
+        departmentCode: '2A',
+        latestBatchStatus: 'applied',
+      }),
+    ]);
+  });
+
+  it('rejects post-safe verification while a plan department is blocked', async () => {
+    const snapshot = {
+      departmentCode: '49',
+      snapshotHash:
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      sourceUpdatedAt: '2026-08-15',
+      featureCount: 1,
+      features: [],
+    };
+    const executor = {
+      query: jest.fn().mockResolvedValue([
+        {
+          departmentCode: '49',
+          appliedSnapshotHash: snapshot.snapshotHash,
+          appliedSourceUpdatedAt: snapshot.sourceUpdatedAt,
+          appliedFeatureCount: 1,
+          lastAppliedAt: '2026-08-15T10:00:00.000Z',
+          blockedAt: '2026-08-15T10:01:00.000Z',
+          needsRecompute: false,
+          latestBatchStatus: 'blocked',
+        },
+      ]),
+    };
+
+    await expect(
+      verifySandrePostSafeConvergence(executor, [snapshot], {
+        staleAfterSeconds: 30 * 60 * 60,
+        forceFullAuditAfter: new Date('2026-08-14T00:00:00.000Z'),
+      }),
+    ).rejects.toThrow('has not converged for department 49');
   });
 
   it('counts only references attached to operational parent orders', async () => {
@@ -453,6 +605,80 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     ).resolves.toBeUndefined();
     expect(queryRunner.query).not.toHaveBeenCalled();
     expect(queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the runner without masking a primary error when rollback fails', async () => {
+    const primaryError = new Error('business invariant failed');
+    const rollbackError = new Error('rollback failed');
+    const queryRunner = {
+      isTransactionActive: true,
+      rollbackTransaction: jest.fn().mockRejectedValue(rollbackError),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+    const consoleError = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    const operation = async () => {
+      let operationError: unknown;
+      try {
+        throw primaryError;
+      } catch (error) {
+        operationError = error;
+        throw error;
+      } finally {
+        await rollbackAndReleaseQueryRunner(
+          queryRunner as any,
+          operationError,
+          'test',
+        );
+      }
+    };
+
+    await expect(operation()).rejects.toBe(primaryError);
+    expect(queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(
+      '[sandre-reconcile] test cleanup failed',
+      rollbackError,
+    );
+  });
+
+  it('keeps a primary error when releasing the transaction runner fails', async () => {
+    const primaryError = new Error('business invariant failed');
+    const releaseError = new Error('release failed');
+    const queryRunner = {
+      isTransactionActive: true,
+      rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn().mockRejectedValue(releaseError),
+    };
+    const consoleError = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    const operation = async () => {
+      let operationError: unknown;
+      try {
+        throw primaryError;
+      } catch (error) {
+        operationError = error;
+        throw error;
+      } finally {
+        await rollbackAndReleaseQueryRunner(
+          queryRunner as any,
+          operationError,
+          'test',
+        );
+      }
+    };
+
+    await expect(operation()).rejects.toBe(primaryError);
+    expect(queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(
+      '[sandre-reconcile] test cleanup failed',
+      releaseError,
+    );
   });
 
   afterEach(() => {

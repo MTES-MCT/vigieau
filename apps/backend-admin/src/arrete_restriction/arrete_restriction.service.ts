@@ -2532,8 +2532,35 @@ export class ArreteRestrictionService {
   async catchUpHistoricComputations(
     requiredThrough: string,
     expectedSourceRevision?: string,
+    assertBoundary?: () => Promise<void>,
+    expectedStatisticPublication?: {
+      statisticRevision: string;
+      currentPublishedDate: string;
+    },
   ) {
     return this.zoneAlerteComputedService.computeHistoricPersistently(
+      requiredThrough,
+      expectedSourceRevision,
+      assertBoundary,
+      expectedStatisticPublication,
+    );
+  }
+
+  async prepareHistoricComputations(
+    requiredThrough: string,
+    expectedSourceRevision: string,
+  ): Promise<void> {
+    await this.zoneAlerteComputedService.prepareHistoricStatisticsPublication(
+      requiredThrough,
+      expectedSourceRevision,
+    );
+  }
+
+  async recoverIncompleteHistoricComputations(
+    requiredThrough: string,
+    expectedSourceRevision: string,
+  ): Promise<string[]> {
+    return this.zoneAlerteComputedService.recoverIncompleteHistoricSnapshots(
       requiredThrough,
       expectedSourceRevision,
     );

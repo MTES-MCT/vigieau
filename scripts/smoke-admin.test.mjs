@@ -74,6 +74,7 @@ const healthySandreSynchronization = {
     appliedDepartments: 101,
     staleAppliedDepartments: 0,
     pendingApplicationDepartments: 0,
+    recomputePendingDepartments: 0,
     blockedDepartments: 0,
     failedBatches: 0,
     blockedBatches: 0,
@@ -298,6 +299,24 @@ test("legacy mode keeps SANDRE synchronization strict", async () => {
 
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr, /SANDRE synchronization is not healthy/);
+});
+
+test("admin smoke rejects pending SANDRE recomputes", async () => {
+  const result = await runSmoke({
+    expectedMode: "legacy",
+    zoneStatus: 503,
+    zonePublication: legacyZonePublication(),
+    sandreSynchronization: {
+      ...healthySandreSynchronization,
+      summary: {
+        ...healthySandreSynchronization.summary,
+        recomputePendingDepartments: 1,
+      },
+    },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /recomputePendingDepartments/);
 });
 
 test("legacy mode keeps disabled SANDRE references strict", async () => {

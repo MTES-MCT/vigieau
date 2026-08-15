@@ -26,6 +26,9 @@ const freshnessPolicy = getStatisticFreshnessPolicy({
 });
 const { maximumLagDays } = freshnessPolicy;
 const sampleCount = Number(process.env.VIGIEAU_STATISTICS_SAMPLE_COUNT || 4);
+const minimumInstanceCount = Number(
+  process.env.VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT || 2,
+);
 const expectedDepartmentCount = Number(
   process.env.VIGIEAU_EXPECTED_DEPARTMENT_COUNT || 101,
 );
@@ -35,6 +38,8 @@ const expectedCommuneCount = Number(
 const communeCode = process.env.VIGIEAU_STATISTICS_COMMUNE_CODE || "65440";
 const allowMissingHealth =
   process.env.VIGIEAU_ALLOW_MISSING_STATISTICS_HEALTH === "true";
+const expectStatisticArtifact =
+  process.env.VIGIEAU_EXPECT_STATISTIC_ARTIFACT === "true";
 const runningSnapshotMaximumAgeMs = 15 * 60 * 1000;
 
 function assertInteger(value, minimum, name) {
@@ -48,6 +53,11 @@ assertInteger(timeoutMs, 1, "VIGIEAU_SMOKE_TIMEOUT_MS");
 assertInteger(lookbackDays, 1, "VIGIEAU_STATISTICS_LOOKBACK_DAYS");
 assertInteger(maximumLagDays, 0, "VIGIEAU_STATISTICS_MAXIMUM_LAG_DAYS");
 assertInteger(sampleCount, 2, "VIGIEAU_STATISTICS_SAMPLE_COUNT");
+assertInteger(
+  minimumInstanceCount,
+  1,
+  "VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT",
+);
 assertInteger(expectedDepartmentCount, 1, "VIGIEAU_EXPECTED_DEPARTMENT_COUNT");
 assertInteger(expectedCommuneCount, 1, "VIGIEAU_EXPECTED_COMMUNE_COUNT");
 assert.match(
@@ -232,25 +242,64 @@ for (let index = 0; index < sampleCount; index += 1) {
       null,
       "The statistics cache reports an error",
     );
+    if (expectStatisticArtifact) {
+      assert.equal(
+        healthResponse.status,
+        200,
+        "The immutable statistics artifact is not current",
+      );
+      assert.equal(
+        health.currentFresh,
+        true,
+        "The immutable statistics artifact is not current",
+      );
+      assert.match(
+        String(health.artifactPublicationId || ""),
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+        "The statistics artifact publication id is missing or invalid",
+      );
+      assert.equal(
+        typeof health.historicComplete,
+        "boolean",
+        "The statistics artifact does not report historic completeness",
+      );
+      assertInteger(
+        health.artifactLiveInstances,
+        minimumInstanceCount,
+        "Statistics artifact live instance count",
+      );
+      assertInteger(
+        health.artifactReadyInstances,
+        minimumInstanceCount,
+        "Statistics artifact ready instance count",
+      );
+      assert.equal(
+        health.artifactReadyInstances,
+        health.artifactLiveInstances,
+        "Not every live public API instance acknowledged the active statistics artifact",
+      );
+      if (health.historicComplete) {
+        assert.equal(
+          health.historicDirtyFrom,
+          null,
+          "A historically complete artifact still reports a dirty range",
+        );
+        assert.equal(
+          health.historicDirtyThrough,
+          null,
+          "A historically complete artifact still reports a dirty range",
+        );
+        assert.equal(
+          health.incompleteSnapshotCount,
+          0,
+          "A historically complete artifact still reports an incomplete snapshot",
+        );
+      }
+    }
   }
 
-  const degradation =
-    healthResponse.status !== 503
-      ? null
-      : health.lagDays > 0
-        ? "current-publication-lag"
-        : health.historicDirtyFrom
-          ? "historic-rebuild"
-          : health.lastError
-            ? "cache-error"
-            : "cache-refresh";
-
-  if (healthResponse.status === 503) {
-    assert.equal(
-      degradation,
-      "historic-rebuild",
-      `Unexpected statistics degradation: ${degradation}`,
-    );
+  let healthyIncompleteSnapshot = false;
+  if (health) {
     const incompleteCount = health.incompleteSnapshotCount;
     const incompleteSnapshot = health.oldestIncompleteSnapshot;
     const noIncompleteSnapshot =
@@ -260,13 +309,21 @@ for (let index = 0; index < sampleCount; index += 1) {
     );
     const runningSnapshotAgeMs =
       statisticNow.getTime() - runningSnapshotUpdatedAt;
-    const singleRecentRunningSnapshot =
+    const snapshotDateIsExpected =
+      incompleteSnapshot?.date === health.currentPublishedDate ||
+      (!freshnessPolicy.afterDeadline &&
+        health.currentPublishedDate === freshnessPolicy.expectedPublishedDate &&
+        incompleteSnapshot?.date === freshnessPolicy.today) ||
+      (health.historicDirtyFrom !== null &&
+        health.historicDirtyThrough !== null &&
+        incompleteSnapshot?.date >= health.historicDirtyFrom &&
+        incompleteSnapshot?.date <= health.historicDirtyThrough);
+    healthyIncompleteSnapshot =
       incompleteCount === 1 &&
       incompleteSnapshot?.scope === "national" &&
-      incompleteSnapshot?.status === "running" &&
+      ["running", "ready"].includes(incompleteSnapshot?.status) &&
       /^\d{4}-\d{2}-\d{2}$/.test(incompleteSnapshot.date) &&
-      incompleteSnapshot.date >= health.historicDirtyFrom &&
-      incompleteSnapshot.date <= health.historicDirtyThrough &&
+      snapshotDateIsExpected &&
       Number.isInteger(incompleteSnapshot.processedCommuneCount) &&
       Number.isInteger(incompleteSnapshot.expectedCommuneCount) &&
       incompleteSnapshot.processedCommuneCount >= 0 &&
@@ -278,8 +335,28 @@ for (let index = 0; index < sampleCount; index += 1) {
       runningSnapshotAgeMs >= -60_000 &&
       runningSnapshotAgeMs <= runningSnapshotMaximumAgeMs;
     assert.ok(
-      noIncompleteSnapshot || singleRecentRunningSnapshot,
-      "The historic rebuild contains an unhealthy incomplete snapshot",
+      noIncompleteSnapshot || healthyIncompleteSnapshot,
+      "The statistics cache reports an unhealthy incomplete snapshot",
+    );
+  }
+
+  const degradation =
+    healthResponse.status !== 503
+      ? null
+      : health.lagDays > 0
+        ? "current-publication-lag"
+        : health.lastError
+          ? "cache-error"
+          : health.historicDirtyFrom
+            ? "historic-rebuild"
+            : healthyIncompleteSnapshot
+              ? "current-recompute"
+              : "cache-refresh";
+
+  if (healthResponse.status === 503) {
+    assert.ok(
+      ["historic-rebuild", "current-recompute"].includes(degradation),
+      `Unexpected statistics degradation: ${degradation}`,
     );
   }
 
@@ -295,16 +372,6 @@ for (let index = 0; index < sampleCount; index += 1) {
 
 const reference = samples[0];
 for (const sample of samples.slice(1)) {
-  assert.equal(
-    sample.healthStatus,
-    reference.healthStatus,
-    "Statistics health status differs between API instances",
-  );
-  assert.equal(
-    sample.degradation,
-    reference.degradation,
-    "Statistics health degradation differs between API instances",
-  );
   assert.deepEqual(
     sample.department,
     reference.department,
@@ -322,15 +389,13 @@ for (const sample of samples.slice(1)) {
       "expectedPublishedDate",
       "publicationDeadline",
       "lagDays",
-      "historicDirtyFrom",
-      "historicDirtyThrough",
-      "incompleteSnapshotCount",
       "firstDate",
       "latestDate",
       "dateCount",
       "departmentCount",
       "communeCount",
       "fingerprint",
+      ...(expectStatisticArtifact ? ["artifactPublicationId"] : []),
     ]) {
       assert.equal(
         sample.health[field],
@@ -338,11 +403,6 @@ for (const sample of samples.slice(1)) {
         `Statistics health field ${field} differs between API instances`,
       );
     }
-    assert.deepEqual(
-      sample.health.oldestIncompleteSnapshot,
-      reference.health.oldestIncompleteSnapshot,
-      "Statistics health incomplete snapshot differs between API instances",
-    );
   }
 }
 
@@ -378,7 +438,9 @@ console.log(
     deadline: freshnessPolicy.deadline,
     afterDeadline: freshnessPolicy.afterDeadline,
     maximumLagDays,
-    sampleCount,
+    sampleCount: samples.length,
+    liveInstanceCount: reference.health?.artifactLiveInstances ?? null,
+    readyInstanceCount: reference.health?.artifactReadyInstances ?? null,
     fingerprint: reference.health?.fingerprint ?? null,
     departmentCount: expectedDepartmentCount,
     communeCount: expectedCommuneCount,

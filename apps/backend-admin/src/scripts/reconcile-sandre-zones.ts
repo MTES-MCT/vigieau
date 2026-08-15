@@ -37,11 +37,28 @@ import {
 } from '../zone_alerte/sandre-zone-reconciliation';
 import {
   isStrictOneToOneGeometry,
+  parseSandreForceFullAuditAfter,
+  parseSandreZoneSyncMode,
   STRICT_GEOMETRY_THRESHOLDS,
   StrictGeometryEvidence,
 } from '../zone_alerte/sandre-zone-governance';
+import {
+  applySandreReconciliationActions,
+  auditSandreReconciliationPlan,
+  auditSandreSyncExpectations,
+  loadSandreReconciliationState,
+  lockSandreReconciliationPlan,
+  OfficialSandreGeometry,
+  OfficialSandreSnapshot,
+  parseSandreReconciliationPlan,
+  reconciliationPlanFingerprint,
+  SandreActionAudit,
+  SandreReconciliationPlan,
+  SandreSyncExpectationEvidence,
+} from '../zone_alerte/sandre-zone-reconciliation-actions';
 
-export const RECONCILIATION_REPORT_VERSION = 5;
+export const RECONCILIATION_REPORT_VERSION = 6;
+export const SANDRE_OPERATION_REPORT_VERSION = 3;
 const MAX_SOURCE_SIZE = 10 * 1024 * 1024;
 const HISTORICAL_RECOMPUTE_LOCK_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -49,8 +66,10 @@ export interface CliOptions {
   apply: boolean;
   departments: string[];
   mappingPairs: ManualMappingPair[];
+  operationPlanPath: string | null;
   recordDecisions: boolean;
   reportPath: string | null;
+  verifyPostSafe: boolean;
 }
 
 export interface ManualMappingPair {
@@ -113,6 +132,25 @@ interface ReconciliationReport {
   reportFingerprint: string;
 }
 
+interface SandreOperationReport {
+  kind: 'audited_sandre_operation';
+  version: number;
+  generatedAt: string;
+  targetFingerprint: string;
+  plan: SandreReconciliationPlan;
+  planFingerprint: string;
+  officialSource: OperationOfficialSourceEvidence;
+  syncEvidence: SandreSyncExpectationEvidence[];
+  audits: SandreActionAudit[];
+  database: {
+    beforeFingerprint: string;
+    afterFingerprint: string;
+    afterBusinessReferencesFingerprint: string;
+    historicalRecomputeFrom: string | null;
+  };
+  reportFingerprint: string;
+}
+
 interface Analysis {
   departments: DepartmentRow[];
   source: SourceEvidence;
@@ -136,9 +174,54 @@ export interface QueryExecutor {
   query(query: string, parameters?: any[]): Promise<any[]>;
 }
 
-interface RecomputeDebt {
+export interface RecomputeDebt {
   departmentId: number;
   revision: number;
+}
+
+interface OperationOfficialSource {
+  features: OfficialSandreGeometry[];
+  snapshots: OfficialSandreSnapshot[];
+}
+
+interface OperationOfficialSourceEvidence {
+  snapshots: Array<{
+    departmentCode: string;
+    snapshotHash: string;
+    sourceUpdatedAt: string | null;
+    featureCount: number;
+  }>;
+  fingerprint: string;
+}
+
+export interface SandrePostSafeVerification {
+  departments: Array<{
+    departmentCode: string;
+    appliedSnapshotHash: string;
+    appliedSourceUpdatedAt: string | null;
+    appliedFeatureCount: number;
+    lastAppliedAt: string;
+    latestBatchStatus: string;
+  }>;
+  invalidReferences: {
+    arreteRestrictions: number;
+    arreteCadres: number;
+    customizations: number;
+    total: number;
+  };
+  health: {
+    totalDepartments: number;
+    trackedDepartments: number;
+    staleDepartments: number;
+    forcedAuditCompletedDepartments: number;
+    appliedDepartments: number;
+    staleAppliedDepartments: number;
+    pendingApplicationDepartments: number;
+    blockedDepartments: number;
+    recomputePendingDepartments: number;
+    failedBatches: number;
+    blockedBatches: number;
+  };
 }
 
 interface ApplyMappingsResult {
@@ -179,8 +262,969 @@ export function currentTargetFingerprint(): string {
   });
 }
 
+async function rollbackTransactionPreservingError(
+  queryRunner: QueryRunner,
+  primaryError: unknown,
+  context: string,
+): Promise<void> {
+  if (!queryRunner.isTransactionActive) {
+    return;
+  }
+  try {
+    await queryRunner.rollbackTransaction();
+  } catch (cleanupError) {
+    if (primaryError !== undefined) {
+      console.error(
+        `[sandre-reconcile] ${context} rollback failed`,
+        cleanupError,
+      );
+      return;
+    }
+    throw cleanupError;
+  }
+}
+
+export async function rollbackAndReleaseQueryRunner(
+  queryRunner: QueryRunner,
+  primaryError: unknown,
+  context: string,
+): Promise<void> {
+  let cleanupError: unknown;
+  try {
+    await rollbackTransactionPreservingError(queryRunner, undefined, context);
+  } catch (error) {
+    cleanupError = error;
+  }
+  try {
+    await queryRunner.release();
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (!cleanupError) {
+    return;
+  }
+  if (primaryError !== undefined) {
+    console.error(`[sandre-reconcile] ${context} cleanup failed`, cleanupError);
+    return;
+  }
+  throw cleanupError;
+}
+
+async function runAuditedOperation(
+  options: CliOptions,
+  approvedReport: SandreOperationReport | null,
+): Promise<void> {
+  const plan = approvedReport
+    ? approvedReport.plan
+    : parseSandreReconciliationPlan(
+        JSON.parse(
+          await readFile(resolve(options.operationPlanPath!), 'utf8'),
+        ) as unknown,
+      );
+  if (
+    approvedReport &&
+    approvedReport.targetFingerprint !== currentTargetFingerprint()
+  ) {
+    throw new Error(
+      'The approved operation was generated for another database target',
+    );
+  }
+
+  const dataSource = createStandaloneDataSource();
+  await dataSource.initialize();
+  let globalLock: QueryRunner | null = null;
+  let operationError: unknown;
+  let recomputeDebts: RecomputeDebt[] = [];
+  let outcome: 'APPLIED' | 'ALREADY_APPLIED' | null = null;
+  try {
+    globalLock = await acquireSandreGlobalLock(dataSource);
+    const officialSource = await loadOperationOfficialSource(plan);
+    if (options.verifyPostSafe) {
+      if (!approvedReport) {
+        throw new Error('Missing approved Sandre operation report');
+      }
+      const queryRunner = dataSource.createQueryRunner();
+      await queryRunner.connect();
+      await queryRunner.startTransaction('REPEATABLE READ');
+      let verificationError: unknown;
+      try {
+        await queryRunner.query('SET TRANSACTION READ ONLY');
+        assertOfficialSourceMatchesReport(officialSource, approvedReport);
+        const currentSyncEvidence = await auditSandreSyncExpectations(
+          queryRunner,
+          plan,
+          officialSource.snapshots,
+        );
+        if (
+          fingerprint(currentSyncEvidence) !==
+          fingerprint(approvedReport.syncEvidence)
+        ) {
+          throw new Error(
+            'Sandre sync expectation evidence differs from the approved operation report',
+          );
+        }
+        const currentAudits = await auditSandreReconciliationPlan(
+          queryRunner,
+          plan,
+          officialSource.features,
+        );
+        if (currentAudits.some((audit) => audit.status !== 'already_applied')) {
+          throw new Error(
+            'Sandre reconciliation actions are not fully applied',
+          );
+        }
+        const currentState = await loadSandreReconciliationState(
+          queryRunner,
+          plan,
+        );
+        if (
+          operationBusinessReferencesFingerprint(currentState) !==
+          approvedReport.database.afterBusinessReferencesFingerprint
+        ) {
+          throw new Error(
+            'Sandre reconciliation business references differ from the approved result',
+          );
+        }
+        const verification = await verifySandrePostSafeConvergence(
+          queryRunner,
+          officialSource.snapshots,
+          getPostSafeHealthConfig(),
+        );
+        process.stdout.write(
+          `${JSON.stringify({
+            status: 'POST_SAFE_VERIFIED',
+            operationId: plan.operationId,
+            ...verification,
+          })}\n`,
+        );
+      } catch (error) {
+        verificationError = error;
+        throw error;
+      } finally {
+        await rollbackAndReleaseQueryRunner(
+          queryRunner,
+          verificationError,
+          'post-safe verification',
+        );
+      }
+      return;
+    }
+    if (!options.apply) {
+      const report = await simulateAuditedOperation(
+        dataSource,
+        plan,
+        officialSource,
+      );
+      const json = `${JSON.stringify(report, null, 2)}\n`;
+      if (options.reportPath) {
+        const reportPath = resolve(options.reportPath);
+        await writeReportFile(reportPath, json);
+        console.error(`[sandre-reconcile] report written to ${reportPath}`);
+      } else {
+        process.stdout.write(json);
+      }
+      return;
+    }
+
+    if (!approvedReport) {
+      throw new Error('Missing approved Sandre operation report');
+    }
+    const queryRunner = dataSource.createQueryRunner();
+    await queryRunner.connect();
+    let historicalLockAcquired = false;
+    let applyError: unknown;
+    try {
+      historicalLockAcquired = await acquireHistoricalRecomputeLock(
+        queryRunner,
+        approvedReport.database.historicalRecomputeFrom,
+      );
+      await queryRunner.startTransaction('SERIALIZABLE');
+      const departmentIds = [
+        ...new Set(approvedReport.audits.map((audit) => audit.departmentId)),
+      ].sort((left, right) => left - right);
+      for (const departmentId of departmentIds) {
+        await queryRunner.query(
+          "SELECT pg_advisory_xact_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
+          [departmentId],
+        );
+      }
+      await lockSandreReconciliationPlan(queryRunner, plan);
+      const transactionOfficialSource = await loadOperationOfficialSource(plan);
+      assertOfficialSourceUnchanged(
+        officialSource,
+        transactionOfficialSource,
+        'while opening the apply transaction',
+      );
+      assertOfficialSourceMatchesReport(
+        transactionOfficialSource,
+        approvedReport,
+      );
+      const currentSyncEvidence = await auditSandreSyncExpectations(
+        queryRunner,
+        plan,
+        transactionOfficialSource.snapshots,
+      );
+      if (
+        fingerprint(currentSyncEvidence) !==
+        fingerprint(approvedReport.syncEvidence)
+      ) {
+        throw new Error(
+          'Sandre sync expectation evidence differs from the approved operation report',
+        );
+      }
+      const currentAudits = await auditSandreReconciliationPlan(
+        queryRunner,
+        plan,
+        transactionOfficialSource.features,
+      );
+      if (currentAudits.every((audit) => audit.status === 'already_applied')) {
+        const currentState = await loadSandreReconciliationState(
+          queryRunner,
+          plan,
+        );
+        if (
+          fingerprint(currentState) !== approvedReport.database.afterFingerprint
+        ) {
+          throw new Error(
+            'Applied Sandre state differs from the approved operation report',
+          );
+        }
+        outcome = 'ALREADY_APPLIED';
+        recomputeDebts = await prepareSandreOperationRecomputeDebt(
+          queryRunner,
+          outcome,
+          departmentIds,
+          approvedReport.database.historicalRecomputeFrom,
+        );
+      } else {
+        const currentState = await loadSandreReconciliationState(
+          queryRunner,
+          plan,
+        );
+        if (
+          fingerprint(currentState) !==
+          approvedReport.database.beforeFingerprint
+        ) {
+          throw new Error(
+            'Locked database state differs from the approved operation report',
+          );
+        }
+        if (fingerprint(currentAudits) !== fingerprint(approvedReport.audits)) {
+          throw new Error(
+            'Reconciliation evidence differs from the approved operation report',
+          );
+        }
+        await applySandreReconciliationActions(queryRunner, currentAudits);
+        const finalAudits = await auditSandreReconciliationPlan(
+          queryRunner,
+          plan,
+          transactionOfficialSource.features,
+        );
+        if (finalAudits.some((audit) => audit.status !== 'already_applied')) {
+          throw new Error(
+            'Sandre reconciliation postconditions are incomplete',
+          );
+        }
+        const finalState = await loadSandreReconciliationState(
+          queryRunner,
+          plan,
+        );
+        if (
+          fingerprint(finalState) !== approvedReport.database.afterFingerprint
+        ) {
+          throw new Error(
+            'Final Sandre state differs from the approved operation report',
+          );
+        }
+        recomputeDebts = await prepareSandreOperationRecomputeDebt(
+          queryRunner,
+          'APPLIED',
+          departmentIds,
+          approvedReport.database.historicalRecomputeFrom,
+        );
+        outcome = 'APPLIED';
+      }
+      const confirmedOfficialSource = await loadOperationOfficialSource(plan);
+      assertOfficialSourceUnchanged(
+        transactionOfficialSource,
+        confirmedOfficialSource,
+        'during the apply transaction',
+      );
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      applyError = error;
+      await rollbackTransactionPreservingError(queryRunner, error, 'apply');
+      throw error;
+    } finally {
+      try {
+        await releaseReconciliationResources(
+          queryRunner,
+          historicalLockAcquired,
+        );
+      } catch (cleanupError) {
+        if (!applyError) {
+          throw cleanupError;
+        }
+        console.error('[sandre-reconcile] apply cleanup failed', cleanupError);
+      }
+    }
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    let cleanupError: unknown;
+    if (globalLock) {
+      try {
+        await releaseSandreGlobalLock(globalLock);
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    try {
+      await dataSource.destroy();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (cleanupError) {
+      if (!operationError) {
+        throw cleanupError;
+      }
+      console.error('[sandre-reconcile] cleanup failed', cleanupError);
+    }
+  }
+
+  const departmentIds = recomputeDebts.map((debt) => debt.departmentId);
+  try {
+    if (departmentIds.length > 0) {
+      await recomputeDepartments(departmentIds);
+      await clearRecomputeDebt(recomputeDebts);
+    }
+  } catch (error) {
+    process.stdout.write(
+      `${JSON.stringify({
+        status: 'APPLIED_RECOMPUTE_FAILED',
+        databaseStatus: outcome,
+        operationId: plan.operationId,
+        error: error instanceof Error ? error.message : String(error),
+      })}\n`,
+    );
+    throw error;
+  }
+  process.stdout.write(
+    `${JSON.stringify({
+      status: outcome,
+      operationId: plan.operationId,
+      actions: plan.actions.length,
+      recomputedDepartments: departmentIds,
+    })}\n`,
+  );
+}
+
+async function simulateAuditedOperation(
+  dataSource: DataSource,
+  plan: SandreReconciliationPlan,
+  officialSource: OperationOfficialSource,
+): Promise<SandreOperationReport> {
+  const previewRunner = dataSource.createQueryRunner();
+  await previewRunner.connect();
+  let syncEvidence: SandreSyncExpectationEvidence[];
+  let audits: SandreActionAudit[];
+  let beforeState: Awaited<ReturnType<typeof loadSandreReconciliationState>>;
+  let previewError: unknown;
+  try {
+    await previewRunner.startTransaction('REPEATABLE READ');
+    await previewRunner.query('SET TRANSACTION READ ONLY');
+    syncEvidence = await auditSandreSyncExpectations(
+      previewRunner,
+      plan,
+      officialSource.snapshots,
+    );
+    audits = await auditSandreReconciliationPlan(
+      previewRunner,
+      plan,
+      officialSource.features,
+    );
+    beforeState = await loadSandreReconciliationState(previewRunner, plan);
+  } catch (error) {
+    previewError = error;
+    throw error;
+  } finally {
+    await rollbackAndReleaseQueryRunner(
+      previewRunner,
+      previewError,
+      'dry-run preview',
+    );
+  }
+
+  const historicalRecomputeFrom = earliestOperationRestrictionDate(beforeState);
+  const departmentIds = [
+    ...new Set(audits.map((audit) => audit.departmentId)),
+  ].sort((left, right) => left - right);
+  const queryRunner = dataSource.createQueryRunner();
+  await queryRunner.connect();
+  let historicalLockAcquired = false;
+  let simulationError: unknown;
+  let afterState: Awaited<ReturnType<typeof loadSandreReconciliationState>>;
+  try {
+    historicalLockAcquired = await acquireHistoricalRecomputeLock(
+      queryRunner,
+      historicalRecomputeFrom,
+    );
+    await queryRunner.startTransaction('SERIALIZABLE');
+    for (const departmentId of departmentIds) {
+      await queryRunner.query(
+        "SELECT pg_advisory_xact_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
+        [departmentId],
+      );
+    }
+    await lockSandreReconciliationPlan(queryRunner, plan);
+
+    const transactionOfficialSource = await loadOperationOfficialSource(plan);
+    assertOfficialSourceUnchanged(
+      officialSource,
+      transactionOfficialSource,
+      'while opening the dry-run transaction',
+    );
+    const transactionSyncEvidence = await auditSandreSyncExpectations(
+      queryRunner,
+      plan,
+      transactionOfficialSource.snapshots,
+    );
+    const transactionAudits = await auditSandreReconciliationPlan(
+      queryRunner,
+      plan,
+      transactionOfficialSource.features,
+    );
+    const transactionBeforeState = await loadSandreReconciliationState(
+      queryRunner,
+      plan,
+    );
+    if (
+      fingerprint(transactionSyncEvidence) !== fingerprint(syncEvidence) ||
+      fingerprint(transactionAudits) !== fingerprint(audits) ||
+      fingerprint(transactionBeforeState) !== fingerprint(beforeState)
+    ) {
+      throw new Error('Sandre operation changed while opening its dry-run');
+    }
+
+    await applySandreReconciliationActions(queryRunner, transactionAudits);
+    const finalAudits = await auditSandreReconciliationPlan(
+      queryRunner,
+      plan,
+      transactionOfficialSource.features,
+    );
+    if (finalAudits.some((audit) => audit.status !== 'already_applied')) {
+      throw new Error('Sandre dry-run postconditions are incomplete');
+    }
+    afterState = await loadSandreReconciliationState(queryRunner, plan);
+
+    const confirmedOfficialSource = await loadOperationOfficialSource(plan);
+    assertOfficialSourceUnchanged(
+      transactionOfficialSource,
+      confirmedOfficialSource,
+      'during the dry-run transaction',
+    );
+    await queryRunner.rollbackTransaction();
+
+    await queryRunner.startTransaction('REPEATABLE READ');
+    await queryRunner.query('SET TRANSACTION READ ONLY');
+    const restoredState = await loadSandreReconciliationState(
+      queryRunner,
+      plan,
+    );
+    if (fingerprint(restoredState) !== fingerprint(beforeState)) {
+      throw new Error(
+        'Sandre dry-run did not restore its initial database state',
+      );
+    }
+    await queryRunner.rollbackTransaction();
+  } catch (error) {
+    simulationError = error;
+    await rollbackTransactionPreservingError(
+      queryRunner,
+      error,
+      'dry-run simulation',
+    );
+    throw error;
+  } finally {
+    try {
+      await releaseReconciliationResources(queryRunner, historicalLockAcquired);
+    } catch (cleanupError) {
+      if (!simulationError) {
+        throw cleanupError;
+      }
+      console.error('[sandre-reconcile] dry-run cleanup failed', cleanupError);
+    }
+  }
+
+  return createOperationReport(
+    plan,
+    officialSource,
+    syncEvidence,
+    audits,
+    beforeState,
+    afterState,
+  );
+}
+
+async function loadOperationOfficialSource(
+  plan: SandreReconciliationPlan,
+): Promise<OperationOfficialSource> {
+  const canonicalActions = plan.actions.filter(
+    (action) => action.strategy === 'canonicalize_duplicate',
+  );
+  const departmentCodes = [
+    ...new Set([
+      ...canonicalActions.map((action) => action.departmentCode),
+      ...(plan.syncExpectations ?? []).map(
+        (expectation) => expectation.departmentCode,
+      ),
+    ]),
+  ].sort();
+  const snapshots = await mapWithConcurrency(
+    departmentCodes,
+    2,
+    async (departmentCode): Promise<OfficialSandreSnapshot> => {
+      const snapshot = await fetchOfficialSnapshot(departmentCode);
+      return {
+        departmentCode,
+        featureCount: snapshot.featureCount,
+        snapshotHash: snapshot.snapshotHash,
+        sourceUpdatedAt: snapshot.sourceUpdatedAt,
+        features: snapshot.features.map((feature) => ({
+          codeSandre: feature.codeSandre,
+          gid: feature.gid,
+          departmentCode: feature.departmentCode,
+          type: feature.type,
+          status: feature.status,
+          payloadHash: feature.payloadHash,
+          basinCode: feature.basinCode,
+          geometry: feature.geometry,
+        })),
+      };
+    },
+  );
+  return {
+    features: snapshots.flatMap((snapshot) => snapshot.features),
+    snapshots,
+  };
+}
+
+function operationOfficialSourceEvidence(
+  source: OperationOfficialSource,
+): OperationOfficialSourceEvidence {
+  const snapshots = source.snapshots
+    .map((snapshot) => ({
+      departmentCode: snapshot.departmentCode,
+      snapshotHash: snapshot.snapshotHash,
+      sourceUpdatedAt: snapshot.sourceUpdatedAt,
+      featureCount: snapshot.featureCount,
+    }))
+    .sort((left, right) =>
+      left.departmentCode.localeCompare(right.departmentCode),
+    );
+  return { snapshots, fingerprint: fingerprint(snapshots) };
+}
+
+function assertOfficialSourceUnchanged(
+  expected: OperationOfficialSource,
+  current: OperationOfficialSource,
+  context: string,
+): void {
+  const expectedEvidence = operationOfficialSourceEvidence(expected);
+  const currentEvidence = operationOfficialSourceEvidence(current);
+  if (expectedEvidence.fingerprint !== currentEvidence.fingerprint) {
+    throw new Error(`Sandre official source changed ${context}`);
+  }
+}
+
+function assertOfficialSourceMatchesReport(
+  source: OperationOfficialSource,
+  report: SandreOperationReport,
+): void {
+  const evidence = operationOfficialSourceEvidence(source);
+  if (
+    evidence.fingerprint !== report.officialSource.fingerprint ||
+    fingerprint(evidence.snapshots) !==
+      fingerprint(report.officialSource.snapshots)
+  ) {
+    throw new Error(
+      'Sandre official source differs from the approved operation report',
+    );
+  }
+}
+
+export async function verifySandrePostSafeConvergence(
+  executor: QueryExecutor,
+  snapshots: OfficialSandreSnapshot[],
+  config: { staleAfterSeconds: number; forceFullAuditAfter: Date },
+): Promise<SandrePostSafeVerification> {
+  const departmentCodes = snapshots
+    .map((snapshot) => snapshot.departmentCode)
+    .sort();
+  if (
+    departmentCodes.length === 0 ||
+    new Set(departmentCodes).size !== departmentCodes.length
+  ) {
+    throw new Error('Invalid post-safe department scope');
+  }
+  const departmentRows = await executor.query(
+    `
+      SELECT
+        department.code AS "departmentCode",
+        state."appliedSnapshotHash",
+        state."appliedSourceUpdatedAt",
+        state."appliedFeatureCount",
+        state."lastAppliedAt",
+        state."blockedAt",
+        state."needsRecompute",
+        latest.status AS "latestBatchStatus"
+      FROM departement department
+      LEFT JOIN sandre_zone_sync_state state
+        ON state."departementId" = department.id
+      LEFT JOIN LATERAL (
+        SELECT batch.status
+        FROM sandre_zone_sync_batch batch
+        WHERE batch.kind = 'snapshot'
+          AND batch."departementId" = department.id
+        ORDER BY batch."startedAt" DESC, batch.id DESC
+        LIMIT 1
+      ) latest ON true
+      WHERE department.code = ANY($1::text[])
+      ORDER BY department.code
+    `,
+    [departmentCodes],
+  );
+  if (departmentRows.length !== snapshots.length) {
+    throw new Error(
+      `Post-safe state covers ${departmentRows.length}/${snapshots.length} departments`,
+    );
+  }
+  const departments = snapshots
+    .map((snapshot) => {
+      const row = departmentRows.find(
+        (candidate) => candidate.departmentCode === snapshot.departmentCode,
+      );
+      if (
+        !row ||
+        row.blockedAt !== null ||
+        row.needsRecompute !== false ||
+        row.appliedSnapshotHash !== snapshot.snapshotHash ||
+        (row.appliedSourceUpdatedAt ?? null) !== snapshot.sourceUpdatedAt ||
+        Number(row.appliedFeatureCount) !== snapshot.featureCount ||
+        !row.lastAppliedAt ||
+        row.latestBatchStatus !== 'applied'
+      ) {
+        throw new Error(
+          `Post-safe synchronization has not converged for department ${snapshot.departmentCode}`,
+        );
+      }
+      return {
+        departmentCode: snapshot.departmentCode,
+        appliedSnapshotHash: row.appliedSnapshotHash,
+        appliedSourceUpdatedAt: row.appliedSourceUpdatedAt ?? null,
+        appliedFeatureCount: Number(row.appliedFeatureCount),
+        lastAppliedAt: new Date(row.lastAppliedAt).toISOString(),
+        latestBatchStatus: row.latestBatchStatus,
+      };
+    })
+    .sort((left, right) =>
+      left.departmentCode.localeCompare(right.departmentCode),
+    );
+
+  const [referenceRow] = await executor.query(`
+    SELECT
+      (
+        SELECT count(*)::integer
+        FROM restriction reference
+        JOIN arrete_restriction parent
+          ON parent.id = reference."arreteRestrictionId"
+        JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
+        WHERE zone.disabled = true
+          AND parent.statut IN ('a_venir', 'publie')
+      ) AS "arreteRestrictions",
+      (
+        SELECT count(*)::integer
+        FROM arrete_cadre_zone_alerte reference
+        JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
+        JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
+        WHERE zone.disabled = true
+          AND parent.statut IN ('a_venir', 'publie')
+      ) AS "arreteCadres",
+      (
+        SELECT count(*)::integer
+        FROM arrete_cadre_zone_alerte_communes reference
+        JOIN arrete_cadre parent ON parent.id = reference."arreteCadreId"
+        JOIN zone_alerte zone ON zone.id = reference."zoneAlerteId"
+        WHERE zone.disabled = true
+          AND parent.statut IN ('a_venir', 'publie')
+      ) AS customizations
+  `);
+  const invalidReferences = {
+    arreteRestrictions: Number(referenceRow?.arreteRestrictions ?? 0),
+    arreteCadres: Number(referenceRow?.arreteCadres ?? 0),
+    customizations: Number(referenceRow?.customizations ?? 0),
+    total: 0,
+  };
+  invalidReferences.total =
+    invalidReferences.arreteRestrictions +
+    invalidReferences.arreteCadres +
+    invalidReferences.customizations;
+  if (invalidReferences.total !== 0) {
+    throw new Error(
+      `Post-safe health still has ${invalidReferences.total} disabled-zone operational references`,
+    );
+  }
+
+  const [healthRow] = await executor.query(
+    `
+      WITH latest_batches AS (
+        SELECT DISTINCT ON (batch."departementId")
+          batch."departementId", batch.status
+        FROM sandre_zone_sync_batch batch
+        WHERE batch.kind = 'snapshot'
+        ORDER BY batch."departementId", batch."startedAt" DESC, batch.id DESC
+      ), latest_rollout_audits AS (
+        SELECT DISTINCT ON (batch."departementId")
+          batch."departementId", batch.status
+        FROM sandre_zone_sync_batch batch
+        WHERE batch.kind = 'snapshot'
+          AND batch.mode = 'audit'
+          AND batch."startedAt" >= $2::timestamptz
+        ORDER BY batch."departementId", batch."startedAt" DESC, batch.id DESC
+      ), completed_forced_audits AS (
+        SELECT "departementId"
+        FROM latest_rollout_audits
+        WHERE status = 'observed'
+      )
+      SELECT
+        count(DISTINCT department.id)::integer AS "totalDepartments",
+        count(DISTINCT state."departementId")::integer AS "trackedDepartments",
+        count(DISTINCT department.id) FILTER (
+          WHERE state."lastObservedAt" IS NULL
+             OR state."lastObservedAt" <
+               now() - ($1::integer * interval '1 second')
+        )::integer AS "staleDepartments",
+        count(DISTINCT completed_forced_audits."departementId")::integer
+          AS "forcedAuditCompletedDepartments",
+        count(DISTINCT state."departementId") FILTER (
+          WHERE state."lastAppliedAt" IS NOT NULL
+        )::integer AS "appliedDepartments",
+        count(DISTINCT department.id) FILTER (
+          WHERE state."lastAppliedAt" IS NULL
+             OR state."lastAppliedAt" <
+               now() - ($1::integer * interval '1 second')
+        )::integer AS "staleAppliedDepartments",
+        count(DISTINCT state."departementId") FILTER (
+          WHERE state."observedSnapshotHash" IS DISTINCT FROM
+              state."appliedSnapshotHash"
+             OR state."observedSourceUpdatedAt" IS DISTINCT FROM
+              state."appliedSourceUpdatedAt"
+        )::integer AS "pendingApplicationDepartments",
+        count(DISTINCT state."departementId") FILTER (
+          WHERE state."blockedAt" IS NOT NULL
+        )::integer AS "blockedDepartments",
+        count(DISTINCT state."departementId") FILTER (
+          WHERE state."needsRecompute" = true
+        )::integer AS "recomputePendingDepartments",
+        count(DISTINCT latest_batches."departementId") FILTER (
+          WHERE latest_batches.status = 'failed'
+        )::integer AS "failedBatches",
+        count(DISTINCT latest_batches."departementId") FILTER (
+          WHERE latest_batches.status = 'blocked'
+        )::integer AS "blockedBatches"
+      FROM departement department
+      LEFT JOIN sandre_zone_sync_state state
+        ON state."departementId" = department.id
+      LEFT JOIN latest_batches
+        ON latest_batches."departementId" = department.id
+      LEFT JOIN completed_forced_audits
+        ON completed_forced_audits."departementId" = department.id
+    `,
+    [config.staleAfterSeconds, config.forceFullAuditAfter],
+  );
+  const health = {
+    totalDepartments: Number(healthRow?.totalDepartments ?? 0),
+    trackedDepartments: Number(healthRow?.trackedDepartments ?? 0),
+    staleDepartments: Number(healthRow?.staleDepartments ?? 0),
+    forcedAuditCompletedDepartments: Number(
+      healthRow?.forcedAuditCompletedDepartments ?? 0,
+    ),
+    appliedDepartments: Number(healthRow?.appliedDepartments ?? 0),
+    staleAppliedDepartments: Number(healthRow?.staleAppliedDepartments ?? 0),
+    pendingApplicationDepartments: Number(
+      healthRow?.pendingApplicationDepartments ?? 0,
+    ),
+    blockedDepartments: Number(healthRow?.blockedDepartments ?? 0),
+    recomputePendingDepartments: Number(
+      healthRow?.recomputePendingDepartments ?? 0,
+    ),
+    failedBatches: Number(healthRow?.failedBatches ?? 0),
+    blockedBatches: Number(healthRow?.blockedBatches ?? 0),
+  };
+  if (
+    health.totalDepartments === 0 ||
+    health.trackedDepartments !== health.totalDepartments ||
+    health.staleDepartments !== 0 ||
+    health.forcedAuditCompletedDepartments !== health.totalDepartments ||
+    health.appliedDepartments !== health.totalDepartments ||
+    health.staleAppliedDepartments !== 0 ||
+    health.pendingApplicationDepartments !== 0 ||
+    health.blockedDepartments !== 0 ||
+    health.recomputePendingDepartments !== 0 ||
+    health.failedBatches !== 0 ||
+    health.blockedBatches !== 0
+  ) {
+    throw new Error(
+      `Post-safe global Sandre health has not converged: ${JSON.stringify(health)}`,
+    );
+  }
+  return { departments, invalidReferences, health };
+}
+
+function getPostSafeHealthConfig(): {
+  staleAfterSeconds: number;
+  forceFullAuditAfter: Date;
+} {
+  if (parseSandreZoneSyncMode(process.env.SANDRE_ZONE_SYNC_MODE) !== 'safe') {
+    throw new Error(
+      'Post-safe verification requires SANDRE_ZONE_SYNC_MODE=safe',
+    );
+  }
+  const forceFullAuditAfter = parseSandreForceFullAuditAfter(
+    process.env.SANDRE_FORCE_FULL_AUDIT_AFTER,
+  );
+  if (!forceFullAuditAfter) {
+    throw new Error(
+      'Post-safe verification requires SANDRE_FORCE_FULL_AUDIT_AFTER',
+    );
+  }
+  const configuredStaleAfter = Number(
+    process.env.SANDRE_HEALTH_STALE_AFTER_SECONDS,
+  );
+  return {
+    staleAfterSeconds:
+      Number.isInteger(configuredStaleAfter) && configuredStaleAfter > 0
+        ? configuredStaleAfter
+        : 30 * 60 * 60,
+    forceFullAuditAfter,
+  };
+}
+
+function createOperationReport(
+  plan: SandreReconciliationPlan,
+  officialSource: OperationOfficialSource,
+  syncEvidence: SandreSyncExpectationEvidence[],
+  audits: SandreActionAudit[],
+  beforeState: Awaited<ReturnType<typeof loadSandreReconciliationState>>,
+  afterState: Awaited<ReturnType<typeof loadSandreReconciliationState>>,
+): SandreOperationReport {
+  const reportWithoutFingerprint = {
+    kind: 'audited_sandre_operation' as const,
+    version: SANDRE_OPERATION_REPORT_VERSION,
+    generatedAt: new Date().toISOString(),
+    targetFingerprint: currentTargetFingerprint(),
+    plan,
+    planFingerprint: reconciliationPlanFingerprint(plan),
+    officialSource: operationOfficialSourceEvidence(officialSource),
+    syncEvidence,
+    audits,
+    database: {
+      beforeFingerprint: fingerprint(beforeState),
+      afterFingerprint: fingerprint(afterState),
+      afterBusinessReferencesFingerprint:
+        operationBusinessReferencesFingerprint(afterState),
+      historicalRecomputeFrom: earliestOperationRestrictionDate(beforeState),
+    },
+  };
+  return {
+    ...reportWithoutFingerprint,
+    reportFingerprint: fingerprint(reportWithoutFingerprint),
+  };
+}
+
+async function readOperationReportIfPresent(
+  reportPath: string | null,
+): Promise<SandreOperationReport | null> {
+  if (!reportPath) {
+    return null;
+  }
+  const parsed = JSON.parse(
+    await readFile(resolve(reportPath), 'utf8'),
+  ) as Record<string, unknown>;
+  if (parsed.kind !== 'audited_sandre_operation') {
+    return null;
+  }
+  const report = parsed as unknown as SandreOperationReport;
+  if (report.version !== SANDRE_OPERATION_REPORT_VERSION) {
+    throw new Error(`Unsupported operation report version ${report.version}`);
+  }
+  if (
+    !report.officialSource ||
+    !Array.isArray(report.officialSource.snapshots) ||
+    typeof report.officialSource.fingerprint !== 'string' ||
+    fingerprint(report.officialSource.snapshots) !==
+      report.officialSource.fingerprint
+  ) {
+    throw new Error('The approved operation source evidence is invalid');
+  }
+  if (
+    !report.database ||
+    !/^[a-f0-9]{64}$/.test(report.database.beforeFingerprint) ||
+    !/^[a-f0-9]{64}$/.test(report.database.afterFingerprint) ||
+    !/^[a-f0-9]{64}$/.test(
+      report.database.afterBusinessReferencesFingerprint,
+    ) ||
+    (report.database.historicalRecomputeFrom !== null &&
+      !/^\d{4}-\d{2}-\d{2}$/.test(report.database.historicalRecomputeFrom))
+  ) {
+    throw new Error('The approved operation database evidence is invalid');
+  }
+  const { reportFingerprint, ...unsignedReport } = report;
+  if (fingerprint(unsignedReport) !== reportFingerprint) {
+    throw new Error('The approved operation report fingerprint is invalid');
+  }
+  const plan = parseSandreReconciliationPlan(report.plan);
+  if (reconciliationPlanFingerprint(plan) !== report.planFingerprint) {
+    throw new Error('The approved operation plan fingerprint is invalid');
+  }
+  return { ...report, plan };
+}
+
+function earliestOperationRestrictionDate(
+  state: Awaited<ReturnType<typeof loadSandreReconciliationState>>,
+): string | null {
+  return (
+    state.restrictions
+      .map((restriction) => restriction.arreteRestrictionDateDebut)
+      .filter((date): date is string => typeof date === 'string')
+      .sort()[0] ?? null
+  );
+}
+
+export function operationBusinessReferencesFingerprint(
+  state: Awaited<ReturnType<typeof loadSandreReconciliationState>>,
+): string {
+  return fingerprint({
+    arreteCadreLinks: state.arreteCadreLinks,
+    restrictions: state.restrictions,
+    usages: state.usages,
+    restrictionCommunes: state.restrictionCommunes,
+    customizations: state.customizations,
+    customizationCommunes: state.customizationCommunes,
+  });
+}
+
 async function main(): Promise<void> {
   const options = parseCliOptions(process.argv.slice(2));
+  const operationReport =
+    options.apply || options.verifyPostSafe
+      ? await readOperationReportIfPresent(options.reportPath)
+      : null;
+  if (options.operationPlanPath || operationReport) {
+    await runAuditedOperation(options, operationReport);
+    return;
+  }
   const approvedReport = options.apply
     ? await readApprovedReport(options.reportPath)
     : null;
@@ -1539,6 +2583,42 @@ async function recordRecomputeDebt(
   }
 }
 
+export async function prepareSandreOperationRecomputeDebt(
+  executor: QueryExecutor,
+  status: 'APPLIED' | 'ALREADY_APPLIED',
+  departmentIds: number[],
+  historicalRecomputeFrom: string | null,
+): Promise<RecomputeDebt[]> {
+  if (status === 'ALREADY_APPLIED') {
+    return loadPendingRecomputeDebt(executor, departmentIds);
+  }
+  await markHistoricalRecomputeDebt(executor, historicalRecomputeFrom);
+  return markRecomputeDebt(executor, departmentIds);
+}
+
+async function loadPendingRecomputeDebt(
+  executor: QueryExecutor,
+  departmentIds: number[],
+): Promise<RecomputeDebt[]> {
+  if (departmentIds.length === 0) {
+    return [];
+  }
+  const rows = await executor.query(
+    `
+      SELECT "departementId", "recomputeRevision"
+      FROM sandre_zone_sync_state
+      WHERE "departementId" = ANY($1::integer[])
+        AND "needsRecompute" = true
+      ORDER BY "departementId"
+    `,
+    [departmentIds],
+  );
+  return rows.map((row) => ({
+    departmentId: Number(row.departementId),
+    revision: Number(row.recomputeRevision),
+  }));
+}
+
 async function markRecomputeDebt(
   executor: QueryExecutor,
   departmentIds: number[],
@@ -1582,26 +2662,36 @@ async function clearRecomputeDebt(debts: RecomputeDebt[]): Promise<void> {
   const dataSource = createStandaloneDataSource();
   await dataSource.initialize();
   try {
-    await dataSource.query(
-      `
-        UPDATE sandre_zone_sync_state state
-        SET "needsRecompute" = false, "updatedAt" = now()
-        FROM unnest(
-          $1::integer[],
-          $2::integer[]
-        ) AS debt(department_id, revision)
-        WHERE state."departementId" = debt.department_id
-          AND state."recomputeRevision" = debt.revision
-          AND state."needsRecompute" = true
-      `,
-      [
-        debts.map((debt) => debt.departmentId),
-        debts.map((debt) => debt.revision),
-      ],
-    );
+    await clearSandreOperationRecomputeDebt(dataSource, debts);
   } finally {
     await dataSource.destroy();
   }
+}
+
+export async function clearSandreOperationRecomputeDebt(
+  executor: QueryExecutor,
+  debts: RecomputeDebt[],
+): Promise<void> {
+  if (debts.length === 0) {
+    return;
+  }
+  await executor.query(
+    `
+      UPDATE sandre_zone_sync_state state
+      SET "needsRecompute" = false, "updatedAt" = now()
+      FROM unnest(
+        $1::integer[],
+        $2::integer[]
+      ) AS debt(department_id, revision)
+      WHERE state."departementId" = debt.department_id
+        AND state."recomputeRevision" = debt.revision
+        AND state."needsRecompute" = true
+    `,
+    [
+      debts.map((debt) => debt.departmentId),
+      debts.map((debt) => debt.revision),
+    ],
+  );
 }
 
 async function markHistoricalRecomputeDebt(
@@ -1942,7 +3032,9 @@ export function parseCliOptions(args: string[]): CliOptions {
   let apply = false;
   let dryRun = false;
   let recordDecisions = false;
+  let verifyPostSafe = false;
   let reportPath: string | null = null;
+  let operationPlanPath: string | null = null;
 
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
@@ -1958,10 +3050,15 @@ export function parseCliOptions(args: string[]): CliOptions {
       recordDecisions = true;
       continue;
     }
+    if (argument === '--verify-post-safe') {
+      verifyPostSafe = true;
+      continue;
+    }
     if (
       argument === '--department' ||
       argument === '--report' ||
-      argument === '--mapping'
+      argument === '--mapping' ||
+      argument === '--plan'
     ) {
       const value = args[++index];
       if (!value) {
@@ -1975,6 +3072,8 @@ export function parseCliOptions(args: string[]): CliOptions {
           .forEach((item) => departments.add(item));
       } else if (argument === '--report') {
         reportPath = value;
+      } else if (argument === '--plan') {
+        operationPlanPath = value;
       } else {
         addManualMappingPairs(mappingPairs, value);
       }
@@ -1993,6 +3092,10 @@ export function parseCliOptions(args: string[]): CliOptions {
       reportPath = argument.slice('--report='.length);
       continue;
     }
+    if (argument.startsWith('--plan=')) {
+      operationPlanPath = argument.slice('--plan='.length);
+      continue;
+    }
     if (argument.startsWith('--mapping=')) {
       addManualMappingPairs(mappingPairs, argument.slice('--mapping='.length));
       continue;
@@ -2006,8 +3109,10 @@ export function parseCliOptions(args: string[]): CliOptions {
           '  --department CODE[,CODE]  Limit the audit to departments',
           '  --report PATH             Write a new dry-run report or read it for apply',
           '  --mapping OLD:NEW[,..]    Audit explicit strict 1:1 mappings; never applicable',
+          '  --plan PATH               Audit a versioned reconciliation operation plan',
           '  --record-decisions        Persist the dry-run batch and decisions',
           '  --apply                   Apply an unchanged approved report',
+          '  --verify-post-safe        Verify safe convergence from an approved report',
           '',
         ].join('\n'),
       );
@@ -2020,12 +3125,42 @@ export function parseCliOptions(args: string[]): CliOptions {
   if (apply && dryRun) {
     throw new Error('--apply and --dry-run are mutually exclusive');
   }
+  if (verifyPostSafe && (apply || dryRun)) {
+    throw new Error(
+      '--verify-post-safe cannot be combined with --apply or --dry-run',
+    );
+  }
   if (apply && !reportPath) {
     throw new Error('--apply requires --report <path>');
+  }
+  if (verifyPostSafe && !reportPath) {
+    throw new Error('--verify-post-safe requires --report <path>');
   }
   if (apply && (mappingPairs.size > 0 || recordDecisions)) {
     throw new Error(
       '--mapping and --record-decisions are dry-run options only',
+    );
+  }
+  if (apply && operationPlanPath) {
+    throw new Error(
+      '--apply reads its operation plan from the approved report',
+    );
+  }
+  if (
+    verifyPostSafe &&
+    (operationPlanPath ||
+      mappingPairs.size > 0 ||
+      sortedDepartments.length > 0 ||
+      recordDecisions)
+  ) {
+    throw new Error('--verify-post-safe accepts only an approved --report');
+  }
+  if (
+    operationPlanPath &&
+    (mappingPairs.size > 0 || sortedDepartments.length > 0 || recordDecisions)
+  ) {
+    throw new Error(
+      '--plan cannot be combined with --department, --mapping or --record-decisions',
     );
   }
   if (mappingPairs.size > 0 && sortedDepartments.length === 0) {
@@ -2037,8 +3172,10 @@ export function parseCliOptions(args: string[]): CliOptions {
     mappingPairs: [...mappingPairs.entries()]
       .map(([oldZoneId, newZoneId]) => ({ oldZoneId, newZoneId }))
       .sort((left, right) => left.oldZoneId - right.oldZoneId),
+    operationPlanPath,
     recordDecisions,
     reportPath,
+    verifyPostSafe,
   };
 }
 

@@ -16,6 +16,7 @@ import { ExternalPublicationRegistryService } from '../datagouv/external-publica
 import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
 import { ArreteCadreScheduler } from './arrete_cadre.scheduler';
 import { ConfigModule } from '../config/config.module';
+import { StatisticCacheModule } from '../statistic_cache/statistic_cache.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { ConfigModule } from '../config/config.module';
     ArreteCadreZoneAlerteCommunesModule,
     ZonePublicationModule,
     ConfigModule,
+    StatisticCacheModule,
   ],
   controllers: [ArreteCadreController],
   providers: [

@@ -61,8 +61,44 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         'dateMajSandre',
         'codesAlternatifs',
         'sandrePayloadHash',
+        'sandreProvenance',
       ]),
     );
+  });
+
+  it('never matches a local_preserved zone through canonical, alias or legacy identity', async () => {
+    const preservedZone = {
+      id: 4605,
+      idSandre: null,
+      codeSandre: null,
+      sandreProvenance: 'local_preserved',
+      type: 'SUP',
+      departement: department,
+    };
+    const zoneFind = jest
+      .fn()
+      .mockResolvedValueOnce([preservedZone])
+      .mockResolvedValueOnce([]);
+    const harness = createHarness({
+      zoneFind,
+      aliasFind: jest.fn().mockResolvedValue({
+        id: 1,
+        zoneAlerte: preservedZone,
+      }),
+    });
+    const feature = createSandreZoneSnapshot([rawFeature()], 1, department.code)
+      .features[0];
+
+    await expect(
+      (harness.service as any).findSandreZoneMatch(
+        harness.manager,
+        department,
+        feature,
+      ),
+    ).resolves.toBeNull();
+    expect(
+      harness.aliasRepository.findOne.mock.calls[0][0].where.zoneAlerte,
+    ).toBeDefined();
   });
 
   const createHarness = (options?: {
@@ -72,6 +108,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     aliasFind?: jest.Mock;
     basin?: any;
     basinFind?: jest.Mock;
+    basinMappings?: Record<number, { localBasinCode: number; source: string }>;
     recomputeResult?: any;
     syncMode?: string;
     forceFullAuditAfter?: string;
@@ -127,12 +164,14 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       findOne: jest.fn().mockResolvedValue(department),
     };
     const basinRepository = {
-      findOne:
+      find:
         options?.basinFind ??
         jest
           .fn()
           .mockResolvedValue(
-            options && 'basin' in options ? options.basin : basin,
+            (options && 'basin' in options ? options.basin : basin)
+              ? [options && 'basin' in options ? options.basin : basin]
+              : [],
           ),
     };
     const repositories = new Map<any, any>([
@@ -145,10 +184,35 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const manager = {
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
-        if (query.includes('ST_IsValid')) {
-          return (options?.invalidGeometryCodes ?? []).map((code) => ({
-            code,
-          }));
+        if (query.includes('WITH sandre_geometry_input AS')) {
+          const inputs = JSON.parse(parameters?.[0] ?? '[]');
+          return inputs.map((input, index) => {
+            const invalid = (options?.invalidGeometryCodes ?? []).includes(
+              input.code,
+            );
+            return {
+              ordinal: index + 1,
+              code: input.code,
+              geometry: input.geometry,
+              raw_valid: !invalid,
+              invalid_reason: invalid ? 'Self-intersection' : 'Valid Geometry',
+              raw_geometry_type: input.geometry.type.toUpperCase(),
+              normalized_geometry_type: input.geometry.type.toUpperCase(),
+              raw_parts: 1,
+              normalized_parts: 1,
+              raw_points: 4,
+              normalized_points: 4,
+              raw_area: '1',
+              normalized_area: '1',
+              relative_area_delta: '0',
+              bbox_unchanged: true,
+              normalized_valid: !invalid,
+            };
+          });
+        }
+        if (query.includes('FROM sandre_basin_mapping')) {
+          const mapping = options?.basinMappings?.[Number(parameters?.[0])];
+          return mapping ? [mapping] : [];
         }
         if (query.includes('AS "nonAbrogeArreteCadre"')) {
           const operationallyReferenced = (
@@ -1486,7 +1550,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
 
       await expect(
         harness.service.updateDepartementZones('65'),
-      ).rejects.toThrow('Unknown basin');
+      ).rejects.toThrow('Expected one local basin');
 
       expect(harness.zoneRepository.save).not.toHaveBeenCalled();
       expect(harness.aliasRepository.save).not.toHaveBeenCalled();
@@ -1508,7 +1572,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
 
       await expect(
         harness.service.updateDepartementZones('65'),
-      ).rejects.toThrow('Invalid Sandre geometry for zone 3201');
+      ).rejects.toThrow('Unsafe Sandre geometry normalization for zone 3201');
 
       expect(harness.zoneRepository.save).not.toHaveBeenCalled();
       expect(harness.aliasRepository.save).not.toHaveBeenCalled();
@@ -1537,15 +1601,15 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         unchanged: 1,
       },
     );
-    expect(harness.basinRepository.findOne).not.toHaveBeenCalled();
+    expect(harness.basinRepository.find).not.toHaveBeenCalled();
   });
 
   it('completes the full preflight before upserting the first active zone', async () => {
     const harness = createHarness({
       basinFind: jest
         .fn()
-        .mockResolvedValueOnce(basin)
-        .mockResolvedValueOnce(null),
+        .mockResolvedValueOnce([basin])
+        .mockResolvedValueOnce([]),
       httpResponses: [
         countResponse(2),
         {
@@ -1565,9 +1629,46 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     });
 
     await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
-      'Unknown basin 8',
+      'Expected one local basin 8',
     );
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('resolves the audited official Corsica basin onto the local basin', async () => {
+    const corsicaBasin = { id: 6, code: 6 };
+    const harness = createHarness({
+      basin: corsicaBasin,
+      basinMappings: {
+        12: {
+          localBasinCode: 6,
+          source: 'audited_official_to_local',
+        },
+      },
+      httpResponses: [
+        countResponse(1),
+        {
+          data: {
+            features: [rawFeature({ NumCircAdminBassin: 12 })],
+          },
+        },
+        countResponse(1),
+      ],
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.objectContaining({ added: 1 }),
+    );
+    expect(harness.basinRepository.find).toHaveBeenCalledWith({
+      where: { code: 6 },
+      order: { id: 'ASC' },
+      take: 2,
+    });
+    expect(harness.zoneRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bassinVersant: corsicaBasin,
+        sandreProvenance: 'official',
+      }),
+    );
   });
 
   it.each(['audit', 'safe'])(
@@ -1950,7 +2051,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       },
     );
 
-    expect(harness.basinRepository.findOne).not.toHaveBeenCalled();
+    expect(harness.basinRepository.find).not.toHaveBeenCalled();
     expect(harness.manager.query.mock.calls).not.toEqual(
       expect.arrayContaining([
         [expect.stringContaining('ST_IsValid'), expect.anything()],

@@ -170,6 +170,8 @@ describe('ArreteCadreService scheduled status update', () => {
 
 describe('ArreteCadreScheduler', () => {
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
+  const previousStatisticCacheRequired =
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
   const historicCursorState = {
     mapCursor: '2026-07-31',
     statsCursor: '2026-07-31',
@@ -185,6 +187,7 @@ describe('ArreteCadreScheduler', () => {
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'false';
   });
 
   afterAll(() => {
@@ -192,6 +195,12 @@ describe('ArreteCadreScheduler', () => {
       delete process.env.ZONE_PUBLICATION_ENABLED;
     } else {
       process.env.ZONE_PUBLICATION_ENABLED = previousPublicationEnabled;
+    }
+    if (previousStatisticCacheRequired === undefined) {
+      delete process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+    } else {
+      process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED =
+        previousStatisticCacheRequired;
     }
   });
 
@@ -208,6 +217,8 @@ describe('ArreteCadreScheduler', () => {
       catchUpHistoricComputations: jest
         .fn()
         .mockResolvedValue(historicCursorState),
+      prepareHistoricComputations: jest.fn().mockResolvedValue(undefined),
+      recoverIncompleteHistoricComputations: jest.fn().mockResolvedValue([]),
     };
     const registry = {
       executeDailyRun: jest.fn(
@@ -221,6 +232,7 @@ describe('ArreteCadreScheduler', () => {
         sourceRevision: '42',
         materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
       }),
+      hasSucceeded: jest.fn().mockResolvedValue(true),
     };
     const zonePublicationService = {
       getSourceRevision: jest.fn().mockResolvedValue('42'),
@@ -234,17 +246,29 @@ describe('ArreteCadreScheduler', () => {
         computeStatsGeneration: historicCursorState.statsGeneration,
       }),
     };
+    const statisticCacheReadiness = {
+      getReadyPublication: jest.fn().mockResolvedValue({
+        publicationId: 'statistic-publication-1',
+        statisticRevision: '12',
+        statisticPublishedDate: '2026-08-01',
+        statisticFingerprint: 'c'.repeat(64),
+        sourceRevision: '42',
+      }),
+      assertReadyPublication: jest.fn().mockResolvedValue(undefined),
+    };
     return {
       service: new ArreteCadreScheduler(
         arreteCadreService as never,
         registry as never,
         zonePublicationService as never,
         configService as never,
+        statisticCacheReadiness as never,
       ),
       arreteCadreService,
       registry,
       zonePublicationService,
       configService,
+      statisticCacheReadiness,
       completedRunMetadata,
     };
   };
@@ -320,6 +344,38 @@ describe('ArreteCadreScheduler', () => {
     );
   });
 
+  it('repairs an orphaned prior-day snapshot before artifact and Datagouv gates after rollover', async () => {
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createScheduler();
+    harness.arreteCadreService.recoverIncompleteHistoricComputations.mockResolvedValue(
+      ['2026-07-30'],
+    );
+    const now = new Date('2026-08-01T08:00:00Z');
+
+    await harness.service.updateIfDue(now);
+
+    expect(
+      harness.arreteCadreService.prepareHistoricComputations,
+    ).toHaveBeenCalledWith('2026-07-31', '42');
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations,
+    ).toHaveBeenCalledWith('2026-07-31', '42');
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.statisticCacheReadiness.getReadyPublication.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      harness.statisticCacheReadiness.getReadyPublication.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.arreteCadreService.catchUpHistoricComputations.mock
+        .invocationCallOrder[0],
+    );
+  });
+
   it('keeps submitting the daily run after a failed attempt', async () => {
     const harness = createScheduler();
     harness.registry.executeDailyRun
@@ -380,6 +436,122 @@ describe('ArreteCadreScheduler', () => {
     expect(
       harness.arreteCadreService.updateArreteCadreStatut,
     ).toHaveBeenCalledWith(false, undefined, '2026-08-14');
+
+    releaseHistoric(historicCursorState);
+    await previousDate;
+  });
+
+  it('prepares the new legacy artifact boundary before deferring to an older historic run', async () => {
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createScheduler();
+    let releaseHistoric!: (value: typeof historicCursorState) => void;
+    harness.arreteCadreService.catchUpHistoricComputations.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseHistoric = resolve;
+      }),
+    );
+
+    const previousDate = harness.service.updateIfDue(
+      new Date('2026-08-13T08:00:00Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.service.updateIfDue(new Date('2026-08-14T08:00:00Z'));
+
+    expect(
+      harness.arreteCadreService.prepareHistoricComputations.mock.calls,
+    ).toEqual([
+      ['2026-08-12', '42'],
+      ['2026-08-13', '42'],
+    ]);
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations.mock
+        .calls,
+    ).toEqual([
+      ['2026-08-12', '42'],
+      ['2026-08-13', '42'],
+    ]);
+    expect(
+      harness.statisticCacheReadiness.getReadyPublication,
+    ).toHaveBeenCalledTimes(1);
+
+    releaseHistoric(historicCursorState);
+    await previousDate;
+  });
+
+  it('does not repeat boundary preparation while the same historic date is running', async () => {
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createScheduler();
+    let releaseHistoric!: (value: typeof historicCursorState) => void;
+    harness.arreteCadreService.catchUpHistoricComputations.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseHistoric = resolve;
+      }),
+    );
+
+    const firstTick = harness.service.updateIfDue(
+      new Date('2026-08-13T08:00:00Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.service.updateIfDue(new Date('2026-08-13T08:05:00Z'));
+    await harness.service.updateIfDue(new Date('2026-08-13T08:10:00Z'));
+
+    expect(
+      harness.arreteCadreService.prepareHistoricComputations,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations,
+    ).toHaveBeenCalledTimes(1);
+
+    releaseHistoric(historicCursorState);
+    await firstTick;
+  });
+
+  it('deduplicates concurrent rollover boundary preparation', async () => {
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createScheduler();
+    let releaseHistoric!: (value: typeof historicCursorState) => void;
+    let releaseBoundary!: () => void;
+    harness.arreteCadreService.catchUpHistoricComputations.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseHistoric = resolve;
+      }),
+    );
+    harness.arreteCadreService.prepareHistoricComputations.mockImplementation(
+      async (requiredThrough: string) => {
+        if (requiredThrough === '2026-08-13') {
+          await new Promise<void>((resolve) => {
+            releaseBoundary = resolve;
+          });
+        }
+      },
+    );
+
+    const previousDate = harness.service.updateIfDue(
+      new Date('2026-08-13T08:00:00Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const firstRollover = harness.service.updateIfDue(
+      new Date('2026-08-14T08:00:00Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const secondRollover = harness.service.updateIfDue(
+      new Date('2026-08-14T08:05:00Z'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(
+      harness.arreteCadreService.prepareHistoricComputations.mock.calls.filter(
+        ([requiredThrough]) => requiredThrough === '2026-08-13',
+      ),
+    ).toHaveLength(1);
+
+    releaseBoundary();
+    await Promise.all([firstRollover, secondRollover]);
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations.mock.calls.filter(
+        ([requiredThrough]) => requiredThrough === '2026-08-13',
+      ),
+    ).toHaveLength(1);
 
     releaseHistoric(historicCursorState);
     await previousDate;
@@ -478,6 +650,33 @@ describe('ArreteCadreScheduler', () => {
       sourceRevision: '42',
       preferredPublicationId: 'publication-1',
     });
+  });
+
+  it('keeps the versioned pipeline independent from the required legacy artifact gate', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createScheduler();
+    harness.arreteCadreService.updateArreteCadreStatut.mockResolvedValue({
+      result: {
+        publicationId: 'publication-1',
+        sourceRevision: '42',
+      },
+    });
+
+    await harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z'));
+
+    expect(
+      harness.arreteCadreService.prepareHistoricComputations,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.statisticCacheReadiness.getReadyPublication,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.statisticCacheReadiness.assertReadyPublication,
+    ).not.toHaveBeenCalled();
   });
 
   it('resumes candidacy from persisted daily and historic successes', async () => {

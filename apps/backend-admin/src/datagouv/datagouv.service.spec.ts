@@ -48,6 +48,7 @@ interface ServiceHarness {
   queryRunner: {
     connect: jest.Mock;
     startTransaction: jest.Mock;
+    commitTransaction: jest.Mock;
     rollbackTransaction: jest.Mock;
     query: jest.Mock;
     release: jest.Mock;
@@ -99,16 +100,26 @@ function createHarness(
   };
   const queryRunner = {
     connect: jest.fn().mockResolvedValue(undefined),
-    startTransaction: jest.fn().mockResolvedValue(undefined),
-    rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+    startTransaction: jest.fn(),
+    commitTransaction: jest.fn(),
+    rollbackTransaction: jest.fn(),
     query: jest.fn(async (sql: string) =>
       sql.includes('pg_advisory_unlock')
         ? [{ unlocked: true }]
         : [{ locked: true }],
     ),
     release: jest.fn().mockResolvedValue(undefined),
-    isTransactionActive: true,
+    isTransactionActive: false,
   };
+  queryRunner.startTransaction.mockImplementation(async () => {
+    queryRunner.isTransactionActive = true;
+  });
+  queryRunner.commitTransaction.mockImplementation(async () => {
+    queryRunner.isTransactionActive = false;
+  });
+  queryRunner.rollbackTransaction.mockImplementation(async () => {
+    queryRunner.isTransactionActive = false;
+  });
   const dataSource = {
     createQueryRunner: jest.fn().mockReturnValue(queryRunner),
   };
@@ -991,12 +1002,116 @@ describe('DatagouvService', () => {
       { sourceDate: '2026-07-31' },
     );
     expect(harness.queryRunner.query).toHaveBeenCalledTimes(2);
-    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.startTransaction).toHaveBeenCalledWith(
+      'REPEATABLE READ',
+    );
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
     expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
     await expect(
       stat(join(directory, 'historique_communes.json')),
     ).rejects.toThrow();
+  });
+
+  it('rejects a historical archive when one commune misses the expected date', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    harness.queryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('snapshot."expectedCommuneCount"')) {
+        return [
+          {
+            status: 'completed',
+            expectedCommuneCount: 2,
+            processedCommuneCount: 2,
+            snapshotSourceRevision: '42',
+            currentSourceRevision: '42',
+            communeCount: 2,
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '01001',
+          commune_nom: 'Commune J',
+          sc_restrictions: [
+            { date: '2026-08-01', SOU: null, SUP: null, AEP: null },
+          ],
+        },
+        {
+          commune_code: '01002',
+          commune_nom: 'Commune J-1',
+          sc_restrictions: [
+            { date: '2026-07-31', SOU: null, SUP: null, AEP: null },
+          ],
+        },
+      ]),
+    );
+    const upload = jest.spyOn(harness.service, 'uploadToDatagouv');
+
+    await expect(
+      harness.service.updateHistoriqueCommunes('2026-08-01'),
+    ).rejects.toThrow('date 2026-08-01 absente');
+
+    expect(upload).not.toHaveBeenCalled();
+    await expect(
+      stat(join(directory, 'historique_communes.zip')),
+    ).rejects.toThrow();
+  });
+
+  it('does not upload when the source identity drifts during archive generation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    let coverageRead = 0;
+    harness.queryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('snapshot."expectedCommuneCount"')) {
+        coverageRead += 1;
+        return [
+          {
+            status: 'completed',
+            expectedCommuneCount: 1,
+            processedCommuneCount: 1,
+            snapshotSourceRevision: '42',
+            currentSourceRevision: coverageRead === 1 ? '42' : '43',
+            communeCount: 1,
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '01001',
+          commune_nom: 'Commune',
+          sc_restrictions: [
+            { date: '2026-08-01', SOU: null, SUP: null, AEP: null },
+          ],
+        },
+      ]),
+    );
+    const upload = jest.spyOn(harness.service, 'uploadToDatagouv');
+
+    await expect(
+      harness.service.updateHistoriqueCommunes('2026-08-01', '42'),
+    ).rejects.toThrow('non certifié');
+
+    expect(upload).not.toHaveBeenCalled();
+    const coverageQueries = harness.queryRunner.query.mock.calls
+      .map(([sql]) => String(sql))
+      .filter((sql) => sql.includes('snapshot."expectedCommuneCount"'));
+    expect(coverageQueries).toHaveLength(2);
+    expect(coverageQueries[0]).not.toContain('FOR SHARE');
+    expect(coverageQueries[1]).toContain('FOR SHARE OF source_state, snapshot');
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the previous historical ZIP and releases the lock after a partial stream failure', async () => {
@@ -1036,9 +1151,73 @@ describe('DatagouvService', () => {
       stat(join(directory, 'historique_communes.zip.tmp')),
     ).rejects.toThrow();
     expect(harness.queryRunner.query).toHaveBeenCalledTimes(2);
-    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
-    expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.startTransaction).toHaveBeenCalledWith(
+      'REPEATABLE READ',
+    );
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to unlocking all when the historical publication lock cannot be released', async () => {
+    const harness = createHarness('/tmp');
+    harness.queryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('pg_advisory_unlock_all')) return [];
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: false }];
+      return [];
+    });
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '01001',
+          commune_nom: 'Commune',
+          sc_restrictions: [
+            { date: '2026-08-01', SOU: null, SUP: null, AEP: null },
+          ],
+        },
+      ]),
+    );
+    jest.spyOn(harness.service, 'uploadToDatagouv').mockResolvedValue();
+
+    await expect(harness.service.updateHistoriqueCommunes()).rejects.toThrow(
+      "Impossible de libérer le verrou de publication de l'historique des communes",
+    );
+
+    expect(harness.queryRunner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a historical publication error when rollback and unlock cleanup fail', async () => {
+    const harness = createHarness('/tmp');
+    const publicationError = new Error('historical archive failed');
+    harness.statisticCommuneService.getStatisticCommuneStream.mockRejectedValue(
+      publicationError,
+    );
+    harness.queryRunner.rollbackTransaction.mockRejectedValue(
+      new Error('rollback failed'),
+    );
+    harness.queryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('pg_advisory_unlock_all')) return [];
+      if (sql.includes('pg_advisory_unlock')) throw new Error('unlock failed');
+      return [];
+    });
+
+    await expect(harness.service.updateHistoriqueCommunes()).rejects.toBe(
+      publicationError,
+    );
+
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      "ERREUR LORS DU NETTOYAGE DE LA PUBLICATION DE L'HISTORIQUE DES COMMUNES",
+      expect.stringContaining('rollback failed'),
+    );
   });
 
   it('rejects an empty historical archive instead of publishing it', async () => {

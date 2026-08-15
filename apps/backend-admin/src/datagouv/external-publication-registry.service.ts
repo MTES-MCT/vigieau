@@ -2,15 +2,18 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import {
+  DATAGOUV_DAILY_JOB_KEY,
   getCivilDateAtUtcNoon,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
 } from '../core/scheduling/daily-job-schedule';
+import { RegleauLogger } from '../logger/regleau.logger';
 
 const STALE_RUN_MS = 2 * 60 * 60 * 1000;
 const BASE_RETRY_MS = 5 * 60 * 1000;
 const MAX_RETRY_MS = 60 * 60 * 1000;
 const IMMEDIATE_ORPHAN_RECOVERY_JOB_KEYS = new Set([
+  DATAGOUV_DAILY_JOB_KEY,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
 ]);
@@ -32,6 +35,10 @@ export interface PublicationRunIdentity {
   historicStatsCursor?: string | null;
   historicMapGeneration?: string;
   historicStatsGeneration?: string;
+  statisticCachePublicationId?: string;
+  statisticRevision?: string;
+  statisticPublishedDate?: string;
+  statisticFingerprint?: string;
 }
 
 export interface ExecuteDailyRunOptions {
@@ -68,6 +75,10 @@ export interface ExternalPublicationHealth {
 
 @Injectable()
 export class ExternalPublicationRegistryService {
+  private readonly logger = new RegleauLogger(
+    'ExternalPublicationRegistryService',
+  );
+
   constructor(
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -155,6 +166,7 @@ export class ExternalPublicationRegistryService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     let locked = false;
+    let operationError: unknown;
     try {
       const [lock] = await queryRunner.query(
         'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
@@ -250,16 +262,47 @@ export class ExternalPublicationRegistryService {
         );
         throw error;
       }
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
+      let cleanupError: unknown;
       try {
         if (locked) {
-          await queryRunner.query(
+          const [unlock] = await queryRunner.query(
             'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
             [`vigieau:external-publication:${jobKey}`],
           );
+          if (unlock?.unlocked !== true) {
+            throw new Error(
+              `Unable to release external publication lock for ${jobKey}`,
+            );
+          }
         }
-      } finally {
+      } catch (error) {
+        cleanupError = error;
+        try {
+          await queryRunner.query('SELECT pg_advisory_unlock_all()');
+        } catch {
+          // Releasing a broken connection is the final lock cleanup fallback.
+        }
+      }
+      try {
         await queryRunner.release();
+      } catch (error) {
+        cleanupError ??= error;
+      }
+      if (cleanupError) {
+        if (operationError !== undefined) {
+          this.logger.error(
+            `EXTERNAL PUBLICATION LOCK CLEANUP FAILED (${jobKey})`,
+            cleanupError instanceof Error
+              ? (cleanupError.stack ?? cleanupError.message)
+              : String(cleanupError),
+          );
+        } else {
+          throw cleanupError;
+        }
       }
     }
   }
@@ -434,7 +477,10 @@ export class ExternalPublicationRegistryService {
       return 'succeeded';
     }
     if (run.status === 'running') {
-      if (IMMEDIATE_ORPHAN_RECOVERY_JOB_KEYS.has(jobKey)) {
+      if (
+        IMMEDIATE_ORPHAN_RECOVERY_JOB_KEYS.has(jobKey) ||
+        jobKey.startsWith('datagouv:')
+      ) {
         return 'succeeded';
       }
       if (

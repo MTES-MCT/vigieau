@@ -8,16 +8,17 @@ import {
   ManyToOne,
   OneToMany,
   Polygon,
-  PrimaryGeneratedColumn, UpdateDateColumn,
-} from 'typeorm';
-import { ArreteCadre } from './arrete_cadre.entity';
-import { BassinVersant } from './bassin_versant.entity';
-import { Departement } from './departement.entity';
-import { Restriction } from './restriction.entity';
-import { ArreteCadreZoneAlerteCommunes } from './arrete_cadre_zone_alerte_communes.entity';
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from "typeorm";
+import { ArreteCadre } from "./arrete_cadre.entity";
+import { BassinVersant } from "./bassin_versant.entity";
+import { Departement } from "./departement.entity";
+import { Restriction } from "./restriction.entity";
+import { ArreteCadreZoneAlerteCommunes } from "./arrete_cadre_zone_alerte_communes.entity";
 
 @Entity()
-@Index('IDX_zone_alerte_code_sandre_unique', ['codeSandre'], {
+@Index("IDX_zone_alerte_code_sandre_unique", ["codeSandre"], {
   unique: true,
   where: '"codeSandre" IS NOT NULL',
 })
@@ -34,14 +35,23 @@ export class ZoneAlerte extends BaseEntity {
   @Column({ nullable: true, length: 20, select: false })
   statutSandre: string;
 
-  @Column({ type: 'date', nullable: true, select: false })
+  @Column({ type: "date", nullable: true, select: false })
   dateMajSandre: string;
 
-  @Column({ type: 'jsonb', nullable: true, select: false })
+  @Column({ type: "jsonb", nullable: true, select: false })
   codesAlternatifs: string[];
 
   @Column({ nullable: true, length: 64, select: false })
   sandrePayloadHash: string;
+
+  @Column({
+    type: "varchar",
+    length: 30,
+    nullable: false,
+    default: "legacy_unverified",
+    select: false,
+  })
+  sandreProvenance: "official" | "legacy_unverified" | "local_preserved";
 
   @Column({ nullable: false, length: 200 })
   nom: string;
@@ -50,7 +60,7 @@ export class ZoneAlerte extends BaseEntity {
   code: string;
 
   @Column({ nullable: false, length: 50 })
-  type: 'SOU' | 'SUP';
+  type: "SOU" | "SUP";
 
   @Column({ default: false, nullable: false })
   ressourceInfluencee: boolean;
@@ -62,7 +72,7 @@ export class ZoneAlerte extends BaseEntity {
   numeroVersionSandre: number;
 
   @Column({
-    type: 'geometry',
+    type: "geometry",
     nullable: false,
     select: false,
   })
@@ -83,7 +93,10 @@ export class ZoneAlerte extends BaseEntity {
   @OneToMany(() => Restriction, (restriction) => restriction.zoneAlerte)
   restrictions: Restriction[];
 
-  @OneToMany(() => ArreteCadreZoneAlerteCommunes, (arreteCadreZoneAlerteCommunes) => arreteCadreZoneAlerteCommunes.zoneAlerte)
+  @OneToMany(
+    () => ArreteCadreZoneAlerteCommunes,
+    (arreteCadreZoneAlerteCommunes) => arreteCadreZoneAlerteCommunes.zoneAlerte,
+  )
   arreteCadreZoneAlerteCommunes: ArreteCadreZoneAlerteCommunes[];
 
   @CreateDateColumn()
