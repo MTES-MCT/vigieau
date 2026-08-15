@@ -183,7 +183,9 @@ export class ZoneAlerteComputedService {
   private pendingNationalCompute = false;
   private pendingNormalCompute = false;
   private pendingDailyPublicationReuse:
-    DailyZonePublicationReuseContext | null | undefined;
+    | DailyZonePublicationReuseContext
+    | null
+    | undefined;
   private pendingPublicationScheduledFor: string | null | undefined;
   private activeComputeWorker: Worker | null = null;
   private computeRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1342,7 +1344,8 @@ DELETE FROM zone_alerte_computed
       .digest('hex');
     let pmtilesChecksum: string | undefined;
     let fileToTransferPmtiles:
-      { originalname: string; buffer: Buffer } | undefined;
+      | { originalname: string; buffer: Buffer }
+      | undefined;
     try {
       if (allZones.length === 0) {
         await generateEmptyPmtiles({

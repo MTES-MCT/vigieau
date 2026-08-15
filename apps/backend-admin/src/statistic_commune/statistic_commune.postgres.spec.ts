@@ -121,7 +121,7 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       {} as never,
       dataSource,
     ) as unknown as StatisticCommuneInternals;
-  });
+  }, 30_000);
 
   beforeEach(async () => {
     queryRunner = dataSource.createQueryRunner();

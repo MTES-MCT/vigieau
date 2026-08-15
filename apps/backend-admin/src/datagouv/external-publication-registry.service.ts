@@ -46,7 +46,10 @@ export interface ExecuteDailyRunOptions {
 }
 
 export type PublicationRunResult =
-  'busy' | 'not_due' | 'succeeded' | 'already_succeeded';
+  | 'busy'
+  | 'not_due'
+  | 'succeeded'
+  | 'already_succeeded';
 
 export interface PublishedResourceDetails {
   remoteResourceId?: string;

@@ -2141,15 +2141,17 @@ export async function loadDatabaseState(
   });
 
   return normalizeDatabaseState({
-    zones: zoneRows.map((row): DatabaseZoneState => ({
-      id: Number(row.id),
-      idSandre: nullableNumber(row.idSandre),
-      codeSandre: row.codeSandre ?? null,
-      disabled: Boolean(row.disabled),
-      departmentId: Number(row.departementId),
-      type: row.type,
-      sandrePayloadHash: row.sandrePayloadHash ?? null,
-    })),
+    zones: zoneRows.map(
+      (row): DatabaseZoneState => ({
+        id: Number(row.id),
+        idSandre: nullableNumber(row.idSandre),
+        codeSandre: row.codeSandre ?? null,
+        disabled: Boolean(row.disabled),
+        departmentId: Number(row.departementId),
+        type: row.type,
+        sandrePayloadHash: row.sandrePayloadHash ?? null,
+      }),
+    ),
     arreteCadreLinks: operationalLinkRows.map(
       (row): DatabaseArreteCadreLink => ({
         arreteCadreId: Number(row.arreteCadreId),
@@ -2176,14 +2178,16 @@ export async function loadDatabaseState(
         communeIds: communeIdsByCustomization.get(Number(row.id)) ?? [],
       }),
     ),
-    aliases: aliasRows.map((row): DatabaseAliasState => ({
-      departmentId: Number(row.departementId),
-      zoneAlerteId: Number(row.zoneAlerteId),
-      zoneType: row.zoneType,
-      aliasType: row.aliasType,
-      aliasValue: row.aliasValue,
-      source: row.source,
-    })),
+    aliases: aliasRows.map(
+      (row): DatabaseAliasState => ({
+        departmentId: Number(row.departementId),
+        zoneAlerteId: Number(row.zoneAlerteId),
+        zoneType: row.zoneType,
+        aliasType: row.aliasType,
+        aliasValue: row.aliasValue,
+        source: row.source,
+      }),
+    ),
   });
 }
 

@@ -16,7 +16,10 @@ export type StatisticCacheArtifactKind =
 export type StatisticCacheArtifactMode = 'legacy-bootstrap' | 'versioned';
 
 export type StatisticCacheMaterializationStrategy =
-  'full-clean' | 'legacy-safe-boundary' | 'daily-delta' | 'current-replace';
+  | 'full-clean'
+  | 'legacy-safe-boundary'
+  | 'daily-delta'
+  | 'current-replace';
 
 export type StatisticCacheLatestCommuneWeight = [code: string, weight: number];
 
@@ -129,7 +132,8 @@ type EncodedArtifact = {
 };
 
 type StatisticCacheQueryable =
-  Pick<DataSource, 'query'> | Pick<EntityManager, 'query'>;
+  | Pick<DataSource, 'query'>
+  | Pick<EntityManager, 'query'>;
 
 const MAX_COMPRESSED_ARTIFACT_BYTES = 48 * 1024 * 1024;
 const MAX_TOTAL_COMPRESSED_ARTIFACT_BYTES = 64 * 1024 * 1024;

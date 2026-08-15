@@ -181,7 +181,7 @@ describe('StatisticCacheArtifactService', () => {
     const { service } = createService();
     const statements: string[] = [];
     const manager = {
-      query: jest.fn(async (sql: string, _parameters?: unknown[]) => {
+      query: jest.fn(async (sql: string) => {
         statements.push(sql);
         if (sql.includes('AS "invalidSnapshotCount"')) {
           return [
@@ -246,7 +246,7 @@ describe('StatisticCacheArtifactService', () => {
     }
     const { service } = createService();
     const manager = {
-      query: jest.fn(async (sql: string, _parameters?: unknown[]) =>
+      query: jest.fn(async (sql: string) =>
         sql.includes('AS "invalidSnapshotCount"')
           ? [
               {
