@@ -1,8 +1,13 @@
+import * as fsPromises from 'fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
   acquireSandreGlobalLock,
   acquireHistoricalRecomputeLock,
   assertNoOldReferences,
   currentTargetFingerprint,
+  earliestOperationRestrictionDate,
   fetchText,
   loadDatabaseState,
   loadReferenceCounts,
@@ -15,6 +20,7 @@ import {
   rollbackAndReleaseQueryRunner,
   releaseSandreGlobalLock,
   verifySandrePostSafeConvergence,
+  writeReportFile,
 } from './reconcile-sandre-zones';
 import { fingerprint } from '../zone_alerte/sandre-zone-reconciliation';
 
@@ -30,6 +36,25 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
       SCALINGO_APP: 'regleau-back-preprod',
       NODE_ENV: 'preprod',
     };
+  });
+
+  it('keeps the earliest civil date when pg returns Date objects', () => {
+    const postgresDate = (year: number, month: number, day: number) =>
+      new Date(year, month - 1, day);
+
+    expect(
+      earliestOperationRestrictionDate({
+        restrictions: [
+          {
+            arreteRestrictionDateDebut: postgresDate(2022, 9, 30),
+          },
+          {
+            arreteRestrictionDateDebut: postgresDate(2016, 7, 18),
+          },
+          { arreteRestrictionDateDebut: null },
+        ],
+      } as any),
+    ).toBe('2016-07-18');
   });
 
   afterAll(() => {
@@ -103,6 +128,78 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
         '/tmp/approved.json',
       ]),
     ).toThrow('--apply and --dry-run are mutually exclusive');
+  });
+
+  describe('report file persistence', () => {
+    let directory: string;
+
+    beforeEach(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'vigieau-sandre-report-'));
+    });
+
+    afterEach(async () => {
+      jest.restoreAllMocks();
+      await rm(directory, { force: true, recursive: true });
+    });
+
+    it('writes the exact content, syncs it and closes the file handle', async () => {
+      const reportPath = join(directory, 'approved.json');
+      const content = '{\n  "status": "approved"\n}\n';
+      const realOpen = fsPromises.open;
+      let syncSpy: jest.SpyInstance<Promise<void>, []>;
+      let closeSpy: jest.SpyInstance<Promise<void>, []>;
+
+      jest
+        .spyOn(fsPromises, 'open')
+        .mockImplementation(async (path, flags, mode) => {
+          const handle = await realOpen(path, flags, mode);
+          syncSpy = jest.spyOn(handle, 'sync');
+          closeSpy = jest.spyOn(handle, 'close');
+          return handle;
+        });
+
+      await writeReportFile(reportPath, content);
+
+      await expect(readFile(reportPath, 'utf8')).resolves.toBe(content);
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(syncSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        closeSpy.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('preserves exclusive creation and never overwrites an existing report', async () => {
+      const reportPath = join(directory, 'approved.json');
+      await writeFile(reportPath, 'already approved', 'utf8');
+
+      await expect(
+        writeReportFile(reportPath, 'replacement'),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      await expect(readFile(reportPath, 'utf8')).resolves.toBe(
+        'already approved',
+      );
+    });
+
+    it('preserves a write error when closing the file also fails', async () => {
+      const writeError = new Error('write failed');
+      const closeError = new Error('close failed');
+      jest.spyOn(fsPromises, 'open').mockResolvedValue({
+        writeFile: jest.fn().mockRejectedValue(writeError),
+        sync: jest.fn(),
+        close: jest.fn().mockRejectedValue(closeError),
+      } as any);
+      const consoleError = jest
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        writeReportFile(join(directory, 'approved.json'), 'content'),
+      ).rejects.toBe(writeError);
+      expect(consoleError).toHaveBeenCalledWith(
+        '[sandre-reconcile] report file cleanup failed',
+        closeError,
+      );
+    });
   });
 
   it('parses an audited operation plan only in dry-run mode', () => {
@@ -430,6 +527,9 @@ describe('reconcile-sandre-zones CLI safeguards', () => {
     expect(
       statements.join('\n').match(/statut IN \('a_venir', 'publie'\)/g),
     ).toHaveLength(3);
+    expect(statements.join('\n')).toContain(
+      'ar."dateDebut"::text AS "arreteRestrictionDateDebut"',
+    );
     const communeQuery = firstExecutor.query.mock.calls.find(([sql]) =>
       sql.includes('FROM ac_za_communes'),
     );
