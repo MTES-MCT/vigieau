@@ -491,7 +491,7 @@ export async function loadSandreReconciliationState(
       SELECT
         restriction.id,
         restriction."arreteRestrictionId",
-        parent."dateDebut" AS "arreteRestrictionDateDebut",
+        parent."dateDebut"::text AS "arreteRestrictionDateDebut",
         restriction."zoneAlerteId",
         restriction."arreteCadreId",
         restriction."nomGroupementAep",

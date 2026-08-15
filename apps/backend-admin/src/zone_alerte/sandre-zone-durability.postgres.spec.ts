@@ -5,6 +5,7 @@ import { SandreZoneDurability1786395600000 } from '../migrations/1786395600000-S
 import {
   acquireHistoricalRecomputeLock,
   clearSandreOperationRecomputeDebt,
+  earliestOperationRestrictionDate,
   operationBusinessReferencesFingerprint,
   prepareSandreOperationRecomputeDebt,
 } from '../scripts/reconcile-sandre-zones';
@@ -350,6 +351,12 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     const beforeState = await loadSandreReconciliationState(runner, plan);
     const beforeFingerprint = fingerprint(beforeState);
     expect(beforeState.restrictions).toHaveLength(3);
+    expect(
+      beforeState.restrictions.map(
+        (restriction) => restriction.arreteRestrictionDateDebut,
+      ),
+    ).toEqual(['2016-07-18', '2016-07-18', '2021-01-01']);
+    expect(earliestOperationRestrictionDate(beforeState)).toBe('2016-07-18');
     const audits = await auditSandreReconciliationPlan(runner, plan, official);
     expect(audits.every((audit) => audit.status === 'ready')).toBe(true);
     expect(audits[3].restrictionConflicts).toEqual({
@@ -534,20 +541,31 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     }
   }, 30_000);
 
-  it('resumes an existing recompute debt without rewinding or incrementing it', async () => {
+  it('persists the historical cursors and resumes an existing recompute debt', async () => {
     const firstDebt = await prepareSandreOperationRecomputeDebt(
       runner,
       'APPLIED',
       [1],
-      '2026-01-01',
+      '2016-07-18',
     );
     expect(firstDebt).toEqual([{ departmentId: 1, revision: 1 }]);
+    const [initialCursors] = await runner.query(`
+      SELECT
+        "computeMapDate"::text AS "computeMapDate",
+        "computeStatsDate"::text AS "computeStatsDate"
+      FROM config
+      WHERE id = 1
+    `);
+    expect(initialCursors).toEqual({
+      computeMapDate: '2016-07-18',
+      computeStatsDate: '2016-07-18',
+    });
 
     const crashResumeDebt = await prepareSandreOperationRecomputeDebt(
       runner,
       'ALREADY_APPLIED',
       [1],
-      '2026-01-01',
+      '2016-07-18',
     );
     expect(crashResumeDebt).toEqual(firstDebt);
     const [pendingState] = await runner.query(`
@@ -572,7 +590,7 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       runner,
       'ALREADY_APPLIED',
       [1],
-      '2026-01-01',
+      '2016-07-18',
     );
     expect(cleanReplayDebt).toEqual([]);
     const [finalState] = await runner.query(`
@@ -953,7 +971,7 @@ async function seedReconciliationFixture(runner: QueryRunner): Promise<void> {
       (3, 9707),
       (4, 9707);
     INSERT INTO arrete_restriction (id, statut, "dateDebut") VALUES
-      (10, 'abroge', DATE '2020-01-01'),
+      (10, 'abroge', DATE '2016-07-18'),
       (11, 'abroge', DATE '2021-01-01');
     INSERT INTO restriction (
       id, "arreteRestrictionId", "zoneAlerteId", "arreteCadreId",

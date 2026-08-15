@@ -2,8 +2,6 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { open, readFile } from 'fs/promises';
 import { resolve } from 'path';
-import { Readable } from 'stream';
-import { pipeline } from 'stream/promises';
 import { DataSource, QueryRunner } from 'typeorm';
 import {
   fetchSandreZoneSnapshot,
@@ -1191,15 +1189,29 @@ async function readOperationReportIfPresent(
   return { ...report, plan };
 }
 
-function earliestOperationRestrictionDate(
+export function earliestOperationRestrictionDate(
   state: Awaited<ReturnType<typeof loadSandreReconciliationState>>,
 ): string | null {
   return (
     state.restrictions
       .map((restriction) => restriction.arreteRestrictionDateDebut)
-      .filter((date): date is string => typeof date === 'string')
+      .map(normalizePostgresCivilDate)
+      .filter((date): date is string => date !== null)
       .sort()[0] ?? null
   );
+}
+
+function normalizePostgresCivilDate(value: unknown): string | null {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    return null;
+  }
+  const year = String(value.getFullYear()).padStart(4, '0');
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export function operationBusinessReferencesFingerprint(
@@ -2054,7 +2066,7 @@ export async function loadDatabaseState(
             restriction_row.id,
             restriction_row."arreteRestrictionId",
             ar.statut AS "arreteRestrictionStatut",
-            ar."dateDebut" AS "arreteRestrictionDateDebut",
+            ar."dateDebut"::text AS "arreteRestrictionDateDebut",
             restriction_row."zoneAlerteId",
             restriction_row."arreteCadreId",
             restriction_row."nomGroupementAep",
@@ -2309,16 +2321,30 @@ async function recordReconciliationDecisions(
   }
 }
 
-async function writeReportFile(path: string, content: string): Promise<void> {
+export async function writeReportFile(
+  path: string,
+  content: string,
+): Promise<void> {
   const handle = await open(path, 'wx');
+  let writeError: unknown;
   try {
-    await pipeline(
-      Readable.from([content]),
-      handle.createWriteStream({ autoClose: false }),
-    );
+    await handle.writeFile(content, 'utf8');
     await handle.sync();
+  } catch (error) {
+    writeError = error;
+    throw error;
   } finally {
-    await handle.close();
+    try {
+      await handle.close();
+    } catch (closeError) {
+      if (!writeError) {
+        throw closeError;
+      }
+      console.error(
+        '[sandre-reconcile] report file cleanup failed',
+        closeError,
+      );
+    }
   }
 }
 
