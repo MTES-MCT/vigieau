@@ -147,6 +147,7 @@ jobs:
         run: >-
           npm --prefix apps/backend test -- --runInBand
           src/data/statistic-cache-artifact.postgres.spec.ts
+          src/data/historic-config-schema-repair.postgres.spec.ts
         env:
           STATISTIC_CACHE_ARTIFACT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Verify statistic boundary recovery against PostgreSQL
