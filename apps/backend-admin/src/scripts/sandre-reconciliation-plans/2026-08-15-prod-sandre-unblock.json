@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "operationId": "2026-08-15-prod-sandre-unblock",
+  "description": "Unblock the audited Sandre departments without guessing identities or discarding historical relations.",
+  "syncExpectations": [
+    {
+      "departmentCode": "2A",
+      "officialCodes": ["3996"],
+      "resolution": "basin_mapping",
+      "officialBasinCode": 12,
+      "localBasinCode": 6,
+      "mappingSource": "audited_official_to_local"
+    },
+    {
+      "departmentCode": "2B",
+      "officialCodes": ["1942"],
+      "resolution": "basin_mapping",
+      "officialBasinCode": 12,
+      "localBasinCode": 6,
+      "mappingSource": "audited_official_to_local"
+    },
+    {
+      "departmentCode": "19",
+      "officialCodes": ["3917"],
+      "resolution": "geometry_normalization"
+    },
+    {
+      "departmentCode": "69",
+      "officialCodes": ["1827"],
+      "resolution": "geometry_normalization"
+    },
+    {
+      "departmentCode": "72",
+      "officialCodes": ["2129"],
+      "resolution": "geometry_normalization"
+    },
+    {
+      "departmentCode": "81",
+      "officialCodes": ["3090"],
+      "resolution": "geometry_normalization"
+    },
+    {
+      "departmentCode": "87",
+      "officialCodes": ["1424"],
+      "resolution": "geometry_normalization"
+    }
+  ],
+  "actions": [
+    {
+      "strategy": "preserve_local",
+      "departmentCode": "2B",
+      "zoneType": "SOU",
+      "sourceZoneId": 4605,
+      "expectedSourceCode": "94_2B_01"
+    },
+    {
+      "strategy": "replace_1to1",
+      "departmentCode": "2A",
+      "zoneType": "SOU",
+      "sourceZoneId": 16581,
+      "targetZoneId": 16773
+    },
+    {
+      "strategy": "replace_1to1",
+      "departmentCode": "2A",
+      "zoneType": "SUP",
+      "sourceZoneId": 16582,
+      "targetZoneId": 16772
+    },
+    {
+      "strategy": "replace_partition_1ton",
+      "departmentCode": "2A",
+      "zoneType": "SOU",
+      "sourceZoneId": 16583,
+      "targetZoneIds": [16765, 16767, 16769, 16774, 16775]
+    },
+    {
+      "strategy": "replace_partition_1ton",
+      "departmentCode": "2A",
+      "zoneType": "SUP",
+      "sourceZoneId": 16584,
+      "targetZoneIds": [16764, 16766, 16768, 16770, 16771]
+    },
+    {
+      "strategy": "canonicalize_duplicate",
+      "departmentCode": "49",
+      "zoneType": "SOU",
+      "sourceZoneId": 9707,
+      "targetZoneId": 9704,
+      "expectedSourceCode": "52_49_14",
+      "expectedSandreGid": 408,
+      "officialCode": "300"
+    }
+  ]
+}

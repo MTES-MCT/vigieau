@@ -7,6 +7,8 @@ import { ZONE_PUBLICATION_MATERIALIZATION_VERSION } from '../zone_publication/zo
 
 describe('DatagouvSchedulerService', () => {
   const previousZonePublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
+  const previousStatisticCacheRequired =
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
   const historicConfig = {
     computeMapDate: new Date('2026-07-31T00:00:00.000Z'),
     computeStatsDate: '2026-07-31T12:00:00.000Z',
@@ -24,6 +26,7 @@ describe('DatagouvSchedulerService', () => {
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'false';
   });
 
   afterAll(() => {
@@ -31,6 +34,12 @@ describe('DatagouvSchedulerService', () => {
       delete process.env.ZONE_PUBLICATION_ENABLED;
     } else {
       process.env.ZONE_PUBLICATION_ENABLED = previousZonePublicationEnabled;
+    }
+    if (previousStatisticCacheRequired === undefined) {
+      delete process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+    } else {
+      process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED =
+        previousStatisticCacheRequired;
     }
   });
 
@@ -59,17 +68,29 @@ describe('DatagouvSchedulerService', () => {
     const configService = {
       getConfig: jest.fn().mockResolvedValue(historicConfig),
     };
+    const statisticCacheReadiness = {
+      getReadyPublication: jest.fn().mockResolvedValue({
+        publicationId: 'statistic-publication-1',
+        statisticRevision: '12',
+        statisticPublishedDate: '2026-08-01',
+        statisticFingerprint: 'c'.repeat(64),
+        sourceRevision: '42',
+      }),
+      assertReadyPublication: jest.fn().mockResolvedValue(undefined),
+    };
     return {
       service: new DatagouvSchedulerService(
         datagouvService as any,
         registry as any,
         zonePublicationService as any,
         configService as any,
+        statisticCacheReadiness as any,
       ),
       datagouvService,
       registry,
       zonePublicationService,
       configService,
+      statisticCacheReadiness,
     };
   };
 
@@ -177,6 +198,48 @@ describe('DatagouvSchedulerService', () => {
     );
     expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
     expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+  });
+
+  it('waits for the exact statistic artifact quorum in required legacy mode', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createService();
+    harness.statisticCacheReadiness.getReadyPublication.mockResolvedValue(null);
+
+    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
+
+    expect(
+      harness.statisticCacheReadiness.getReadyPublication,
+    ).toHaveBeenCalledWith('2026-08-01', '42');
+    expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
+  });
+
+  it('pins a required legacy Datagouv run to the exact statistic artifact', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'false';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createService();
+
+    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
+
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
+      'datagouv:daily',
+      '2026-08-01',
+      expect.any(Function),
+      new Date('2026-08-01T04:01:00Z'),
+      {
+        identity: expect.objectContaining({
+          publicationMode: 'legacy',
+          sourceRevision: '42',
+          statisticCachePublicationId: 'statistic-publication-1',
+          statisticRevision: '12',
+          statisticPublishedDate: '2026-08-01',
+          statisticFingerprint: 'c'.repeat(64),
+        }),
+      },
+    );
+    expect(
+      harness.statisticCacheReadiness.assertReadyPublication,
+    ).toHaveBeenCalled();
   });
 
   it('keeps legacy retries idempotent through the daily registry', async () => {

@@ -17,6 +17,7 @@ import {
   FindOptionsWhere,
   In,
   IsNull,
+  Not,
   Repository,
   QueryRunner,
 } from 'typeorm';
@@ -54,6 +55,10 @@ import {
   SandreSyncDecisionDraft,
   SandreZoneSyncMode,
 } from './sandre-zone-governance';
+import {
+  normalizeSandreZoneGeometries,
+  SandreGeometryAudit,
+} from './sandre-zone-geometry';
 
 const SANDRE_FULL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const SANDRE_HTTP_TIMEOUT_MS = 30 * 1000;
@@ -69,6 +74,7 @@ const SANDRE_ZONE_SELECT = {
   dateMajSandre: true,
   codesAlternatifs: true,
   sandrePayloadHash: true,
+  sandreProvenance: true,
   nom: true,
   code: true,
   type: true,
@@ -129,12 +135,21 @@ interface SandreSnapshotPreflight {
     feature: SandreZoneFeature;
     match: SandreZoneMatch | null;
     bassinVersant: BassinVersant;
+    basinResolution: SandreBasinResolution;
+    geometryAudit: SandreGeometryAudit;
   }>;
   resolvedInactiveFeatures: Array<{
     feature: SandreZoneFeature;
     match: SandreZoneMatch | null;
   }>;
   activeZoneIds: Set<number>;
+}
+
+interface SandreBasinResolution {
+  officialBasinCode: number;
+  localBasinCode: number;
+  mappingSource: string;
+  mapped: boolean;
 }
 
 interface SandreSnapshotApplication {
@@ -1145,40 +1160,80 @@ export class ZoneAlerteService {
       throw new Error(`Unknown department ${depCode}`);
     }
 
-    const activeFeatures = snapshot.features.filter(
+    const rawActiveFeatures = snapshot.features.filter(
       (feature) => feature.status === SANDRE_VALID_STATUS,
     );
-    await this.assertValidSandreGeometries(manager, activeFeatures);
+    const normalizedGeometry = await normalizeSandreZoneGeometries(
+      manager,
+      rawActiveFeatures,
+    );
+    const activeFeatures = normalizedGeometry.features;
 
     const basinRepository = manager.getRepository(BassinVersant);
-    const basinsByCode = new Map<number, BassinVersant>();
+    const basinsByCode = new Map<
+      number,
+      { bassinVersant: BassinVersant; resolution: SandreBasinResolution }
+    >();
     for (const feature of activeFeatures) {
       if (basinsByCode.has(feature.basinCode)) {
         continue;
       }
-      const bassinVersant = await basinRepository.findOne({
-        where: { code: feature.basinCode },
+      const [mapping] = await manager.query(
+        `
+          SELECT "localBasinCode", source
+          FROM sandre_basin_mapping
+          WHERE "officialBasinCode" = $1
+        `,
+        [feature.basinCode],
+      );
+      const localBasinCode = mapping
+        ? Number(mapping.localBasinCode)
+        : feature.basinCode;
+      const basinCandidates = await basinRepository.find({
+        where: { code: localBasinCode },
+        order: { id: 'ASC' },
+        take: 2,
       });
-      if (!bassinVersant) {
+      if (basinCandidates.length !== 1) {
         throw new Error(
-          `Unknown basin ${feature.basinCode} for Sandre zone ${feature.codeSandre}`,
+          `Expected one local basin ${localBasinCode}, found ${basinCandidates.length}, ` +
+            `for Sandre basin ${feature.basinCode} ` +
+            `and zone ${feature.codeSandre}`,
         );
       }
-      basinsByCode.set(feature.basinCode, bassinVersant);
+      const [bassinVersant] = basinCandidates;
+      basinsByCode.set(feature.basinCode, {
+        bassinVersant,
+        resolution: {
+          officialBasinCode: feature.basinCode,
+          localBasinCode,
+          mappingSource: mapping?.source ?? 'identity',
+          mapped: localBasinCode !== feature.basinCode,
+        },
+      });
     }
 
     const activeZoneIds = new Set<number>();
     const resolvedActiveFeatures: SandreSnapshotPreflight['resolvedActiveFeatures'] =
       [];
     for (const feature of activeFeatures) {
-      const bassinVersant = basinsByCode.get(feature.basinCode)!;
+      const { bassinVersant, resolution: basinResolution } = basinsByCode.get(
+        feature.basinCode,
+      )!;
+      const geometryAudit = normalizedGeometry.audits.get(feature.codeSandre)!;
       const match = await this.findSandreZoneMatch(
         manager,
         departement,
         feature,
       );
       if (!match) {
-        resolvedActiveFeatures.push({ feature, match, bassinVersant });
+        resolvedActiveFeatures.push({
+          feature,
+          match,
+          bassinVersant,
+          basinResolution,
+          geometryAudit,
+        });
         continue;
       }
       if (activeZoneIds.has(match.zone.id)) {
@@ -1199,7 +1254,13 @@ export class ZoneAlerteService {
           match.zone.codeSandre,
         );
       }
-      resolvedActiveFeatures.push({ feature, match, bassinVersant });
+      resolvedActiveFeatures.push({
+        feature,
+        match,
+        bassinVersant,
+        basinResolution,
+        geometryAudit,
+      });
     }
 
     const resolvedInactiveFeatures: SandreSnapshotPreflight['resolvedInactiveFeatures'] =
@@ -1288,13 +1349,20 @@ export class ZoneAlerteService {
     const activeZoneIds = new Set(preflight.activeZoneIds);
     const activeZonesByCode = new Map<string, ZoneAlerte>();
     let virtualZoneId = -1;
-    for (const { feature, match } of preflight.resolvedActiveFeatures) {
+    for (const {
+      feature,
+      match,
+      basinResolution,
+      geometryAudit,
+    } of preflight.resolvedActiveFeatures) {
       const decision = decisionsByKey.get(`${feature.codeSandre}:active`);
       if (decision) {
         decision.zoneAlerteId = match?.zone.id ?? null;
         decision.evidence = {
           ...decision.evidence,
           matchType: match?.matchType ?? null,
+          basinResolution,
+          geometry: geometryAudit,
         };
       }
       activeZonesByCode.set(
@@ -1623,7 +1691,13 @@ export class ZoneAlerteService {
       ]);
 
       const activeZonesByCode = new Map<string, ZoneAlerte>();
-      for (const { feature, match, bassinVersant } of resolvedActiveFeatures) {
+      for (const {
+        feature,
+        match,
+        bassinVersant,
+        basinResolution,
+        geometryAudit,
+      } of resolvedActiveFeatures) {
         const countersBefore = { ...result };
         const upsert = await this.upsertActiveSandreZone(
           queryRunner.manager,
@@ -1650,7 +1724,11 @@ export class ZoneAlerteService {
           action: 'UPSERT_ACTIVE',
           outcome: 'applied',
           reason,
-          evidence: { matchType: match?.matchType ?? null },
+          evidence: {
+            matchType: match?.matchType ?? null,
+            basinResolution,
+            geometry: geometryAudit,
+          },
         });
       }
 
@@ -2334,6 +2412,7 @@ export class ZoneAlerteService {
           FROM zone_alerte zone
           WHERE zone."departementId" = $1
             AND zone.disabled = true
+            AND zone."sandreProvenance" <> 'local_preserved'
             AND (
               EXISTS (
                 SELECT 1
@@ -2568,51 +2647,6 @@ export class ZoneAlerteService {
     );
   }
 
-  private async assertValidSandreGeometries(
-    manager: EntityManager,
-    features: SandreZoneFeature[],
-  ): Promise<void> {
-    if (features.length === 0) {
-      return;
-    }
-    const invalidFeatures =
-      (await manager.query(
-        `
-          WITH input AS (
-            SELECT
-              item->>'code' AS code,
-              ST_SetSRID(
-                ST_GeomFromGeoJSON((item->'geometry')::text),
-                4326
-              ) AS geom
-            FROM jsonb_array_elements($1::jsonb) AS item
-          )
-          SELECT code
-          FROM input
-          WHERE ST_IsEmpty(geom)
-            OR NOT ST_IsValid(geom)
-            OR GeometryType(geom) NOT IN ('POLYGON', 'MULTIPOLYGON')
-            OR ST_XMin(Box3D(geom)) < -180
-            OR ST_XMax(Box3D(geom)) > 180
-            OR ST_YMin(Box3D(geom)) < -90
-            OR ST_YMax(Box3D(geom)) > 90
-        `,
-        [
-          JSON.stringify(
-            features.map((feature) => ({
-              code: feature.codeSandre,
-              geometry: feature.geometry,
-            })),
-          ),
-        ],
-      )) ?? [];
-    if (invalidFeatures.length > 0) {
-      throw new Error(
-        `Invalid Sandre geometry for zone ${invalidFeatures[0].code}`,
-      );
-    }
-  }
-
   private async findSandreZoneMatch(
     manager: EntityManager,
     departement: Departement,
@@ -2623,6 +2657,7 @@ export class ZoneAlerteService {
       select: SANDRE_ZONE_SELECT,
       where: {
         codeSandre: feature.codeSandre,
+        sandreProvenance: Not('local_preserved'),
       },
       relations: {
         bassinVersant: true,
@@ -2630,14 +2665,21 @@ export class ZoneAlerteService {
       },
       take: 2,
     });
-    if (canonicalMatches.length > 1) {
+    const managedCanonicalMatches = canonicalMatches.filter(
+      (zone) => zone.sandreProvenance !== 'local_preserved',
+    );
+    if (managedCanonicalMatches.length > 1) {
       throw new Error(`Duplicate Sandre code ${feature.codeSandre}`);
     }
-    if (canonicalMatches.length === 1) {
-      this.assertSandreZoneScope(canonicalMatches[0], departement, feature);
+    if (managedCanonicalMatches.length === 1) {
+      this.assertSandreZoneScope(
+        managedCanonicalMatches[0],
+        departement,
+        feature,
+      );
       return {
         matchType: 'canonical',
-        zone: canonicalMatches[0],
+        zone: managedCanonicalMatches[0],
       };
     }
 
@@ -2653,6 +2695,9 @@ export class ZoneAlerteService {
         zoneType: feature.type,
         aliasType: 'cd_zas',
         aliasValue: feature.codeSandre,
+        zoneAlerte: {
+          sandreProvenance: Not('local_preserved'),
+        },
       },
       relations: {
         zoneAlerte: {
@@ -2661,7 +2706,7 @@ export class ZoneAlerteService {
         },
       },
     });
-    if (alias) {
+    if (alias && alias.zoneAlerte.sandreProvenance !== 'local_preserved') {
       this.assertSandreZoneScope(alias.zoneAlerte, departement, feature);
       return {
         matchType: 'alias',
@@ -2674,6 +2719,7 @@ export class ZoneAlerteService {
       where: {
         idSandre: feature.gid,
         codeSandre: IsNull(),
+        sandreProvenance: Not('local_preserved'),
         departement: {
           id: departement.id,
         },
@@ -2685,16 +2731,19 @@ export class ZoneAlerteService {
       },
       take: 2,
     });
-    if (legacyMatches.length > 1) {
+    const managedLegacyMatches = legacyMatches.filter(
+      (zone) => zone.sandreProvenance !== 'local_preserved',
+    );
+    if (managedLegacyMatches.length > 1) {
       throw new Error(
         `Duplicate legacy Sandre gid ${feature.gid} for department ${departement.code}`,
       );
     }
 
-    return legacyMatches.length === 1
+    return managedLegacyMatches.length === 1
       ? {
           matchType: 'legacy_gid',
-          zone: legacyMatches[0],
+          zone: managedLegacyMatches[0],
         }
       : null;
   }
@@ -2745,6 +2794,8 @@ export class ZoneAlerteService {
       zone.statutSandre !== feature.status ||
       zone.dateMajSandre !== feature.sourceUpdatedAt ||
       zone.sandrePayloadHash !== feature.payloadHash ||
+      (zone.sandreProvenance !== undefined &&
+        zone.sandreProvenance !== 'official') ||
       zone.bassinVersant?.id !== bassinVersant.id ||
       !sameStringArrays(zone.codesAlternatifs, feature.alternateCodes) ||
       !samePolygonGeometry(zone.geom, feature.geometry);
@@ -2783,6 +2834,7 @@ export class ZoneAlerteService {
     zone.dateMajSandre = feature.sourceUpdatedAt;
     zone.codesAlternatifs = feature.alternateCodes;
     zone.sandrePayloadHash = feature.payloadHash;
+    zone.sandreProvenance = 'official';
 
     const savedZone = await zoneRepository.save(zone);
     if (isNew) {

@@ -13,14 +13,21 @@ import { DataSource } from 'typeorm';
 describe('DataService', () => {
   let service: DataService;
   const originalStatisticCacheMode = process.env.STATISTIC_CACHE_MODE;
+  const originalStatisticArtifactMode =
+    process.env.STATISTIC_CACHE_ARTIFACT_MODE;
 
   const stablePublicationState = {
     revision: 'stable',
     activePublicationId: 'active-publication',
+    statisticCachePublicationId: null,
     currentPublishedDate: '2023-01-02',
     historicPublishedThrough: '2023-01-01',
     historicDirtyFrom: null,
     historicDirtyThrough: null,
+    historicMapCursor: null,
+    historicStatsCursor: null,
+    sourceRevision: null,
+    historicComputeEpoch: null,
   };
 
   const mockRepository = {
@@ -120,6 +127,7 @@ describe('DataService', () => {
 
   beforeEach(async () => {
     process.env.STATISTIC_CACHE_MODE = 'versioned';
+    process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'disabled';
     jest.clearAllMocks();
     mockDataSource.query.mockReset();
     mockDataSource.query.mockResolvedValue([stablePublicationState]);
@@ -193,6 +201,11 @@ describe('DataService', () => {
       delete process.env.STATISTIC_CACHE_MODE;
     } else {
       process.env.STATISTIC_CACHE_MODE = originalStatisticCacheMode;
+    }
+    if (originalStatisticArtifactMode === undefined) {
+      delete process.env.STATISTIC_CACHE_ARTIFACT_MODE;
+    } else {
+      process.env.STATISTIC_CACHE_ARTIFACT_MODE = originalStatisticArtifactMode;
     }
   });
 
@@ -601,7 +614,7 @@ describe('DataService', () => {
 
       expect(result).toEqual([{ date: '2023-01-01', ESO: 1, ESU: 1, AEP: 1 }]);
       expect(service['certifiedDataCache']?.dataArea).toEqual(result);
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(loadDataOnce).toHaveBeenCalledTimes(1);
 
       finishLoad!({
@@ -993,8 +1006,8 @@ describe('DataService', () => {
 
       expect(state).toEqual(stablePublicationState);
       const query = mockDataSource.query.mock.calls[0][0];
-      expect(query).toContain('FROM statistic_publication_state');
-      expect(query).toContain('WHERE statistic_state.id = 1');
+      expect(query).toContain('FROM "statistic_publication_state"');
+      expect(query).toContain('WHERE statistic_state."id" = 1');
       expect(query).toContain('LIMIT 1');
       expect(query).not.toContain('md5');
       expect(query).not.toContain('statistic_commune_snapshot');
@@ -1877,7 +1890,7 @@ describe('DataService', () => {
       expect(service['failedPublicationStateToken']).toBeNull();
     });
 
-    it('refreshes a hot cache when the dirty range changes at the same revision', async () => {
+    it('updates dirty health metadata without reloading an unchanged cache identity', async () => {
       const dirtyState = {
         ...stablePublicationState,
         historicDirtyFrom: '2023-01-01',
@@ -1898,13 +1911,13 @@ describe('DataService', () => {
 
       await service.loadData();
 
-      expect(loadDataOnce).toHaveBeenCalledTimes(1);
+      expect(loadDataOnce).not.toHaveBeenCalled();
       expect(service['certifiedDataCache']?.publicationState).toEqual(
         dirtyState,
       );
     });
 
-    it('does not reuse the cooldown of another dirty range at the same revision', async () => {
+    it('does not let a dirty cursor change trigger cache materialization', async () => {
       const failedDirtyState = {
         ...stablePublicationState,
         historicDirtyFrom: '2023-01-01',
@@ -1934,11 +1947,600 @@ describe('DataService', () => {
       await service.areaFindByDate();
       await service['certifiedDataRefreshLoading'];
 
-      expect(loadDataOnce).toHaveBeenCalledTimes(1);
+      expect(loadDataOnce).not.toHaveBeenCalled();
       expect(service['certifiedDataCache']?.publicationState).toEqual(
         nextDirtyState,
       );
       expect(service['failedPublicationStateToken']).toBeNull();
+    });
+  });
+
+  describe('statistic artifact materialization', () => {
+    const artifactState = {
+      ...stablePublicationState,
+      revision: '11',
+      activePublicationId: null,
+      statisticCachePublicationId: '00000000-0000-4000-8000-000000000011',
+      currentPublishedDate: '2026-09-02',
+      historicDirtyFrom: '2015-01-01',
+      historicDirtyThrough: '2026-09-01',
+      historicMapCursor: '2015-01-01',
+      historicStatsCursor: '2015-01-01',
+      sourceRevision: '42',
+      historicComputeEpoch: '7',
+    };
+    const activeArtifact = {
+      identity: {
+        id: '00000000-0000-4000-8000-000000000010',
+        statisticRevision: '10',
+        currentPublishedDate: '2026-08-31',
+        mode: 'legacy-bootstrap',
+        materializationStrategy: 'daily-delta',
+        historicDirtyFrom: '2015-01-01',
+        historicDirtyThrough: '2026-08-30',
+        historicMapCursor: '2015-01-01',
+        historicStatsCursor: '2015-01-01',
+        sourceRevision: '42',
+        historicComputeEpoch: '7',
+        contentFingerprint: 'a'.repeat(64),
+        firstDate: '2026-08-31',
+        latestDate: '2026-08-31',
+        dateCount: 1,
+        areaCount: 1,
+        departmentCount: 101,
+        communeCount: 1,
+        readyAt: new Date('2026-08-31T06:00:00.000Z'),
+      },
+      dataArea: [{ date: '2026-08-31', ESO: {}, ESU: {}, AEP: {} }],
+      dataDepartement: [departmentDay('2026-08-31')],
+      dataCommune: [{ code: '01001', restrictions: [{ d: '2026-08', p: 2 }] }],
+      latestCommuneWeights: [['01001', 2]],
+    };
+
+    beforeEach(() => {
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+    });
+
+    it.each([
+      ['clean bootstrap', null, 'full-clean'],
+      ['safe dirty bootstrap', '2015-01-01', 'legacy-safe-boundary'],
+    ])('builds a %s candidate', async (_label, dirtyFrom, strategy) => {
+      const state = {
+        ...artifactState,
+        historicDirtyFrom: dirtyFrom,
+        historicDirtyThrough: dirtyFrom ? '2026-09-01' : null,
+      };
+      const candidate = { materializationStrategy: strategy };
+      const full = jest
+        .spyOn(service as any, 'createFullArtifactCandidate')
+        .mockResolvedValue(candidate);
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          state,
+          null,
+          mockTransactionManager,
+        ),
+      ).resolves.toBe(candidate);
+      expect(full).toHaveBeenCalledWith(
+        state,
+        strategy,
+        mockTransactionManager,
+      );
+    });
+
+    it('forces one full rebuild when historic dirty publication finishes', async () => {
+      const cleanState = {
+        ...artifactState,
+        revision: '12',
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+        historicMapCursor: '2026-09-01',
+        historicStatsCursor: '2026-09-01',
+      };
+      const candidate = { materializationStrategy: 'full-clean' };
+      const full = jest
+        .spyOn(service as any, 'createFullArtifactCandidate')
+        .mockResolvedValue(candidate);
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          cleanState,
+          activeArtifact,
+          mockTransactionManager,
+        ),
+      ).resolves.toBe(candidate);
+      expect(full).toHaveBeenCalledWith(
+        cleanState,
+        'full-clean',
+        mockTransactionManager,
+      );
+    });
+
+    it('appends several days across a month boundary even when revision changes', async () => {
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      jest
+        .spyOn(service as any, 'loadRefData')
+        .mockResolvedValue(referenceData);
+      const snapshotCoverage = jest
+        .spyOn(service as any, 'assertDeltaSnapshotCoverage')
+        .mockResolvedValue(undefined);
+      jest
+        .spyOn(service as any, 'loadDailyDepartmentCollections')
+        .mockResolvedValue({
+          dataArea: [
+            { date: '2026-09-01', ESO: {}, ESU: {}, AEP: {} },
+            { date: '2026-09-02', ESO: {}, ESU: {}, AEP: {} },
+          ],
+          dataDepartement: [
+            departmentDay('2026-09-01'),
+            departmentDay('2026-09-02'),
+          ],
+        });
+      jest.spyOn(service as any, 'loadDailyCommuneWeights').mockResolvedValue(
+        new Map([
+          ['2026-09-01', [['01001', 3]]],
+          ['2026-09-02', [['01001', 4]]],
+        ]),
+      );
+
+      const result = await (service as any).createDeltaArtifactCandidate(
+        artifactState,
+        activeArtifact,
+        mockTransactionManager,
+      );
+
+      expect(result.materializationStrategy).toBe('daily-delta');
+      expect(result.statisticRevision).toBe('11');
+      expect(result.latestDate).toBe('2026-09-02');
+      expect(result.dateCount).toBe(3);
+      expect(result.dataCommune).toEqual([
+        {
+          code: '01001',
+          restrictions: [
+            { d: '2026-08', p: 2 },
+            { d: '2026-09', p: 7 },
+          ],
+        },
+      ]);
+      expect(snapshotCoverage).toHaveBeenCalledWith(
+        '2026-09-01',
+        '2026-09-02',
+        1,
+        artifactState,
+        mockTransactionManager,
+      );
+    });
+
+    it('replaces the current date by subtracting its previous private weight first', async () => {
+      const sameDateState = {
+        ...artifactState,
+        currentPublishedDate: '2026-08-31',
+      };
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      jest
+        .spyOn(service as any, 'loadRefData')
+        .mockResolvedValue(referenceData);
+      jest
+        .spyOn(service as any, 'assertDeltaSnapshotCoverage')
+        .mockResolvedValue(undefined);
+      jest
+        .spyOn(service as any, 'loadDailyDepartmentCollections')
+        .mockResolvedValue({
+          dataArea: [{ date: '2026-08-31', ESO: {}, ESU: {}, AEP: {} }],
+          dataDepartement: [departmentDay('2026-08-31')],
+        });
+      jest
+        .spyOn(service as any, 'loadDailyCommuneWeights')
+        .mockResolvedValue(new Map([['2026-08-31', [['01001', 4]]]]));
+
+      const result = await (service as any).createDeltaArtifactCandidate(
+        sameDateState,
+        {
+          ...activeArtifact,
+          dataCommune: [
+            { code: '01001', restrictions: [{ d: '2026-08', p: 5 }] },
+          ],
+        },
+        mockTransactionManager,
+      );
+
+      expect(result.materializationStrategy).toBe('current-replace');
+      expect(result.dataCommune).toEqual([
+        { code: '01001', restrictions: [{ d: '2026-08', p: 7 }] },
+      ]);
+      expect(result.latestCommuneWeights).toEqual([['01001', 4]]);
+    });
+
+    it('rejects a delta whose current national snapshot has another source', async () => {
+      mockTransactionManager.query.mockResolvedValue([
+        {
+          snapshotDate: '2026-09-02',
+          status: 'completed',
+          expectedCommuneCount: 1,
+          processedCommuneCount: 1,
+          sourceRevision: '41',
+        },
+      ]);
+
+      await expect(
+        (service as any).assertDeltaSnapshotCoverage(
+          '2026-09-02',
+          '2026-09-02',
+          1,
+          artifactState,
+          mockTransactionManager,
+        ),
+      ).rejects.toThrow('snapshots are not certified');
+    });
+
+    it('loads reference data before hydrating an active artifact on cold start', async () => {
+      process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
+      const artifactService = {
+        loadActive: jest.fn(),
+        materialize: jest.fn(),
+      };
+      const coldService = new DataService(
+        mockRepository as any,
+        mockRepository as any,
+        mockRepository as any,
+        mockRepository as any,
+        mockRepository as any,
+        mockDataSource as any,
+        artifactService as any,
+      );
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      const state = {
+        ...artifactState,
+        revision: '10',
+        currentPublishedDate: '2026-08-31',
+      };
+      const payload = structuredClone(activeArtifact) as any;
+      payload.identity.readyAt = new Date('2026-08-31T06:00:00.000Z');
+      const cacheWithoutFingerprint = {
+        ...referenceData,
+        revision: '10',
+        publicationState: state,
+        mode: 'legacy-bootstrap',
+        dataArea: payload.dataArea,
+        dataDepartement: payload.dataDepartement,
+        dataCommune: payload.dataCommune,
+        firstDate: '2026-08-31',
+        latestDate: '2026-08-31',
+        dateCount: 1,
+        departmentCount: 101,
+        communeCount: 1,
+        artifactPublicationId: payload.identity.id,
+        latestCommuneWeights: payload.latestCommuneWeights,
+        artifactHistoricDirtyFrom: payload.identity.historicDirtyFrom,
+        artifactHistoricDirtyThrough: payload.identity.historicDirtyThrough,
+        artifactHistoricMapCursor: payload.identity.historicMapCursor,
+        artifactHistoricStatsCursor: payload.identity.historicStatsCursor,
+        loadedAt: payload.identity.readyAt,
+      };
+      payload.identity.contentFingerprint = (
+        coldService as any
+      ).computeStatisticCacheFingerprint(cacheWithoutFingerprint);
+      artifactService.loadActive.mockResolvedValue(payload);
+      const ensureReferences = jest
+        .spyOn(coldService as any, 'ensureReferenceDataCache')
+        .mockImplementation(async () => {
+          coldService['referenceDataCache'] = referenceData as any;
+          return referenceData;
+        });
+
+      const loaded = await (coldService as any).loadArtifactBackedData(state);
+
+      expect(ensureReferences).toHaveBeenCalledTimes(1);
+      expect(artifactService.materialize).not.toHaveBeenCalled();
+      expect(loaded.artifactPublicationId).toBe(payload.identity.id);
+      expect(JSON.stringify(loaded.dataCommune)).not.toContain(
+        'latestCommuneWeights',
+      );
+    });
+
+    it('uses a local hydration timestamp while preserving one artifact identity across instances', () => {
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      const state = {
+        ...artifactState,
+        revision: '10',
+        statisticCachePublicationId: activeArtifact.identity.id,
+        currentPublishedDate: '2026-08-31',
+      };
+      const createInstance = () => {
+        const instance = new DataService(
+          mockRepository as any,
+          mockRepository as any,
+          mockRepository as any,
+          mockRepository as any,
+          mockRepository as any,
+          mockDataSource as any,
+          {} as any,
+        );
+        instance['referenceDataCache'] = referenceData as any;
+        return instance;
+      };
+      const firstService = createInstance();
+      const secondService = createInstance();
+      const payload = structuredClone(activeArtifact) as any;
+      const fingerprintInput = {
+        ...referenceData,
+        revision: '10',
+        publicationState: state,
+        mode: payload.identity.mode,
+        dataArea: payload.dataArea,
+        dataDepartement: payload.dataDepartement,
+        dataCommune: payload.dataCommune,
+        firstDate: payload.identity.firstDate,
+        latestDate: payload.identity.latestDate,
+        dateCount: payload.identity.dateCount,
+        departmentCount: payload.identity.departmentCount,
+        communeCount: payload.identity.communeCount,
+        artifactPublicationId: payload.identity.id,
+        artifactSourceRevision: payload.identity.sourceRevision,
+        latestCommuneWeights: payload.latestCommuneWeights,
+        artifactHistoricDirtyFrom: payload.identity.historicDirtyFrom,
+        artifactHistoricDirtyThrough: payload.identity.historicDirtyThrough,
+        artifactHistoricMapCursor: payload.identity.historicMapCursor,
+        artifactHistoricStatsCursor: payload.identity.historicStatsCursor,
+        artifactHistoricComputeEpoch: payload.identity.historicComputeEpoch,
+        loadedAt: new Date(),
+      };
+      payload.identity.contentFingerprint = (
+        firstService as any
+      ).computeStatisticCacheFingerprint(fingerprintInput);
+
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-08-31T06:01:00.000Z'));
+        const first = (firstService as any).hydrateArtifactPayload(
+          payload,
+          state,
+        );
+        jest.setSystemTime(new Date('2026-08-31T06:02:00.000Z'));
+        const second = (secondService as any).hydrateArtifactPayload(
+          payload,
+          state,
+        );
+
+        expect(first.artifactPublicationId).toBe(second.artifactPublicationId);
+        expect(first.fingerprint).toBe(second.fingerprint);
+        expect(first.loadedAt.toISOString()).toBe('2026-08-31T06:01:00.000Z');
+        expect(second.loadedAt.toISOString()).toBe('2026-08-31T06:02:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('keeps current health ready across a historic-only revision bump and refreshes the full artifact', async () => {
+      process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).statisticCacheArtifactService = {};
+      const activeId = '00000000-0000-4000-8000-000000000020';
+      const stateAfterHistoricPublish = {
+        ...stablePublicationState,
+        revision: '12',
+        statisticCachePublicationId: activeId,
+        sourceRevision: '42',
+        historicMapCursor: '2023-01-01',
+        historicStatsCursor: '2023-01-01',
+        historicComputeEpoch: '7',
+      };
+      certifyData({
+        revision: '11',
+        publicationState: {
+          ...stateAfterHistoricPublish,
+          revision: '11',
+          historicDirtyFrom: '2023-01-01',
+          historicDirtyThrough: '2023-01-01',
+        },
+        mode: 'legacy-bootstrap',
+        latestDate: '2023-01-02',
+        artifactPublicationId: activeId,
+        artifactSourceRevision: '42',
+        artifactHistoricDirtyFrom: '2023-01-01',
+        artifactHistoricDirtyThrough: '2023-01-01',
+        artifactHistoricMapCursor: '2023-01-01',
+        artifactHistoricStatsCursor: '2023-01-01',
+        artifactHistoricComputeEpoch: '7',
+        latestCommuneWeights: [],
+      });
+      (service as any).lastDataCacheError = {
+        at: new Date('2023-01-02T08:00:00.000Z'),
+        phase: 'refresh',
+      };
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(stateAfterHistoricPublish);
+      jest
+        .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
+        .mockResolvedValue({
+          incompleteSnapshotCount: 0,
+          oldestIncompleteSnapshot: null,
+        });
+      jest
+        .spyOn(service as any, 'isCurrentSnapshotCertified')
+        .mockResolvedValue(true);
+      jest
+        .spyOn(service as any, 'isLegacyCacheContinuous')
+        .mockReturnValue(true);
+      jest
+        .spyOn(service as any, 'getStatisticArtifactInstanceSummary')
+        .mockResolvedValue({ liveInstances: 2, readyInstances: 2 });
+      const refresh = jest
+        .spyOn(service as any, 'startCertifiedDataRefresh')
+        .mockImplementation();
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'ready',
+          fresh: true,
+          currentFresh: true,
+          historicComplete: false,
+          artifactPublicationId: activeId,
+          artifactLiveInstances: 2,
+          artifactReadyInstances: 2,
+          lastError: expect.objectContaining({ phase: 'refresh' }),
+        }),
+      );
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails current freshness on source drift but not on historic cursor drift', async () => {
+      process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).statisticCacheArtifactService = {};
+      const activeId = '00000000-0000-4000-8000-000000000021';
+      const baseState = {
+        ...stablePublicationState,
+        revision: '11',
+        statisticCachePublicationId: activeId,
+        sourceRevision: '42',
+        historicMapCursor: '2023-01-01',
+        historicStatsCursor: '2023-01-01',
+        historicComputeEpoch: '8',
+      };
+      certifyData({
+        revision: '11',
+        publicationState: baseState,
+        mode: 'legacy-bootstrap',
+        latestDate: '2023-01-02',
+        artifactPublicationId: activeId,
+        artifactSourceRevision: '42',
+        artifactHistoricDirtyFrom: null,
+        artifactHistoricDirtyThrough: null,
+        artifactHistoricMapCursor: '2023-01-01',
+        artifactHistoricStatsCursor: '2023-01-01',
+        artifactHistoricComputeEpoch: '7',
+        latestCommuneWeights: [],
+      });
+      jest
+        .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
+        .mockResolvedValue({
+          incompleteSnapshotCount: 0,
+          oldestIncompleteSnapshot: null,
+        });
+      jest
+        .spyOn(service as any, 'isCurrentSnapshotCertified')
+        .mockResolvedValue(true);
+      jest
+        .spyOn(service as any, 'isLegacyCacheContinuous')
+        .mockReturnValue(true);
+      const refresh = jest
+        .spyOn(service as any, 'startCertifiedDataRefresh')
+        .mockImplementation();
+      const getState = jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(baseState);
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          currentFresh: true,
+          historicComplete: false,
+        }),
+      );
+
+      getState.mockResolvedValue({ ...baseState, sourceRevision: '43' });
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          currentFresh: false,
+          historicComplete: false,
+        }),
+      );
+      expect(refresh).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh an exact active artifact while dirty cursors advance', async () => {
+      process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
+      process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
+      (service as any).statisticCacheArtifactService = {};
+      const activeId = '00000000-0000-4000-8000-000000000022';
+      const cachedState = {
+        ...stablePublicationState,
+        revision: '11',
+        statisticCachePublicationId: activeId,
+        sourceRevision: '42',
+        historicDirtyFrom: '2022-01-01',
+        historicDirtyThrough: '2022-01-31',
+        historicMapCursor: '2022-01-02',
+        historicStatsCursor: '2022-01-02',
+        historicComputeEpoch: '8',
+      };
+      const progressedState = {
+        ...cachedState,
+        historicMapCursor: '2022-01-03',
+        historicStatsCursor: '2022-01-03',
+      };
+      certifyData({
+        revision: '11',
+        publicationState: cachedState,
+        mode: 'legacy-bootstrap',
+        latestDate: cachedState.currentPublishedDate,
+        artifactPublicationId: activeId,
+        artifactSourceRevision: '42',
+        artifactHistoricDirtyFrom: '2022-01-01',
+        artifactHistoricDirtyThrough: '2022-01-31',
+        artifactHistoricMapCursor: '2022-01-02',
+        artifactHistoricStatsCursor: '2022-01-02',
+        artifactHistoricComputeEpoch: '8',
+        latestCommuneWeights: [],
+      });
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(progressedState);
+      jest
+        .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
+        .mockResolvedValue({
+          incompleteSnapshotCount: 0,
+          oldestIncompleteSnapshot: null,
+        });
+      jest
+        .spyOn(service as any, 'isCurrentSnapshotCertified')
+        .mockResolvedValue(true);
+      jest
+        .spyOn(service as any, 'isLegacyCacheContinuous')
+        .mockReturnValue(true);
+      jest
+        .spyOn(service as any, 'getStatisticArtifactInstanceSummary')
+        .mockResolvedValue({ liveInstances: 2, readyInstances: 2 });
+      const refresh = jest
+        .spyOn(service as any, 'startCertifiedDataRefresh')
+        .mockImplementation();
+
+      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+        expect.objectContaining({
+          currentFresh: true,
+          historicComplete: false,
+        }),
+      );
+      await service.getStatisticCacheStatus(true);
+
+      expect(refresh).not.toHaveBeenCalled();
     });
   });
 

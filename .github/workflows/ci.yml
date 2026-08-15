@@ -29,8 +29,8 @@ jobs:
       run:
         working-directory: ${{ matrix.root }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -46,10 +46,10 @@ jobs:
     env:
       LINT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -83,8 +83,8 @@ jobs:
           - apps/frontend
           - apps/frontend-admin
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -113,27 +113,48 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: apps/backend-admin/package-lock.json
+          cache-dependency-path: |
+            apps/backend-admin/package-lock.json
+            apps/backend/package-lock.json
       - run: npm install --global npm@${NPM_VERSION}
       - run: npm ci --prefix apps/backend-admin
+      - run: npm ci --prefix apps/backend
       - name: Verify concurrent SANDRE reference guard
         run: >-
           npm --prefix apps/backend-admin test -- --runInBand
           src/zone_alerte/sandre-disabled-zone-reference-guard.migration.spec.ts
         env:
           SANDRE_GUARD_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify durable SANDRE reconciliation
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/zone_alerte/sandre-zone-durability.postgres.spec.ts
+        env:
+          SANDRE_RECONCILIATION_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - run: npm --prefix apps/backend-admin run build
       - name: Verify a fresh database
         run: node scripts/verify-admin-migrations.mjs
         env:
           MIGRATION_VERIFY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify statistic artifact lifecycle against PostgreSQL
+        run: >-
+          npm --prefix apps/backend test -- --runInBand
+          src/data/statistic-cache-artifact.postgres.spec.ts
+        env:
+          STATISTIC_CACHE_ARTIFACT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify statistic boundary recovery against PostgreSQL
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/zone_alerte_computed/statistic-cache-boundary.postgres.spec.ts
+        env:
+          STATISTIC_CACHE_ARTIFACT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Verify statistic snapshot finalization against PostgreSQL
         run: >-
           npm --prefix apps/backend-admin test -- --runInBand

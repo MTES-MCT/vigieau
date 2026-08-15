@@ -119,7 +119,16 @@ describe('ZonesService', () => {
     publishSituation: jest.fn(),
   };
   const mockStatisticsService = { loadStatistics: jest.fn() };
-  const mockDataService = { loadData: jest.fn() };
+  const mockDataService = {
+    loadData: jest.fn(),
+    getStatisticCacheAcknowledgement: jest.fn(() => ({
+      statisticCachePublicationId: null,
+      statisticRevision: null,
+      statisticPublishedDate: null,
+      statisticFingerprint: null,
+      statisticLastError: 'statistic-artifact-unavailable',
+    })),
+  };
   const mockCommunesService = {
     normalizeCodeCommune: jest.fn((code) => code),
     findArretesMunicipaux: jest.fn(),

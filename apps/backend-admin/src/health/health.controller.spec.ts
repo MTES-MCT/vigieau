@@ -229,6 +229,7 @@ describe('HealthController', () => {
           appliedDepartments: mode === 'safe' ? 101 : 0,
           staleAppliedDepartments: mode === 'safe' ? 0 : 101,
           pendingApplicationDepartments: mode === 'safe' ? 0 : 101,
+          recomputePendingDepartments: 0,
           blockedDepartments: 0,
           failedBatches: 0,
           blockedBatches: 0,
@@ -244,6 +245,7 @@ describe('HealthController', () => {
           totalDepartments: 101,
           staleDepartments: 0,
           appliedDepartments: mode === 'safe' ? 101 : 0,
+          recomputePendingDepartments: 0,
           blockedDepartments: 0,
         },
       });
@@ -269,6 +271,7 @@ describe('HealthController', () => {
       appliedDepartments: 0,
       staleAppliedDepartments: 101,
       pendingApplicationDepartments: 101,
+      recomputePendingDepartments: 0,
       blockedDepartments: 0,
       failedBatches: 0,
       blockedBatches: 0,
@@ -364,6 +367,7 @@ describe('HealthController', () => {
         appliedDepartments: 101,
         staleAppliedDepartments: 0,
         pendingApplicationDepartments: 0,
+        recomputePendingDepartments: 0,
         blockedDepartments: 0,
         failedBatches: 0,
         blockedBatches: 0,
@@ -398,6 +402,7 @@ describe('HealthController', () => {
           appliedDepartments: 101,
           staleAppliedDepartments: 0,
           pendingApplicationDepartments: 0,
+          recomputePendingDepartments: 0,
           blockedDepartments: 0,
           failedBatches: 0,
           blockedBatches: 0,
@@ -456,6 +461,7 @@ describe('HealthController', () => {
           appliedDepartments: 101,
           staleAppliedDepartments: 0,
           pendingApplicationDepartments: 0,
+          recomputePendingDepartments: 0,
           blockedDepartments: 0,
           failedBatches: 0,
           blockedBatches: 0,
@@ -470,6 +476,39 @@ describe('HealthController', () => {
       });
     },
   );
+
+  it('reports pending SANDRE recomputes as unavailable', async () => {
+    const { controller, dataSource } = createController();
+    dataSource.query.mockResolvedValue([
+      {
+        totalDepartments: 101,
+        trackedDepartments: 101,
+        staleDepartments: 0,
+        forcedAuditCompletedDepartments: 101,
+        pendingForcedAuditDepartments: 0,
+        appliedDepartments: 101,
+        staleAppliedDepartments: 0,
+        pendingApplicationDepartments: 0,
+        recomputePendingDepartments: 1,
+        blockedDepartments: 0,
+        failedBatches: 0,
+        blockedBatches: 0,
+      },
+    ]);
+
+    await expect(controller.sandreSynchronization()).rejects.toMatchObject({
+      status: 503,
+      response: {
+        status: 'pending_recompute',
+        mode: 'safe',
+        summary: { recomputePendingDepartments: 1 },
+      },
+    });
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('state."needsRecompute" = true'),
+      expect.any(Array),
+    );
+  });
 
   it('exposes map archives as disabled by default and rejects incomplete opt-in', () => {
     const { controller, config } = createController();

@@ -67,6 +67,63 @@ describe('ExternalPublicationRegistryService', () => {
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to unlocking all without masking a publication error', async () => {
+    const publicationError = new Error('upload failed');
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) return [];
+      if (sql.includes('pg_advisory_unlock_all')) return [];
+      if (sql.includes('pg_advisory_unlock(')) return [{ unlocked: false }];
+      return [];
+    });
+    const harness = createHarness(query);
+    jest
+      .spyOn((harness.service as any).logger, 'error')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      harness.service.executeDailyRun(
+        'datagouv:daily',
+        '2026-08-01',
+        async () => {
+          throw publicationError;
+        },
+      ),
+    ).rejects.toBe(publicationError);
+
+    expect(
+      query.mock.calls.some(([sql]) => sql.includes('pg_advisory_unlock_all')),
+    ).toBe(true);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back and reports an unlock failure after a successful publication', async () => {
+    const unlockError = new Error('unlock failed');
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+      void _params;
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('SELECT "status"')) return [];
+      if (sql.includes('pg_advisory_unlock_all')) return [];
+      if (sql.includes('pg_advisory_unlock(')) throw unlockError;
+      return [];
+    });
+    const harness = createHarness(query);
+
+    await expect(
+      harness.service.executeDailyRun(
+        'datagouv:daily',
+        '2026-08-01',
+        async () => undefined,
+      ),
+    ).rejects.toBe(unlockError);
+
+    expect(
+      query.mock.calls.some(([sql]) => sql.includes('pg_advisory_unlock_all')),
+    ).toBe(true);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
   it('immediately resumes an orphaned running publication after acquiring the lock', async () => {
     const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       void _params;
@@ -109,7 +166,7 @@ describe('ExternalPublicationRegistryService', () => {
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps a grace period for a recent external publication', async () => {
+  it('immediately resumes an orphaned Datagouv daily publication', async () => {
     const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       void _params;
       if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
@@ -128,7 +185,7 @@ describe('ExternalPublicationRegistryService', () => {
       return [];
     });
     const harness = createHarness(query);
-    const run = jest.fn();
+    const run = jest.fn().mockResolvedValue(undefined);
 
     await expect(
       harness.service.executeDailyRun(
@@ -137,12 +194,12 @@ describe('ExternalPublicationRegistryService', () => {
         run,
         new Date('2026-08-01T02:01:00.000Z'),
       ),
-    ).resolves.toBe('busy');
+    ).resolves.toBe('succeeded');
 
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the external grace period when the publication identity changed', async () => {
+  it('immediately resumes an orphaned Datagouv resource publication', async () => {
     const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       void _params;
       if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
@@ -164,11 +221,11 @@ describe('ExternalPublicationRegistryService', () => {
       return [];
     });
     const harness = createHarness(query);
-    const run = jest.fn();
+    const run = jest.fn().mockResolvedValue(undefined);
 
     await expect(
       harness.service.executeDailyRun(
-        'datagouv:daily',
+        'datagouv:communes-2026',
         '2026-08-01',
         run,
         new Date('2026-08-01T02:01:00.000Z'),
@@ -179,9 +236,9 @@ describe('ExternalPublicationRegistryService', () => {
           },
         },
       ),
-    ).resolves.toBe('busy');
+    ).resolves.toBe('succeeded');
 
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it('waits until the retry date of a failed publication', async () => {

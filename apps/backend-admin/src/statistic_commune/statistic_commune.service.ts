@@ -174,9 +174,13 @@ export class StatisticCommuneService {
     // }, 5000);
   }
 
-  async getStatisticCommuneStream() {
-    await this.assertNoIncompleteSnapshots();
-    return this.statisticCommuneRepository
+  async getStatisticCommuneStream(queryRunner?: QueryRunner) {
+    const queryable = queryRunner ?? this.dataSource;
+    const repository = queryRunner
+      ? queryRunner.manager.getRepository(StatisticCommune)
+      : this.statisticCommuneRepository;
+    await this.assertNoIncompleteSnapshots(undefined, undefined, queryable);
+    return repository
       .createQueryBuilder('sc')
       .innerJoin('sc.commune', 'commune')
       .select('commune.code', 'commune_code')
@@ -1649,6 +1653,7 @@ export class StatisticCommuneService {
   private async assertNoIncompleteSnapshots(
     startDate?: string,
     endDate?: string,
+    queryable: Pick<DataSource, 'query'> = this.dataSource,
   ): Promise<void> {
     const parameters: string[] = [];
     const dateFilter =
@@ -1661,7 +1666,7 @@ export class StatisticCommuneService {
     if (startDate && endDate) {
       parameters.push(startDate, endDate);
     }
-    const [snapshot] = await this.dataSource.query(
+    const [snapshot] = await queryable.query(
       `
         SELECT "snapshotDate", "scope", "status", "processedCommuneCount", "expectedCommuneCount"
         FROM "statistic_commune_snapshot"

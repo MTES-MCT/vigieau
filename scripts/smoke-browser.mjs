@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
@@ -9,6 +9,10 @@ import {
   parseTarbesCheckMode,
   resolveTarbesLookupOutcome,
 } from "./smoke-browser-tarbes.mjs";
+import {
+  terminateChild,
+  waitForChromeDevTools,
+} from "./smoke-browser-startup.mjs";
 
 const frontBase = (
   process.env.VIGIEAU_FRONT_URL || "https://vigieau.gouv.fr"
@@ -21,6 +25,10 @@ const tarbesForbiddenMessage =
   /Pas d['\u2019]arr\u00eat\u00e9 en vigueur|Aucune restriction/i;
 const timeoutMs = Number(
   process.env.VIGIEAU_BROWSER_SMOKE_TIMEOUT_MS || 60_000,
+);
+const chromeStartupTimeoutMs = Math.min(
+  Number(process.env.VIGIEAU_CHROME_STARTUP_TIMEOUT_MS || 30_000),
+  timeoutMs,
 );
 const zonePaletteMaxDistance = Number(
   process.env.VIGIEAU_ZONE_PALETTE_MAX_DISTANCE || 24,
@@ -45,6 +53,10 @@ const zonePalette = [
 assert.ok(
   Number.isFinite(timeoutMs) && timeoutMs >= 10_000,
   "VIGIEAU_BROWSER_SMOKE_TIMEOUT_MS must be at least 10000",
+);
+assert.ok(
+  Number.isInteger(chromeStartupTimeoutMs) && chromeStartupTimeoutMs >= 1_000,
+  "VIGIEAU_CHROME_STARTUP_TIMEOUT_MS must be at least 1000",
 );
 assert.ok(
   Number.isFinite(zonePaletteMaxDistance) && zonePaletteMaxDistance >= 0,
@@ -78,39 +90,6 @@ async function findChrome() {
     }
   }
   throw new Error("No Chrome or Chromium executable was found");
-}
-
-async function waitForDevToolsFile(path, child) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    assert.equal(
-      child.exitCode,
-      null,
-      "Chrome exited before DevTools was ready",
-    );
-    try {
-      const contents = await readFile(path, "utf8");
-      const [port] = contents.trim().split("\n");
-      if (port) return Number(port);
-    } catch {
-      // Chrome creates the file asynchronously.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("Chrome DevTools did not become ready");
-}
-
-async function getPageDevToolsUrl(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
-    signal: AbortSignal.timeout(5_000),
-  });
-  assert.equal(response.status, 200, "Chrome did not expose its page target");
-  const targets = await response.json();
-  const page = targets.find(
-    (target) => target.type === "page" && target.webSocketDebuggerUrl,
-  );
-  assert.ok(page, "Chrome has no debuggable page target");
-  return page.webSocketDebuggerUrl;
 }
 
 class DevToolsClient {
@@ -1228,13 +1207,14 @@ chrome.stderr.on("data", (chunk) => {
 });
 
 let client;
+let smokeError = null;
 try {
-  const devToolsPort = await waitForDevToolsFile(
-    join(userDataDir, "DevToolsActivePort"),
-    chrome,
-  );
-  const devToolsUrl = await getPageDevToolsUrl(devToolsPort);
-  client = new DevToolsClient(devToolsUrl);
+  const devTools = await waitForChromeDevTools({
+    activePortPath: join(userDataDir, "DevToolsActivePort"),
+    child: chrome,
+    timeoutMs: chromeStartupTimeoutMs,
+  });
+  client = new DevToolsClient(devTools.webSocketDebuggerUrl);
   await client.connect();
   client.onEvent((event) => {
     if (event.method === "Network.requestWillBeSent") {
@@ -1306,29 +1286,36 @@ try {
     }),
   );
 } catch (error) {
-  throw new Error(
+  smokeError = new Error(
     `${error.message}\nChrome stderr:\n${chromeErrors.slice(-3000)}`,
   );
+  throw smokeError;
 } finally {
-  client?.close();
-  if (chrome.exitCode === null && chrome.signalCode === null) {
-    await new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        resolve();
-      };
-      const timeout = setTimeout(finish, 2_000);
-      chrome.once("exit", finish);
-      chrome.kill("SIGTERM");
-    });
+  let cleanupError = null;
+  try {
+    client?.close();
+  } catch (error) {
+    cleanupError = error;
   }
-  await rm(userDataDir, {
-    recursive: true,
-    force: true,
-    maxRetries: 3,
-    retryDelay: 100,
-  });
+  try {
+    await terminateChild({ child: chrome });
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  try {
+    await rm(userDataDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (cleanupError) {
+    if (!smokeError) {
+      throw cleanupError;
+    }
+    console.error(`Browser smoke cleanup failed: ${cleanupError.message}`);
+  }
 }

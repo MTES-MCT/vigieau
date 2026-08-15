@@ -548,6 +548,518 @@ async function verifySandreReferenceGuards() {
   }
 }
 
+async function verifyStatisticCachePublication() {
+  const runner = dataSource.createQueryRunner();
+  await runner.connect();
+  await runner.startTransaction();
+  let savepointSequence = 0;
+
+  const expectDatabaseError = async (expectedCode, action, message) => {
+    const savepoint = `statistic_cache_guard_${++savepointSequence}`;
+    await runner.query(`SAVEPOINT ${savepoint}`);
+    let blocked = false;
+    try {
+      await action();
+    } catch (error) {
+      blocked = error?.code === expectedCode;
+    } finally {
+      await runner.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    }
+    assert.equal(blocked, true, message);
+  };
+
+  const payloadHex = "1f8b0800000000000003abae050043bfa6a302000000";
+  const payloadByteLength = Buffer.from(payloadHex, "hex").length;
+  const areaFingerprint = "a".repeat(64);
+  const departmentFingerprint = "b".repeat(64);
+  const communeFingerprint = "c".repeat(64);
+  const publicationFingerprint = "f".repeat(64);
+  const checksum = "1".repeat(64);
+  const incompletePublicationId = "00000000-0000-4000-8000-000000000201";
+  const completePublicationId = "00000000-0000-4000-8000-000000000202";
+  const disposablePublicationId = "00000000-0000-4000-8000-000000000203";
+  const invalidBoundaryPublicationId = "00000000-0000-4000-8000-000000000204";
+  const replacementPublicationId = "00000000-0000-4000-8000-000000000205";
+  const rematerializedPublicationId = "00000000-0000-4000-8000-000000000206";
+
+  const insertBuildingPublication = async ({
+    id,
+    statisticRevision,
+    currentPublishedDate,
+    contentFingerprint = null,
+    materializationStrategy = "full-clean",
+    historicDirtyFrom = null,
+    historicDirtyThrough = null,
+    historicMapCursor = null,
+    historicStatsCursor = null,
+    sourceRevision = null,
+    historicComputeEpoch = null,
+  }) => {
+    await runner.query(
+      `
+        INSERT INTO "statistic_cache_publication" (
+          "id", "statisticRevision", "currentPublishedDate",
+          "schemaVersion", "mode", "materializationStrategy", "status",
+          "historicDirtyFrom", "historicDirtyThrough",
+          "historicMapCursor", "historicStatsCursor", "sourceRevision",
+          "historicComputeEpoch", "firstDate", "latestDate",
+          "dateCount", "areaCount", "departmentCount", "communeCount",
+          "contentFingerprint", "compressedByteLength",
+          "uncompressedByteLength"
+        ) VALUES (
+          $1, $2, $3, 1, 'legacy-bootstrap', $5, 'building',
+          $6, $7, $8, $9, $10, $11,
+          DATE '2026-08-14', $3, 2, 2, 101, 34943, $4, 0, 0
+        )
+      `,
+      [
+        id,
+        statisticRevision,
+        currentPublishedDate,
+        contentFingerprint,
+        materializationStrategy,
+        historicDirtyFrom,
+        historicDirtyThrough,
+        historicMapCursor,
+        historicStatsCursor,
+        sourceRevision,
+        historicComputeEpoch,
+      ],
+    );
+  };
+
+  const completeBuildingPublication = async ({
+    id,
+    statisticRevision,
+    currentPublishedDate,
+    contentFingerprint,
+  }) => {
+    await insertBuildingPublication({
+      id,
+      statisticRevision,
+      currentPublishedDate,
+    });
+    await runner.query(
+      `
+        INSERT INTO "statistic_cache_artifact" (
+          "publicationId", "kind", "rowCount", "contentFingerprint",
+          "checksum", "compressedByteLength", "uncompressedByteLength",
+          "payload"
+        ) VALUES
+          ($1, 'area', 2, $2, $5, $6, 2, decode($7, 'hex')),
+          ($1, 'departement', 2, $3, $5, $6, 2, decode($7, 'hex')),
+          ($1, 'commune', 34943, $4, $5, $6, 2, decode($7, 'hex'))
+      `,
+      [
+        id,
+        areaFingerprint,
+        departmentFingerprint,
+        communeFingerprint,
+        checksum,
+        payloadByteLength,
+        payloadHex,
+      ],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'ready',
+            "contentFingerprint" = $2,
+            "compressedByteLength" = $3,
+            "uncompressedByteLength" = 6,
+            "readyAt" = now()
+        WHERE "id" = $1
+      `,
+      [id, contentFingerprint, payloadByteLength * 3],
+    );
+  };
+
+  try {
+    await insertBuildingPublication({
+      id: incompletePublicationId,
+      statisticRevision: 10,
+      currentPublishedDate: "2026-08-15",
+    });
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `
+            UPDATE "statistic_cache_publication"
+            SET "status" = 'ready',
+                "contentFingerprint" = $2,
+                "compressedByteLength" = 1,
+                "uncompressedByteLength" = 1,
+                "readyAt" = now()
+            WHERE "id" = $1
+          `,
+          [incompletePublicationId, publicationFingerprint],
+        ),
+      "An incomplete statistic cache publication was marked ready",
+    );
+    await runner.query(
+      'DELETE FROM "statistic_cache_publication" WHERE "id" = $1',
+      [incompletePublicationId],
+    );
+
+    await completeBuildingPublication({
+      id: completePublicationId,
+      statisticRevision: 11,
+      currentPublishedDate: "2026-08-15",
+      contentFingerprint: publicationFingerprint,
+    });
+
+    const [readyPublication] = await runner.query(
+      `
+        SELECT "status", "contentFingerprint", "compressedByteLength"::text
+          AS "compressedByteLength"
+        FROM "statistic_cache_publication"
+        WHERE "id" = $1
+      `,
+      [completePublicationId],
+    );
+    assert.deepEqual(
+      readyPublication,
+      {
+        status: "ready",
+        contentFingerprint: publicationFingerprint,
+        compressedByteLength: String(payloadByteLength * 3),
+      },
+      "The complete statistic cache publication did not become ready",
+    );
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `UPDATE "statistic_cache_publication" SET "communeCount" = 1 WHERE "id" = $1`,
+          [completePublicationId],
+        ),
+      "Ready statistic cache publication metadata remained mutable",
+    );
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `UPDATE "statistic_cache_publication" SET "sourceRevision" = 99 WHERE "id" = $1`,
+          [completePublicationId],
+        ),
+      "Ready statistic cache publication audit context remained mutable",
+    );
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `
+            UPDATE "statistic_cache_artifact"
+            SET "rowCount" = 2
+            WHERE "publicationId" = $1 AND "kind" = 'area'
+          `,
+          [completePublicationId],
+        ),
+      "A persisted statistic cache artifact remained mutable",
+    );
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `
+            DELETE FROM "statistic_cache_artifact"
+            WHERE "publicationId" = $1 AND "kind" = 'area'
+          `,
+          [completePublicationId],
+        ),
+      "A ready statistic cache artifact could be deleted directly",
+    );
+
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'active', "activatedAt" = now()
+        WHERE "id" = $1
+      `,
+      [completePublicationId],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_state"
+        SET "activePublicationId" = $1, "previousPublicationId" = NULL
+        WHERE "id" = 1
+      `,
+      [completePublicationId],
+    );
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `
+            UPDATE "statistic_cache_state"
+            SET "previousPublicationId" = "activePublicationId"
+            WHERE "id" = 1
+          `,
+        ),
+      "The singleton accepted the same active and previous publication",
+    );
+
+    const replacementFingerprint = "d".repeat(64);
+    const rematerializedFingerprint = "9".repeat(64);
+    await completeBuildingPublication({
+      id: replacementPublicationId,
+      statisticRevision: 12,
+      currentPublishedDate: "2026-08-16",
+      contentFingerprint: replacementFingerprint,
+    });
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'retired', "retiredAt" = now()
+        WHERE "id" = $1 AND "status" = 'active'
+      `,
+      [completePublicationId],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'active', "activatedAt" = now()
+        WHERE "id" = $1 AND "status" = 'ready'
+      `,
+      [replacementPublicationId],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_state"
+        SET "activePublicationId" = $1, "previousPublicationId" = $2
+        WHERE "id" = 1
+      `,
+      [replacementPublicationId, completePublicationId],
+    );
+
+    const rollback = async (activePublicationId, previousPublicationId) => {
+      await runner.query(
+        `
+          UPDATE "statistic_cache_publication"
+          SET "status" = 'retired', "retiredAt" = now()
+          WHERE "id" = $1 AND "status" = 'active'
+        `,
+        [activePublicationId],
+      );
+      await runner.query(
+        `
+          UPDATE "statistic_cache_publication"
+          SET "status" = 'active', "activatedAt" = now(), "retiredAt" = NULL
+          WHERE "id" = $1 AND "status" = 'retired'
+        `,
+        [previousPublicationId],
+      );
+      await runner.query(
+        `
+          UPDATE "statistic_cache_state"
+          SET "activePublicationId" = $1, "previousPublicationId" = $2
+          WHERE "id" = 1
+        `,
+        [previousPublicationId, activePublicationId],
+      );
+    };
+    await rollback(replacementPublicationId, completePublicationId);
+    await rollback(replacementPublicationId, completePublicationId);
+
+    await completeBuildingPublication({
+      id: rematerializedPublicationId,
+      statisticRevision: 12,
+      currentPublishedDate: "2026-08-16",
+      contentFingerprint: rematerializedFingerprint,
+    });
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'retired', "retiredAt" = now()
+        WHERE "id" = $1 AND "status" = 'active'
+      `,
+      [completePublicationId],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'active', "activatedAt" = now()
+        WHERE "id" = $1 AND "status" = 'ready'
+      `,
+      [rematerializedPublicationId],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_state"
+        SET "activePublicationId" = $1, "previousPublicationId" = $2
+        WHERE "id" = 1
+      `,
+      [rematerializedPublicationId, completePublicationId],
+    );
+    await rollback(rematerializedPublicationId, completePublicationId);
+    await rollback(completePublicationId, rematerializedPublicationId);
+
+    const [recoveryState] = await runner.query(
+      `
+        SELECT
+          state."activePublicationId"::text AS "activePublicationId",
+          state."previousPublicationId"::text AS "previousPublicationId",
+          active."contentFingerprint" AS "activeFingerprint",
+          previous."status" AS "previousStatus"
+        FROM "statistic_cache_state" state
+        JOIN "statistic_cache_publication" active
+          ON active."id" = state."activePublicationId"
+        JOIN "statistic_cache_publication" previous
+          ON previous."id" = state."previousPublicationId"
+        WHERE state."id" = 1
+      `,
+    );
+    assert.deepEqual(
+      recoveryState,
+      {
+        activePublicationId: rematerializedPublicationId,
+        previousPublicationId: completePublicationId,
+        activeFingerprint: rematerializedFingerprint,
+        previousStatus: "retired",
+      },
+      "Rollback and same-identity rematerialization did not preserve a usable active/previous pair",
+    );
+
+    await runner.query(
+      `
+        INSERT INTO "zone_publication_instance" (
+          "instanceId", "statisticCachePublicationId", "statisticRevision",
+          "statisticPublishedDate", "statisticFingerprint",
+          "statisticLastError"
+        ) VALUES ($1, $2, 11, DATE '2026-08-15', $3, NULL)
+      `,
+      [
+        "statistic-cache-active-instance",
+        completePublicationId,
+        publicationFingerprint,
+      ],
+    );
+    await expectDatabaseError(
+      "23514",
+      () =>
+        runner.query(
+          `
+            INSERT INTO "zone_publication_instance" (
+              "instanceId", "statisticCachePublicationId"
+            ) VALUES ('statistic-cache-partial-instance', $1)
+          `,
+          [completePublicationId],
+        ),
+      "A heartbeat accepted a partial statistic cache identity",
+    );
+
+    const disposableFingerprint = "e".repeat(64);
+    await expectDatabaseError(
+      "23514",
+      () =>
+        insertBuildingPublication({
+          id: invalidBoundaryPublicationId,
+          statisticRevision: 13,
+          currentPublishedDate: "2026-08-17",
+          materializationStrategy: "legacy-safe-boundary",
+        }),
+      "A legacy safe-boundary publication was accepted without audit context",
+    );
+    await insertBuildingPublication({
+      id: disposablePublicationId,
+      statisticRevision: 12,
+      currentPublishedDate: "2026-08-16",
+      contentFingerprint: disposableFingerprint,
+      materializationStrategy: "legacy-safe-boundary",
+      historicDirtyFrom: "2015-01-01",
+      historicDirtyThrough: "2026-08-15",
+      historicMapCursor: "2015-01-28",
+      historicStatsCursor: "2015-01-28",
+      sourceRevision: 42,
+      historicComputeEpoch: 17,
+    });
+    await runner.query(
+      `
+        INSERT INTO "zone_publication_instance" (
+          "instanceId", "statisticCachePublicationId", "statisticRevision",
+          "statisticPublishedDate", "statisticFingerprint",
+          "statisticLastError"
+        ) VALUES ($1, $2, 12, DATE '2026-08-16', $3, 'load failed')
+      `,
+      [
+        "statistic-cache-disposable-instance",
+        disposablePublicationId,
+        disposableFingerprint,
+      ],
+    );
+    await runner.query(
+      'DELETE FROM "statistic_cache_publication" WHERE "id" = $1',
+      [disposablePublicationId],
+    );
+    const [clearedHeartbeat] = await runner.query(`
+      SELECT
+        "statisticCachePublicationId", "statisticRevision",
+        "statisticPublishedDate", "statisticFingerprint",
+        "statisticLastError"
+      FROM "zone_publication_instance"
+      WHERE "instanceId" = 'statistic-cache-disposable-instance'
+    `);
+    assert.deepEqual(
+      clearedHeartbeat,
+      {
+        statisticCachePublicationId: null,
+        statisticRevision: null,
+        statisticPublishedDate: null,
+        statisticFingerprint: null,
+        statisticLastError: "load failed",
+      },
+      "Deleting a disposable publication did not clear its full heartbeat identity",
+    );
+
+    await runner.query(`
+      UPDATE "statistic_cache_state"
+      SET "activePublicationId" = NULL, "previousPublicationId" = NULL
+      WHERE "id" = 1
+    `);
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'retired', "retiredAt" = now()
+        WHERE "id" = $1 AND "status" = 'active'
+      `,
+      [rematerializedPublicationId],
+    );
+    await runner.query(
+      `
+        UPDATE "statistic_cache_publication"
+        SET "status" = 'retired', "retiredAt" = now()
+        WHERE "id" = $1
+      `,
+      [completePublicationId],
+    );
+    await runner.query(
+      'DELETE FROM "statistic_cache_publication" WHERE "id" = $1',
+      [completePublicationId],
+    );
+    await runner.query(
+      'DELETE FROM "statistic_cache_publication" WHERE "id" IN ($1, $2)',
+      [replacementPublicationId, rematerializedPublicationId],
+    );
+    const [{ artifactCountAfterCollection }] = await runner.query(
+      `
+        SELECT count(*)::integer AS "artifactCountAfterCollection"
+        FROM "statistic_cache_artifact"
+        WHERE "publicationId" = $1
+      `,
+      [completePublicationId],
+    );
+    assert.equal(
+      artifactCountAfterCollection,
+      0,
+      "Collecting a retired publication did not cascade to its artifacts",
+    );
+  } finally {
+    await runner.rollbackTransaction();
+    await runner.release();
+  }
+}
+
 const upgrade = mode === "upgrade" ? await prepareUpgradeDatabase() : null;
 
 await dataSource.initialize();
@@ -967,6 +1479,7 @@ try {
       "The upgrade did not activate the commune export barrier fail-closed",
     );
   }
+  await verifyStatisticCachePublication();
   await verifySandreReferenceGuards();
 
   console.log(

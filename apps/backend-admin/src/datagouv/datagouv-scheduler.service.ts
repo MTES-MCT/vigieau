@@ -7,6 +7,7 @@ import {
 } from '../core/scheduling/business-cron';
 import { RegleauLogger } from '../logger/regleau.logger';
 import {
+  DATAGOUV_DAILY_JOB_KEY,
   getScheduledCivilDate,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
   NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
@@ -26,8 +27,8 @@ import {
   isZonePublicationEnabled,
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
 } from '../zone_publication/zone_publication.config';
-
-const DATAGOUV_JOB_KEY = 'datagouv:daily';
+import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
+import { StatisticCacheReadinessService } from '../statistic_cache/statistic_cache_readiness.service';
 
 type DatagouvHistoricRunIdentity = HistoricRunIdentity & {
   sourceRevision: string;
@@ -44,6 +45,7 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
     private readonly registry: ExternalPublicationRegistryService,
     private readonly zonePublicationService: ZonePublicationService,
     private readonly configService: ConfigService,
+    private readonly statisticCacheReadiness: StatisticCacheReadinessService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -103,7 +105,7 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
         historicIdentity,
       );
     await this.registry.executeDailyRun(
-      DATAGOUV_JOB_KEY,
+      DATAGOUV_DAILY_JOB_KEY,
       scheduledFor,
       async () => {
         await verifyCurrent();
@@ -129,26 +131,54 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
   ): Promise<void> {
     const sourceRevision =
       await this.zonePublicationService.getSourceRevision();
-    const identity = {
+    const dailyIdentity = {
       publicationMode: 'legacy' as const,
       sourceRevision,
     } satisfies PublicationRunIdentity;
     const currentComputed = await this.registry.hasSucceeded(
       NATIONAL_DAILY_COMPUTE_JOB_KEY,
       scheduledFor,
-      identity,
+      dailyIdentity,
     );
     if (!currentComputed) {
       return;
     }
+    const artifactRequired = isStatisticCacheArtifactRequired();
+    const artifactIdentity = artifactRequired
+      ? await this.statisticCacheReadiness.getReadyPublication(
+          scheduledFor,
+          sourceRevision,
+        )
+      : null;
+    if (artifactRequired && !artifactIdentity) {
+      return;
+    }
+    const identity = {
+      ...dailyIdentity,
+      ...(artifactIdentity
+        ? {
+            statisticCachePublicationId: artifactIdentity.publicationId,
+            statisticRevision: artifactIdentity.statisticRevision,
+            statisticPublishedDate: artifactIdentity.statisticPublishedDate,
+            statisticFingerprint: artifactIdentity.statisticFingerprint,
+          }
+        : {}),
+    } satisfies PublicationRunIdentity;
     const verifyCurrent = async () => {
       const [currentSourceRevision, stillComputed] = await Promise.all([
         this.zonePublicationService.getSourceRevision(),
         this.registry.hasSucceeded(
           NATIONAL_DAILY_COMPUTE_JOB_KEY,
           scheduledFor,
-          identity,
+          dailyIdentity,
         ),
+        ...(artifactIdentity
+          ? [
+              this.statisticCacheReadiness.assertReadyPublication(
+                artifactIdentity,
+              ),
+            ]
+          : []),
       ]);
       if (currentSourceRevision !== sourceRevision || !stillComputed) {
         throw new Error(
@@ -158,7 +188,7 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
     };
 
     await this.registry.executeDailyRun(
-      DATAGOUV_JOB_KEY,
+      DATAGOUV_DAILY_JOB_KEY,
       scheduledFor,
       async () => {
         await verifyCurrent();
