@@ -1,4 +1,6 @@
 import { DataSource, QueryRunner } from 'typeorm';
+import { SandreZoneSync1785484800000 } from '../migrations/1785484800000-SandreZoneSync';
+import { SandreZoneSchemaPrerequisites1786392000000 } from '../migrations/1786392000000-SandreZoneSchemaPrerequisites';
 import { SandreZoneDurability1786395600000 } from '../migrations/1786395600000-SandreZoneDurability';
 import {
   acquireHistoricalRecomputeLock,
@@ -602,6 +604,164 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       await contender.release();
       await runner.query(`DELETE FROM zone_alerte WHERE id = 5000`);
     }
+  });
+});
+
+describeWithPostgres('Sandre schema drift recovery on PostgreSQL', () => {
+  const schema = `sandre_schema_drift_${process.pid}_${Date.now()}`;
+  let bootstrapDataSource: DataSource;
+  let driftDataSource: DataSource;
+
+  beforeAll(async () => {
+    bootstrapDataSource = await new DataSource({
+      type: 'postgres',
+      url: postgresUrl,
+      entities: [],
+      synchronize: false,
+      logging: false,
+    }).initialize();
+    await bootstrapDataSource.query(`CREATE SCHEMA "${schema}"`);
+
+    driftDataSource = await new DataSource({
+      type: 'postgres',
+      url: postgresUrl,
+      entities: [],
+      migrations: [
+        SandreZoneSync1785484800000,
+        SandreZoneSchemaPrerequisites1786392000000,
+        SandreZoneDurability1786395600000,
+      ],
+      migrationsTransactionMode: 'each',
+      synchronize: false,
+      logging: false,
+      extra: { options: `-c search_path=${schema},public` },
+    }).initialize();
+  });
+
+  afterAll(async () => {
+    if (driftDataSource?.isInitialized) {
+      await driftDataSource.destroy();
+    }
+    if (bootstrapDataSource?.isInitialized) {
+      await bootstrapDataSource.query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE`,
+      );
+      await bootstrapDataSource.destroy();
+    }
+  });
+
+  it('repairs a skipped legacy schema before durability reads its columns', async () => {
+    await driftDataSource.query(`
+      CREATE TABLE "zone_alerte" (
+        "id" integer PRIMARY KEY,
+        "legacyValue" text NOT NULL
+      );
+      INSERT INTO "zone_alerte" ("id", "legacyValue")
+      VALUES (1, 'preserve-me');
+      CREATE TABLE "migrations" (
+        "id" SERIAL NOT NULL,
+        "timestamp" bigint NOT NULL,
+        "name" character varying NOT NULL,
+        CONSTRAINT "PK_sandre_drift_migrations" PRIMARY KEY ("id")
+      );
+      INSERT INTO "migrations" ("timestamp", "name")
+      VALUES (1785484800000, 'SandreZoneSync1785484800000');
+    `);
+
+    const applied = await driftDataSource.runMigrations({
+      transaction: 'each',
+    });
+
+    expect(applied.map(({ name }) => name)).toEqual([
+      'SandreZoneSchemaPrerequisites1786392000000',
+      'SandreZoneDurability1786395600000',
+    ]);
+    const columns = await driftDataSource.query(`
+      SELECT
+        "column_name" AS "columnName",
+        "data_type" AS "dataType",
+        "character_maximum_length"::integer AS "maximumLength",
+        "is_nullable" AS "isNullable"
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'zone_alerte'
+        AND "column_name" IN (
+          'idSandre',
+          'codeSandre',
+          'statutSandre',
+          'dateMajSandre',
+          'numeroVersionSandre',
+          'codesAlternatifs',
+          'sandrePayloadHash'
+        )
+      ORDER BY "column_name"
+    `);
+    expect(columns).toEqual([
+      {
+        columnName: 'codeSandre',
+        dataType: 'character varying',
+        maximumLength: 32,
+        isNullable: 'YES',
+      },
+      {
+        columnName: 'codesAlternatifs',
+        dataType: 'jsonb',
+        maximumLength: null,
+        isNullable: 'YES',
+      },
+      {
+        columnName: 'dateMajSandre',
+        dataType: 'date',
+        maximumLength: null,
+        isNullable: 'YES',
+      },
+      {
+        columnName: 'idSandre',
+        dataType: 'integer',
+        maximumLength: null,
+        isNullable: 'YES',
+      },
+      {
+        columnName: 'numeroVersionSandre',
+        dataType: 'integer',
+        maximumLength: null,
+        isNullable: 'YES',
+      },
+      {
+        columnName: 'sandrePayloadHash',
+        dataType: 'character varying',
+        maximumLength: 64,
+        isNullable: 'YES',
+      },
+      {
+        columnName: 'statutSandre',
+        dataType: 'character varying',
+        maximumLength: 20,
+        isNullable: 'YES',
+      },
+    ]);
+    await expect(
+      driftDataSource.query(`
+        SELECT "legacyValue", "sandreProvenance"
+        FROM "zone_alerte"
+        WHERE "id" = 1
+      `),
+    ).resolves.toEqual([
+      { legacyValue: 'preserve-me', sandreProvenance: 'legacy_unverified' },
+    ]);
+
+    const replayRunner = driftDataSource.createQueryRunner();
+    await replayRunner.connect();
+    try {
+      await expect(
+        new SandreZoneSchemaPrerequisites1786392000000().up(replayRunner),
+      ).resolves.toBeUndefined();
+    } finally {
+      await replayRunner.release();
+    }
+    await expect(
+      driftDataSource.runMigrations({ transaction: 'each' }),
+    ).resolves.toEqual([]);
   });
 });
 
