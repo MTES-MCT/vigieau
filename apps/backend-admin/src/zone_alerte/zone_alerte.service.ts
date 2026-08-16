@@ -63,8 +63,12 @@ import {
 import {
   fetchSandreMdmNomenclatureEvidence,
   fetchSandreMdmZoneRecordEvidence,
+  loadSandreMdmProofWithRetry,
   SandreMdmNomenclatureEvidence,
+  SandreMdmProofBudget,
+  SandreMdmProofDeadlineExceededError,
   SandreMdmTransportResponse,
+  SandreMdmTransientError,
   SandreMdmZoneRecordEvidence,
 } from './sandre-mdm-evidence';
 import {
@@ -88,6 +92,11 @@ const SANDRE_HTTP_TIMEOUT_MS = 30 * 1000;
 const SANDRE_GENEALOGY_CACHE_MS = 10 * 60 * 1000;
 const SANDRE_GENEALOGY_METADATA_MAX_BYTES = 1024 * 1024;
 const SANDRE_GENEALOGY_CSV_MAX_BYTES = 20 * 1024 * 1024;
+const SANDRE_MDM_REQUEST_ATTEMPTS = 3;
+const SANDRE_MDM_REQUEST_TIMEOUT_MS = 60_000;
+const SANDRE_MDM_REQUEST_RETRY_BASE_MS = 250;
+const SANDRE_MDM_PROOF_RETRY_BASE_MS = 2_000;
+const SANDRE_MDM_TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const SANDRE_VALID_STATUS = 'Validé';
 const SANDRE_ZONE_SELECT = {
   id: true,
@@ -3063,44 +3072,102 @@ export class ZoneAlerteService {
   private async fetchApprovedSandreMdmEvidence(
     approval: SandreApprovedSyncSnapshot,
   ): Promise<SandreApprovedMdmEvidence> {
-    const zoneRecords = await Promise.all(
-      approval.mdmRecords.map((expectation) =>
-        fetchSandreMdmZoneRecordEvidence(expectation, (url) =>
-          this.fetchSandreMdmTransport(
-            url,
-            'application/json',
-            2 * 1024 * 1024,
-          ),
+    return loadSandreMdmProofWithRetry(
+      (budget) => this.fetchApprovedSandreMdmEvidenceAttempt(approval, budget),
+      (attempt, budget) => this.waitForSandreMdmProofRetry(attempt, budget),
+    );
+  }
+
+  private async fetchApprovedSandreMdmEvidenceAttempt(
+    approval: SandreApprovedSyncSnapshot,
+    budget: SandreMdmProofBudget,
+  ): Promise<SandreApprovedMdmEvidence> {
+    budget.assertRemaining('before loading the approved resources');
+    const controller = new AbortController();
+    const attemptCancellation = new Error('Sandre MDM proof attempt cancelled');
+    const cancelAttemptAtProofDeadline = () => {
+      controller.abort(this.sandreMdmCancellationError(budget.signal));
+    };
+    if (budget.signal.aborted) {
+      cancelAttemptAtProofDeadline();
+    } else {
+      budget.signal.addEventListener('abort', cancelAttemptAtProofDeadline, {
+        once: true,
+      });
+    }
+    const zoneRecordPromises = approval.mdmRecords.map((expectation) =>
+      fetchSandreMdmZoneRecordEvidence(expectation, (url) =>
+        this.fetchSandreMdmTransport(
+          url,
+          'application/json',
+          2 * 1024 * 1024,
+          budget,
+          controller.signal,
         ),
       ),
     );
-    const nomenclature = approval.mdmNomenclature
-      ? await fetchSandreMdmNomenclatureEvidence(
-          approval.mdmNomenclature,
-          (url) =>
-            this.fetchSandreMdmTransport(
-              url,
-              'text/html,application/xhtml+xml;q=0.9',
-              512 * 1024,
-            ),
+    const nomenclaturePromise = approval.mdmNomenclature
+      ? fetchSandreMdmNomenclatureEvidence(approval.mdmNomenclature, (url) =>
+          this.fetchSandreMdmTransport(
+            url,
+            'text/html,application/xhtml+xml;q=0.9',
+            512 * 1024,
+            budget,
+            controller.signal,
+          ),
         )
-      : null;
-    return { approvalId: approval.approvalId, zoneRecords, nomenclature };
+      : Promise.resolve(null);
+    try {
+      const [zoneRecords, nomenclature] = await Promise.all([
+        Promise.all(zoneRecordPromises),
+        nomenclaturePromise,
+      ]);
+      budget.assertRemaining('after validating the approved resources');
+      return { approvalId: approval.approvalId, zoneRecords, nomenclature };
+    } catch (error) {
+      controller.abort(attemptCancellation);
+      const settledResources = await Promise.allSettled([
+        ...zoneRecordPromises,
+        nomenclaturePromise,
+      ]);
+      const nonRetryableFailure = settledResources.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected' &&
+          result.reason !== attemptCancellation &&
+          !(result.reason instanceof SandreMdmTransientError),
+      );
+      if (nonRetryableFailure) {
+        throw nonRetryableFailure.reason;
+      }
+      throw error;
+    } finally {
+      budget.signal.removeEventListener('abort', cancelAttemptAtProofDeadline);
+    }
   }
 
   private async fetchSandreMdmTransport(
     url: string,
     accept: string,
     maximumBytes: number,
+    budget: SandreMdmProofBudget,
+    signal: AbortSignal,
   ): Promise<SandreMdmTransportResponse> {
-    const attempts = 3;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    for (let attempt = 1; attempt <= SANDRE_MDM_REQUEST_ATTEMPTS; attempt++) {
+      if (signal.aborted) {
+        throw this.sandreMdmCancellationError(signal);
+      }
+      const timeout = Math.min(
+        SANDRE_MDM_REQUEST_TIMEOUT_MS,
+        budget.assertRemaining(`before requesting ${url}`),
+      );
+      let response;
       try {
-        const response = await firstValueFrom(
+        response = await firstValueFrom(
           this.httpService.get(url, {
             headers: { accept, 'accept-language': 'fr' },
             responseType: 'text',
-            timeout: 60_000,
+            timeout,
+            signal,
             maxRedirects: 0,
             maxContentLength: maximumBytes,
             maxBodyLength: maximumBytes,
@@ -3108,51 +3175,117 @@ export class ZoneAlerteService {
             validateStatus: () => true,
           }),
         );
-        if (
-          attempt < attempts &&
-          (response.status === 429 || response.status >= 500)
-        ) {
-          await this.waitForSandreMdmRetry(attempt);
-          continue;
-        }
-        return {
-          status: response.status,
-          contentType:
-            typeof response.headers?.['content-type'] === 'string'
-              ? response.headers['content-type']
-              : null,
-          finalUrl:
-            response.request?.res?.responseUrl ??
-            response.request?.responseURL ??
-            url,
-          body: typeof response.data === 'string' ? response.data : '',
-        };
       } catch (error) {
+        if (signal.aborted) {
+          throw this.sandreMdmCancellationError(signal);
+        }
+        budget.assertRemaining(`while requesting ${url}`, error);
         const code =
           error && typeof error === 'object' && 'code' in error
             ? String(error.code)
             : '';
-        if (
-          attempt === attempts ||
-          ![
-            'ECONNABORTED',
-            'ECONNRESET',
-            'ECONNREFUSED',
-            'EAI_AGAIN',
-            'ENETUNREACH',
-            'ETIMEDOUT',
-          ].includes(code)
-        ) {
+        const transient = [
+          'ECONNABORTED',
+          'ECONNRESET',
+          'ECONNREFUSED',
+          'EAI_AGAIN',
+          'ENETUNREACH',
+          'ETIMEDOUT',
+        ].includes(code);
+        if (!transient) {
           throw error;
         }
-        await this.waitForSandreMdmRetry(attempt);
+        if (attempt === SANDRE_MDM_REQUEST_ATTEMPTS) {
+          throw new SandreMdmTransientError(
+            `Transient Sandre MDM transport failure for ${url}`,
+            error,
+          );
+        }
+        await this.waitForSandreMdmRequestRetry(attempt, budget, signal);
+        continue;
       }
+      budget.assertRemaining(`after requesting ${url}`);
+      if (SANDRE_MDM_TRANSIENT_HTTP_STATUSES.has(response.status)) {
+        if (attempt === SANDRE_MDM_REQUEST_ATTEMPTS) {
+          throw new SandreMdmTransientError(
+            `Transient Sandre MDM HTTP ${response.status} for ${url}`,
+          );
+        }
+        await this.waitForSandreMdmRequestRetry(attempt, budget, signal);
+        continue;
+      }
+      return {
+        status: response.status,
+        contentType:
+          typeof response.headers?.['content-type'] === 'string'
+            ? response.headers['content-type']
+            : null,
+        finalUrl:
+          response.request?.res?.responseUrl ??
+          response.request?.responseURL ??
+          url,
+        body: typeof response.data === 'string' ? response.data : '',
+      };
     }
-    throw new Error('Sandre MDM retry budget exhausted');
+    throw new Error('Sandre MDM request retry budget exhausted');
   }
 
-  private async waitForSandreMdmRetry(attempt: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+  private async waitForSandreMdmRequestRetry(
+    attempt: number,
+    budget: SandreMdmProofBudget,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.waitForSandreMdmDelay(
+      SANDRE_MDM_REQUEST_RETRY_BASE_MS * 2 ** (attempt - 1),
+      budget,
+      signal,
+    );
+  }
+
+  private async waitForSandreMdmProofRetry(
+    attempt: number,
+    budget: SandreMdmProofBudget,
+  ): Promise<void> {
+    await this.waitForSandreMdmDelay(
+      SANDRE_MDM_PROOF_RETRY_BASE_MS * 2 ** (attempt - 1),
+      budget,
+      budget.signal,
+    );
+  }
+
+  private async waitForSandreMdmDelay(
+    delayMs: number,
+    budget: SandreMdmProofBudget,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) {
+      throw this.sandreMdmCancellationError(signal);
+    }
+    const remainingMs = budget.assertRemaining('before retry backoff');
+    if (delayMs >= remainingMs) {
+      throw new SandreMdmProofDeadlineExceededError(
+        'Sandre MDM proof deadline leaves no room for the required backoff',
+      );
+    }
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        reject(this.sandreMdmCancellationError(signal!));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, delayMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    budget.assertRemaining('after retry backoff');
+  }
+
+  private sandreMdmCancellationError(signal: AbortSignal): Error {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new Error('Sandre MDM proof attempt cancelled');
   }
 
   private async lockOperationalParentsForSandreSources(

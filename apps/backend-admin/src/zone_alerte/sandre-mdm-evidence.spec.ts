@@ -2,10 +2,13 @@ import { fingerprint } from './sandre-zone-reconciliation';
 import {
   fetchSandreMdmNomenclatureEvidence,
   fetchSandreMdmZoneRecordEvidence,
+  loadSandreMdmProofWithRetry,
   projectSandreMdmNomenclatureNode,
   projectSandreMdmZoneRecord,
   SANDRE_MDM_MAX_ZONE_RECORD_BYTES,
   SANDRE_MDM_ZONE_RECORD_BASE_URL,
+  SandreMdmProofDeadlineExceededError,
+  SandreMdmTransientError,
   SandreMdmTransportResponse,
 } from './sandre-mdm-evidence';
 
@@ -209,6 +212,197 @@ describe('Sandre MDM split evidence', () => {
         '590',
       ),
     ).toThrow('root');
+  });
+
+  it('restarts the complete proof after a transient failure and recovers', async () => {
+    const completedReads: string[] = [];
+    let attempt = 0;
+    const loadProof = jest.fn(async () => {
+      attempt++;
+      completedReads.push(`${attempt}:355`, `${attempt}:3947`);
+      if (attempt === 1) {
+        throw new SandreMdmTransientError('HTTP 500 for 3947');
+      }
+      completedReads.push(`${attempt}:3948`, `${attempt}:282836`);
+      return 'complete-proof';
+    });
+    const waitForRetry = jest.fn().mockResolvedValue(undefined);
+
+    await expect(
+      loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+        attempts: 3,
+      }),
+    ).resolves.toBe('complete-proof');
+    expect(loadProof).toHaveBeenCalledTimes(2);
+    expect(waitForRetry).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ expiresAt: expect.any(Number) }),
+    );
+    expect(completedReads).toEqual([
+      '1:355',
+      '1:3947',
+      '2:355',
+      '2:3947',
+      '2:3948',
+      '2:282836',
+    ]);
+  });
+
+  it('fails closed after exhausting the transient proof retry budget', async () => {
+    const transient = new SandreMdmTransientError('HTTP 500');
+    const loadProof = jest.fn().mockRejectedValue(transient);
+    const waitForRetry = jest.fn().mockResolvedValue(undefined);
+
+    await expect(
+      loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+        attempts: 3,
+      }),
+    ).rejects.toMatchObject({
+      message: 'Sandre MDM proof retry budget exhausted after 3 attempts',
+      cause: transient,
+    });
+    expect(loadProof).toHaveBeenCalledTimes(3);
+    expect(waitForRetry.mock.calls.map(([attempt]) => attempt)).toEqual([1, 2]);
+  });
+
+  it('does not retry validation drift', async () => {
+    const validationError = new Error(
+      'Sandre MDM projection changed for zone 3947',
+    );
+    const loadProof = jest.fn().mockRejectedValue(validationError);
+    const waitForRetry = jest.fn().mockResolvedValue(undefined);
+
+    await expect(
+      loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+        attempts: 5,
+      }),
+    ).rejects.toBe(validationError);
+    expect(loadProof).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).not.toHaveBeenCalled();
+  });
+
+  it('enforces one monotonic deadline across proof attempts and backoffs', async () => {
+    let now = 1_000;
+    const transient = new SandreMdmTransientError('HTTP 500');
+    const loadProof = jest.fn(async () => {
+      now += 40;
+      throw transient;
+    });
+    const waitForRetry = jest.fn(async () => {
+      now += 20;
+    });
+
+    await expect(
+      loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+        attempts: 5,
+        timeoutMs: 100,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({
+      name: 'SandreMdmProofDeadlineExceededError',
+      cause: transient,
+    });
+    expect(loadProof).toHaveBeenCalledTimes(2);
+    expect(waitForRetry).toHaveBeenCalledTimes(1);
+    expect(now).toBe(1_100);
+  });
+
+  it('actively cancels a retried proof at one wall-clock deadline', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-16T12:00:00.000Z'));
+    try {
+      let attempt = 0;
+      const observedSignals: AbortSignal[] = [];
+      const cancellation = jest.fn();
+      const transient = new SandreMdmTransientError('HTTP 500');
+      const loadProof = jest.fn(
+        (budget: { signal: AbortSignal }): Promise<string> => {
+          attempt++;
+          observedSignals.push(budget.signal);
+          if (attempt === 1) {
+            return Promise.reject(transient);
+          }
+          return new Promise((_resolve, reject) => {
+            budget.signal.addEventListener(
+              'abort',
+              () => {
+                cancellation();
+                reject(budget.signal.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      );
+      const waitForRetry = jest.fn().mockResolvedValue(undefined);
+      const proof = loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+        attempts: 3,
+        timeoutMs: 100,
+        now: () => Date.now(),
+      });
+      const rejection = expect(proof).rejects.toBeInstanceOf(
+        SandreMdmProofDeadlineExceededError,
+      );
+
+      await jest.advanceTimersByTimeAsync(0);
+      expect(loadProof).toHaveBeenCalledTimes(2);
+      expect(waitForRetry).toHaveBeenCalledTimes(1);
+      expect(observedSignals[0]).toBe(observedSignals[1]);
+      expect(jest.getTimerCount()).toBe(1);
+
+      await jest.advanceTimersByTimeAsync(99);
+      expect(cancellation).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1);
+      await rejection;
+
+      expect(cancellation).toHaveBeenCalledTimes(1);
+      expect(observedSignals[0].aborted).toBe(true);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('clears the wall-clock deadline timer after an early proof success', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-16T12:00:00.000Z'));
+    try {
+      let signal: AbortSignal | undefined;
+
+      await expect(
+        loadSandreMdmProofWithRetry(
+          async (budget) => {
+            signal = budget.signal;
+            return 'complete-proof';
+          },
+          jest.fn(),
+          { timeoutMs: 100, now: () => Date.now() },
+        ),
+      ).resolves.toBe('complete-proof');
+
+      expect(jest.getTimerCount()).toBe(0);
+      await jest.advanceTimersByTimeAsync(100);
+      expect(signal?.aborted).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('fails before starting work when the monotonic proof deadline is spent', async () => {
+    const clockReadings = [5_000, 5_010];
+    const loadProof = jest.fn(async () => 'unreachable');
+    const waitForRetry = jest.fn().mockResolvedValue(undefined);
+    const proof = loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+      timeoutMs: 10,
+      now: () => clockReadings.shift() ?? 5_010,
+    });
+
+    await expect(proof).rejects.toBeInstanceOf(
+      SandreMdmProofDeadlineExceededError,
+    );
+    expect(loadProof).not.toHaveBeenCalled();
+    expect(waitForRetry).not.toHaveBeenCalled();
   });
 });
 

@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { performance } from 'perf_hooks';
 import { load } from 'cheerio';
 import { fingerprint } from './sandre-zone-reconciliation';
 import {
@@ -12,6 +13,128 @@ export const SANDRE_MDM_MAX_ZONE_RECORD_BYTES = 2 * 1024 * 1024;
 export const SANDRE_MDM_NOMENCLATURE_NODE_BASE_URL =
   'https://mdm.sandre.eaufrance.fr/node';
 export const SANDRE_MDM_MAX_NOMENCLATURE_BYTES = 512 * 1024;
+export const SANDRE_MDM_PROOF_ATTEMPTS = 5;
+export const SANDRE_MDM_PROOF_TIMEOUT_MS = 3 * 60 * 1000;
+
+export class SandreMdmTransientError extends Error {
+  readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = 'SandreMdmTransientError';
+    this.cause = cause;
+  }
+}
+
+export class SandreMdmProofDeadlineExceededError extends Error {
+  readonly cause?: unknown;
+
+  constructor(message = 'Sandre MDM proof deadline exceeded', cause?: unknown) {
+    super(message);
+    this.name = 'SandreMdmProofDeadlineExceededError';
+    this.cause = cause;
+  }
+}
+
+export interface SandreMdmProofBudget {
+  readonly expiresAt: number;
+  readonly signal: AbortSignal;
+  remainingMs(): number;
+  assertRemaining(context?: string, cause?: unknown): number;
+}
+
+export interface SandreMdmProofRetryOptions {
+  attempts?: number;
+  timeoutMs?: number;
+  now?: () => number;
+}
+
+export async function loadSandreMdmProofWithRetry<T>(
+  loadProof: (budget: SandreMdmProofBudget) => Promise<T>,
+  waitForRetry: (
+    attempt: number,
+    budget: SandreMdmProofBudget,
+  ) => Promise<void>,
+  options: SandreMdmProofRetryOptions = {},
+): Promise<T> {
+  const attempts = options.attempts ?? SANDRE_MDM_PROOF_ATTEMPTS;
+  const timeoutMs = options.timeoutMs ?? SANDRE_MDM_PROOF_TIMEOUT_MS;
+  const now = options.now ?? (() => performance.now());
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error('Invalid Sandre MDM proof retry budget');
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('Invalid Sandre MDM proof deadline');
+  }
+  const startedAt = now();
+  if (!Number.isFinite(startedAt)) {
+    throw new Error('Invalid Sandre MDM monotonic clock');
+  }
+  const expiresAt = startedAt + timeoutMs;
+  if (!Number.isFinite(expiresAt)) {
+    throw new Error('Invalid Sandre MDM proof deadline');
+  }
+  const deadlineController = new AbortController();
+  const remainingMs = (): number => {
+    const observedAt = now();
+    if (!Number.isFinite(observedAt)) {
+      throw new Error('Invalid Sandre MDM monotonic clock');
+    }
+    return Math.max(0, Math.ceil(expiresAt - observedAt));
+  };
+  const budget: SandreMdmProofBudget = {
+    expiresAt,
+    signal: deadlineController.signal,
+    remainingMs,
+    assertRemaining: (context = 'before the next operation', cause) => {
+      if (deadlineController.signal.aborted) {
+        throw deadlineController.signal.reason;
+      }
+      const remaining = remainingMs();
+      if (remaining <= 0) {
+        throw new SandreMdmProofDeadlineExceededError(
+          `Sandre MDM proof deadline exceeded ${context}`,
+          cause,
+        );
+      }
+      return remaining;
+    },
+  };
+  let rejectAtDeadline!: (error: SandreMdmProofDeadlineExceededError) => void;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectAtDeadline = reject;
+  });
+  const deadlineTimer = setTimeout(() => {
+    const error = new SandreMdmProofDeadlineExceededError();
+    deadlineController.abort(error);
+    rejectAtDeadline(error);
+  }, budget.assertRemaining('before arming the proof deadline'));
+  try {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      budget.assertRemaining(`before attempt ${attempt}`);
+      try {
+        return await Promise.race([loadProof(budget), deadline]);
+      } catch (error) {
+        if (!(error instanceof SandreMdmTransientError)) {
+          throw error;
+        }
+        budget.assertRemaining(`after attempt ${attempt}`, error);
+        if (attempt === attempts) {
+          throw Object.assign(
+            new Error(
+              `Sandre MDM proof retry budget exhausted after ${attempts} attempts`,
+            ),
+            { cause: error },
+          );
+        }
+        await Promise.race([waitForRetry(attempt, budget), deadline]);
+      }
+    }
+    throw new Error('Sandre MDM proof retry budget exhausted');
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
+}
 
 export interface SandreMdmTransportResponse {
   status: number;
