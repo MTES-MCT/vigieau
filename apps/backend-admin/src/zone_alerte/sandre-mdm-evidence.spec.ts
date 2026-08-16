@@ -266,6 +266,48 @@ describe('Sandre MDM split evidence', () => {
     expect(waitForRetry.mock.calls.map(([attempt]) => attempt)).toEqual([1, 2]);
   });
 
+  it('keeps retrying transient proof beyond five attempts until the active deadline', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-16T12:00:00.000Z'));
+    try {
+      const transient = new SandreMdmTransientError('HTTP 500');
+      const loadProof = jest.fn().mockRejectedValue(transient);
+      const waitForRetry = jest.fn(
+        (_attempt: number, budget: { signal: AbortSignal }) =>
+          new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(budget.signal.reason);
+            };
+            const timer = setTimeout(() => {
+              budget.signal.removeEventListener('abort', onAbort);
+              resolve();
+            }, 10);
+            budget.signal.addEventListener('abort', onAbort, { once: true });
+          }),
+      );
+      const proof = loadSandreMdmProofWithRetry(loadProof, waitForRetry, {
+        timeoutMs: 60,
+        now: () => Date.now(),
+      });
+      const rejection = expect(proof).rejects.toBeInstanceOf(
+        SandreMdmProofDeadlineExceededError,
+      );
+
+      await jest.advanceTimersByTimeAsync(59);
+      expect(loadProof).toHaveBeenCalledTimes(6);
+      expect(waitForRetry.mock.calls.map(([attempt]) => attempt)).toEqual([
+        1, 2, 3, 4, 5, 6,
+      ]);
+      await jest.advanceTimersByTimeAsync(1);
+      await rejection;
+
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('does not retry validation drift', async () => {
     const validationError = new Error(
       'Sandre MDM projection changed for zone 3947',

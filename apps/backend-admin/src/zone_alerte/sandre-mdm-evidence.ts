@@ -13,7 +13,6 @@ export const SANDRE_MDM_MAX_ZONE_RECORD_BYTES = 2 * 1024 * 1024;
 export const SANDRE_MDM_NOMENCLATURE_NODE_BASE_URL =
   'https://mdm.sandre.eaufrance.fr/node';
 export const SANDRE_MDM_MAX_NOMENCLATURE_BYTES = 512 * 1024;
-export const SANDRE_MDM_PROOF_ATTEMPTS = 5;
 export const SANDRE_MDM_PROOF_TIMEOUT_MS = 3 * 60 * 1000;
 
 export class SandreMdmTransientError extends Error {
@@ -57,10 +56,10 @@ export async function loadSandreMdmProofWithRetry<T>(
   ) => Promise<void>,
   options: SandreMdmProofRetryOptions = {},
 ): Promise<T> {
-  const attempts = options.attempts ?? SANDRE_MDM_PROOF_ATTEMPTS;
+  const attempts = options.attempts;
   const timeoutMs = options.timeoutMs ?? SANDRE_MDM_PROOF_TIMEOUT_MS;
   const now = options.now ?? (() => performance.now());
-  if (!Number.isInteger(attempts) || attempts < 1) {
+  if (attempts !== undefined && (!Number.isInteger(attempts) || attempts < 1)) {
     throw new Error('Invalid Sandre MDM proof retry budget');
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -110,7 +109,7 @@ export async function loadSandreMdmProofWithRetry<T>(
     rejectAtDeadline(error);
   }, budget.assertRemaining('before arming the proof deadline'));
   try {
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    for (let attempt = 1; ; attempt++) {
       budget.assertRemaining(`before attempt ${attempt}`);
       try {
         return await Promise.race([loadProof(budget), deadline]);
@@ -119,7 +118,7 @@ export async function loadSandreMdmProofWithRetry<T>(
           throw error;
         }
         budget.assertRemaining(`after attempt ${attempt}`, error);
-        if (attempt === attempts) {
+        if (attempts !== undefined && attempt === attempts) {
           throw Object.assign(
             new Error(
               `Sandre MDM proof retry budget exhausted after ${attempts} attempts`,
@@ -130,7 +129,6 @@ export async function loadSandreMdmProofWithRetry<T>(
         await Promise.race([waitForRetry(attempt, budget), deadline]);
       }
     }
-    throw new Error('Sandre MDM proof retry budget exhausted');
   } finally {
     clearTimeout(deadlineTimer);
   }
