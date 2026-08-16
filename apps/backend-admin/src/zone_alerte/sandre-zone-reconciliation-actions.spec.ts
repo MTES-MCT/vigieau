@@ -16,6 +16,10 @@ describe('audited Sandre reconciliation plans', () => {
     __dirname,
     '../scripts/sandre-reconciliation-plans/2026-08-15-prod-sandre-unblock.json',
   );
+  const auditBlockersPlanPath = resolve(
+    __dirname,
+    '../scripts/sandre-reconciliation-plans/2026-08-15-prod-sandre-audit-blockers.json',
+  );
 
   it('signs every operational action and generic sync expectation', () => {
     const serializedPlan = readFileSync(planPath, 'utf8');
@@ -74,6 +78,51 @@ describe('audited Sandre reconciliation plans', () => {
     );
   });
 
+  it('keeps the follow-up audit blockers in a separate exact operation', () => {
+    const serializedPlan = readFileSync(auditBlockersPlanPath, 'utf8');
+    const plan = parseSandreReconciliationPlan(JSON.parse(serializedPlan));
+
+    expect(plan.operationId).toBe('2026-08-15-prod-sandre-audit-blockers');
+    expect(plan.syncExpectations).toEqual([
+      {
+        departmentCode: '11',
+        officialCodes: [
+          '3575',
+          '3579',
+          '3586',
+          '3592',
+          '3951',
+          '3956',
+          '3958',
+          '3961',
+        ],
+        resolution: 'geometry_normalization',
+      },
+    ]);
+    expect(plan.actions).toEqual([
+      expect.objectContaining({
+        strategy: 'canonicalize_duplicate',
+        departmentCode: '49',
+        zoneType: 'SOU',
+        sourceZoneId: 16677,
+        targetZoneId: 9708,
+        expectedSourceCode: '52_49_15',
+        expectedSandreGid: 409,
+        officialCode: '301',
+        requiredSourceBusinessReferenceCount: 0,
+        restrictionConflictPolicy: expect.objectContaining({
+          expectedCount: 0,
+          expectedFingerprint:
+            '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+        }),
+      }),
+    ]);
+    expect(reconciliationPlanFingerprint(plan)).toMatch(/^[a-f0-9]{64}$/);
+    expect(serializedPlan).not.toMatch(
+      /DATABASE_|API_SANDRE|PASSWORD|SECRET|postgres(?:ql)?:\/\//i,
+    );
+  });
+
   it('requires an exact restriction conflict policy for canonical duplicates', () => {
     const conflict = canonicalConflict();
     const action = canonicalAction([conflict]);
@@ -104,6 +153,34 @@ describe('audited Sandre reconciliation plans', () => {
         ],
       }),
     ).toThrow('Invalid canonical Sandre duplicate action');
+  });
+
+  it('rejects the retired plan-level partition replication path', () => {
+    const policy = {
+      mode: 'replicate_exact_to_all_targets',
+      requiredParentStatuses: ['a_venir', 'publie'],
+      expectedSourceCount: 2,
+      expectedSourceFingerprint: 'a'.repeat(64),
+      expectedTargetCollisionCount: 0,
+      expectedTargetCollisionFingerprint: fingerprint([]),
+    };
+    expect(() =>
+      parseSandreReconciliationPlan({
+        schemaVersion: 1,
+        operationId: 'partition-restriction-policy',
+        description: 'test',
+        actions: [
+          {
+            strategy: 'replace_partition_1ton',
+            departmentCode: '85',
+            zoneType: 'SUP',
+            sourceZoneId: 10582,
+            targetZoneIds: [20001, 20002],
+            restrictionReplicationPolicy: policy,
+          },
+        ],
+      }),
+    ).toThrow('Legacy partition evidence is not supported');
   });
 
   it('fails closed when canonical restriction conflicts drift', () => {
@@ -421,6 +498,9 @@ function geometryAuditRow(overrides: Record<string, unknown>): any {
     raw_area: '1',
     normalized_area: '1',
     relative_area_delta: '0',
+    raw_geodesic_area: '10000000',
+    normalized_geodesic_area: '10000000',
+    absolute_geodesic_area_delta: '0',
     bbox_unchanged: true,
     normalized_valid: true,
     ...overrides,

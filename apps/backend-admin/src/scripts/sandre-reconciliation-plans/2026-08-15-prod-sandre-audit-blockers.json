@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "operationId": "2026-08-15-prod-sandre-audit-blockers",
+  "description": "Resolve the second full-audit blockers with source-scoped geometry evidence and exact duplicate canonicalization.",
+  "syncExpectations": [
+    {
+      "departmentCode": "11",
+      "officialCodes": [
+        "3575",
+        "3579",
+        "3586",
+        "3592",
+        "3951",
+        "3956",
+        "3958",
+        "3961"
+      ],
+      "resolution": "geometry_normalization"
+    }
+  ],
+  "actions": [
+    {
+      "strategy": "canonicalize_duplicate",
+      "departmentCode": "49",
+      "zoneType": "SOU",
+      "sourceZoneId": 16677,
+      "targetZoneId": 9708,
+      "expectedSourceCode": "52_49_15",
+      "expectedSandreGid": 409,
+      "officialCode": "301",
+      "requiredSourceBusinessReferenceCount": 0,
+      "restrictionConflictPolicy": {
+        "mode": "prefer_source",
+        "expectedCount": 0,
+        "expectedFingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "allowedDifferingFields": ["niveauGravite"],
+        "requiredParentStatus": "abroge",
+        "requireSourceSeverityStrictlyHigher": true
+      }
+    }
+  ]
+}

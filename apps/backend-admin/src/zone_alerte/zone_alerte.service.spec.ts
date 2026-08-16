@@ -5,6 +5,9 @@ import { SandreZoneSyncState } from '@shared/entities/sandre_zone_sync_state.ent
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { of } from 'rxjs';
 import { getMetadataArgsStorage } from 'typeorm';
+import * as approvedReferences from './sandre-zone-sync-approved-references';
+import * as syncApprovals from './sandre-zone-sync-approvals';
+import { fingerprint } from './sandre-zone-reconciliation';
 import { createSandreZoneSnapshot } from './sandre-zone-sync';
 import { ZoneAlerteService } from './zone_alerte.service';
 
@@ -135,6 +138,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       reason: string;
     }>;
     globalLockAvailable?: boolean;
+    exactAuditBatch?: Record<string, unknown> | null;
   }) => {
     const zoneRepository = {
       create: jest.fn(() => ({})),
@@ -181,9 +185,47 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       [Departement, departmentRepository],
       [BassinVersant, basinRepository],
     ]);
+    const configuredResponses = options?.httpResponses ?? [
+      countResponse(1),
+      {
+        data: {
+          features: [rawFeature()],
+        },
+      },
+      countResponse(1),
+    ];
+    const exactAuditFeatures = configuredResponses.flatMap((response) =>
+      Array.isArray(response?.data?.features) ? response.data.features : [],
+    );
+    const getExactAuditSnapshot = () =>
+      createSandreZoneSnapshot(
+        exactAuditFeatures,
+        exactAuditFeatures.length,
+        department.code,
+      );
     const manager = {
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
+        if (
+          query.includes('FROM sandre_zone_sync_batch batch') &&
+          query.includes("batch.kind = 'snapshot'") &&
+          query.includes("batch.mode = 'audit'") &&
+          query.includes('FOR SHARE')
+        ) {
+          if (options && 'exactAuditBatch' in options) {
+            return options.exactAuditBatch ? [options.exactAuditBatch] : [];
+          }
+          const exactAuditSnapshot = getExactAuditSnapshot();
+          return [
+            {
+              id: 'exact-audit-1',
+              status: 'observed',
+              snapshotHash: exactAuditSnapshot.snapshotHash,
+              sourceUpdatedAt: exactAuditSnapshot.sourceUpdatedAt,
+              featureCount: exactAuditSnapshot.featureCount,
+            },
+          ];
+        }
         if (query.includes('WITH sandre_geometry_input AS')) {
           const inputs = JSON.parse(parameters?.[0] ?? '[]');
           return inputs.map((input, index) => {
@@ -205,6 +247,9 @@ describe('ZoneAlerteService Sandre synchronization', () => {
               raw_area: '1',
               normalized_area: '1',
               relative_area_delta: '0',
+              raw_geodesic_area: '10000000',
+              normalized_geodesic_area: '10000000',
+              absolute_geodesic_area_delta: '0',
               bbox_unchanged: true,
               normalized_valid: !invalid,
             };
@@ -321,15 +366,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         return [];
       }),
     };
-    const responses = options?.httpResponses ?? [
-      countResponse(1),
-      {
-        data: {
-          features: [rawFeature()],
-        },
-      },
-      countResponse(1),
-    ];
+    const responses = [...configuredResponses];
     const httpService = {
       get: jest.fn(() => of(responses.shift())),
     };
@@ -394,6 +431,72 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       runCurrentZoneComputeWorker,
     };
   };
+
+  it('requests the official genealogy representation explicitly', async () => {
+    const csvUrl =
+      'https://services.sandre.eaufrance.fr/telechargement/geo/ZAS/GenealogieZAS_millesime2024.csv';
+    const metadata = `
+      <root xmlns:gmd="gmd" xmlns:gco="gco">
+        <gmd:CI_OnlineResource>
+          <gmd:linkage><gmd:URL>${csvUrl}</gmd:URL></gmd:linkage>
+          <gmd:name><gco:CharacterString>Télécharger la généalogie des zones d'alerte sécheresse</gco:CharacterString></gmd:name>
+        </gmd:CI_OnlineResource>
+      </root>
+    `;
+    const csv = [
+      'id,CdZASParent,CdZASEnfant,DtGenZAS,TypGenZAS,RaisGenZAS',
+      '1,OLD,NEW,2024-10-01,2,Remplacement',
+    ].join('\n');
+    const harness = createHarness({
+      httpResponses: [{ data: metadata }, { data: csv }],
+    });
+
+    await expect(
+      (harness.service as any).fetchSandreGenealogyRelations(),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        parentCode: 'OLD',
+        childCode: 'NEW',
+        modificationType: '2',
+      }),
+    ]);
+
+    expect(harness.httpService.get).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('/formatters/xml'),
+      expect.objectContaining({
+        headers: {
+          accept: 'application/xml,text/xml,text/csv,text/html;q=0.9',
+          'accept-language': 'fr',
+        },
+        responseType: 'text',
+      }),
+    );
+    expect(harness.httpService.get).toHaveBeenNthCalledWith(
+      2,
+      csvUrl,
+      expect.objectContaining({
+        headers: {
+          accept: 'application/xml,text/xml,text/csv,text/html;q=0.9',
+          'accept-language': 'fr',
+        },
+        responseType: 'text',
+      }),
+    );
+  });
+
+  it('fails closed when Sandre serves the default JSON metadata representation', async () => {
+    const harness = createHarness({
+      httpResponses: [{ data: { distributions: [] } }],
+    });
+
+    await expect(
+      (harness.service as any).fetchSandreGenealogyRelations(),
+    ).rejects.toThrow(
+      'Expected exactly one official Sandre genealogy resource',
+    );
+    expect(harness.httpService.get).toHaveBeenCalledTimes(1);
+  });
 
   it('rejects an incomplete paginated snapshot before opening a transaction', async () => {
     const harness = createHarness({
@@ -564,6 +667,326 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         [expect.stringContaining('"observedSnapshotHash"'), expect.anything()],
       ]),
     );
+  });
+
+  it('binds a virtual-target audit before promoting and splitting a strict legacy source', async () => {
+    const sourceGeometry = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [0, 0],
+          [2, 0],
+          [2, 2],
+          [0, 2],
+          [0, 0],
+        ],
+      ],
+    };
+    const targetGeometryA = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [0, 0],
+          [1, 0],
+          [1, 2],
+          [0, 2],
+          [0, 0],
+        ],
+      ],
+    };
+    const targetGeometryB = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [1, 0],
+          [2, 0],
+          [2, 2],
+          [1, 2],
+          [1, 0],
+        ],
+      ],
+    };
+    const raw = (
+      properties: Record<string, unknown>,
+      geometry: Record<string, unknown>,
+    ) => ({
+      ...rawFeature({
+        DateMajZAS: '2026-06-30',
+        NumCircAdminBassin: 7,
+        ...properties,
+      }),
+      geometry,
+    });
+    const snapshot = createSandreZoneSnapshot(
+      [
+        raw(
+          { gid: 464, CdZAS: '355', StZAS: 'Gelé', LbZAS: 'Source' },
+          sourceGeometry,
+        ),
+        raw(
+          { gid: 3947, CdZAS: '3947', StZAS: 'Validé', LbZAS: 'Target A' },
+          targetGeometryA,
+        ),
+        raw(
+          { gid: 3946, CdZAS: '3948', StZAS: 'Validé', LbZAS: 'Target B' },
+          targetGeometryB,
+        ),
+      ],
+      3,
+      department.code,
+    );
+    const sourceFeature = snapshot.features.find(
+      (feature) => feature.codeSandre === '355',
+    )!;
+    const targetFeatures = snapshot.features.filter((feature) =>
+      ['3947', '3948'].includes(feature.codeSandre),
+    );
+    const sourceZone = {
+      id: 10582,
+      idSandre: sourceFeature.gid,
+      codeSandre: null,
+      sandreProvenance: 'legacy_unverified',
+      disabled: false,
+      type: 'SUP',
+      statutSandre: null,
+      dateMajSandre: null,
+      numeroVersionSandre: null,
+      sandrePayloadHash: null,
+      departement: department,
+    };
+    const targetZones = targetFeatures.map((feature, index) => ({
+      id: 20001 + index,
+      idSandre: feature.gid,
+      codeSandre: feature.codeSandre,
+      sandreProvenance: 'official',
+      disabled: false,
+      type: 'SUP',
+      departement: department,
+    }));
+    const mapping = {
+      sourceCode: '355',
+      sourceZoneId: 10582,
+      targetCodes: ['3947', '3948'],
+      requireTopologicalEquality: false,
+      effectiveDate: '2026-06-30',
+      expectedGeometry: {
+        sourceGeometryHash: '1'.repeat(32),
+        targetGeometryHashes: ['2'.repeat(32), '3'.repeat(32)],
+        unionGeometryHash: '4'.repeat(32),
+        sourceCoverage: 1,
+        targetCoverage: 1,
+        iou: 1,
+      },
+      minimumGeometry: {
+        sourceCoverage: 0.9999,
+        targetCoverage: 0.9999,
+        iou: 0.9999,
+      },
+    };
+    const approval = {
+      approvalId: 'test-approved-split',
+      departmentCode: department.code,
+      snapshotHash: snapshot.snapshotHash,
+      sourceUpdatedAt: snapshot.sourceUpdatedAt!,
+      featureCount: snapshot.featureCount,
+      featureEvidenceFingerprint: '5'.repeat(64),
+      expectedSourceCount: 1,
+      expectedTargetCount: 2,
+      mappings: [mapping],
+      mdmRecords: [],
+      mdmNomenclature: null,
+    };
+    const targetState = [0, 1].map((targetIndex) => ({
+      targetIndex,
+      arreteCadreIds: [],
+      restrictions: [],
+      customizationCount: 0,
+      aliasCount: 0,
+    }));
+    const referenceEvidence = (lifecycle: 'pre_apply' | 'post_apply') => {
+      const state =
+        lifecycle === 'pre_apply'
+          ? targetState
+          : targetState.map((target) => ({
+              ...target,
+              arreteCadreIds: [700],
+            }));
+      const unsigned = {
+        sourceZoneId: sourceZone.id,
+        lifecycle,
+        sourceOperationalEmpty: lifecycle === 'post_apply',
+        arreteCadreLinks: [{ arreteCadreId: 700, parentStatus: 'publie' }],
+        restrictions: [],
+        customizationCount: 0,
+        aliasCount: 0,
+        targetCollisionFingerprint: fingerprint([]),
+        targetStateFingerprint: fingerprint(state),
+        targetState: state,
+      };
+      return { ...unsigned, fingerprint: fingerprint(unsigned) };
+    };
+    const preApplyReferences = referenceEvidence('pre_apply');
+    const postApplyLineage = referenceEvidence('post_apply');
+    const geometryEvidence = {
+      sourceGeometryHash: mapping.expectedGeometry.sourceGeometryHash,
+      targetGeometryHashes: mapping.expectedGeometry.targetGeometryHashes,
+      unionGeometryHash: mapping.expectedGeometry.unionGeometryHash,
+      sourceCoverage: 1,
+      targetCoverage: 1,
+      iou: 1,
+      pairwiseOverlapRatio: 0,
+      topologicallyEqual: true,
+      sourceValid: true,
+      targetsValid: true,
+      sourceSrid: 4326,
+      targetsSrid: 4326,
+      sourceType: 'POLYGON',
+      targetType: 'MULTIPOLYGON',
+    };
+    const mdmEvidence = {
+      approvalId: approval.approvalId,
+      zoneRecords: [],
+      nomenclature: null,
+    };
+    const harness = createHarness();
+    const geometrySpy = jest
+      .spyOn(syncApprovals, 'auditSandreApprovedSyncGeometry')
+      .mockResolvedValue(geometryEvidence);
+    const materializedSpy = jest
+      .spyOn(syncApprovals, 'assertSandreApprovedMaterializedTargets')
+      .mockResolvedValue();
+    const lockSpy = jest
+      .spyOn(approvedReferences, 'lockSandreApprovedSyncReferences')
+      .mockResolvedValue();
+    const referencesSpy = jest
+      .spyOn(approvedReferences, 'loadSandreApprovedReferenceEvidence')
+      .mockResolvedValueOnce(preApplyReferences)
+      .mockResolvedValueOnce(preApplyReferences)
+      .mockResolvedValueOnce(postApplyLineage);
+    const partitionSpy = jest
+      .spyOn(approvedReferences, 'applySandreApprovedPartitionReferences')
+      .mockResolvedValue({ applied: true });
+    const inactive = [
+      {
+        feature: sourceFeature,
+        match: { zone: sourceZone, matchType: 'legacy_gid' },
+      },
+    ];
+    const auditTargets = new Map(
+      targetFeatures.map((feature, index) => [
+        feature.codeSandre,
+        { ...targetZones[index], id: -1 - index },
+      ]),
+    );
+    const auditDecisions: any[] = [];
+
+    await (harness.service as any).reconcileApprovedSandreSnapshotMappings(
+      harness.manager,
+      department,
+      snapshot,
+      approval,
+      inactive,
+      auditTargets,
+      auditDecisions,
+      false,
+      undefined,
+      mdmEvidence,
+    );
+
+    expect(auditDecisions).toHaveLength(1);
+    expect(auditDecisions[0]).toEqual(
+      expect.objectContaining({
+        candidateZoneAlerteId: null,
+        outcome: 'observed',
+      }),
+    );
+    expect(JSON.stringify(auditDecisions[0].evidence)).not.toContain(':-1');
+    expect(lockSpy).not.toHaveBeenCalled();
+    const audited = auditDecisions[0].evidence;
+    const safeDecisions: any[] = [];
+
+    await (harness.service as any).reconcileApprovedSandreSnapshotMappings(
+      harness.manager,
+      department,
+      snapshot,
+      approval,
+      inactive,
+      new Map(
+        targetFeatures.map((feature, index) => [
+          feature.codeSandre,
+          targetZones[index],
+        ]),
+      ),
+      safeDecisions,
+      true,
+      {
+        batchId: 'audit-1',
+        decisions: new Map([['355:approved-snapshot', audited]]),
+      },
+      mdmEvidence,
+    );
+
+    expect(sourceZone).toEqual(
+      expect.objectContaining({
+        idSandre: 464,
+        codeSandre: '355',
+        sandreProvenance: 'official',
+      }),
+    );
+    expect(materializedSpy).toHaveBeenCalledWith(
+      harness.manager,
+      department.id,
+      expect.arrayContaining([
+        expect.objectContaining({ zoneAlerteId: 20001 }),
+        expect.objectContaining({ zoneAlerteId: 20002 }),
+      ]),
+    );
+    expect(partitionSpy).toHaveBeenCalledWith(
+      harness.manager,
+      preApplyReferences,
+      [
+        { codeSandre: '3947', zoneAlerteId: 20001 },
+        { codeSandre: '3948', zoneAlerteId: 20002 },
+      ],
+      '2026-06-30',
+    );
+    expect(safeDecisions[0].evidence.migrationLineage).toEqual(
+      postApplyLineage,
+    );
+    expect(referencesSpy).toHaveBeenCalledTimes(3);
+
+    materializedSpy.mockRejectedValueOnce(
+      new Error('Approved Sandre materialized target geometry changed'),
+    );
+    await expect(
+      (harness.service as any).reconcileApprovedSandreSnapshotMappings(
+        harness.manager,
+        department,
+        snapshot,
+        approval,
+        [
+          {
+            feature: sourceFeature,
+            match: { zone: sourceZone, matchType: 'canonical' },
+          },
+        ],
+        new Map(
+          targetFeatures.map((feature, index) => [
+            feature.codeSandre,
+            targetZones[index],
+          ]),
+        ),
+        [],
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([['355:approved-snapshot', audited]]),
+        },
+        mdmEvidence,
+      ),
+    ).rejects.toThrow('materialized target geometry changed');
+    expect(partitionSpy).toHaveBeenCalledTimes(1);
+    expect(geometrySpy).toHaveBeenCalledTimes(2);
   });
 
   it('exposes a redacted operator status with observed, applied and blocked state', async () => {
@@ -1926,6 +2349,18 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
+  it('fails closed before the domain preflight without an exact audit', async () => {
+    const harness = createHarness({ exactAuditBatch: null });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'successful exact-snapshot audit',
+    );
+
+    expect(harness.zoneRepository.find).not.toHaveBeenCalled();
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
   it('ignores a snapshot that started before the last applied snapshot', async () => {
     const snapshot = createSandreZoneSnapshot(
       [rawFeature()],
@@ -2040,6 +2475,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       state,
       basin: null,
       invalidGeometryCodes: ['3201'],
+      exactAuditBatch: null,
     });
 
     await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
@@ -2058,6 +2494,10 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       ]),
     );
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalledWith(
+      expect.stringContaining("batch.mode = 'audit'"),
+      expect.anything(),
+    );
     expect(harness.stateRepository.save).not.toHaveBeenCalled();
     expect(state).toEqual(
       expect.objectContaining({
