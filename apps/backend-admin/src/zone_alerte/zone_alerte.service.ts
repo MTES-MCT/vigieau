@@ -96,6 +96,7 @@ const SANDRE_MDM_REQUEST_ATTEMPTS = 3;
 const SANDRE_MDM_REQUEST_TIMEOUT_MS = 60_000;
 const SANDRE_MDM_REQUEST_RETRY_BASE_MS = 250;
 const SANDRE_MDM_PROOF_RETRY_BASE_MS = 2_000;
+const SANDRE_MDM_PROOF_RETRY_MAX_MS = 10_000;
 const SANDRE_MDM_TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const SANDRE_VALID_STATUS = 'Validé';
 const SANDRE_ZONE_SELECT = {
@@ -200,6 +201,11 @@ interface SandreApprovedMdmEvidence {
   approvalId: string;
   zoneRecords: SandreMdmZoneRecordEvidence[];
   nomenclature: SandreMdmNomenclatureEvidence | null;
+}
+
+interface SandreApprovedMdmEvidenceAccumulator {
+  zoneRecords: Array<SandreMdmZoneRecordEvidence | undefined>;
+  nomenclature: SandreMdmNomenclatureEvidence | null | undefined;
 }
 
 interface SandreApprovedSourceIdentityEvidence {
@@ -3072,8 +3078,18 @@ export class ZoneAlerteService {
   private async fetchApprovedSandreMdmEvidence(
     approval: SandreApprovedSyncSnapshot,
   ): Promise<SandreApprovedMdmEvidence> {
+    // A proof call validates each resource once; retries only fill missing slots.
+    const accumulatedEvidence: SandreApprovedMdmEvidenceAccumulator = {
+      zoneRecords: approval.mdmRecords.map(() => undefined),
+      nomenclature: approval.mdmNomenclature ? undefined : null,
+    };
     return loadSandreMdmProofWithRetry(
-      (budget) => this.fetchApprovedSandreMdmEvidenceAttempt(approval, budget),
+      (budget) =>
+        this.fetchApprovedSandreMdmEvidenceAttempt(
+          approval,
+          budget,
+          accumulatedEvidence,
+        ),
       (attempt, budget) => this.waitForSandreMdmProofRetry(attempt, budget),
     );
   }
@@ -3081,6 +3097,10 @@ export class ZoneAlerteService {
   private async fetchApprovedSandreMdmEvidenceAttempt(
     approval: SandreApprovedSyncSnapshot,
     budget: SandreMdmProofBudget,
+    accumulatedEvidence: SandreApprovedMdmEvidenceAccumulator = {
+      zoneRecords: approval.mdmRecords.map(() => undefined),
+      nomenclature: approval.mdmNomenclature ? undefined : null,
+    },
   ): Promise<SandreApprovedMdmEvidence> {
     budget.assertRemaining('before loading the approved resources');
     const controller = new AbortController();
@@ -3095,41 +3115,97 @@ export class ZoneAlerteService {
         once: true,
       });
     }
-    const zoneRecordPromises = approval.mdmRecords.map((expectation) =>
-      fetchSandreMdmZoneRecordEvidence(expectation, (url) =>
-        this.fetchSandreMdmTransport(
-          url,
-          'application/json',
-          2 * 1024 * 1024,
-          budget,
-          controller.signal,
-        ),
-      ),
+    const abortSiblingsOnNonRetryableFailure = <T>(
+      resource: Promise<T>,
+    ): Promise<T> =>
+      resource.catch((error) => {
+        if (
+          error !== attemptCancellation &&
+          !(error instanceof SandreMdmTransientError) &&
+          !budget.signal.aborted
+        ) {
+          controller.abort(attemptCancellation);
+        }
+        throw error;
+      });
+    const zoneRecordPromises = approval.mdmRecords.flatMap(
+      (expectation, index) =>
+        accumulatedEvidence.zoneRecords[index] !== undefined
+          ? []
+          : [
+              abortSiblingsOnNonRetryableFailure(
+                fetchSandreMdmZoneRecordEvidence(expectation, (url) =>
+                  this.fetchSandreMdmTransport(
+                    url,
+                    'application/json',
+                    2 * 1024 * 1024,
+                    budget,
+                    controller.signal,
+                  ),
+                ).then((evidence) => {
+                  if (accumulatedEvidence.zoneRecords[index] !== undefined) {
+                    throw new Error(
+                      `Sandre MDM zone ${expectation.codeSandre} was validated more than once`,
+                    );
+                  }
+                  accumulatedEvidence.zoneRecords[index] = evidence;
+                  return evidence;
+                }),
+              ),
+            ],
     );
-    const nomenclaturePromise = approval.mdmNomenclature
-      ? fetchSandreMdmNomenclatureEvidence(approval.mdmNomenclature, (url) =>
-          this.fetchSandreMdmTransport(
-            url,
-            'text/html,application/xhtml+xml;q=0.9',
-            512 * 1024,
-            budget,
-            controller.signal,
-          ),
-        )
-      : Promise.resolve(null);
+    const nomenclaturePromises =
+      approval.mdmNomenclature && accumulatedEvidence.nomenclature === undefined
+        ? [
+            abortSiblingsOnNonRetryableFailure(
+              fetchSandreMdmNomenclatureEvidence(
+                approval.mdmNomenclature,
+                (url) =>
+                  this.fetchSandreMdmTransport(
+                    url,
+                    'text/html,application/xhtml+xml;q=0.9',
+                    512 * 1024,
+                    budget,
+                    controller.signal,
+                  ),
+              ).then((evidence) => {
+                if (accumulatedEvidence.nomenclature !== undefined) {
+                  throw new Error(
+                    'Sandre MDM nomenclature was validated more than once',
+                  );
+                }
+                accumulatedEvidence.nomenclature = evidence;
+                return evidence;
+              }),
+            ),
+          ]
+        : [];
+    const resourcePromises = [...zoneRecordPromises, ...nomenclaturePromises];
     try {
-      const [zoneRecords, nomenclature] = await Promise.all([
-        Promise.all(zoneRecordPromises),
-        nomenclaturePromise,
-      ]);
+      await Promise.all(resourcePromises);
       budget.assertRemaining('after validating the approved resources');
-      return { approvalId: approval.approvalId, zoneRecords, nomenclature };
+      const zoneRecords = accumulatedEvidence.zoneRecords.filter(
+        (record): record is SandreMdmZoneRecordEvidence => record !== undefined,
+      );
+      if (zoneRecords.length !== approval.mdmRecords.length) {
+        throw new Error('Incomplete accumulated Sandre MDM zone evidence');
+      }
+      if (
+        approval.mdmNomenclature &&
+        accumulatedEvidence.nomenclature === undefined
+      ) {
+        throw new Error('Incomplete accumulated Sandre MDM nomenclature');
+      }
+      return {
+        approvalId: approval.approvalId,
+        zoneRecords,
+        nomenclature: accumulatedEvidence.nomenclature ?? null,
+      };
     } catch (error) {
-      controller.abort(attemptCancellation);
-      const settledResources = await Promise.allSettled([
-        ...zoneRecordPromises,
-        nomenclaturePromise,
-      ]);
+      if (!(error instanceof SandreMdmTransientError)) {
+        controller.abort(attemptCancellation);
+      }
+      const settledResources = await Promise.allSettled(resourcePromises);
       const nonRetryableFailure = settledResources.find(
         (result): result is PromiseRejectedResult =>
           result.status === 'rejected' &&
@@ -3247,9 +3323,14 @@ export class ZoneAlerteService {
     budget: SandreMdmProofBudget,
   ): Promise<void> {
     await this.waitForSandreMdmDelay(
-      SANDRE_MDM_PROOF_RETRY_BASE_MS * 2 ** (attempt - 1),
+      Math.min(
+        SANDRE_MDM_PROOF_RETRY_BASE_MS *
+          2 ** Math.min(Math.max(0, attempt - 1), 3),
+        SANDRE_MDM_PROOF_RETRY_MAX_MS,
+      ),
       budget,
       budget.signal,
+      true,
     );
   }
 
@@ -3257,15 +3338,20 @@ export class ZoneAlerteService {
     delayMs: number,
     budget: SandreMdmProofBudget,
     signal?: AbortSignal,
+    fitWithinBudget = false,
   ): Promise<void> {
     if (signal?.aborted) {
       throw this.sandreMdmCancellationError(signal);
     }
     const remainingMs = budget.assertRemaining('before retry backoff');
-    if (delayMs >= remainingMs) {
-      throw new SandreMdmProofDeadlineExceededError(
-        'Sandre MDM proof deadline leaves no room for the required backoff',
-      );
+    let effectiveDelayMs = delayMs;
+    if (effectiveDelayMs >= remainingMs) {
+      if (!fitWithinBudget) {
+        throw new SandreMdmProofDeadlineExceededError(
+          'Sandre MDM proof deadline leaves no room for the required backoff',
+        );
+      }
+      effectiveDelayMs = Math.max(0, remainingMs - 1);
     }
     await new Promise<void>((resolve, reject) => {
       const onAbort = () => {
@@ -3276,7 +3362,7 @@ export class ZoneAlerteService {
       const timer = setTimeout(() => {
         signal?.removeEventListener('abort', onAbort);
         resolve();
-      }, delayMs);
+      }, effectiveDelayMs);
       signal?.addEventListener('abort', onAbort, { once: true });
     });
     budget.assertRemaining('after retry backoff');
