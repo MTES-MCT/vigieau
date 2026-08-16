@@ -7,6 +7,13 @@ import { of } from 'rxjs';
 import { getMetadataArgsStorage } from 'typeorm';
 import * as approvedReferences from './sandre-zone-sync-approved-references';
 import * as syncApprovals from './sandre-zone-sync-approvals';
+import {
+  fetchSandreMdmZoneRecordEvidence,
+  SANDRE_MDM_PROOF_TIMEOUT_MS,
+  SandreMdmProofBudget,
+  SandreMdmProofDeadlineExceededError,
+  SandreMdmTransientError,
+} from './sandre-mdm-evidence';
 import { fingerprint } from './sandre-zone-reconciliation';
 import { createSandreZoneSnapshot } from './sandre-zone-sync';
 import { ZoneAlerteService } from './zone_alerte.service';
@@ -14,6 +21,28 @@ import { ZoneAlerteService } from './zone_alerte.service';
 describe('ZoneAlerteService Sandre synchronization', () => {
   const department = { id: 65, code: '65' };
   const basin = { id: 7, code: 7 };
+  const mdmBudget = (remainingMs = 30_000): SandreMdmProofBudget => ({
+    expiresAt: remainingMs,
+    signal: new AbortController().signal,
+    remainingMs: jest.fn(() => remainingMs),
+    assertRemaining: jest.fn(() => remainingMs),
+  });
+  const mdmApproval = () => ({
+    approvalId: 'test-mdm-proof',
+    mdmRecords: ['355', '3947', '3948'].map((codeSandre) => ({
+      codeSandre,
+      projectionSha256: '0'.repeat(64),
+      requiredEvolution: null,
+    })),
+    mdmNomenclature: {
+      nid: '282836',
+      nomenclatureCode: '590',
+      title: 'Creation',
+      code: '7',
+      mnemonic: 'Creation',
+      projectionSha256: '0'.repeat(64),
+    },
+  });
 
   const rawFeature = (overrides: Record<string, any> = {}) => ({
     type: 'Feature',
@@ -496,6 +525,269 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       'Expected exactly one official Sandre genealogy resource',
     );
     expect(harness.httpService.get).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([429, 500, 502, 503, 504])(
+    'classifies exhausted MDM HTTP %s retries as a transient proof failure',
+    async (status) => {
+      const harness = createHarness({
+        httpResponses: [{ status }, { status }, { status }],
+      });
+      const waitForRetry = jest
+        .spyOn(harness.service as any, 'waitForSandreMdmRequestRetry')
+        .mockResolvedValue(undefined);
+      const budget = mdmBudget(1_234);
+      const controller = new AbortController();
+
+      await expect(
+        (harness.service as any).fetchSandreMdmTransport(
+          'https://mdm.sandre.test/id/355/json',
+          'application/json',
+          2 * 1024 * 1024,
+          budget,
+          controller.signal,
+        ),
+      ).rejects.toBeInstanceOf(SandreMdmTransientError);
+      expect(harness.httpService.get).toHaveBeenCalledTimes(3);
+      expect(waitForRetry.mock.calls.map(([attempt]) => attempt)).toEqual([
+        1, 2,
+      ]);
+      expect(harness.httpService.get).toHaveBeenNthCalledWith(
+        1,
+        'https://mdm.sandre.test/id/355/json',
+        expect.objectContaining({ timeout: 1_234, signal: controller.signal }),
+      );
+    },
+  );
+
+  it.each([501, 505])(
+    'returns MDM HTTP %s to strict validation without retrying',
+    async (status) => {
+      const harness = createHarness({ httpResponses: [{ status }] });
+      const waitForRetry = jest.spyOn(
+        harness.service as any,
+        'waitForSandreMdmRequestRetry',
+      );
+      const controller = new AbortController();
+
+      await expect(
+        fetchSandreMdmZoneRecordEvidence(
+          {
+            codeSandre: '355',
+            projectionSha256: '0'.repeat(64),
+            requiredEvolution: null,
+          },
+          (url) =>
+            (harness.service as any).fetchSandreMdmTransport(
+              url,
+              'application/json',
+              2 * 1024 * 1024,
+              mdmBudget(),
+              controller.signal,
+            ),
+        ),
+      ).rejects.toThrow('Invalid Sandre MDM response for zone 355');
+      expect(harness.httpService.get).toHaveBeenCalledTimes(1);
+      expect(waitForRetry).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a response that completes after the MDM proof deadline', async () => {
+    const harness = createHarness({ httpResponses: [{ status: 200 }] });
+    const budget = mdmBudget(1_234);
+    (budget.assertRemaining as jest.Mock)
+      .mockReturnValueOnce(1_234)
+      .mockImplementationOnce(() => {
+        throw new SandreMdmProofDeadlineExceededError();
+      });
+
+    await expect(
+      (harness.service as any).fetchSandreMdmTransport(
+        'https://mdm.sandre.test/id/355/json',
+        'application/json',
+        2 * 1024 * 1024,
+        budget,
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(SandreMdmProofDeadlineExceededError);
+    expect(harness.httpService.get).toHaveBeenCalledTimes(1);
+    expect(harness.httpService.get).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ timeout: 1_234 }),
+    );
+  });
+
+  it('fails closed when the required MDM retry backoff exceeds the deadline', async () => {
+    const harness = createHarness({ httpResponses: [{ status: 503 }] });
+
+    await expect(
+      (harness.service as any).fetchSandreMdmTransport(
+        'https://mdm.sandre.test/id/355/json',
+        'application/json',
+        2 * 1024 * 1024,
+        mdmBudget(250),
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(SandreMdmProofDeadlineExceededError);
+    expect(harness.httpService.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels an MDM request backoff when its proof attempt is aborted', async () => {
+    jest.useFakeTimers();
+    try {
+      const harness = createHarness();
+      const controller = new AbortController();
+      const cancellation = new Error('proof failed elsewhere');
+      const waiting = (harness.service as any).waitForSandreMdmRequestRetry(
+        1,
+        mdmBudget(),
+        controller.signal,
+      );
+      const rejection = expect(waiting).rejects.toBe(cancellation);
+
+      expect(jest.getTimerCount()).toBe(1);
+      controller.abort(cancellation);
+      await rejection;
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('aborts all non-completing MDM reads at one wall-clock proof deadline', async () => {
+    jest.useFakeTimers();
+    try {
+      const harness = createHarness();
+      const cancelledUrls: string[] = [];
+      const transport = jest
+        .spyOn(harness.service as any, 'fetchSandreMdmTransport')
+        .mockImplementation(async (url: string, ...args: any[]) => {
+          const signal = args.at(-1) as AbortSignal;
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                cancelledUrls.push(url);
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          });
+        });
+      const proof = (harness.service as any).fetchApprovedSandreMdmEvidence(
+        mdmApproval(),
+      );
+      const rejection = expect(proof).rejects.toBeInstanceOf(
+        SandreMdmProofDeadlineExceededError,
+      );
+
+      await jest.advanceTimersByTimeAsync(0);
+      expect(transport).toHaveBeenCalledTimes(4);
+      expect(jest.getTimerCount()).toBe(1);
+
+      await jest.advanceTimersByTimeAsync(SANDRE_MDM_PROOF_TIMEOUT_MS / 2);
+      expect(cancelledUrls).toHaveLength(0);
+      expect(jest.getTimerCount()).toBe(1);
+      await jest.advanceTimersByTimeAsync(SANDRE_MDM_PROOF_TIMEOUT_MS / 2);
+      await rejection;
+
+      expect(cancelledUrls).toHaveLength(4);
+      expect(jest.getTimerCount()).toBe(0);
+      expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry when a transient result wins before sibling validation drift', async () => {
+    const harness = createHarness();
+    const transient = new SandreMdmTransientError('HTTP 500 for 355');
+    let rejectTransient!: (reason: unknown) => void;
+    let resolveValidation!: (response: any) => void;
+    let validationUrl = '';
+    const transport = jest
+      .spyOn(harness.service as any, 'fetchSandreMdmTransport')
+      .mockImplementation(async (url: string, ...args: any[]) => {
+        if (url.endsWith('/355/json')) {
+          return new Promise((_resolve, reject) => {
+            rejectTransient = reject;
+          });
+        }
+        if (url.endsWith('/3947/json')) {
+          validationUrl = url;
+          return new Promise((resolve) => {
+            resolveValidation = resolve;
+          });
+        }
+        const signal = args.at(-1) as AbortSignal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      });
+    const waitForProofRetry = jest.spyOn(
+      harness.service as any,
+      'waitForSandreMdmProofRetry',
+    );
+    const proof = (harness.service as any).fetchApprovedSandreMdmEvidence(
+      mdmApproval(),
+    );
+    const rejection = expect(proof).rejects.toThrow(
+      'Incomplete Sandre MDM zone record',
+    );
+
+    expect(transport).toHaveBeenCalledTimes(4);
+    rejectTransient(transient);
+    resolveValidation({
+      status: 200,
+      contentType: 'application/json',
+      finalUrl: validationUrl,
+      body: '{}',
+    });
+    await rejection;
+
+    expect(waitForProofRetry).not.toHaveBeenCalled();
+    expect(transport).toHaveBeenCalledTimes(4);
+  });
+
+  it('loads one MDM proof in parallel and cancels siblings on validation drift', async () => {
+    const harness = createHarness();
+    const cancelledUrls: string[] = [];
+    const transport = jest
+      .spyOn(harness.service as any, 'fetchSandreMdmTransport')
+      .mockImplementation(async (url: string, ...args: any[]) => {
+        const signal = args.at(-1) as AbortSignal;
+        if (url.endsWith('/355/json')) {
+          return {
+            status: 302,
+            contentType: 'application/json',
+            finalUrl: url,
+            body: '{}',
+          };
+        }
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              cancelledUrls.push(url);
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      });
+    const approval = mdmApproval();
+
+    await expect(
+      (harness.service as any).fetchApprovedSandreMdmEvidenceAttempt(
+        approval,
+        mdmBudget(),
+      ),
+    ).rejects.toThrow('Invalid Sandre MDM response for zone 355');
+    expect(transport).toHaveBeenCalledTimes(4);
+    expect(cancelledUrls).toHaveLength(3);
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
   });
 
   it('rejects an incomplete paginated snapshot before opening a transaction', async () => {
