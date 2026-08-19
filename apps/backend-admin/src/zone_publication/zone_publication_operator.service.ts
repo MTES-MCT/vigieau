@@ -77,8 +77,12 @@ export class ZonePublicationOperatorService {
       }
 
       const enableCompatibility = input.mode === 'compatibility';
-      const [updated] = await manager.query(
-        `
+      const [updated] = unwrapTypeOrmDmlReturningRows<{
+        revision: string;
+        publicRevision: string;
+      }>(
+        await manager.query(
+          `
           UPDATE "zone_publication_source_state"
           SET
             "legacyDualWrite" = $1,
@@ -99,8 +103,9 @@ export class ZonePublicationOperatorService {
           RETURNING
             "revision"::text AS "revision",
             "publicRevision"::text AS "publicRevision"
-        `,
-        [enableCompatibility],
+          `,
+          [enableCompatibility],
+        ),
       );
       if (!updated) {
         throw new ConflictException(

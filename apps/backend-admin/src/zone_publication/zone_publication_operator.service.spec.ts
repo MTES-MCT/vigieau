@@ -32,7 +32,7 @@ describe('ZonePublicationOperatorService', () => {
         if (sql.includes('UPDATE "zone_publication_source_state"')) {
           expect(parameters).toEqual([false]);
           separated = true;
-          return [{ revision: '166500', publicRevision: '166500' }];
+          return [[{ revision: '166500', publicRevision: '166500' }], 1];
         }
         if (sql.includes('INSERT INTO "current_zone_recompute_request"')) {
           return [];
@@ -86,7 +86,7 @@ describe('ZonePublicationOperatorService', () => {
         }
         if (sql.includes('UPDATE "zone_publication_source_state"')) {
           expect(parameters).toEqual([true]);
-          return [{ revision: '166510', publicRevision: '166510' }];
+          return [[{ revision: '166510', publicRevision: '166510' }], 1];
         }
         if (sql.includes('INSERT INTO "current_zone_recompute_request"')) {
           return [];
@@ -132,7 +132,7 @@ describe('ZonePublicationOperatorService', () => {
           expect(sql).toContain(
             '"revision" = CASE\n              WHEN $1 THEN GREATEST',
           );
-          return [{ revision: '166520', publicRevision: '166520' }];
+          return [[{ revision: '166520', publicRevision: '166520' }], 1];
         }
         if (sql.includes('INSERT INTO "current_zone_recompute_request"')) {
           return [];
