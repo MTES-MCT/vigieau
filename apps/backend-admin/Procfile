@@ -1,3 +1,3 @@
 web: npm run start:prod
 clock: npm run start:clock
-current-zone-worker: npm run start:current-zone-worker
+currentzoneworker: npm run start:current-zone-worker

@@ -53,7 +53,7 @@ phases.
    puis sur l'admin. Attendre une revision identique sur les deux lectures avant
    le flag suivant.
 9. Activer `CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED=true`, puis demarrer exactement
-   un processus `current-zone-worker`. Le Procfile lui injecte
+   un processus `currentzoneworker`. Le Procfile lui injecte
    `CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS=true`; le web et le clock ne consomment
    plus la queue. Verifier une requete consommee et une revision depassee
    rebasee avant de poursuivre.
@@ -75,7 +75,7 @@ phases.
 - API admin et publique `live` et `ready` a HTTP 200.
 - Aucun rejet `ADMIN_WRITES_DISABLED` et aucun processus one-off concurrent.
 - Queue courante prise en moins de cinq minutes, sans tentative en erreur.
-- Un seul `current-zone-worker`, un seul `statcache` et aucun materialiseur lourd
+- Un seul `currentzoneworker`, un seul `statcache` et aucun materialiseur lourd
   dans les processus HTTP.
 - Artefact actif utilisable pendant le calcul, puis candidat acquitte 2/2.
 - Un trou historique n'est jamais comble artificiellement: `sparse-current`
