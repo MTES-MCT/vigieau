@@ -78,6 +78,7 @@ interface CertifiedDataCache extends ReferenceDataCache {
   departmentCount: number;
   communeCount: number;
   fingerprint: string;
+  artifactIdentity: StatisticCacheArtifactIdentity | null;
   artifactPublicationId: string | null;
   artifactProtocolVersion: number | null;
   artifactSourceRevision: string | null;
@@ -782,7 +783,9 @@ export class DataService implements OnModuleInit {
           if (this.isSamePublicationState(publicationState, stateAfter)) {
             const certifiedDataCache = {
               ...candidateCache,
-              revision: stateAfter.revision,
+              revision: candidateCache.artifactPublicationId
+                ? candidateCache.revision
+                : stateAfter.revision,
               publicationState: stateAfter,
             };
             this.publishCertifiedDataCache(certifiedDataCache);
@@ -1051,6 +1054,7 @@ export class DataService implements OnModuleInit {
         dateCount: 1,
         departmentCount: referenceData.departements.length,
         communeCount: expectedCommuneCount,
+        artifactIdentity: null,
         artifactPublicationId: null,
         artifactProtocolVersion: null,
         artifactSourceRevision: publicationState.sourceRevision,
@@ -1177,6 +1181,7 @@ export class DataService implements OnModuleInit {
         dateCount: dataArea.length,
         departmentCount: active.identity.departmentCount,
         communeCount: active.identity.communeCount,
+        artifactIdentity: null,
         artifactPublicationId: null,
         artifactProtocolVersion: null,
         artifactSourceRevision: publicationState.sourceRevision,
@@ -1552,6 +1557,7 @@ export class DataService implements OnModuleInit {
       dateCount: payload.identity.dateCount,
       departmentCount: payload.identity.departmentCount,
       communeCount: payload.identity.communeCount,
+      artifactIdentity: { ...payload.identity },
       artifactPublicationId: payload.identity.id,
       artifactProtocolVersion: payload.identity.protocolVersion,
       artifactSourceRevision: payload.identity.sourceRevision,
@@ -2349,7 +2355,22 @@ export class DataService implements OnModuleInit {
         ? this.failedCandidatePhase
         : null,
     };
-    if (!cache?.artifactPublicationId) {
+    const artifactIdentity = cache?.artifactIdentity ?? null;
+    const artifactIdentityIsConsistent = Boolean(
+      cache?.artifactPublicationId &&
+      artifactIdentity &&
+      cache.artifactPublicationId === artifactIdentity.id &&
+      cache.revision === artifactIdentity.statisticRevision &&
+      cache.latestDate === artifactIdentity.latestDate &&
+      artifactIdentity.currentPublishedDate === artifactIdentity.latestDate &&
+      cache.fingerprint === artifactIdentity.contentFingerprint &&
+      cache.artifactSourceRevision === artifactIdentity.sourceRevision &&
+      cache.artifactProtocolVersion === artifactIdentity.protocolVersion,
+    );
+    if (!artifactIdentity || !artifactIdentityIsConsistent) {
+      const hasPartialArtifactIdentity = Boolean(
+        cache?.artifactPublicationId || artifactIdentity,
+      );
       return {
         statisticCachePublicationId: null,
         statisticRevision: null,
@@ -2358,17 +2379,20 @@ export class DataService implements OnModuleInit {
         statisticSourceRevision: null,
         statisticProtocolVersion: null,
         statisticLastError:
-          this.lastDataCacheError?.phase ?? 'statistic-artifact-unavailable',
+          (hasPartialArtifactIdentity
+            ? 'statistic-artifact-identity-inconsistent'
+            : this.lastDataCacheError?.phase) ??
+          'statistic-artifact-unavailable',
         ...candidateAcknowledgement,
       };
     }
     return {
-      statisticCachePublicationId: cache.artifactPublicationId,
-      statisticRevision: cache.revision,
-      statisticPublishedDate: cache.latestDate,
-      statisticFingerprint: cache.fingerprint,
-      statisticSourceRevision: cache.artifactSourceRevision,
-      statisticProtocolVersion: cache.artifactProtocolVersion,
+      statisticCachePublicationId: artifactIdentity.id,
+      statisticRevision: artifactIdentity.statisticRevision,
+      statisticPublishedDate: artifactIdentity.currentPublishedDate,
+      statisticFingerprint: artifactIdentity.contentFingerprint,
+      statisticSourceRevision: artifactIdentity.sourceRevision,
+      statisticProtocolVersion: artifactIdentity.protocolVersion,
       statisticLastError: this.lastDataCacheError?.phase ?? null,
       ...candidateAcknowledgement,
     };
@@ -2934,6 +2958,7 @@ export class DataService implements OnModuleInit {
       dateCount: areaDates.length,
       departmentCount: expectedDepartmentCodes.size,
       communeCount: this.dataCommune.length,
+      artifactIdentity: null,
       artifactPublicationId: null,
       artifactProtocolVersion: null,
       artifactSourceRevision: publicationState.sourceRevision,

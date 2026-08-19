@@ -2982,6 +2982,118 @@ describe('DataService', () => {
       process.env.STATISTIC_CACHE_DISTRIBUTED_REFRESH_ENABLED = 'true';
     });
 
+    it('acknowledges the loaded active artifact instead of the newer target state', async () => {
+      const activeId = '00000000-0000-4000-8000-000000000034';
+      const targetState = {
+        ...distributedState,
+        revision: '38',
+        statisticCachePublicationId: activeId,
+        currentPublishedDate: '2026-08-19',
+        sourceRevision: '168348',
+      };
+      const artifactIdentity = {
+        id: activeId,
+        statisticRevision: '34',
+        currentPublishedDate: '2026-08-17',
+        protocolVersion: 1,
+        mode: 'versioned',
+        materializationStrategy: 'sparse-current',
+        historicDirtyFrom: '2013-01-01',
+        historicDirtyThrough: '2026-08-16',
+        historicMapCursor: '2026-08-16',
+        historicStatsCursor: '2026-08-16',
+        sourceRevision: '166401',
+        historicComputeEpoch: '7',
+        contentFingerprint: 'a'.repeat(64),
+        firstDate: '2026-08-17',
+        latestDate: '2026-08-17',
+        dateCount: 1,
+        areaCount: 1,
+        departmentCount: 101,
+        communeCount: 34943,
+        readyAt: new Date('2026-08-17T06:00:00.000Z'),
+      };
+      const loadedArtifact = certifyData({
+        revision: artifactIdentity.statisticRevision,
+        publicationState: targetState,
+        latestDate: artifactIdentity.latestDate,
+        fingerprint: artifactIdentity.contentFingerprint,
+        artifactIdentity,
+        artifactPublicationId: artifactIdentity.id,
+        artifactProtocolVersion: artifactIdentity.protocolVersion,
+        artifactSourceRevision: artifactIdentity.sourceRevision,
+      });
+      (service as any).statisticCacheArtifactService = {};
+      service['certifiedDataCache'] = null;
+      jest
+        .spyOn(service as any, 'loadArtifactBackedData')
+        .mockResolvedValue(loadedArtifact);
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(targetState);
+
+      await service.loadData(targetState);
+
+      expect(service['certifiedDataCache']?.revision).toBe('34');
+      expect(service.getStatisticCacheAcknowledgement()).toEqual(
+        expect.objectContaining({
+          statisticCachePublicationId: activeId,
+          statisticRevision: '34',
+          statisticPublishedDate: '2026-08-17',
+          statisticSourceRevision: '166401',
+          statisticFingerprint: 'a'.repeat(64),
+          statisticProtocolVersion: 1,
+          statisticLastError: null,
+        }),
+      );
+    });
+
+    it('nulls the complete active identity when the loaded artifact cache is internally inconsistent', () => {
+      const artifactIdentity = {
+        id: '00000000-0000-4000-8000-000000000034',
+        statisticRevision: '34',
+        currentPublishedDate: '2026-08-17',
+        protocolVersion: 1,
+        mode: 'versioned',
+        materializationStrategy: 'sparse-current',
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+        historicMapCursor: null,
+        historicStatsCursor: null,
+        sourceRevision: '166401',
+        historicComputeEpoch: null,
+        contentFingerprint: 'a'.repeat(64),
+        firstDate: '2026-08-17',
+        latestDate: '2026-08-17',
+        dateCount: 1,
+        areaCount: 1,
+        departmentCount: 101,
+        communeCount: 34943,
+        readyAt: new Date('2026-08-17T06:00:00.000Z'),
+      };
+      certifyData({
+        revision: '38',
+        latestDate: artifactIdentity.latestDate,
+        fingerprint: artifactIdentity.contentFingerprint,
+        artifactIdentity,
+        artifactPublicationId: artifactIdentity.id,
+        artifactProtocolVersion: artifactIdentity.protocolVersion,
+        artifactSourceRevision: artifactIdentity.sourceRevision,
+      });
+
+      expect(service.getStatisticCacheAcknowledgement()).toEqual(
+        expect.objectContaining({
+          statisticCachePublicationId: null,
+          statisticRevision: null,
+          statisticPublishedDate: null,
+          statisticSourceRevision: null,
+          statisticFingerprint: null,
+          statisticProtocolVersion: null,
+          statisticLastError: 'statistic-artifact-identity-inconsistent',
+        }),
+      );
+    });
+
     it('loads only the active artifact on a web refresh', async () => {
       const payload = { identity: { id: 'active' } } as any;
       const artifactService = {
