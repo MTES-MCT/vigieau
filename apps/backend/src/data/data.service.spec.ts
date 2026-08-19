@@ -2067,6 +2067,124 @@ describe('DataService', () => {
       );
     });
 
+    it('bootstraps a versioned sparse-current candidate from the certified current day', async () => {
+      const currentDate = '2026-08-19';
+      const state = {
+        ...artifactState,
+        activePublicationId: '00000000-0000-4000-8000-000000000019',
+        statisticCachePublicationId: null,
+        currentPublishedDate: currentDate,
+        historicDirtyFrom: '2011-06-07',
+        historicDirtyThrough: '2026-08-05',
+      };
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      const snapshotCoverage = jest
+        .spyOn(service as any, 'getCertifiedCurrentSnapshotCommuneCount')
+        .mockResolvedValue(1);
+      jest
+        .spyOn(service as any, 'loadRefData')
+        .mockResolvedValue(referenceData);
+      const departmentLoad = jest
+        .spyOn(service as any, 'loadDailyDepartmentCollections')
+        .mockResolvedValue({
+          dataArea: [{ date: currentDate, ESO: {}, ESU: {}, AEP: {} }],
+          dataDepartement: [departmentDay(currentDate)],
+        });
+      const communeLoad = jest
+        .spyOn(service as any, 'loadDailyCommuneWeights')
+        .mockResolvedValue(new Map([[currentDate, [['01001', 4]]]]));
+      const fullBuild = jest.spyOn(
+        service as any,
+        'createFullArtifactCandidate',
+      );
+
+      const result = await (service as any).createArtifactCandidate(
+        state,
+        null,
+        mockTransactionManager,
+      );
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          statisticRevision: state.revision,
+          currentPublishedDate: currentDate,
+          mode: 'versioned',
+          materializationStrategy: 'sparse-current',
+          historicDirtyFrom: state.historicDirtyFrom,
+          historicDirtyThrough: state.historicDirtyThrough,
+          firstDate: currentDate,
+          latestDate: currentDate,
+          dateCount: 1,
+          departmentCount: 101,
+          communeCount: 1,
+          dataCommune: [
+            { code: '01001', restrictions: [{ d: '2026-08', p: 4 }] },
+          ],
+          latestCommuneWeights: [['01001', 4]],
+        }),
+      );
+      expect(result.contentFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(snapshotCoverage).toHaveBeenCalledWith(
+        state,
+        mockTransactionManager,
+      );
+      expect(departmentLoad).toHaveBeenCalledWith(
+        currentDate,
+        currentDate,
+        referenceData,
+        mockTransactionManager,
+      );
+      expect(communeLoad).toHaveBeenCalledWith(
+        currentDate,
+        currentDate,
+        1,
+        state,
+        mockTransactionManager,
+      );
+      expect(fullBuild).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before loading data when the current bootstrap snapshot is not certified', async () => {
+      const state = {
+        ...artifactState,
+        activePublicationId: '00000000-0000-4000-8000-000000000019',
+        statisticCachePublicationId: null,
+        currentPublishedDate: '2026-08-19',
+      };
+      mockTransactionManager.query.mockResolvedValue([
+        {
+          status: 'completed',
+          expectedCommuneCount: 1,
+          processedCommuneCount: 1,
+          communeCount: 1,
+          sourceRevision: 'stale-source',
+        },
+      ]);
+      const referenceLoad = jest.spyOn(service as any, 'loadRefData');
+      const departmentLoad = jest.spyOn(
+        service as any,
+        'loadDailyDepartmentCollections',
+      );
+      const communeLoad = jest.spyOn(service as any, 'loadDailyCommuneWeights');
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          state,
+          null,
+          mockTransactionManager,
+        ),
+      ).rejects.toThrow('current snapshot is not certified');
+      expect(referenceLoad).not.toHaveBeenCalled();
+      expect(departmentLoad).not.toHaveBeenCalled();
+      expect(communeLoad).not.toHaveBeenCalled();
+    });
+
     it('forces one full rebuild when historic dirty publication finishes', async () => {
       const cleanState = {
         ...artifactState,

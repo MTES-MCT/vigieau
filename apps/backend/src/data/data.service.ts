@@ -935,6 +935,16 @@ export class DataService implements OnModuleInit {
       currentPublishedDate < active.identity.latestDate ||
       historicBoundaryClosed,
     );
+    if (
+      !active &&
+      mode === 'versioned' &&
+      publicationState.historicDirtyFrom !== null
+    ) {
+      return this.createSparseCurrentArtifactCandidate(
+        publicationState,
+        manager,
+      );
+    }
     if (requiresFullBuild) {
       if (
         publicationState.historicDirtyFrom !== null &&
@@ -992,6 +1002,84 @@ export class DataService implements OnModuleInit {
       dataArea: cache.dataArea,
       dataDepartement: cache.dataDepartement,
       dataCommune: cache.dataCommune,
+      latestCommuneWeights,
+    };
+  }
+
+  private async createSparseCurrentArtifactCandidate(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<StatisticCacheArtifactCandidate> {
+    const currentPublishedDate = publicationState.currentPublishedDate!;
+    const expectedCommuneCount =
+      await this.getCertifiedCurrentSnapshotCommuneCount(
+        publicationState,
+        manager,
+      );
+    const referenceData = await this.loadRefData(manager);
+    const { dataArea, dataDepartement } =
+      await this.loadDailyDepartmentCollections(
+        currentPublishedDate,
+        currentPublishedDate,
+        referenceData,
+        manager,
+      );
+    const weightsByDate = await this.loadDailyCommuneWeights(
+      currentPublishedDate,
+      currentPublishedDate,
+      expectedCommuneCount,
+      publicationState,
+      manager,
+    );
+    const latestCommuneWeights = weightsByDate.get(currentPublishedDate)!;
+    const currentMonth = currentPublishedDate.slice(0, 7);
+    const dataCommune = latestCommuneWeights.map(([code, weight]) => ({
+      code,
+      restrictions: [{ d: currentMonth, p: weight }],
+    }));
+    const candidateWithoutFingerprint: Omit<CertifiedDataCache, 'fingerprint'> =
+      {
+        ...referenceData,
+        revision: publicationState.revision,
+        publicationState,
+        mode: 'versioned',
+        dataArea,
+        dataDepartement,
+        dataCommune,
+        firstDate: currentPublishedDate,
+        latestDate: currentPublishedDate,
+        dateCount: 1,
+        departmentCount: referenceData.departements.length,
+        communeCount: expectedCommuneCount,
+        artifactPublicationId: null,
+        artifactProtocolVersion: null,
+        artifactSourceRevision: publicationState.sourceRevision,
+        latestCommuneWeights,
+        artifactHistoricDirtyFrom: publicationState.historicDirtyFrom,
+        artifactHistoricDirtyThrough: publicationState.historicDirtyThrough,
+        artifactHistoricMapCursor: publicationState.historicMapCursor,
+        artifactHistoricStatsCursor: publicationState.historicStatsCursor,
+        artifactHistoricComputeEpoch: publicationState.historicComputeEpoch,
+        loadedAt: new Date(),
+      };
+    this.assertArtifactCollections(candidateWithoutFingerprint, true);
+    return {
+      statisticRevision: publicationState.revision,
+      currentPublishedDate,
+      mode: 'versioned',
+      materializationStrategy: 'sparse-current',
+      ...this.getArtifactAudit(publicationState),
+      contentFingerprint: this.computeStatisticCacheFingerprint(
+        candidateWithoutFingerprint,
+      ),
+      firstDate: currentPublishedDate,
+      latestDate: currentPublishedDate,
+      dateCount: 1,
+      departmentCount: candidateWithoutFingerprint.departmentCount,
+      communeCount: expectedCommuneCount,
+      dataArea,
+      dataDepartement,
+      dataCommune,
       latestCommuneWeights,
     };
   }
@@ -1153,6 +1241,41 @@ export class DataService implements OnModuleInit {
         `Statistic delta snapshots are not certified for ${startDate}..${endDate}`,
       );
     }
+  }
+
+  private async getCertifiedCurrentSnapshotCommuneCount(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<number> {
+    const [snapshot] = await manager.query(
+      `
+        SELECT
+          snapshot."status", snapshot."expectedCommuneCount",
+          snapshot."processedCommuneCount",
+          snapshot."sourceRevision"::text AS "sourceRevision",
+          (SELECT COUNT(*)::integer FROM "commune") AS "communeCount"
+        FROM "statistic_commune_snapshot" snapshot
+        WHERE snapshot."snapshotDate" = $1::date
+          AND snapshot."scope" = 'national'
+      `,
+      [publicationState.currentPublishedDate],
+    );
+    const expectedCommuneCount = Number(snapshot?.expectedCommuneCount ?? 0);
+    if (
+      !snapshot ||
+      snapshot.status !== 'completed' ||
+      !Number.isSafeInteger(expectedCommuneCount) ||
+      expectedCommuneCount <= 0 ||
+      Number(snapshot.processedCommuneCount) !== expectedCommuneCount ||
+      Number(snapshot.communeCount) !== expectedCommuneCount ||
+      String(snapshot.sourceRevision ?? '') !==
+        String(publicationState.sourceRevision ?? '')
+    ) {
+      throw new Error(
+        `Statistic current snapshot is not certified for ${publicationState.currentPublishedDate}`,
+      );
+    }
+    return expectedCommuneCount;
   }
 
   private async hasCertifiedDeltaSnapshotCoverage(
