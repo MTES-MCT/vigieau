@@ -365,6 +365,41 @@ describe('ZonesService', () => {
     expect(service).toBeDefined();
   });
 
+  it('waits for the initial zone snapshot before module startup completes', async () => {
+    let finishLoad!: () => void;
+    jest.spyOn(service, 'loadAllZones').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLoad = () => {
+            service['activeSnapshot'] = makeSnapshot(1) as any;
+            resolve();
+          };
+        }),
+    );
+
+    let initialized = false;
+    const initialization = service.onModuleInit().then(() => {
+      initialized = true;
+    });
+    await flushPromises();
+
+    expect(service.loadAllZones).toHaveBeenCalledWith(true);
+    expect(initialized).toBe(false);
+
+    finishLoad();
+    await initialization;
+
+    expect(initialized).toBe(true);
+  });
+
+  it('fails startup when no initial zone snapshot can be loaded', async () => {
+    jest.spyOn(service, 'loadAllZones').mockResolvedValue(undefined);
+
+    await expect(service.onModuleInit()).rejects.toThrow(
+      'Initial zone cache could not be loaded',
+    );
+  });
+
   describe('zone data availability', () => {
     it('reports an AEP zone as available', async () => {
       const snapshot = makeSnapshot(1) as any;

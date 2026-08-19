@@ -212,8 +212,11 @@ export class ZonesService implements OnModuleInit {
     private readonly zonePublicationInstanceRepository: Repository<ZonePublicationInstance>,
   ) {}
 
-  onModuleInit(): void {
-    void this.loadAllZones(true);
+  async onModuleInit(): Promise<void> {
+    await this.loadAllZones(true);
+    if (!this.activeSnapshot) {
+      throw new Error('Initial zone cache could not be loaded');
+    }
   }
 
   /**
