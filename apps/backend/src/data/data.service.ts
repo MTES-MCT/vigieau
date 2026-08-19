@@ -932,9 +932,16 @@ export class DataService implements OnModuleInit {
         active.identity.historicStatsCursor !==
           publicationState.historicStatsCursor),
     );
+    const legacyToVersionedTransition = Boolean(
+      active &&
+      active.identity.mode === 'legacy-bootstrap' &&
+      mode === 'versioned' &&
+      publicationState.historicDirtyFrom !== null &&
+      currentPublishedDate >= active.identity.latestDate,
+    );
     const requiresFullBuild = Boolean(
       !active ||
-      active.identity.mode !== mode ||
+      (active.identity.mode !== mode && !legacyToVersionedTransition) ||
       currentPublishedDate < active.identity.latestDate ||
       historicBoundaryClosed,
     );
@@ -965,6 +972,15 @@ export class DataService implements OnModuleInit {
         publicationState,
         strategy,
         manager,
+      );
+    }
+
+    if (legacyToVersionedTransition) {
+      return this.createDeltaArtifactCandidate(
+        publicationState,
+        active!,
+        manager,
+        { mode: 'versioned', forceSparseCurrent: true },
       );
     }
 
@@ -1092,6 +1108,10 @@ export class DataService implements OnModuleInit {
     publicationState: StatisticPublicationState,
     active: StatisticCacheArtifactPayload,
     manager: EntityManager,
+    options?: {
+      mode?: StatisticCacheMode;
+      forceSparseCurrent?: boolean;
+    },
   ): Promise<StatisticCacheArtifactCandidate> {
     const currentPublishedDate = publicationState.currentPublishedDate!;
     if (currentPublishedDate < active.identity.latestDate) {
@@ -1103,6 +1123,7 @@ export class DataService implements OnModuleInit {
       .add(1, 'day')
       .format('YYYY-MM-DD');
     let sparseCurrent =
+      options?.forceSparseCurrent === true ||
       active.identity.materializationStrategy === 'sparse-current';
     let snapshotCoverageValidated = false;
     if (appendOnly && currentPublishedDate > nextDate && !sparseCurrent) {
@@ -1172,7 +1193,7 @@ export class DataService implements OnModuleInit {
         ...referenceData,
         revision: publicationState.revision,
         publicationState,
-        mode: active.identity.mode,
+        mode: options?.mode ?? active.identity.mode,
         dataArea,
         dataDepartement,
         dataCommune,
@@ -1197,7 +1218,7 @@ export class DataService implements OnModuleInit {
     return {
       statisticRevision: publicationState.revision,
       currentPublishedDate,
-      mode: active.identity.mode,
+      mode: options?.mode ?? active.identity.mode,
       materializationStrategy: strategy,
       ...this.getArtifactAudit(publicationState),
       contentFingerprint: this.computeStatisticCacheFingerprint(
