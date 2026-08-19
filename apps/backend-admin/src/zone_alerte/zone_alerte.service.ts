@@ -29,6 +29,7 @@ import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { MailService } from '../shared/services/mail.service';
 import { runCurrentZoneComputeWorker } from '../worker_threads/run-current-zone-compute';
+import { recordPublicMutation } from '../zone_publication/public-mutation';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import {
   buildReconciliationResults,
@@ -2011,6 +2012,13 @@ export class ZoneAlerteService {
         state.recomputeRevision = (state.recomputeRevision ?? 0) + 1;
       }
       await stateRepository.save(state);
+      if (recomputeRequired) {
+        await recordPublicMutation(
+          queryRunner.manager,
+          [departement.id],
+          'SYNCHRONISATION SANDRE',
+        );
+      }
       if (batchId) {
         await this.persistSandreDecisions(
           queryRunner.manager,

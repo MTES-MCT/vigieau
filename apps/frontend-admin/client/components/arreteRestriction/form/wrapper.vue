@@ -20,7 +20,7 @@ const apiErrorHandler = useApiErrorHandler();
 const loading = ref(false);
 const componentKey = ref(0);
 const asc = ref(true);
-const checkReturn: Ref<{ errors: string[], warnings: string[] } | null | undefined> = ref();
+const checkReturn: Ref<{ errors: string[]; warnings: string[] } | null | undefined> = ref();
 
 const currentStep: Ref<number> = ref(1);
 
@@ -86,24 +86,30 @@ const publicationContext = (action: string) => ({
 const getRestrictionLabel = (restriction: Restriction) =>
   restriction.zoneAlerte?.nom || restriction.nomGroupementAep || 'restriction sans libellé';
 
+const normalizeAepGroupName = (value?: string | null) => (value ?? '').trim().normalize('NFKC').toLocaleLowerCase('fr-FR');
+
 const syncSavedRestrictionIds = (savedArreteRestriction: ArreteRestriction) => {
   props.arreteRestriction.restrictions.forEach((restriction: Restriction) => {
-    const restrictionReturned = savedArreteRestriction.restrictions?.find(
-      (r: Restriction) => r.zoneAlerte ? r.zoneAlerte.id === restriction.zoneAlerte?.id : r.nomGroupementAep === restriction.nomGroupementAep,
-    );
+    const restrictionReturned = restriction.id
+      ? savedArreteRestriction.restrictions?.find((candidate: Restriction) => candidate.id === restriction.id)
+      : savedArreteRestriction.restrictions?.find((candidate: Restriction) =>
+          candidate.zoneAlerte
+            ? candidate.zoneAlerte.id === restriction.zoneAlerte?.id
+            : normalizeAepGroupName(candidate.nomGroupementAep) === normalizeAepGroupName(restriction.nomGroupementAep),
+        );
 
     if (!restrictionReturned?.id) {
       throw new Error(`La restriction "${getRestrictionLabel(restriction)}" n'a pas été renvoyée par l'API après enregistrement.`);
     }
 
     restriction.id = restrictionReturned.id;
-    restriction.usages.forEach((usagesArreteRestriction: Usage) => {
-      const savedUsage = restrictionReturned.usages?.find(
-        (u: Usage) => u.nom === usagesArreteRestriction.nom,
-      );
+    (restriction.usages ?? []).forEach((usagesArreteRestriction: Usage) => {
+      const savedUsage = restrictionReturned.usages?.find((u: Usage) => u.nom === usagesArreteRestriction.nom);
 
       if (!savedUsage?.id) {
-        throw new Error(`L'usage "${usagesArreteRestriction.nom}" de la restriction "${getRestrictionLabel(restriction)}" n'a pas été renvoyé par l'API après enregistrement.`);
+        throw new Error(
+          `L'usage "${usagesArreteRestriction.nom}" de la restriction "${getRestrictionLabel(restriction)}" n'a pas été renvoyé par l'API après enregistrement.`,
+        );
       }
 
       usagesArreteRestriction.id = savedUsage.id;
@@ -137,9 +143,11 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
     });
     arToSend.restrictions = arToSend.restrictions.map((r: any) => {
       r.zoneAlerte = r.zoneAlerte ? { id: r.zoneAlerte.id } : null;
-      r.communes = r.communes ? r.communes.map((c: any) => {
-        return { id: c.id };
-      }) : [];
+      r.communes = r.communes
+        ? r.communes.map((c: any) => {
+            return { id: c.id };
+          })
+        : [];
       return r;
     });
     const { data, error } = props.arreteRestriction.id
@@ -164,7 +172,7 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
   } catch (error) {
     apiErrorHandler.showError(
       error,
-      publish ? 'Impossible de préparer la publication de l\'arrêté de restriction' : 'Impossible d\'enregistrer l\'arrêté de restriction',
+      publish ? "Impossible de préparer la publication de l'arrêté de restriction" : "Impossible d'enregistrer l'arrêté de restriction",
       'Une erreur technique empêche l’enregistrement de l’arrêté de restriction.',
       publicationContext(publish ? 'save_before_publish_exception' : 'save_exception'),
     );
@@ -208,7 +216,7 @@ const checkArrete = async (ar: ArreteRestriction): Promise<boolean> => {
     checkReturn.value = null;
     apiErrorHandler.showError(
       error,
-      'Impossible de vérifier l\'arrêté de restriction',
+      "Impossible de vérifier l'arrêté de restriction",
       'Une erreur technique empêche la vérification avant publication.',
       publicationContext('check_before_publish_exception'),
     );
@@ -220,7 +228,7 @@ const checkArrete = async (ar: ArreteRestriction): Promise<boolean> => {
 
 const showErrors = (errors, publish) => {
   alertStore.addAlert({
-    title: publish ? 'Impossible de publier l\'arrêté de restriction' : 'Impossible d\'enregistrer l\'arrêté de restriction',
+    title: publish ? "Impossible de publier l'arrêté de restriction" : "Impossible d'enregistrer l'arrêté de restriction",
     description: errors.map((e: any) => e.$message).join(', '),
     type: 'error',
   });
@@ -244,7 +252,7 @@ const publishArrete = async (ar: ArreteRestriction): Promise<boolean> => {
   }
   if (checkReturn.value?.errors?.length > 0) {
     alertStore.addAlert({
-      title: 'Impossible de publier l\'arrêté de restriction',
+      title: "Impossible de publier l'arrêté de restriction",
       description: checkReturn.value?.errors.join(', '),
       type: 'error',
     });
@@ -274,7 +282,7 @@ const publishArrete = async (ar: ArreteRestriction): Promise<boolean> => {
   } catch (error) {
     apiErrorHandler.showError(
       error,
-      'Impossible de publier l\'arrêté de restriction',
+      "Impossible de publier l'arrêté de restriction",
       'Une erreur technique empêche la publication de l’arrêté de restriction.',
       publicationContext('publish_exception'),
     );
@@ -293,8 +301,10 @@ const showRestrictionsForm = computed(() => {
 });
 
 const showRestrictionsAepForm = computed(() => {
-  return props.arreteRestriction.perimetreAr === 'aep' ||
-    (props.arreteRestriction.perimetreAr === 'all' && props.arreteRestriction.niveauGraviteSpecifiqueEap);
+  return (
+    props.arreteRestriction.perimetreAr === 'aep' ||
+    (props.arreteRestriction.perimetreAr === 'all' && props.arreteRestriction.niveauGraviteSpecifiqueEap)
+  );
 });
 
 const totalSteps = computed(() => {
@@ -302,16 +312,15 @@ const totalSteps = computed(() => {
 });
 
 const subscriptions = computed(() => {
-  return refDataStore.departements.find(d => props.arreteRestriction.departement?.id === d.id)?.subscriptions;
-})
-
+  return refDataStore.departements.find((d) => props.arreteRestriction.departement?.id === d.id)?.subscriptions;
+});
 
 const steps = computed(() => {
   if (showRestrictionsForm.value && !showRestrictionsAepForm.value) {
     return [
       'Informations générales',
       'Ressources concernées par les restrictions',
-      'Liste des zones d\'alertes',
+      "Liste des zones d'alertes",
       'Niveaux de gravité et usages',
       'Usages',
     ];
@@ -319,8 +328,8 @@ const steps = computed(() => {
     return [
       'Informations générales',
       'Ressources concernées par les restrictions',
-      'Liste des zones d\'alertes AEP',
-      'Liste des zones d\'alertes',
+      "Liste des zones d'alertes AEP",
+      "Liste des zones d'alertes",
       'Niveaux de gravité et usages',
       'Usages',
     ];
@@ -328,7 +337,7 @@ const steps = computed(() => {
     return [
       'Informations générales',
       'Ressources concernées par les restrictions',
-      'Liste des zones d\'alertes AEP',
+      "Liste des zones d'alertes AEP",
       'Niveaux de gravité et usages',
       'Usages',
     ];
@@ -350,47 +359,33 @@ const graviteFormRef = ref(null);
 
 <template>
   <DsfrStepper :steps="steps" :currentStep="currentStep" />
-  <DsfrTabs class="tabs-light"
-            v-if="refDataStore.departements.length > 0">
+  <DsfrTabs class="tabs-light" v-if="refDataStore.departements.length > 0">
     <DsfrTabContent :selected="currentStep === 1" :asc="asc">
-      <ArreteRestrictionFormGeneral
-        ref="generalFormRef"
-        :arreteRestriction="arreteRestriction"
-        :checkReturn="checkReturn" />
+      <ArreteRestrictionFormGeneral ref="generalFormRef" :arreteRestriction="arreteRestriction" :checkReturn="checkReturn" />
     </DsfrTabContent>
     <DsfrTabContent :selected="currentStep === 2" :asc="asc">
-      <ArreteRestrictionFormRegles
-        ref="reglesFormRef"
-        :arreteRestriction="arreteRestriction" />
+      <ArreteRestrictionFormRegles ref="reglesFormRef" :arreteRestriction="arreteRestriction" />
     </DsfrTabContent>
-    <DsfrTabContent v-if="showRestrictionsAepForm"
-                    :selected="currentStep === 3"
-                    :asc="asc">
+    <DsfrTabContent v-if="showRestrictionsAepForm" :selected="currentStep === 3" :asc="asc">
       <ArreteRestrictionFormZonesAep
         ref="restrictionsAepFormRef"
-        :selected="showRestrictionsForm ? currentStep === (totalSteps - 3) : currentStep === (totalSteps - 2)"
-        :arreteRestriction="arreteRestriction" />
+        :selected="showRestrictionsForm ? currentStep === totalSteps - 3 : currentStep === totalSteps - 2"
+        :arreteRestriction="arreteRestriction"
+      />
     </DsfrTabContent>
-    <DsfrTabContent v-if="showRestrictionsForm"
-                    :selected="currentStep === (totalSteps - 2)"
-                    :asc="asc">
-      <ArreteRestrictionFormZones
-        ref="restrictionsFormRef"
-        :selected="currentStep === 3"
-        :arreteRestriction="arreteRestriction" />
+    <DsfrTabContent v-if="showRestrictionsForm" :selected="currentStep === totalSteps - 2" :asc="asc">
+      <ArreteRestrictionFormZones ref="restrictionsFormRef" :selected="currentStep === 3" :arreteRestriction="arreteRestriction" />
     </DsfrTabContent>
-    <DsfrTabContent :selected="currentStep === totalSteps - 1"
-                    :asc="asc">
+    <DsfrTabContent :selected="currentStep === totalSteps - 1" :asc="asc">
       <ArreteRestrictionFormGravite
         ref="graviteFormRef"
         :key="currentStep"
-        :selected="currentStep === (totalSteps - 1)"
+        :selected="currentStep === totalSteps - 1"
         :arreteRestriction="arreteRestriction"
         @editUsages="nextStep()"
       />
     </DsfrTabContent>
-    <DsfrTabContent :selected="currentStep === totalSteps"
-                    :asc="asc">
+    <DsfrTabContent :selected="currentStep === totalSteps" :asc="asc">
       <ArreteRestrictionFormUsages
         ref="usagesFormRef"
         :key="currentStep"
@@ -400,7 +395,8 @@ const graviteFormRef = ref(null);
     </DsfrTabContent>
   </DsfrTabs>
   <ul
-    class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w">
+    class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w"
+  >
     <li>
       <DsfrButton
         :label="currentStep !== totalSteps ? 'Précedent' : 'Retour aux restrictions'"
@@ -408,7 +404,8 @@ const graviteFormRef = ref(null);
         icon="ri-arrow-left-line"
         data-cy="ArreteRestrictionFormPreviousStepBtn"
         :disabled="currentStep === 1"
-        @click="previousStep()" />
+        @click="previousStep()"
+      />
     </li>
     <li>
       <DsfrButton
@@ -428,10 +425,11 @@ const graviteFormRef = ref(null);
         :secondary="true"
         icon="ri-arrow-right-line"
         data-cy="ArreteRestrictionFormNextStepBtn"
-        :disabled="currentStep >= (totalSteps - 1)"
-        @click="nextStep()" />
+        :disabled="currentStep >= totalSteps - 1"
+        @click="nextStep()"
+      />
     </li>
-    <li v-if="currentStep === (totalSteps - 1) && arreteRestriction.statut === 'a_valider'">
+    <li v-if="currentStep === totalSteps - 1 && arreteRestriction.statut === 'a_valider'">
       <DsfrButton
         label="Publier"
         :disabled="loading"
@@ -441,7 +439,7 @@ const graviteFormRef = ref(null);
         @click="askPublishArrete()"
       />
     </li>
-    <li style="margin-left: auto;">
+    <li style="margin-left: auto">
       <DsfrButton
         v-if="currentStep !== totalSteps"
         label="Retour à la liste"
@@ -451,10 +449,12 @@ const graviteFormRef = ref(null);
       />
     </li>
   </ul>
-  <DsfrModal :opened="modalPublishOpened"
-             icon="ri-arrow-right-line"
-             :title="modalTitle"
-             @close="modalPublishOpened = utils.closeModal(modalPublishOpened);">
+  <DsfrModal
+    :opened="modalPublishOpened"
+    icon="ri-arrow-right-line"
+    :title="modalTitle"
+    @close="modalPublishOpened = utils.closeModal(modalPublishOpened)"
+  >
     <div>
       Cet arrêté de restriction contient&nbsp;:
       <ul>
@@ -471,23 +471,25 @@ const graviteFormRef = ref(null);
           {{ getRestrictionByNiveauDeGravite('crise').length }} zone(s) en crise
         </li>
       </ul>
-      <span>
-        {{ subscriptions }} usagers de VigiEau seront prévenus par mail.
-      </span>
+      <span> {{ subscriptions }} usagers de VigiEau seront prévenus par mail. </span>
       <div class="divider fr-mt-1w"></div>
     </div>
-    <ArreteRestrictionFormPublier ref="publierFormRef"
-                                  :arreteRestriction="arreteRestriction"
-                                  :warnings="checkReturn?.warnings"
-                                  :errors="checkReturn?.errors"
-                                  @publier="publishArrete($event)" />
+    <ArreteRestrictionFormPublier
+      ref="publierFormRef"
+      :arreteRestriction="arreteRestriction"
+      :warnings="checkReturn?.warnings"
+      :errors="checkReturn?.errors"
+      @publier="publishArrete($event)"
+    />
     <template #footer>
       <ul class="fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w">
         <li v-if="currentStep !== 1">
-          <DsfrButton label="Annuler"
-                      :disabled="loading"
-                      :secondary="true"
-                      @click="modalPublishOpened = utils.closeModal(modalPublishOpened);" />
+          <DsfrButton
+            label="Annuler"
+            :disabled="loading"
+            :secondary="true"
+            @click="modalPublishOpened = utils.closeModal(modalPublishOpened)"
+          />
         </li>
         <li>
           <DsfrButton

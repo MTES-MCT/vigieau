@@ -36,6 +36,11 @@ import {
   stableJson,
   type ZonePublicationAggregatePayload,
 } from '@shared/zone_publication_materialization';
+import type {
+  ZoneAvailabilityStatus,
+  ZoneTypeAvailabilityDto,
+  ZonesWithAvailabilityDto,
+} from './dto/zone.dto';
 
 type ZoneCacheError = {
   at: Date;
@@ -87,6 +92,28 @@ type PublicationInstanceSummary = {
   activeReady: number;
   candidateReady: number;
 };
+
+type ZoneType = 'AEP' | 'SUP' | 'SOU';
+
+type AvailabilityRow = {
+  sourcePublicRevision: string;
+  status: ZoneAvailabilityStatus | null;
+  asOf: Date | string | null;
+  availabilityPublicRevision: string | null;
+  officialUrl: string | null;
+};
+
+type AvailabilityContext = {
+  sourcePublicRevision: string | null;
+  certifications: Map<ZoneType, AvailabilityRow>;
+};
+
+const ZONE_TYPES: readonly ZoneType[] = ['AEP', 'SUP', 'SOU'];
+
+const OFFICIAL_AEP_URLS: Readonly<Record<string, string>> = Object.freeze({
+  '49': 'https://www.maine-et-loire.gouv.fr/Actions-de-l-Etat/Eau-et-Environnement/Eau-et-milieux-aquatiques/Les-restrictions-en-eau-liees-a-la-secheresse',
+  '79': 'https://www.deux-sevres.gouv.fr/Publications/Annonces-et-avis/Arretes-de-restriction-d-eau-prelevee-a-partir-du-reseau-d-eau-potable',
+});
 
 export type ZoneCacheStatus = {
   status: 'ready' | 'degraded' | 'unavailable';
@@ -238,6 +265,197 @@ export class ZonesService implements OnModuleInit {
       `Les paramètres lon/lat ou commune sont requis.`,
       HttpStatus.BAD_REQUEST,
     );
+  }
+
+  async findWithAvailability(
+    queryLon?: string,
+    queryLat?: string,
+    commune?: string,
+    profil?: string,
+    zoneType?: string,
+    publicationId?: string,
+  ): Promise<ZonesWithAvailabilityDto> {
+    const allZones = await this.find(
+      queryLon,
+      queryLat,
+      commune,
+      profil,
+      undefined,
+      publicationId,
+    );
+    const zones = zoneType
+      ? allZones.filter((zone) => zone.type === zoneType)
+      : allZones;
+    const departmentCode = this.resolveDepartmentCode(commune, allZones);
+    const context = departmentCode
+      ? await this.loadZoneTypeAvailability(departmentCode, publicationId)
+      : {
+          sourcePublicRevision: null,
+          certifications: new Map<ZoneType, AvailabilityRow>(),
+        };
+
+    const availability = Object.fromEntries(
+      ZONE_TYPES.map((type) => [
+        type,
+        this.buildZoneTypeAvailability(
+          type,
+          allZones,
+          departmentCode,
+          context.sourcePublicRevision,
+          context.certifications.get(type),
+        ),
+      ]),
+    ) as Record<ZoneType, ZoneTypeAvailabilityDto>;
+
+    const certifiedZones = zones.filter(
+      (zone) =>
+        zone?.arreteMunicipalCheminFichier ||
+        availability[zone?.type as ZoneType]?.status === 'available',
+    );
+
+    return { zones: certifiedZones, availability };
+  }
+
+  private resolveDepartmentCode(
+    commune: string | undefined,
+    zones: readonly any[],
+  ): string | null {
+    if (commune) {
+      const normalized = this.communesService.normalizeCodeCommune(commune);
+      return normalized.startsWith('97')
+        ? normalized.slice(0, 3)
+        : normalized.slice(0, 2);
+    }
+    const zoneDepartment = zones.find((zone) => zone?.departement)?.departement;
+    if (zoneDepartment) {
+      return String(zoneDepartment);
+    }
+    return null;
+  }
+
+  private async loadZoneTypeAvailability(
+    departmentCode: string,
+    publicationId?: string,
+  ): Promise<AvailabilityContext> {
+    try {
+      const rows = (await this.zonePublicationRepository.query(
+        `
+          SELECT
+            CASE
+              WHEN $2::uuid IS NULL THEN source."publicRevision"::text
+              ELSE publication."sourceRevision"::text
+            END AS "sourcePublicRevision",
+            availability."zoneType",
+            availability."status",
+            availability."asOf",
+            availability."publicRevision"::text AS "availabilityPublicRevision",
+            availability."officialUrl"
+          FROM "zone_publication_source_state" source
+          LEFT JOIN "zone_type_availability" availability
+            ON availability."departmentCode" = $1
+          LEFT JOIN "zone_publication" publication
+            ON publication."id" = $2::uuid
+          WHERE source."id" = 1
+        `,
+        [departmentCode, publicationId ?? null],
+      )) as Array<AvailabilityRow & { zoneType: ZoneType | null }>;
+      return {
+        sourcePublicRevision: rows[0]?.sourcePublicRevision ?? null,
+        certifications: new Map(
+          rows
+            .filter((row) => row.zoneType && ZONE_TYPES.includes(row.zoneType))
+            .map((row) => [row.zoneType as ZoneType, row]),
+        ),
+      };
+    } catch (error) {
+      this.logger.warn(
+        `ZONE DATA AVAILABILITY UNAVAILABLE FOR ${departmentCode}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {
+        sourcePublicRevision: null,
+        certifications: new Map(),
+      };
+    }
+  }
+
+  private buildZoneTypeAvailability(
+    type: ZoneType,
+    zones: readonly any[],
+    departmentCode: string | null,
+    sourcePublicRevision: string | null,
+    certification?: AvailabilityRow,
+  ): ZoneTypeAvailabilityDto {
+    const officialUrl =
+      certification?.officialUrl ??
+      (type === 'AEP' && departmentCode
+        ? (OFFICIAL_AEP_URLS[departmentCode] ?? null)
+        : null);
+    if (sourcePublicRevision === null) {
+      return {
+        status: 'unavailable',
+        asOf: null,
+        sourceRevision: null,
+        officialUrl,
+      };
+    }
+    const certificationApplies = this.publicRevisionIsAtOrBefore(
+      certification?.availabilityPublicRevision,
+      sourcePublicRevision,
+    );
+    if (certification && !certificationApplies) {
+      return {
+        status: 'unavailable',
+        asOf: certification.asOf
+          ? new Date(certification.asOf).toISOString()
+          : null,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+      };
+    }
+    if (certificationApplies && certification?.status !== 'available') {
+      return {
+        status:
+          certification?.status === 'confirmed_none'
+            ? 'confirmed_none'
+            : 'unavailable',
+        asOf: certification.asOf
+          ? new Date(certification.asOf).toISOString()
+          : null,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+      };
+    }
+    if (zones.some((zone) => zone?.type === type && zone?.id !== null)) {
+      return {
+        status: 'available',
+        asOf: this.activeSnapshot?.version?.toISOString() ?? null,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+      };
+    }
+    return {
+      status: 'unavailable',
+      asOf: certification?.asOf
+        ? new Date(certification.asOf).toISOString()
+        : null,
+      sourceRevision: sourcePublicRevision,
+      officialUrl,
+    };
+  }
+
+  private publicRevisionIsAtOrBefore(
+    certificationRevision?: string | null,
+    sourceRevision?: string | null,
+  ): boolean {
+    if (
+      !certificationRevision ||
+      !sourceRevision ||
+      !/^\d+$/.test(certificationRevision) ||
+      !/^\d+$/.test(sourceRevision)
+    ) {
+      return false;
+    }
+    return BigInt(certificationRevision) <= BigInt(sourceRevision);
   }
 
   /**

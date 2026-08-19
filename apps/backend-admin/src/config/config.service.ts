@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { Config } from '@shared/entities/config.entity';
 import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
+import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
 
 @Injectable()
 export class ConfigService {
@@ -54,7 +55,7 @@ export class ConfigService {
           SELECT 1
           FROM "zone_publication_source_state" source_state
           WHERE source_state."id" = 1
-            AND source_state."revision" = :expectedSourceRevision
+            AND ${sourceRevisionColumn('source_state')} = :expectedSourceRevision
           FOR SHARE
         )`,
         { expectedSourceRevision },
@@ -91,7 +92,7 @@ export class ConfigService {
           SELECT 1
           FROM "zone_publication_source_state" source_state
           WHERE source_state."id" = 1
-            AND source_state."revision" = :expectedSourceRevision
+            AND ${sourceRevisionColumn('source_state')} = :expectedSourceRevision
           FOR SHARE
         )`,
         { expectedSourceRevision },

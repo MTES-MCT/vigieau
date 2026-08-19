@@ -4,6 +4,12 @@ export interface RestrictionPopupEntry {
   zoneName: unknown;
 }
 
+export type RestrictionPopupEmptyState =
+  | { status: 'loading' }
+  | { status: 'confirmed_none' }
+  | { status: 'unavailable'; officialUrl?: string | null }
+  | { status: 'municipal'; documentUrl?: string | null };
+
 export interface CommunePopupStatistics {
   noDays: number;
   vigilanceDays: number;
@@ -60,6 +66,108 @@ const appendPopupButton = (
   root.append(container);
 };
 
+const safeHttpsUrl = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+};
+
+const appendExternalLink = (
+  root: HTMLElement,
+  label: string,
+  href: unknown,
+  ownerDocument: Document,
+): boolean => {
+  const safeUrl = safeHttpsUrl(href);
+  if (!safeUrl) {
+    return false;
+  }
+  const link = createTextElement(ownerDocument, 'a', label, 'fr-link');
+  link.href = safeUrl;
+  link.target = '_blank';
+  link.rel = 'noopener external';
+  root.append(link);
+  return true;
+};
+
+const appendEmptyRestrictionState = (
+  root: HTMLElement,
+  state: RestrictionPopupEmptyState,
+  ownerDocument: Document,
+) => {
+  const container = ownerDocument.createElement('div');
+  container.className = 'map-popup-availability fr-mb-1w';
+
+  if (state.status === 'confirmed_none') {
+    container.append(
+      createTextElement(
+        ownerDocument,
+        'p',
+        'Pas de restrictions',
+        'fr-badge situation-level-bg-0',
+      ),
+    );
+  } else if (state.status === 'loading') {
+    const status = createTextElement(
+      ownerDocument,
+      'p',
+      'Vérification des restrictions en cours…',
+      'fr-mb-0',
+    );
+    status.setAttribute('role', 'status');
+    container.append(status);
+  } else if (state.status === 'municipal') {
+    container.append(
+      createTextElement(
+        ownerDocument,
+        'p',
+        'Un arrêté municipal a été publié pour cette commune.',
+        'fr-mb-1w',
+      ),
+    );
+    appendExternalLink(
+      container,
+      "Consulter l'arrêté municipal",
+      state.documentUrl,
+      ownerDocument,
+    );
+  } else {
+    container.append(
+      createTextElement(
+        ownerDocument,
+        'p',
+        'Les restrictions ne peuvent pas être confirmées pour ce point.',
+        'fr-mb-1w',
+      ),
+    );
+    if (
+      !appendExternalLink(
+        container,
+        "Consulter le site des services de l'État",
+        state.officialUrl,
+        ownerDocument,
+      )
+    ) {
+      container.append(
+        createTextElement(
+          ownerDocument,
+          'p',
+          "Consultez le site des services de l'État de votre département.",
+          'fr-mb-0',
+        ),
+      );
+    }
+  }
+
+  root.append(container);
+};
+
 export function createPointSelectionPopupContent(
   options: PointPopupOptions,
   ownerDocument?: Document,
@@ -96,6 +204,7 @@ export function createRestrictionsPopupContent(
   showRestrictionsButton: boolean,
   location: unknown,
   ownerDocument?: Document,
+  emptyState: RestrictionPopupEmptyState = { status: 'loading' },
 ): HTMLElement {
   const popupDocument = getDocument(ownerDocument);
   const root = popupDocument.createElement('div');
@@ -134,17 +243,7 @@ export function createRestrictionsPopupContent(
       );
     });
   } else {
-    const badgeContainer = popupDocument.createElement('div');
-    badgeContainer.className = 'fr-mb-1w';
-    badgeContainer.append(
-      createTextElement(
-        popupDocument,
-        'p',
-        'Pas de restrictions',
-        'fr-badge situation-level-bg-0',
-      ),
-    );
-    root.append(badgeContainer);
+    appendEmptyRestrictionState(root, emptyState, popupDocument);
   }
 
   root.append(

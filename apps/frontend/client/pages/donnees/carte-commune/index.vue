@@ -47,6 +47,7 @@ const downloadMap = () => {
   </div>
   <div class="background-blue fr-py-2w">
     <div class="fr-container">
+      <DonneesStatisticDataStatus />
       <div ref="screenshotZone">
         <CarteCommuneFilter :loading="loading"
                             @filterChange="setFilterData($event)" />

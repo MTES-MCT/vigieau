@@ -41,6 +41,21 @@ const createService = (askCompute: jest.Mock) => {
       if (sql.includes('SELECT id FROM departement')) {
         return [{ id: 65 }];
       }
+      if (
+        sql.includes('SELECT "publicRevision"') &&
+        sql.includes('zone_publication_source_state')
+      ) {
+        return [{ publicRevision: '42' }];
+      }
+      if (
+        sql.includes('UPDATE "zone_publication_source_state"') &&
+        sql.includes('RETURNING "publicRevision"')
+      ) {
+        return [{ publicRevision: '43' }];
+      }
+      if (sql.includes('zone_type_availability')) {
+        return [];
+      }
       if (sql.includes('current_zone_recompute_request')) {
         queuedDepartementIds = [
           ...((parameters?.[0] as number[] | undefined) ?? []),
@@ -238,7 +253,13 @@ describe('ArreteRestrictionService scheduled status update', () => {
     const enqueueCall = manager.query.mock.calls.find(([sql]) =>
       sql.includes('current_zone_recompute_request'),
     );
-    expect(enqueueCall?.[1]).toEqual([[65]]);
+    const enqueueParameters = enqueueCall?.[1];
+    expect(enqueueParameters?.[0]).toEqual([65]);
+    expect(enqueueParameters?.[1]).toBe('42');
+    expect(enqueueParameters?.[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(enqueueParameters?.[2]).toBe(
+      `CALCUL QUOTIDIEN ${enqueueParameters?.[3]}`,
+    );
     expect(processPendingCurrentZoneRecomputes).toHaveBeenCalledTimes(1);
     expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
       processPendingCurrentZoneRecomputes.mock.invocationCallOrder[0],
@@ -345,7 +366,11 @@ describe('ArreteRestrictionService scheduled status update', () => {
     expect(
       harness.transactionRepository.update.mock.calls[0][1],
     ).not.toHaveProperty('dateDebut');
-    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(([sql]) =>
+        sql.includes('UPDATE config'),
+      ),
+    ).toBe(false);
   });
 
   it('invalidates history when a stale published order becomes expired', async () => {
@@ -382,10 +407,11 @@ describe('ArreteRestrictionService scheduled status update', () => {
         statut: 'abroge',
       }),
     );
-    expect(harness.manager.query).toHaveBeenLastCalledWith(
-      expect.stringContaining('UPDATE config'),
-      ['2026-07-01'],
-    );
+    expect(
+      harness.manager.query.mock.calls.find(([sql]) =>
+        sql.includes('UPDATE config'),
+      ),
+    ).toEqual([expect.stringContaining('UPDATE config'), ['2026-07-01']]);
   });
 
   it('reconciles a stale status without extending an unknown legacy end', async () => {
@@ -460,7 +486,11 @@ describe('ArreteRestrictionService scheduled status update', () => {
       { id: 37577 },
       expect.objectContaining({ statut: 'publie' }),
     );
-    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(([sql]) =>
+        sql.includes('UPDATE config'),
+      ),
+    ).toBe(false);
   });
 
   it('does not invalidate history for a normal end-of-day expiration', async () => {
@@ -494,6 +524,10 @@ describe('ArreteRestrictionService scheduled status update', () => {
       { id: 37577 },
       expect.objectContaining({ statut: 'abroge' }),
     );
-    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(([sql]) =>
+        sql.includes('UPDATE config'),
+      ),
+    ).toBe(false);
   });
 });

@@ -10,6 +10,7 @@ import {
 } from '../core/scheduling/daily-job-schedule';
 import {
   isZonePublicationEnabled,
+  sourceRevisionColumn,
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
 } from '../zone_publication/zone_publication.config';
 
@@ -91,7 +92,7 @@ export class ZonePublicationHealthService {
         this.dataSource.query(
           `
             SELECT
-              source_state."revision" AS "sourceRevision",
+              ${sourceRevisionColumn('source_state')} AS "sourceRevision",
               source_state."updatedAt" AS "sourceUpdatedAt",
               publication_state."updatedAt" AS "stateUpdatedAt",
               publication_state."automaticPublishingPaused"
@@ -229,7 +230,7 @@ export class ZonePublicationHealthService {
                 )::integer AS "incompleteCount",
                 MAX(snapshot."updatedAt") FILTER (
                   WHERE snapshot."scope" <> 'bootstrap'
-                    AND snapshot."sourceRevision" = source_state."revision"
+                    AND snapshot."sourceRevision" = ${sourceRevisionColumn('source_state')}
                     AND (
                       snapshot."snapshotDate" = $4::date
                       OR (
@@ -250,7 +251,7 @@ export class ZonePublicationHealthService {
                 publication."candidateAt"
               )) AS "latestProgressAt"
               FROM "zone_publication" publication
-              WHERE publication."sourceRevision" = source_state."revision"
+              WHERE publication."sourceRevision" = ${sourceRevisionColumn('source_state')}
                 AND publication."materializationVersion" = $3
                 AND (
                   publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris'
@@ -264,7 +265,7 @@ export class ZonePublicationHealthService {
               FROM "zone_publication_instance" instance
               JOIN "zone_publication" candidate
                 ON candidate."id" = publication_state."candidatePublicationId"
-               AND candidate."sourceRevision" = source_state."revision"
+               AND candidate."sourceRevision" = ${sourceRevisionColumn('source_state')}
                AND candidate."materializationVersion" = $3
                AND (
                  candidate."sourceComputedAt" AT TIME ZONE 'Europe/Paris'
@@ -280,7 +281,7 @@ export class ZonePublicationHealthService {
                 AND run."scheduledFor" = $4::date
                 AND run."status" = 'running'
                 AND run."metadata" @> jsonb_build_object(
-                  'sourceRevision', source_state."revision"::text,
+                  'sourceRevision', ${sourceRevisionColumn('source_state')}::text,
                   'materializationVersion', $3
                 )
               ORDER BY run."updatedAt" DESC

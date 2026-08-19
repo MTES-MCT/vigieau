@@ -1,4 +1,11 @@
-import { applyDecorators, Controller, Get, Param, Query } from '@nestjs/common';
+import {
+  applyDecorators,
+  Controller,
+  Get,
+  Header,
+  Param,
+  Query,
+} from '@nestjs/common';
 import { ApiExcludeController, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { DataService } from './data.service';
 import { CommonDataQueryDto, CommuneQueryDto } from './dto/data.dto';
@@ -51,6 +58,15 @@ export class DataController {
   })
   refData(): Promise<any> {
     return this.dataService.getRefData();
+  }
+
+  @Get('status')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Consulter la fraîcheur des statistiques publiques',
+  })
+  status() {
+    return this.dataService.getStatisticCacheStatus(true);
   }
 
   @Get('area')

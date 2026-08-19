@@ -1,7 +1,12 @@
 import { ArreteCadreService } from './arrete_cadre.service';
-import { ArreteCadreScheduler } from './arrete_cadre.scheduler';
+import {
+  ArreteCadreScheduler,
+  HISTORIC_CATCHUP_ENABLED_ENV,
+  isHistoricCatchupEnabled,
+} from './arrete_cadre.scheduler';
 import {
   BUSINESS_SCHEDULER_PROCESS_ENV,
+  CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV,
   DISABLE_SCHEDULED_JOBS_ENV,
 } from '../core/scheduling/business-cron';
 import {
@@ -172,6 +177,10 @@ describe('ArreteCadreScheduler', () => {
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
   const previousStatisticCacheRequired =
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+  const previousHistoricCatchupEnabled =
+    process.env[HISTORIC_CATCHUP_ENABLED_ENV];
+  const previousCurrentZoneWorkerEnabled =
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
   const historicCursorState = {
     mapCursor: '2026-07-31',
     statsCursor: '2026-07-31',
@@ -188,6 +197,8 @@ describe('ArreteCadreScheduler', () => {
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'false';
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'false';
+    delete process.env[HISTORIC_CATCHUP_ENABLED_ENV];
+    delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
   });
 
   afterAll(() => {
@@ -201,6 +212,18 @@ describe('ArreteCadreScheduler', () => {
     } else {
       process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED =
         previousStatisticCacheRequired;
+    }
+    if (previousHistoricCatchupEnabled === undefined) {
+      delete process.env[HISTORIC_CATCHUP_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_CATCHUP_ENABLED_ENV] =
+        previousHistoricCatchupEnabled;
+    }
+    if (previousCurrentZoneWorkerEnabled === undefined) {
+      delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
+    } else {
+      process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV] =
+        previousCurrentZoneWorkerEnabled;
     }
   });
 
@@ -236,6 +259,10 @@ describe('ArreteCadreScheduler', () => {
     };
     const zonePublicationService = {
       getSourceRevision: jest.fn().mockResolvedValue('42'),
+      findReusableDailyPublication: jest.fn().mockResolvedValue({
+        publicationId: 'publication-1',
+        sourceRevision: '42',
+      }),
       promoteCertifiedPublicationIfAvailable: jest.fn().mockResolvedValue(true),
     };
     const configService = {
@@ -272,6 +299,146 @@ describe('ArreteCadreScheduler', () => {
       completedRunMetadata,
     };
   };
+
+  it.each([
+    [undefined, true],
+    ['true', true],
+    [' TRUE ', true],
+    ['false', false],
+    [' False ', false],
+  ])('parses the historic catch-up switch %p', (value, expected) => {
+    expect(isHistoricCatchupEnabled(value)).toBe(expected);
+  });
+
+  it.each(['', '1', 'yes', 'enabled'])(
+    'rejects the invalid historic catch-up switch %p',
+    (value) => {
+      expect(() => isHistoricCatchupEnabled(value)).toThrow(
+        `${HISTORIC_CATCHUP_ENABLED_ENV} must be true or false`,
+      );
+    },
+  );
+
+  it('keeps daily enabled while historic catch-up is paused', async () => {
+    process.env[HISTORIC_CATCHUP_ENABLED_ENV] = 'false';
+    process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+    const harness = createScheduler();
+    const now = new Date('2026-08-17T14:00:00Z');
+
+    await harness.service.updateIfDue(now);
+
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(1);
+    expect(
+      harness.arreteCadreService.prepareHistoricComputations,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteCadreService.recoverIncompleteHistoricComputations,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.statisticCacheReadiness.getReadyPublication,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('lets the clock enqueue once and records completion only after the dedicated worker finishes', async () => {
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV] = 'true';
+    const harness = createScheduler();
+    harness.arreteCadreService.assertLegacyDailyComputationCompleted
+      .mockRejectedValueOnce(new Error('daily computation pending'))
+      .mockResolvedValue({ sourceRevision: '42' });
+    const now = new Date('2026-08-17T14:00:00Z');
+
+    await harness.service.updateIfDue(now);
+
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledWith(false, undefined, '2026-08-17');
+    expect(
+      harness.registry.executeDailyRun.mock.calls.filter(
+        ([jobKey]) => jobKey === NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      ),
+    ).toHaveLength(0);
+
+    await harness.service.updateIfDue(now);
+
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      harness.registry.executeDailyRun.mock.calls.filter(
+        ([jobKey]) => jobKey === NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps the versioned clock enqueue-only until the dedicated worker produces a certified publication', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV] = 'true';
+    const harness = createScheduler();
+    harness.zonePublicationService.findReusableDailyPublication.mockResolvedValue(
+      null,
+    );
+    const now = new Date('2026-08-17T14:00:00Z');
+
+    await harness.service.updateIfDue(now);
+
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledWith(false, undefined, '2026-08-17');
+    expect(
+      harness.registry.executeDailyRun.mock.calls.filter(
+        ([jobKey]) => jobKey === NATIONAL_DAILY_COMPUTE_JOB_KEY,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('records a versioned daily success by reusing the publication certified by the worker', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV] = 'true';
+    const harness = createScheduler();
+    const now = new Date('2026-08-17T14:00:00Z');
+
+    await harness.service.updateIfDue(now);
+
+    expect(
+      harness.zonePublicationService.findReusableDailyPublication,
+    ).toHaveBeenCalledWith({
+      scheduledFor: '2026-08-17',
+      sourceRevision: '42',
+    });
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).not.toHaveBeenCalled();
+    expect(harness.completedRunMetadata[0]).toEqual({
+      publicationId: 'publication-1',
+      sourceRevision: '42',
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    });
+  });
+
+  it('fails the historic branch closed on an invalid switch after daily succeeds', async () => {
+    process.env[HISTORIC_CATCHUP_ENABLED_ENV] = 'invalid';
+    const harness = createScheduler();
+
+    await expect(
+      harness.service.updateIfDue(new Date('2026-08-17T14:00:00Z')),
+    ).rejects.toThrow(`${HISTORIC_CATCHUP_ENABLED_ENV} must be true or false`);
+
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).not.toHaveBeenCalled();
+  });
 
   it('allows cron reentry so a new daily date is not hidden by historic work', () => {
     expect(

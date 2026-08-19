@@ -76,9 +76,41 @@ export class UsageService {
       ? manager.getRepository(Usage)
       : this.usageRepository;
     const usagesId = restriction.usages
-      .filter((u) => u.id)
-      .map((u) => u.id)
-      .flat();
+      .map(({ id }) => id)
+      .filter((id): id is number => id !== null && id !== undefined);
+    if (
+      usagesId.some((id) => !Number.isInteger(id) || id <= 0) ||
+      new Set(usagesId).size !== usagesId.length
+    ) {
+      throw new HttpException(
+        `Les identifiants des usages à modifier sont invalides.`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (usagesId.length > 0) {
+      const ownedUsages: Array<{ id: number | string }> = await (
+        manager ?? this.usageRepository.manager
+      ).query(
+        `
+          SELECT usage.id
+          FROM usage
+          WHERE usage.id = ANY($1::integer[])
+            AND usage."restrictionId" = $2
+          FOR UPDATE
+        `,
+        [usagesId, restriction.id],
+      );
+      const ownedIds = new Set(ownedUsages.map(({ id }) => Number(id)));
+      if (
+        ownedIds.size !== usagesId.length ||
+        usagesId.some((id) => !ownedIds.has(id))
+      ) {
+        throw new HttpException(
+          `Un usage à modifier n'appartient pas à cette restriction.`,
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
     // SUPPRESSION DES ANCIENS USAGES
     if (usagesId.length > 0) {
       await repository.delete(<FindOptionsWhere<Usage>>{
@@ -110,8 +142,41 @@ export class UsageService {
       ? manager.getRepository(Usage)
       : this.usageRepository;
     const usagesId = arreteCadre.usages
-      .filter((usage) => usage.id)
-      .map((usage) => usage.id);
+      .map(({ id }) => id)
+      .filter((id): id is number => id !== null && id !== undefined);
+    if (
+      usagesId.some((id) => !Number.isInteger(id) || id <= 0) ||
+      new Set(usagesId).size !== usagesId.length
+    ) {
+      throw new HttpException(
+        `Les identifiants des usages à modifier sont invalides.`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (usagesId.length > 0) {
+      const ownedUsages: Array<{ id: number | string }> = await (
+        manager ?? this.usageRepository.manager
+      ).query(
+        `
+          SELECT usage.id
+          FROM usage
+          WHERE usage.id = ANY($1::integer[])
+            AND usage."arreteCadreId" = $2
+          FOR UPDATE
+        `,
+        [usagesId, arreteCadre.id],
+      );
+      const ownedIds = new Set(ownedUsages.map(({ id }) => Number(id)));
+      if (
+        ownedIds.size !== usagesId.length ||
+        usagesId.some((id) => !ownedIds.has(id))
+      ) {
+        throw new HttpException(
+          `Un usage à modifier n'appartient pas à cet arrêté cadre.`,
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
     // SUPPRESSION DES ANCIENS USAGES
     if (usagesId.length > 0) {
       await repository.delete(<FindOptionsWhere<Usage>>{
@@ -163,6 +228,23 @@ export class UsageService {
       where: {
         arreteCadre: {
           id: arreteCadreId,
+        },
+      },
+      order: {
+        nom: 'ASC',
+      },
+    });
+  }
+
+  findByRestriction(restrictionId: number, manager?: EntityManager) {
+    const repository = manager
+      ? manager.getRepository(Usage)
+      : this.usageRepository;
+    return repository.find(<FindManyOptions>{
+      relations: ['thematique'],
+      where: {
+        restriction: {
+          id: restrictionId,
         },
       },
       order: {

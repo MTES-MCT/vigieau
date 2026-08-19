@@ -12,7 +12,7 @@ describe('DepartementsController', () => {
   let service: DepartementsService;
 
   const mockDepartementsService = {
-    situationByDepartement: jest.fn(),
+    situationByDepartementWithAvailability: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -53,7 +53,7 @@ describe('DepartementsController', () => {
         { code: '4', niveauGravite: 'alerte' },
       ];
 
-      mockDepartementsService.situationByDepartement.mockResolvedValue(
+      mockDepartementsService.situationByDepartementWithAvailability.mockResolvedValue(
         expectedResult,
       );
 
@@ -61,7 +61,9 @@ describe('DepartementsController', () => {
       const result = await controller.situationByDepartement(query);
 
       // Assert
-      expect(service.situationByDepartement).toHaveBeenCalledWith(
+      expect(
+        service.situationByDepartementWithAvailability,
+      ).toHaveBeenCalledWith(
         query.date,
         query.bassinVersant,
         query.region,
@@ -76,7 +78,7 @@ describe('DepartementsController', () => {
       const query: QueryDepartementDto = {}; // Aucun paramètre fourni
       const expectedResult: DepartementDto[] = [];
 
-      mockDepartementsService.situationByDepartement.mockResolvedValue(
+      mockDepartementsService.situationByDepartementWithAvailability.mockResolvedValue(
         expectedResult,
       );
 
@@ -84,7 +86,9 @@ describe('DepartementsController', () => {
       const result = await controller.situationByDepartement(query);
 
       // Assert
-      expect(service.situationByDepartement).toHaveBeenCalledWith(
+      expect(
+        service.situationByDepartementWithAvailability,
+      ).toHaveBeenCalledWith(
         undefined,
         undefined,
         undefined,

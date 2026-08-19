@@ -19,7 +19,7 @@ export class DepartementsController {
   async situationByDepartement(
     @Query() query: QueryDepartementDto,
   ): Promise<DepartementDto[]> {
-    return this.departementsService.situationByDepartement(
+    return this.departementsService.situationByDepartementWithAvailability(
       query.date,
       query.bassinVersant,
       query.region,

@@ -17,6 +17,7 @@
     "start:debug": "nest start --debug --watch --max-old-space-size=4096",
     "start:prod": "node dist/apps/backend-admin/src/main --max-old-space-size=4096",
     "start:clock": "RUN_BUSINESS_SCHEDULED_JOBS=true node --max-old-space-size=4096 dist/apps/backend-admin/src/clock",
+    "start:current-zone-worker": "RUN_BUSINESS_SCHEDULED_JOBS=false CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS=true node --max-old-space-size=4096 dist/apps/backend-admin/src/current-zone-worker",
     "datagouv:publish-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-communes.js",
     "datagouv:publish-historique-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-historique-communes.js",
     "recompute:commune-statistics": "node dist/apps/backend-admin/src/scripts/recompute-commune-statistics.js",

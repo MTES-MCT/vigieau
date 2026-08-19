@@ -1,6 +1,15 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApiOperation } from '@nestjs/swagger';
-import { IsBoolean, IsOptional, IsUUID } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsISO8601,
+  IsOptional,
+  IsString,
+  IsUrl,
+  IsUUID,
+  Matches,
+} from 'class-validator';
 import { AuthenticatedGuard } from '../core/guards/authenticated.guard';
 import { Roles } from '../core/decorators/roles.decorator';
 import { RolesGuard } from '../core/guards/roles.guard';
@@ -10,6 +19,37 @@ class ZonePublicationRollbackDto {
   @IsOptional()
   @IsUUID()
   publicationId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  apply?: boolean;
+}
+
+class ConfirmNoAvailableZoneDto {
+  @IsString()
+  @Matches(/^\s*(?:2[ab]|\d{2,3})\s*$/i)
+  departmentCode: string;
+
+  @IsIn(['AEP', 'SOU', 'SUP'])
+  zoneType: 'AEP' | 'SOU' | 'SUP';
+
+  @IsString()
+  @Matches(/^\d+$/)
+  publicRevision: string;
+
+  @IsOptional()
+  @Matches(/^https:\/\//i)
+  @IsUrl({ protocols: ['https'], require_protocol: true })
+  officialUrl?: string;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  asOf?: string;
+}
+
+class PublicRevisionModeDto {
+  @IsIn(['compatibility', 'separated'])
+  mode: 'compatibility' | 'separated';
 
   @IsOptional()
   @IsBoolean()
@@ -42,5 +82,24 @@ export class ZonePublicationController {
   @ApiOperation({ summary: 'Reprendre la publication automatique des zones' })
   resumeAutomaticPublishing() {
     return this.operatorService.resumeAutomaticPublishing();
+  }
+
+  @Post('availability/confirm-none')
+  @Roles(['mte'])
+  @ApiOperation({
+    summary: "Certifier explicitement l'absence de zones d'un type",
+  })
+  confirmNoAvailableZone(@Body() input: ConfirmNoAvailableZoneDto) {
+    return this.operatorService.confirmNoAvailableZone(input);
+  }
+
+  @Post('public-revision-mode')
+  @Roles(['mte'])
+  @ApiOperation({
+    summary:
+      'Préparer ou appliquer la bascule de compatibilité de la révision publique',
+  })
+  setPublicRevisionMode(@Body() input: PublicRevisionModeDto) {
+    return this.operatorService.setPublicRevisionMode(input);
   }
 }

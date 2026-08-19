@@ -179,9 +179,12 @@ describe('computeZonePublicationRetryBackoffSeconds', () => {
 describe('ZonePublicationService', () => {
   let fetchSpy: jest.SpyInstance;
   const previousPublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
+  const previousPublicSourceRevisionEnabled =
+    process.env.PUBLIC_SOURCE_REVISION_ENABLED;
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
     fetchSpy = jest
       .spyOn(globalThis, 'fetch')
       .mockImplementation(async (url) => {
@@ -202,6 +205,12 @@ describe('ZonePublicationService', () => {
     } else {
       process.env.ZONE_PUBLICATION_ENABLED = previousPublicationEnabled;
     }
+    if (previousPublicSourceRevisionEnabled === undefined) {
+      delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
+    } else {
+      process.env.PUBLIC_SOURCE_REVISION_ENABLED =
+        previousPublicSourceRevisionEnabled;
+    }
   });
 
   it('unwraps the PostgreSQL DML result when bumping the source revision', async () => {
@@ -211,6 +220,19 @@ describe('ZonePublicationService', () => {
     const service = new ZonePublicationService(dataSource as any);
 
     await expect(service.bumpSourceRevision()).resolves.toBe('12');
+  });
+
+  it('reads the public revision when the dual-read switch is enabled', async () => {
+    process.env.PUBLIC_SOURCE_REVISION_ENABLED = 'true';
+    const dataSource = {
+      query: jest.fn(async (sql: string) => {
+        expect(sql).toContain('"publicRevision" AS "revision"');
+        return [{ revision: '42', technicalRevision: '100' }];
+      }),
+    };
+    const service = new ZonePublicationService(dataSource as any);
+
+    await expect(service.getSourceRevision()).resolves.toBe('42');
   });
 
   it('reuses only a complete publication from the requested Paris civil day and revision', async () => {

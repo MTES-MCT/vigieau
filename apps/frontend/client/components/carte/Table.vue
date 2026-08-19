@@ -5,8 +5,19 @@ import utils from '../../utils';
 import { createLatestTaskRunner } from '../../utils/retryable-task';
 import type { Ref } from 'vue';
 import { json2csv } from 'json-2-csv';
+import type { DepartementSituation } from '../../dto/departement.dto';
+import { getDepartmentAepSituation } from '../../utils/department-availability';
 
-type DepartmentRow = [string, string, string];
+type DepartmentStatusCell =
+  | string
+  | {
+      component: 'a';
+      text: string;
+      href: string;
+      target: '_blank';
+      rel: 'noopener noreferrer';
+    };
+type DepartmentRow = [string, string, DepartmentStatusCell];
 
 const props = defineProps<{
   date: string;
@@ -14,12 +25,13 @@ const props = defineProps<{
   light: boolean;
   filterText: string;
   publicationPin?: ZonePublicationPin | null;
+  typeEau?: 'AEP';
 }>();
 
 const headers = ['N° Département', 'Département', 'Niveau de gravité'];
 const dataResume = reactive([
   {
-    label: 'Pas de restrictions',
+    label: 'Aucune restriction affichée',
     niveauGravite: 'pas_de_restrictions',
     number: 0,
   },
@@ -43,18 +55,26 @@ const dataResume = reactive([
     niveauGravite: 'crise',
     number: 0,
   },
+  {
+    label: 'Données indisponibles',
+    niveauGravite: 'unavailable',
+    number: 0,
+  },
 ]);
 const query = ref('');
 const rows: Ref<DepartmentRow[]> = ref([]);
 const rowsFiltered: Ref<DepartmentRow[]> = ref([]);
 const loading = ref(false);
-const departementsData: Ref<any[]> = ref([]);
+const departementsData: Ref<DepartementSituation[]> = ref([]);
 const filterStatus = ref('');
 const dataTaskRunner = createLatestTaskRunner();
 
 const formatDepartmentCount = (count: number): string => {
   return `${count} département${count === 1 ? '' : 's'}`;
 };
+
+const getDepartmentCellText = (cell: DepartmentStatusCell): string =>
+  typeof cell === 'string' ? cell : cell.text;
 
 async function loadData() {
   rows.value = [];
@@ -88,19 +108,53 @@ async function loadData() {
 
       const nextRows: DepartmentRow[] = [];
       departementsData.value = result.response.data.value || [];
-      result.response.data.value?.forEach((department: any) => {
-        const resume = dataResume.find(
-          (item) =>
-            item.niveauGravite ===
-            (department.niveauGraviteMax || 'pas_de_restrictions'),
-        );
-        nextRows.push([
-          String(department.code),
-          String(department.nom),
-          resume?.label || 'Pas de restrictions',
-        ]);
-        if (resume) resume.number++;
-      });
+      result.response.data.value?.forEach(
+        (department: DepartementSituation) => {
+          if (props.typeEau === 'AEP') {
+            const situation = getDepartmentAepSituation(department);
+            const resumeLevel =
+              situation.status === 'restricted'
+                ? situation.level
+                : situation.status === 'confirmed_none'
+                  ? 'pas_de_restrictions'
+                  : 'unavailable';
+            const resume = dataResume.find(
+              (item) => item.niveauGravite === resumeLevel,
+            );
+            const statusCell: DepartmentStatusCell =
+              situation.status === 'unavailable' && situation.officialUrl
+                ? {
+                    component: 'a',
+                    text: "Données indisponibles - consulter le site des services de l'État",
+                    href: situation.officialUrl,
+                    target: '_blank',
+                    rel: 'noopener noreferrer',
+                  }
+                : situation.status === 'confirmed_none'
+                  ? 'Aucune restriction confirmée'
+                  : resume?.label || 'Données indisponibles';
+            nextRows.push([
+              String(department.code),
+              String(department.nom),
+              statusCell,
+            ]);
+            if (resume) resume.number++;
+            return;
+          }
+
+          const resume = dataResume.find(
+            (item) =>
+              item.niveauGravite ===
+              (department.niveauGraviteMax || 'pas_de_restrictions'),
+          );
+          nextRows.push([
+            String(department.code),
+            String(department.nom),
+            resume?.label || 'Aucune restriction affichée',
+          ]);
+          if (resume) resume.number++;
+        },
+      );
       query.value = '';
       rows.value = nextRows;
       rowsFiltered.value = [...nextRows];
@@ -110,8 +164,10 @@ async function loadData() {
   );
 }
 
-const classObject = (rank: number | undefined): string[] => {
-  return [`situation-level-bg-${rank}`];
+const classObject = (niveauGravite: string): string[] => {
+  return niveauGravite === 'unavailable'
+    ? ['fr-badge--warning']
+    : [`situation-level-bg-${utils.getRestrictionRank(niveauGravite)}`];
 };
 
 function filterDepartments() {
@@ -119,7 +175,9 @@ function filterDepartments() {
   rowsFiltered.value = normalizedQuery
     ? rows.value.filter((row) =>
         row.some((cell) =>
-          cell.toLocaleLowerCase('fr').includes(normalizedQuery),
+          getDepartmentCellText(cell)
+            .toLocaleLowerCase('fr')
+            .includes(normalizedQuery),
         ),
       )
     : [...rows.value];
@@ -130,7 +188,20 @@ function filterDepartments() {
 }
 
 async function downloadCsv() {
-  const formatDepartements = departementsData.value.map((departement: any) => {
+  const formatDepartements = departementsData.value.map((departement) => {
+    if (props.typeEau === 'AEP') {
+      const situation = getDepartmentAepSituation(departement);
+      return {
+        code: departement.code,
+        nom: departement.nom,
+        region: departement.region,
+        type_eau: 'AEP',
+        disponibilite: situation.status,
+        niveau_gravite_max:
+          situation.status === 'restricted' ? situation.level : null,
+        url_officielle: situation.officialUrl,
+      };
+    }
     return {
       code: departement.code,
       nom: departement.nom,
@@ -154,10 +225,16 @@ async function downloadCsv() {
 }
 
 const tableTitle = computed(() => {
+  if (props.typeEau === 'AEP') {
+    return `Situation de l'eau potable par département ${props.filterText ? '(' + props.filterText + ')' : ''}`;
+  }
   return `Niveau de gravité maximal observé par département ${props.filterText ? '(' + props.filterText + ')' : ''}`;
 });
 
 const pageTitle = computed(() => {
+  if (props.typeEau === 'AEP') {
+    return `Restrictions sur l'eau potable en France par département ${props.filterText ? ' - ' + props.filterText : ''}`;
+  }
   return `Situation de la sécheresse en France (niveau de gravité maximum constaté par département) ${props.filterText ? ' - ' + props.filterText : ''}`;
 });
 
@@ -188,16 +265,20 @@ onBeforeUnmount(() => {
         <ul class="departement-card-list fr-mb-2w">
           <li
             v-for="resume of dataResume"
+            v-show="typeEau === 'AEP' || resume.niveauGravite !== 'unavailable'"
             :key="resume.niveauGravite"
             class="departement-card"
           >
             <DsfrBadge
               small
               no-icon
-              :class="
-                classObject(utils.getRestrictionRank(resume.niveauGravite))
+              :class="classObject(resume.niveauGravite)"
+              :label="
+                typeEau === 'AEP' &&
+                  resume.niveauGravite === 'pas_de_restrictions'
+                  ? 'Aucune restriction confirmée'
+                  : resume.label
               "
-              :label="resume.label"
             />
             <span class="departement-card__number fr-mt-1w">
               {{ formatDepartmentCount(resume.number) }}
@@ -223,7 +304,7 @@ onBeforeUnmount(() => {
               class="fr-input"
               type="search"
               autocomplete="off"
-            >
+            />
           </div>
           <button class="fr-btn department-filter__submit" type="submit">
             Rechercher un département
@@ -359,6 +440,5 @@ onBeforeUnmount(() => {
     width: 100%;
     justify-content: center;
   }
-
 }
 </style>

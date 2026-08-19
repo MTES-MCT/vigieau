@@ -11,6 +11,7 @@ import { BusinessCron } from '../core/scheduling/business-cron';
 import { shiftCivilDate } from '../core/scheduling/daily-job-schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
+import { Departement } from '@shared/entities/departement.entity';
 import { User } from '@shared/entities/user.entity';
 import moment from 'moment/moment';
 import { paginate, Paginated, PaginateQuery } from 'nestjs-paginate';
@@ -381,8 +382,13 @@ export class ArreteCadreService {
     createArreteCadreDto: CreateUpdateArreteCadreDto,
     currentUser?: User,
   ): Promise<ArreteCadre> {
+    await this.assertAuthorizedTargetDepartements(
+      createArreteCadreDto.departements,
+      currentUser,
+      createArreteCadreDto.departements?.length > 1,
+    );
     // Check ACI
-    await this.checkAci(createArreteCadreDto, false, currentUser);
+    await this.checkAci(createArreteCadreDto);
     const arreteCadre = await this.arreteCadreRepository.manager.transaction(
       'SERIALIZABLE',
       async (manager) => {
@@ -417,7 +423,13 @@ export class ArreteCadreService {
         HttpStatus.FORBIDDEN,
       );
     }
-    await this.checkAci(updateArreteCadreDto, true, currentUser);
+    const nextDepartements =
+      updateArreteCadreDto.departements ?? oldAc.departements;
+    await this.assertAuthorizedTargetDepartements(
+      nextDepartements,
+      currentUser,
+    );
+    await this.checkAci(updateArreteCadreDto);
     let arreteCadre: ArreteCadre;
     if (oldAc.statut === 'a_valider') {
       arreteCadre = await this.arreteCadreRepository.manager.transaction(
@@ -440,6 +452,13 @@ export class ArreteCadreService {
               HttpStatus.CONFLICT,
             );
           }
+          await this.assertAuthorizedTargetDepartements(
+            updateArreteCadreDto.departements ??
+              authorizationState.departements,
+            currentUser,
+            false,
+            manager,
+          );
           await this.arreteRestrictionService.lockArreteRestrictionsForArreteCadres(
             manager,
             [id],
@@ -475,9 +494,9 @@ export class ArreteCadreService {
       const nextPredecessorId = hasPredecessorUpdate
         ? updateArreteCadreDto.arreteCadreAbroge?.id
         : initialPredecessorId;
-      const nextDepartementIds = (
-        updateArreteCadreDto.departements ?? oldAc.departements
-      ).map(({ id: departementId }) => departementId);
+      const nextDepartementIds = nextDepartements.map(
+        ({ id: departementId }) => departementId,
+      );
       if (nextPredecessorId === id) {
         throw new HttpException(
           `Un arrêté ne peut pas s'abroger lui-même.`,
@@ -529,6 +548,13 @@ export class ArreteCadreService {
                 HttpStatus.CONFLICT,
               );
             }
+            await this.assertAuthorizedTargetDepartements(
+              updateArreteCadreDto.departements ??
+                authorizationState.departements,
+              currentUser,
+              false,
+              manager,
+            );
             await this.arreteRestrictionService.lockArreteRestrictionsForArreteCadres(
               manager,
               affectedIds,
@@ -597,7 +623,7 @@ export class ArreteCadreService {
                 dirtyDates.sort()[0],
               );
             }
-            await this.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager(
+            await this.arreteRestrictionService.recordPublicMutation(
               manager,
               [
                 ...oldAc.departements.map(
@@ -605,6 +631,7 @@ export class ArreteCadreService {
                 ),
                 ...nextDepartementIds,
               ],
+              'MODIFICATION AC',
             );
             return saved;
           },
@@ -813,9 +840,10 @@ export class ArreteCadreService {
               dirtyDates.sort()[0],
             );
           }
-          await this.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager(
+          await this.arreteRestrictionService.recordPublicMutation(
             manager,
             ac.departements.map(({ id: departementId }) => departementId),
+            'PUBLICATION AC',
           );
           return saved;
         },
@@ -1215,9 +1243,10 @@ export class ArreteCadreService {
           manager,
           dirtyDates.sort()[0],
         );
-        await this.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager(
+        await this.arreteRestrictionService.recordPublicMutation(
           manager,
           ac.departements.map(({ id: departementId }) => departementId),
+          'ABROGATION AC',
         );
         return saved;
       },
@@ -1305,9 +1334,10 @@ export class ArreteCadreService {
             );
           }
           if (current.statut !== 'a_valider') {
-            await this.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager(
+            await this.arreteRestrictionService.recordPublicMutation(
               manager,
               arrete.departements.map(({ id: departementId }) => departementId),
+              'SUPPRESSION AC',
             );
           }
         },
@@ -1452,9 +1482,10 @@ export class ArreteCadreService {
 
   private async checkAci(
     createUpdateArreteCadreDto: CreateUpdateArreteCadreDto,
-    isUpdate: boolean,
-    currentUser?: User,
   ): Promise<void> {
+    if (!createUpdateArreteCadreDto.departements?.length) {
+      return;
+    }
     if (createUpdateArreteCadreDto.departements.length < 2) {
       return;
     }
@@ -1463,23 +1494,73 @@ export class ArreteCadreService {
     const depPilote = await this.departementService.find(
       createUpdateArreteCadreDto.departements[0].id,
     );
-    /**
-     * Si c'est un update, on vérifie seulement que le département est bien dedans
-     */
+    // @ts-expect-error objet non complet
+    createUpdateArreteCadreDto.departementPilote = depPilote;
+  }
+
+  private async assertAuthorizedTargetDepartements(
+    targetDepartements: Array<{ id: number }> | undefined,
+    currentUser?: User,
+    requireAuthorizedPilot = false,
+    manager?: EntityManager,
+  ): Promise<void> {
+    if (!currentUser || currentUser.role === 'mte') {
+      return;
+    }
+
+    const targetIds = [
+      ...new Set(
+        (targetDepartements ?? [])
+          .map(({ id }) => id)
+          .filter((id) => Number.isInteger(id) && id > 0),
+      ),
+    ];
     if (
-      isUpdate &&
-      currentUser?.role === 'departement' &&
-      !createUpdateArreteCadreDto.departements.some(
-        (d) => d.id === depPilote.id,
-      )
+      targetIds.length === 0 ||
+      targetIds.length !== (targetDepartements ?? []).length
     ) {
       throw new HttpException(
-        `Vous ne pouvez pas modifier un ACI qui ne concerne pas votre département.`,
+        `Vous ne pouvez pas enregistrer un arrêté cadre sans département autorisé.`,
         HttpStatus.FORBIDDEN,
       );
     }
-    // @ts-expect-error objet non complet
-    createUpdateArreteCadreDto.departementPilote = depPilote;
+
+    const resolvedDepartements = manager
+      ? await manager.getRepository(Departement).find({
+          select: { id: true, code: true },
+          where: { id: In(targetIds) },
+        })
+      : await Promise.all(
+          targetIds.map((departementId) =>
+            this.departementService.find(departementId),
+          ),
+        );
+    const byId = new Map(
+      resolvedDepartements
+        .filter((departement): departement is Departement => !!departement)
+        .map((departement) => [departement.id, departement]),
+    );
+    if (byId.size !== targetIds.length) {
+      throw new HttpException(
+        `Un département de l'arrêté cadre est introuvable.`,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+
+    const authorizedCodes = new Set(currentUser.role_departements ?? []);
+    const targets = targetIds.map((id) => byId.get(id));
+    if (!targets.some((departement) => authorizedCodes.has(departement.code))) {
+      throw new HttpException(
+        `Vous ne pouvez pas enregistrer un arrêté cadre qui ne concerne aucun de vos départements.`,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+    if (requireAuthorizedPilot && !authorizedCodes.has(targets[0].code)) {
+      throw new HttpException(
+        `Vous ne pouvez pas créer un ACI dont le département pilote ne fait pas partie de vos départements.`,
+        HttpStatus.FORBIDDEN,
+      );
+    }
   }
 
   private async sendAciMails(
@@ -1735,9 +1816,10 @@ export class ArreteCadreService {
             `,
             [ids],
           )) as Array<{ id: number }>;
-          await this.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager(
+          await this.arreteRestrictionService.recordPublicMutation(
             manager,
             affectedDepartements.map(({ id }) => Number(id)),
+            'TRANSITION AUTOMATIQUE AC',
           );
         }
       },

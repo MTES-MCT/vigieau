@@ -27,6 +27,7 @@ import {
 } from '../statistic_commune/statistic_commune.service';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
+import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
 import {
   HistoricDepartmentCheckpointOptions,
   HistoricDepartmentCheckpointService,
@@ -886,7 +887,7 @@ export class ZoneAlerteComputedHistoricService {
       return;
     }
     const [sourceState] = await this.dataSource.query(
-      `SELECT "revision"::text AS "revision"
+      `SELECT ${sourceRevisionColumn()}::text AS "revision"
        FROM "zone_publication_source_state"
        WHERE "id" = 1`,
     );

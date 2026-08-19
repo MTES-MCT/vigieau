@@ -9,6 +9,7 @@ import { CommuneService } from '../commune/commune.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import moment = require('moment');
 import { Moment } from 'moment';
+import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
 
 const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
   'vigieau:statistic-commune:snapshot-computation';
@@ -470,7 +471,7 @@ export class StatisticCommuneService {
             FROM "zone_publication_source_state" source_state
             CROSS JOIN "config" config
             WHERE source_state."id" = 1
-              AND source_state."revision" = $2::bigint
+              AND ${sourceRevisionColumn('source_state')} = $2::bigint
               AND config."id" = 1
               AND config."historicComputeEpoch" = $3::bigint
             FOR SHARE OF source_state, config
@@ -1315,7 +1316,7 @@ export class StatisticCommuneService {
           WHERE config."id" = 1
             AND config."historicComputeEpoch" = $4::bigint
             AND source_state."id" = 1
-            AND source_state."revision" = $3::bigint
+            AND ${sourceRevisionColumn('source_state')} = $3::bigint
         ), target_dates AS MATERIALIZED (
           SELECT unnest($1::date[]) AS "snapshotDate"
         ), started AS (
@@ -1373,7 +1374,7 @@ export class StatisticCommuneService {
         WHERE config."id" = 1
           AND config."historicComputeEpoch" = $1::bigint
           AND source_state."id" = 1
-          AND source_state."revision" = $2::bigint
+          AND ${sourceRevisionColumn('source_state')} = $2::bigint
         FOR SHARE OF config, source_state
       `,
       [options.historicComputeEpoch, options.sourceRevision],
@@ -2019,7 +2020,7 @@ export class StatisticCommuneService {
           FOR UPDATE OF snapshot
         ), current_context AS MATERIALIZED (
           SELECT
-            source_state."revision" AS "sourceRevision",
+            ${sourceRevisionColumn('source_state')} AS "sourceRevision",
             config."historicComputeEpoch" AS "historicComputeEpoch"
           FROM "zone_publication_source_state" source_state
           CROSS JOIN "config" config

@@ -3,6 +3,7 @@ import { CronExpression } from '@nestjs/schedule';
 import {
   areScheduledJobsDisabled,
   BusinessCron,
+  isCurrentZoneRecomputeWorkerEnabled,
   isBusinessSchedulerProcess,
 } from '../core/scheduling/business-cron';
 import {
@@ -41,6 +42,24 @@ interface DailyComputationContext {
   sourceRevision: string;
   publicationId?: string;
   materializationVersion?: number;
+}
+
+export const HISTORIC_CATCHUP_ENABLED_ENV = 'HISTORIC_CATCHUP_ENABLED';
+
+export function isHistoricCatchupEnabled(
+  value = process.env[HISTORIC_CATCHUP_ENABLED_ENV],
+): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  throw new Error(`${HISTORIC_CATCHUP_ENABLED_ENV} must be true or false`);
 }
 
 @Injectable()
@@ -128,21 +147,64 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
   ): Promise<DailyComputationContext | null> {
     const expectedSourceRevision =
       await this.zonePublicationService.getSourceRevision();
+    let reusablePublication: {
+      publicationId: string;
+      sourceRevision: string;
+    } | null = null;
+    if (isCurrentZoneRecomputeWorkerEnabled()) {
+      reusablePublication =
+        await this.zonePublicationService.findReusableDailyPublication({
+          scheduledFor,
+          sourceRevision: expectedSourceRevision,
+        });
+      if (reusablePublication) {
+        try {
+          if (
+            String(reusablePublication.sourceRevision) !==
+            expectedSourceRevision
+          ) {
+            throw new Error('Reusable publication source revision mismatch');
+          }
+          await this.assertSourceRevision(expectedSourceRevision);
+          await this.arreteCadreService.assertVersionedDailyComputationReady(
+            scheduledFor,
+            expectedSourceRevision,
+          );
+        } catch {
+          reusablePublication = null;
+        }
+      }
+      if (!reusablePublication) {
+        await this.arreteCadreService.updateArreteCadreStatut(
+          false,
+          undefined,
+          scheduledFor,
+        );
+        return null;
+      }
+    }
     const currentResult = await this.registry.executeDailyRun(
       NATIONAL_DAILY_COMPUTE_JOB_KEY,
       scheduledFor,
       async () => {
-        const result = (await this.arreteCadreService.updateArreteCadreStatut(
-          false,
-          {
-            scheduledFor,
-            sourceRevision: expectedSourceRevision,
-          },
-        )) as {
-          result?: { publicationId?: unknown; sourceRevision?: unknown };
-        };
-        const publicationId = result?.result?.publicationId;
-        const sourceRevision = result?.result?.sourceRevision;
+        let publicationId: unknown;
+        let sourceRevision: unknown;
+        if (reusablePublication) {
+          publicationId = reusablePublication.publicationId;
+          sourceRevision = reusablePublication.sourceRevision;
+        } else {
+          const result = (await this.arreteCadreService.updateArreteCadreStatut(
+            false,
+            {
+              scheduledFor,
+              sourceRevision: expectedSourceRevision,
+            },
+          )) as {
+            result?: { publicationId?: unknown; sourceRevision?: unknown };
+          };
+          publicationId = result?.result?.publicationId;
+          sourceRevision = result?.result?.sourceRevision;
+        }
         if (
           typeof publicationId !== 'string' ||
           (typeof sourceRevision !== 'string' &&
@@ -214,21 +276,39 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
   ): Promise<DailyComputationContext | null> {
     const expectedSourceRevision =
       await this.zonePublicationService.getSourceRevision();
+    if (isCurrentZoneRecomputeWorkerEnabled()) {
+      try {
+        await this.arreteCadreService.assertLegacyDailyComputationCompleted(
+          scheduledFor,
+        );
+      } catch {
+        await this.arreteCadreService.updateArreteCadreStatut(
+          false,
+          undefined,
+          scheduledFor,
+        );
+        return null;
+      }
+    }
     let completedSourceRevision: string | undefined;
     const currentResult = await this.registry.executeDailyRun(
       NATIONAL_DAILY_COMPUTE_JOB_KEY,
       scheduledFor,
       async () => {
-        const queueResult =
-          await this.arreteCadreService.updateArreteCadreStatut(
-            false,
-            undefined,
-            scheduledFor,
-          );
-        if (!['empty', 'processed'].includes(String(queueResult))) {
-          throw new Error(
-            `Current zone recompute queue is ${String(queueResult ?? 'unknown')} for ${scheduledFor}`,
-          );
+        if (!isCurrentZoneRecomputeWorkerEnabled()) {
+          const queueResult =
+            await this.arreteCadreService.updateArreteCadreStatut(
+              false,
+              undefined,
+              scheduledFor,
+            );
+          if (
+            !['empty', 'processed', 'superseded'].includes(String(queueResult))
+          ) {
+            throw new Error(
+              `Current zone recompute queue is ${String(queueResult ?? 'unknown')} for ${scheduledFor}`,
+            );
+          }
         }
         const completed =
           await this.arreteCadreService.assertLegacyDailyComputationCompleted(
@@ -271,6 +351,9 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     current: DailyComputationContext,
     now: Date,
   ): Promise<void> {
+    if (!isHistoricCatchupEnabled()) {
+      return;
+    }
     if (this.historicUpdateInFlight?.scheduledFor === current.scheduledFor) {
       return;
     }

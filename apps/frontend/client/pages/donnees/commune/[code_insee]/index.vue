@@ -20,6 +20,7 @@ const communeName = ref(null);
   <div class="fr-container">
     <AppBreadcrumb :links="links" />
     <h1>Commune - {{ route.params.code_insee }} <span v-if="communeName">({{ communeName }})</span></h1>
+    <DonneesStatisticDataStatus />
     <DonneesCommuneChart :codeInsee="route.params.code_insee" @commune="communeName = $event.nom" />
   </div>
 </template>

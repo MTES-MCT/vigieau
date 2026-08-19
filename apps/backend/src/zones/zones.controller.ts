@@ -13,6 +13,7 @@ import {
   ZoneDto,
   ZonePublicationDto,
   ZonePublicationQueryDto,
+  ZonesWithAvailabilityDto,
 } from './dto/zone.dto';
 
 @Controller('zones')
@@ -84,6 +85,26 @@ export class ZonesController {
   })
   async findAll(@Query() query: FindZonesQueryDto): Promise<any[]> {
     return this.zonesService.find(
+      query.lon,
+      query.lat,
+      query.commune,
+      query.profil,
+      query.zoneType,
+      query.publicationId,
+    );
+  }
+
+  @Get('v2')
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary:
+      "Récupérer les zones et la disponibilité certifiée des données par type d'eau",
+  })
+  @ApiResponse({ status: 200, type: ZonesWithAvailabilityDto })
+  async findAllV2(
+    @Query() query: FindZonesQueryDto,
+  ): Promise<ZonesWithAvailabilityDto> {
+    return this.zonesService.findWithAvailability(
       query.lon,
       query.lat,
       query.commune,

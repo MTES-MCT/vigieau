@@ -13,6 +13,7 @@ import { RegleauLogger } from '../logger/regleau.logger';
 import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
 import {
   isZonePublicationEnabled,
+  sourceRevisionColumn,
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
   ZONE_PUBLICATION_STABLE_PROMOTION_LOCK,
 } from './zone_publication.config';
@@ -245,7 +246,8 @@ export class ZonePublicationService {
 
   async getSourceRevision(): Promise<string> {
     const [state] = await this.dataSource.query(
-      `SELECT "revision" FROM "zone_publication_source_state" WHERE "id" = 1`,
+      `SELECT ${sourceRevisionColumn()} AS "revision"
+       FROM "zone_publication_source_state" WHERE "id" = 1`,
     );
     if (!state) {
       throw new Error('Zone publication source state is missing');
@@ -280,8 +282,8 @@ export class ZonePublicationService {
             state."candidatePublicationId"
           )
         WHERE state."id" = 1
-          AND source."revision" = $1
-          AND publication."sourceRevision" = source."revision"
+          AND ${sourceRevisionColumn('source')} = $1
+          AND publication."sourceRevision" = ${sourceRevisionColumn('source')}
           AND publication."materializationVersion" = $2
           AND (
             publication."status" = 'validated'
@@ -350,7 +352,7 @@ export class ZonePublicationService {
         JOIN "zone_publication_source_state" source ON source."id" = 1
         WHERE state."id" = 1
           AND publication."status" = 'active'
-          AND publication."sourceRevision" = source."revision"
+          AND publication."sourceRevision" = ${sourceRevisionColumn('source')}
           AND publication."materializationVersion" = $2
           AND (publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris')::date = $1::date
           AND publication."legacyPromotedAt" IS NOT NULL
@@ -529,7 +531,7 @@ export class ZonePublicationService {
     const [status] = await this.dataSource.query(
       `
         SELECT
-          source."revision" AS "sourceRevision",
+          ${sourceRevisionColumn('source')} AS "sourceRevision",
           active."sourceRevision" AS "activeRevision",
           active."materializationVersion" AS "activeMaterializationVersion",
           candidate."sourceRevision" AS "candidateRevision",
@@ -541,7 +543,7 @@ export class ZonePublicationService {
           EXISTS (
             SELECT 1
             FROM "zone_publication" in_progress
-            WHERE in_progress."sourceRevision" = source."revision"
+            WHERE in_progress."sourceRevision" = ${sourceRevisionColumn('source')}
               AND in_progress."materializationVersion" = $2
               AND (
                 (
@@ -570,7 +572,7 @@ export class ZonePublicationService {
                           FROM "external_publication_run" latest_daily
                           WHERE latest_daily."jobKey" = 'compute:national-daily'
                             AND latest_daily."metadata" @> jsonb_build_object(
-                              'sourceRevision', source."revision"::text,
+                              'sourceRevision', ${sourceRevisionColumn('source')}::text,
                               'materializationVersion', $2::integer
                             )
                         )
@@ -613,13 +615,13 @@ export class ZonePublicationService {
               ON historic_run."scheduledFor" = daily_run."scheduledFor"
              AND historic_run."jobKey" = 'compute:historic-catchup'
              AND historic_run."metadata" @> jsonb_build_object(
-               'sourceRevision', source."revision"::text,
+               'sourceRevision', ${sourceRevisionColumn('source')}::text,
                'materializationVersion', $2::integer
              )
             CROSS JOIN "statistic_publication_state" statistic_state
             WHERE daily_run."jobKey" = 'compute:national-daily'
               AND daily_run."metadata" @> jsonb_build_object(
-                'sourceRevision', source."revision"::text,
+                'sourceRevision', ${sourceRevisionColumn('source')}::text,
                 'materializationVersion', $2::integer
               )
             ORDER BY daily_run."scheduledFor" DESC
@@ -636,7 +638,7 @@ export class ZonePublicationService {
             COUNT(*)::integer AS "failureCount",
             MAX(COALESCE(failed."failedAt", failed."createdAt")) AS "lastFailureAt"
           FROM "zone_publication" failed
-          WHERE failed."sourceRevision" = source."revision"
+          WHERE failed."sourceRevision" = ${sourceRevisionColumn('source')}
             AND failed."materializationVersion" = $2
             AND failed."status" = 'failed'
         ) failures ON true
@@ -713,7 +715,7 @@ export class ZonePublicationService {
         JOIN "zone_publication_state" publication_state
           ON publication_state."id" = 1
         JOIN "zone_publication" publication
-          ON publication."sourceRevision" = source."revision"
+          ON publication."sourceRevision" = ${sourceRevisionColumn('source')}
          AND publication."materializationVersion" = $1
         JOIN "external_publication_run" daily_run
           ON daily_run."jobKey" = 'compute:national-daily'
@@ -729,7 +731,7 @@ export class ZonePublicationService {
            FROM "external_publication_run" latest_daily
            WHERE latest_daily."jobKey" = 'compute:national-daily'
              AND latest_daily."metadata" @> jsonb_build_object(
-               'sourceRevision', source."revision"::text,
+               'sourceRevision', ${sourceRevisionColumn('source')}::text,
                'materializationVersion', $1::integer
              )
          )
@@ -802,7 +804,8 @@ export class ZonePublicationService {
   async markCandidate(publicationId: string): Promise<boolean> {
     return this.dataSource.transaction('SERIALIZABLE', async (manager) => {
       const [sourceState] = await manager.query(
-        `SELECT "revision" FROM "zone_publication_source_state" WHERE "id" = 1 FOR UPDATE`,
+        `SELECT ${sourceRevisionColumn()} AS "revision"
+         FROM "zone_publication_source_state" WHERE "id" = 1 FOR UPDATE`,
       );
       const [state] = await manager.query(`
         SELECT state.*,
@@ -1091,7 +1094,8 @@ export class ZonePublicationService {
 
     return this.dataSource.transaction('SERIALIZABLE', async (manager) => {
       const [sourceState] = await manager.query(
-        `SELECT "revision" FROM "zone_publication_source_state" WHERE "id" = 1 FOR UPDATE`,
+        `SELECT ${sourceRevisionColumn()} AS "revision"
+         FROM "zone_publication_source_state" WHERE "id" = 1 FOR UPDATE`,
       );
       const [state] = await manager.query(
         `SELECT * FROM "zone_publication_state" WHERE "id" = 1 FOR UPDATE`,
@@ -1824,7 +1828,7 @@ export class ZonePublicationService {
             )
             AND NOT (
               publication."status" = 'failed'
-              AND publication."sourceRevision" = source."revision"
+              AND publication."sourceRevision" = ${sourceRevisionColumn('source')}
               AND publication."materializationVersion" = $3
               AND EXISTS (
                 SELECT 1
@@ -1835,7 +1839,7 @@ export class ZonePublicationService {
                     publication."sourceComputedAt" AT TIME ZONE 'Europe/Paris'
                   )::date
                   AND daily_run."metadata" @> jsonb_build_object(
-                    'sourceRevision', source."revision"::text,
+                    'sourceRevision', ${sourceRevisionColumn('source')}::text,
                     'materializationVersion', $3::integer
                   )
                   AND daily_run."metadata" ->> 'publicationId' =
@@ -1845,7 +1849,7 @@ export class ZonePublicationService {
                     FROM "external_publication_run" latest_daily
                     WHERE latest_daily."jobKey" = 'compute:national-daily'
                       AND latest_daily."metadata" @> jsonb_build_object(
-                        'sourceRevision', source."revision"::text,
+                        'sourceRevision', ${sourceRevisionColumn('source')}::text,
                         'materializationVersion', $3::integer
                       )
                   )
@@ -1904,7 +1908,7 @@ export class ZonePublicationService {
           AND publication."id" IS DISTINCT FROM state."activePublicationId"
           AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
           AND NOT (
-            publication."sourceRevision" = source."revision"
+            publication."sourceRevision" = ${sourceRevisionColumn('source')}
             AND publication."materializationVersion" = $2
             AND EXISTS (
               SELECT 1
@@ -1922,7 +1926,7 @@ export class ZonePublicationService {
                   FROM "external_publication_run" latest_daily
                   WHERE latest_daily."jobKey" = 'compute:national-daily'
                     AND latest_daily."metadata" @> jsonb_build_object(
-                      'sourceRevision', source."revision"::text,
+                      'sourceRevision', ${sourceRevisionColumn('source')}::text,
                       'materializationVersion', $2::integer
                     )
                 )
@@ -2296,7 +2300,8 @@ export class ZonePublicationService {
     expectedRevision: string,
   ): Promise<void> {
     const [state] = await manager.query(
-      `SELECT "revision" FROM "zone_publication_source_state" WHERE "id" = 1`,
+      `SELECT ${sourceRevisionColumn()} AS "revision"
+       FROM "zone_publication_source_state" WHERE "id" = 1`,
     );
     if (!state || String(state.revision) !== String(expectedRevision)) {
       throw new Error(

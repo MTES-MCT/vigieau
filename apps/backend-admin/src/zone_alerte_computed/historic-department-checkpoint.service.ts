@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import moment, { Moment } from 'moment';
 import { DataSource } from 'typeorm';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
+import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
 
 export const HISTORIC_DEPARTMENT_CHECKPOINT_ENV =
   'HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED';
@@ -112,7 +113,7 @@ export class HistoricDepartmentCheckpointService {
           WHERE config."id" = 1
             AND config."historicComputeEpoch" = $1::bigint
             AND source_state."id" = 1
-            AND source_state."revision"::text = $2::text
+            AND ${sourceRevisionColumn('source_state')}::text = $2::text
         ), stale_checkpoints AS (
           SELECT checkpoint.ctid
           FROM "historic_department_checkpoint" checkpoint
@@ -176,7 +177,7 @@ export class HistoricDepartmentCheckpointService {
             WHERE config."id" = 1
               AND config."historicComputeEpoch" = $2::bigint
               AND source_state."id" = 1
-              AND source_state."revision"::text = $3::text
+              AND ${sourceRevisionColumn('source_state')}::text = $3::text
           ) AS "contextMatches",
           EXISTS (
             SELECT 1
@@ -566,7 +567,7 @@ export class HistoricDepartmentCheckpointService {
       `
         SELECT
           config."historicComputeEpoch"::text AS "historicComputeEpoch",
-          source_state."revision"::text AS "sourceRevision"
+          ${sourceRevisionColumn('source_state')}::text AS "sourceRevision"
         FROM "config" config
         CROSS JOIN "zone_publication_source_state" source_state
         WHERE config."id" = 1
@@ -637,7 +638,7 @@ export class HistoricDepartmentCheckpointService {
         WHERE config."id" = 1
           AND config."historicComputeEpoch" = $3::bigint
           AND source_state."id" = 1
-          AND source_state."revision"::text = $4::text
+          AND ${sourceRevisionColumn('source_state')}::text = $4::text
         ON CONFLICT ("computedFor", "departementId", "historicComputeEpoch")
         DO UPDATE SET
           "sourceRevision" = EXCLUDED."sourceRevision",
