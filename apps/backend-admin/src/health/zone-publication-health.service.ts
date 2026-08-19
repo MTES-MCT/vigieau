@@ -24,6 +24,11 @@ export type PublicZonePublicationHealthStatus =
   | 'stale'
   | 'unavailable';
 
+export type PublicZonePublicationHistoricStatus =
+  | 'complete'
+  | 'incomplete'
+  | 'unknown';
+
 export interface PublicZonePublicationHealthChecks {
   enabled: boolean;
   automaticPublishing: boolean;
@@ -38,12 +43,14 @@ export interface PublicZonePublicationHealthChecks {
   historicClean: boolean;
   historicCursors: boolean;
   certifiedRun: boolean;
+  historicRun: boolean;
   snapshotsComplete: boolean;
   recentProgress: boolean;
 }
 
 export interface PublicZonePublicationHealth {
   status: PublicZonePublicationHealthStatus;
+  historicStatus: PublicZonePublicationHistoricStatus;
   serving: boolean;
   businessDate: string;
   requiredHistoricThrough: string;
@@ -69,6 +76,7 @@ export class ZonePublicationHealthService {
     const requiredHistoricThrough = shiftCivilDate(businessDate, -1);
     const unavailable = (): PublicZonePublicationHealth => ({
       status: 'unavailable',
+      historicStatus: 'unknown',
       serving: false,
       businessDate,
       requiredHistoricThrough,
@@ -148,20 +156,6 @@ export class ZonePublicationHealthService {
               EXISTS (
                 SELECT 1
                 FROM "external_publication_run" daily_run
-                JOIN "external_publication_run" historic_run
-                  ON historic_run."scheduledFor" = daily_run."scheduledFor"
-                 AND historic_run."jobKey" = 'compute:historic-catchup'
-                 AND historic_run."status" = 'succeeded'
-                 AND historic_run."metadata" @> jsonb_build_object(
-                   'sourceRevision', active."sourceRevision"::text,
-                   'materializationVersion', active."materializationVersion"
-                 )
-                 AND historic_run."metadata" @> jsonb_build_object(
-                   'historicMapCursor', config."computeMapDate"::text,
-                   'historicStatsCursor', config."computeStatsDate"::text,
-                   'historicMapGeneration', config."computeMapGeneration"::text,
-                   'historicStatsGeneration', config."computeStatsGeneration"::text
-                 )
                 WHERE daily_run."jobKey" = 'compute:national-daily'
                   AND daily_run."status" = 'succeeded'
                   AND daily_run."scheduledFor" = $4::date
@@ -198,7 +192,24 @@ export class ZonePublicationHealthService {
                         )::date = daily_run."scheduledFor"
                     )
                   )
-              ) AS "certifiedRun"
+              ) AS "certifiedCurrentRun",
+              EXISTS (
+                SELECT 1
+                FROM "external_publication_run" historic_run
+                WHERE historic_run."jobKey" = 'compute:historic-catchup'
+                  AND historic_run."status" = 'succeeded'
+                  AND historic_run."scheduledFor" = $4::date
+                  AND historic_run."metadata" @> jsonb_build_object(
+                    'sourceRevision', active."sourceRevision"::text,
+                    'materializationVersion', active."materializationVersion"
+                  )
+                  AND historic_run."metadata" @> jsonb_build_object(
+                    'historicMapCursor', config."computeMapDate"::text,
+                    'historicStatsCursor', config."computeStatsDate"::text,
+                    'historicMapGeneration', config."computeMapGeneration"::text,
+                    'historicStatsGeneration', config."computeStatsGeneration"::text
+                  )
+              ) AS "certifiedHistoricRun"
             FROM "zone_publication_source_state" source_state
             INNER JOIN "zone_publication_state" publication_state
               ON publication_state."id" = 1
@@ -333,9 +344,18 @@ export class ZonePublicationHealthService {
         state.computeMapDate >= requiredHistoricThrough &&
         typeof state.computeStatsDate === 'string' &&
         state.computeStatsDate >= requiredHistoricThrough;
-      const certifiedRun = state.certifiedRun === true;
+      const certifiedRun = state.certifiedCurrentRun === true;
+      const historicRun = state.certifiedHistoricRun === true;
       const snapshotsComplete =
         Number(state.incompleteSnapshotCount || 0) === 0;
+      const historicComplete =
+        historicStatistics &&
+        historicClean &&
+        historicCursors &&
+        historicRun &&
+        snapshotsComplete;
+      const historicStatus: PublicZonePublicationHistoricStatus =
+        historicComplete ? 'complete' : 'incomplete';
       const candidateRequestedAt = this.toDate(state.candidateRequestedAt);
       const candidateHeartbeatAt =
         candidateRequestedAt &&
@@ -376,6 +396,7 @@ export class ZonePublicationHealthService {
         historicClean,
         historicCursors,
         certifiedRun,
+        historicRun,
         snapshotsComplete,
         recentProgress,
       };
@@ -388,14 +409,11 @@ export class ZonePublicationHealthService {
         legacyPromotion &&
         currentStatistics &&
         currentSnapshot &&
-        historicStatistics &&
-        historicClean &&
-        historicCursors &&
-        certifiedRun &&
-        snapshotsComplete;
+        certifiedRun;
       if (healthy) {
         return {
           status: 'healthy',
+          historicStatus,
           serving: true,
           businessDate,
           requiredHistoricThrough,
@@ -411,6 +429,7 @@ export class ZonePublicationHealthService {
         recentProgress;
       return {
         status: updating ? 'updating' : 'stale',
+        historicStatus,
         serving: activeServing,
         businessDate,
         requiredHistoricThrough,

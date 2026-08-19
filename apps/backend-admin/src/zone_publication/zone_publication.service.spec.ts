@@ -565,7 +565,7 @@ describe('ZonePublicationService', () => {
     expect(sql).toContain('SELECT MAX(latest_daily."scheduledFor")');
   });
 
-  it('does not rebuild while the latest historic barrier is pending', async () => {
+  it('does not rebuild while the latest daily computation is running', async () => {
     const dataSource = {
       query: jest.fn().mockResolvedValue([
         {
@@ -586,14 +586,15 @@ describe('ZonePublicationService', () => {
     await expect(service.isRecomputeRequired()).resolves.toBe(false);
 
     const sql = dataSource.query.mock.calls[0][0] as string;
-    expect(sql).toContain(`historic_run."status" IS DISTINCT FROM 'succeeded'`);
-    expect(sql).toContain('statistic_state."historicDirtyFrom" IS NOT NULL');
+    expect(sql).toContain(`daily_run."status" = 'running'`);
+    expect(sql).not.toContain('compute:historic-catchup');
+    expect(sql).not.toContain('statistic_state."historicDirtyFrom"');
     expect(sql).toContain('\'sourceRevision\', source."revision"::text');
     expect(sql).toContain("'materializationVersion', $2::integer");
     expect(sql).toContain('ORDER BY daily_run."scheduledFor" DESC');
   });
 
-  it('ignores an older failed barrier when the latest daily run is certified', async () => {
+  it('allows a rebuild after the latest daily run is certified', async () => {
     const dataSource = {
       query: jest.fn().mockResolvedValue([
         {
@@ -724,7 +725,7 @@ describe('ZonePublicationService', () => {
     ).toBe(false);
   });
 
-  it('keeps a validated publication private until the exact historic cursor epoch is certified', async () => {
+  it('keeps a validated publication private until current statistics are certified', async () => {
     const manager = {
       query: jest.fn(async (sql: string) => {
         if (sql.includes('FROM "zone_publication_source_state"')) {
@@ -760,7 +761,7 @@ describe('ZonePublicationService', () => {
     } as any);
 
     await expect(service.markCandidate('validated')).rejects.toThrow(
-      'waiting for certified current statistics or historic catch-up',
+      'waiting for certified current statistics',
     );
     expect(
       manager.query.mock.calls.some(([sql]) =>
@@ -772,23 +773,11 @@ describe('ZonePublicationService', () => {
       sql.includes('certified_publication'),
     )?.[0];
     expect(certificationSql).toContain('snapshot."status" = \'ready\'');
+    expect(certificationSql).toContain('snapshot."processedCommuneCount" =');
     expect(certificationSql).toContain('daily_run."status" = \'succeeded\'');
-    expect(certificationSql).toContain('historic_run."status" = \'succeeded\'');
-    expect(certificationSql).toContain(
-      'statistic_state."historicDirtyFrom" IS NULL',
-    );
-    expect(certificationSql).toContain(
-      `'historicMapCursor', historic_cursor."computeMapDate"::text`,
-    );
-    expect(certificationSql).toContain(
-      `'historicStatsCursor', historic_cursor."computeStatsDate"::text`,
-    );
-    expect(certificationSql).toContain(
-      `'historicMapGeneration', historic_cursor."computeMapGeneration"::text`,
-    );
-    expect(certificationSql).toContain(
-      `'historicStatsGeneration', historic_cursor."computeStatsGeneration"::text`,
-    );
+    expect(certificationSql).not.toContain('compute:historic-catchup');
+    expect(certificationSql).not.toContain('historic_cursor');
+    expect(certificationSql).not.toContain('historicDirtyFrom');
   });
 
   it('marks a validated publication candidate atomically after certification', async () => {
@@ -886,6 +875,7 @@ describe('ZonePublicationService', () => {
     expect(sql).toContain('failed_publication."sourceComputedAt"');
     expect(sql).toContain("AT TIME ZONE 'Europe/Paris'");
     expect(sql).toContain(')::date = daily_run."scheduledFor"');
+    expect(sql).not.toContain('compute:historic-catchup');
   });
 
   it('keeps the active publication when not every live instance is ready', async () => {
@@ -1221,8 +1211,9 @@ describe('ZonePublicationService', () => {
     expect(readySnapshotSql).toContain(
       'snapshot."sourceRevision" = publication."sourceRevision"',
     );
+    expect(readySnapshotSql).toContain('snapshot."processedCommuneCount" =');
     expect(readySnapshotSql).toContain("'compute:national-daily'");
-    expect(readySnapshotSql).toContain("'compute:historic-catchup'");
+    expect(readySnapshotSql).not.toContain("'compute:historic-catchup'");
     expect(readySnapshotSql).toContain(
       `daily_run."metadata" ->> 'publicationId' =`,
     );
@@ -1243,39 +1234,13 @@ describe('ZonePublicationService', () => {
     expect(readySnapshotSql).toContain(
       `'materializationVersion', publication."materializationVersion"`,
     );
-    expect(readySnapshotSql).toContain(
-      `historic_run."scheduledFor" = daily_run."scheduledFor"`,
-    );
-    expect(readySnapshotSql).toContain(
-      `'historicMapCursor', historic_cursor."computeMapDate"::text`,
-    );
-    expect(readySnapshotSql).toContain(
-      `'historicStatsCursor', historic_cursor."computeStatsDate"::text`,
-    );
-    expect(readySnapshotSql).toContain(
-      `'historicMapGeneration', historic_cursor."computeMapGeneration"::text`,
-    );
-    expect(readySnapshotSql).toContain(
-      `'historicStatsGeneration', historic_cursor."computeStatsGeneration"::text`,
-    );
     expect(readySnapshotSql).toContain(`running_daily."status" = 'running'`);
     expect(readySnapshotSql).not.toContain(
       `daily_run."scheduledFor" =
                         (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date`,
     );
     expect(readySnapshotSql).toContain(
-      'statistic_state."historicDirtyFrom" IS NULL',
-    );
-    expect(readySnapshotSql).toContain(
-      'statistic_state."historicPublishedThrough" >=',
-    );
-    expect(readySnapshotSql).toContain('historic_cursor."computeMapDate" >=');
-    expect(readySnapshotSql).toContain('historic_cursor."computeStatsDate" >=');
-    expect(readySnapshotSql).toContain(
-      'statistic_state."currentPublishedDate" IS NULL',
-    );
-    expect(readySnapshotSql).toContain(
-      'FOR UPDATE OF snapshot, statistic_state, historic_cursor',
+      'FOR UPDATE OF snapshot, statistic_state',
     );
     const runningDailyGuardStart = readySnapshotSql.indexOf(
       'FROM "external_publication_run" running_daily',
@@ -1296,17 +1261,17 @@ describe('ZonePublicationService', () => {
     );
     expect(runningDailyGuard).not.toContain('sourceRevision');
     expect(runningDailyGuard).not.toContain('materializationVersion');
-    expect(executed[statisticPublicationIndex]).toContain(
-      '"historicDirtyFrom" IS NULL',
+    expect(executed[statisticPublicationIndex]).not.toContain(
+      '"historicDirtyFrom"',
+    );
+    expect(executed[statisticPublicationIndex]).not.toContain(
+      '"historicPublishedThrough"',
     );
     expect(executed[statisticPublicationIndex]).toContain(
       '"revision" = "revision" + 1',
     );
     expect(executed[statisticPublicationIndex]).toContain(
       '"currentPublishedDate" = $1::date',
-    );
-    expect(executed[statisticPublicationIndex]).toContain(
-      'WHEN "currentPublishedDate" IS NULL THEN $1::date - 1',
     );
   });
 
@@ -1358,7 +1323,7 @@ describe('ZonePublicationService', () => {
     await expect(
       service.activateWhenReady({ minimumReadyInstances: 2 }),
     ).rejects.toThrow(
-      'Publication candidate is waiting for certified current statistics or historic catch-up',
+      'Publication candidate is waiting for certified current statistics',
     );
 
     expect(

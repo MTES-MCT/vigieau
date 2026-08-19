@@ -601,24 +601,8 @@ export class ZonePublicationService {
               )
           ) AS "recentInProgress"
           , COALESCE((
-            SELECT
-              daily_run."status" = 'running'
-              OR (
-                daily_run."status" = 'succeeded'
-                AND (
-                  historic_run."status" IS DISTINCT FROM 'succeeded'
-                  OR statistic_state."historicDirtyFrom" IS NOT NULL
-                )
-              )
+            SELECT daily_run."status" = 'running'
             FROM "external_publication_run" daily_run
-            LEFT JOIN "external_publication_run" historic_run
-              ON historic_run."scheduledFor" = daily_run."scheduledFor"
-             AND historic_run."jobKey" = 'compute:historic-catchup'
-             AND historic_run."metadata" @> jsonb_build_object(
-               'sourceRevision', ${sourceRevisionColumn('source')}::text,
-               'materializationVersion', $2::integer
-             )
-            CROSS JOIN "statistic_publication_state" statistic_state
             WHERE daily_run."jobKey" = 'compute:national-daily'
               AND daily_run."metadata" @> jsonb_build_object(
                 'sourceRevision', ${sourceRevisionColumn('source')}::text,
@@ -734,14 +718,6 @@ export class ZonePublicationService {
                'sourceRevision', ${sourceRevisionColumn('source')}::text,
                'materializationVersion', $1::integer
              )
-         )
-        JOIN "external_publication_run" historic_run
-          ON historic_run."scheduledFor" = daily_run."scheduledFor"
-         AND historic_run."jobKey" = 'compute:historic-catchup'
-         AND historic_run."status" = 'succeeded'
-         AND historic_run."metadata" @> jsonb_build_object(
-           'sourceRevision', publication."sourceRevision"::text,
-           'materializationVersion', publication."materializationVersion"
          )
         WHERE source."id" = 1
           AND (
@@ -881,10 +857,8 @@ export class ZonePublicationService {
            AND snapshot."scope" = 'national'
            AND snapshot."status" = 'ready'
            AND snapshot."sourceRevision" = certified_publication."sourceRevision"
-          JOIN "statistic_publication_state" statistic_state
-            ON statistic_state."id" = 1
-          JOIN "config" historic_cursor
-            ON historic_cursor."id" = 1
+           AND snapshot."processedCommuneCount" =
+               snapshot."expectedCommuneCount"
           JOIN "external_publication_run" daily_run
             ON daily_run."jobKey" = 'compute:national-daily'
            AND daily_run."status" = 'succeeded'
@@ -902,20 +876,6 @@ export class ZonePublicationService {
                  'sourceRevision', certified_publication."sourceRevision"::text,
                  'materializationVersion', certified_publication."materializationVersion"
                )
-           )
-          JOIN "external_publication_run" historic_run
-            ON historic_run."scheduledFor" = daily_run."scheduledFor"
-           AND historic_run."jobKey" = 'compute:historic-catchup'
-           AND historic_run."status" = 'succeeded'
-           AND historic_run."metadata" @> jsonb_build_object(
-             'sourceRevision', certified_publication."sourceRevision"::text,
-             'materializationVersion', certified_publication."materializationVersion"
-           )
-           AND historic_run."metadata" @> jsonb_build_object(
-             'historicMapCursor', historic_cursor."computeMapDate"::text,
-             'historicStatsCursor', historic_cursor."computeStatsDate"::text,
-             'historicMapGeneration', historic_cursor."computeMapGeneration"::text,
-             'historicStatsGeneration', historic_cursor."computeStatsGeneration"::text
            )
           WHERE certified_publication."id" = $1
             AND (
@@ -937,26 +897,13 @@ export class ZonePublicationService {
                   )::date = daily_run."scheduledFor"
               )
             )
-            AND statistic_state."historicDirtyFrom" IS NULL
-            AND (
-              statistic_state."currentPublishedDate" IS NULL
-              OR (
-                statistic_state."historicPublishedThrough" >=
-                  (certified_publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
-                AND historic_cursor."computeMapDate" >=
-                  (certified_publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
-                AND historic_cursor."computeStatsDate" >=
-                  (certified_publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
-              )
-            )
-          FOR UPDATE OF snapshot, statistic_state, historic_cursor,
-            daily_run, historic_run
+          FOR UPDATE OF snapshot, daily_run
         `,
         [publicationId],
       );
       if (certifiedStatistics.length !== 1) {
         throw new Error(
-          `Publication ${publicationId} is waiting for certified current statistics or historic catch-up`,
+          `Publication ${publicationId} is waiting for certified current statistics`,
         );
       }
 
@@ -1335,21 +1282,9 @@ export class ZonePublicationService {
               AND snapshot."sourceRevision" = publication."sourceRevision"
             JOIN "statistic_publication_state" statistic_state
               ON statistic_state."id" = 1
-            JOIN "config" historic_cursor
-              ON historic_cursor."id" = 1
             WHERE publication."id" = $1
-              AND statistic_state."historicDirtyFrom" IS NULL
-              AND (
-                statistic_state."currentPublishedDate" IS NULL
-                OR (
-                  statistic_state."historicPublishedThrough" >=
-                    (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
-                  AND historic_cursor."computeMapDate" >=
-                    (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
-                  AND historic_cursor."computeStatsDate" >=
-                    (publication."sourceComputedAt" AT TIME ZONE 'UTC')::date - 1
-                )
-              )
+              AND snapshot."processedCommuneCount" =
+                  snapshot."expectedCommuneCount"
               AND NOT EXISTS (
                 SELECT 1
                 FROM "external_publication_run" running_daily
@@ -1364,20 +1299,6 @@ export class ZonePublicationService {
               AND EXISTS (
                 SELECT 1
                 FROM "external_publication_run" daily_run
-                JOIN "external_publication_run" historic_run
-                  ON historic_run."scheduledFor" = daily_run."scheduledFor"
-                  AND historic_run."jobKey" = 'compute:historic-catchup'
-                  AND historic_run."status" = 'succeeded'
-                  AND historic_run."metadata" @> jsonb_build_object(
-                    'sourceRevision', publication."sourceRevision"::text,
-                    'materializationVersion', publication."materializationVersion"
-                  )
-                  AND historic_run."metadata" @> jsonb_build_object(
-                    'historicMapCursor', historic_cursor."computeMapDate"::text,
-                    'historicStatsCursor', historic_cursor."computeStatsDate"::text,
-                    'historicMapGeneration', historic_cursor."computeMapGeneration"::text,
-                    'historicStatsGeneration', historic_cursor."computeStatsGeneration"::text
-                  )
                 WHERE daily_run."jobKey" = 'compute:national-daily'
                   AND daily_run."status" = 'succeeded'
                   AND daily_run."scheduledFor" =
@@ -1415,13 +1336,13 @@ export class ZonePublicationService {
                     )
                   )
               )
-            FOR UPDATE OF snapshot, statistic_state, historic_cursor
+            FOR UPDATE OF snapshot, statistic_state
           `,
           [publication.id],
         );
         if (readySnapshots.length !== 1) {
           throw new Error(
-            `Publication ${publication.id} is waiting for certified current statistics or historic catch-up`,
+            `Publication ${publication.id} is waiting for certified current statistics`,
           );
         }
         const snapshotDate = readySnapshots[0].snapshotDate;
@@ -1475,13 +1396,8 @@ export class ZonePublicationService {
               UPDATE "statistic_publication_state"
               SET "revision" = "revision" + 1,
                   "currentPublishedDate" = $1::date,
-                  "historicPublishedThrough" = CASE
-                    WHEN "currentPublishedDate" IS NULL THEN $1::date - 1
-                    ELSE "historicPublishedThrough"
-                  END,
                   "updatedAt" = now()
               WHERE "id" = 1
-                AND "historicDirtyFrom" IS NULL
               RETURNING "revision"
             `,
             [snapshotDate],

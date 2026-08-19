@@ -319,10 +319,17 @@ describe('ArreteCadreScheduler', () => {
     },
   );
 
-  it('keeps daily enabled while historic catch-up is paused', async () => {
+  it('promotes the current publication while historic catch-up is paused', async () => {
     process.env[HISTORIC_CATCHUP_ENABLED_ENV] = 'false';
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
     const harness = createScheduler();
+    harness.arreteCadreService.updateArreteCadreStatut.mockResolvedValue({
+      result: {
+        publicationId: 'publication-1',
+        sourceRevision: '42',
+      },
+    });
     const now = new Date('2026-08-17T14:00:00Z');
 
     await harness.service.updateIfDue(now);
@@ -340,6 +347,13 @@ describe('ArreteCadreScheduler', () => {
     expect(
       harness.arreteCadreService.catchUpHistoricComputations,
     ).not.toHaveBeenCalled();
+    expect(
+      harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledWith({
+      scheduledFor: '2026-08-17',
+      sourceRevision: '42',
+      preferredPublicationId: 'publication-1',
+    });
   });
 
   it('lets the clock enqueue once and records completion only after the dedicated worker finishes', async () => {
@@ -870,7 +884,7 @@ describe('ArreteCadreScheduler', () => {
     });
   });
 
-  it('does not expose the validated publication while historic catch-up is busy', async () => {
+  it('promotes the validated publication before a busy historic catch-up', async () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
     const harness = createScheduler();
     harness.registry.executeDailyRun
@@ -881,6 +895,41 @@ describe('ArreteCadreScheduler', () => {
 
     expect(
       harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledWith({
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+      preferredPublicationId: 'publication-1',
+    });
+    expect(
+      harness.zonePublicationService.promoteCertifiedPublicationIfAvailable.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.registry.executeDailyRun.mock.invocationCallOrder[1],
+    );
+  });
+
+  it('does not start historic catch-up when current candidacy is rejected', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createScheduler();
+    harness.arreteCadreService.updateArreteCadreStatut.mockResolvedValue({
+      result: {
+        publicationId: 'publication-1',
+        sourceRevision: '42',
+      },
+    });
+    harness.zonePublicationService.promoteCertifiedPublicationIfAvailable.mockResolvedValue(
+      false,
+    );
+
+    await expect(
+      harness.service.updateIfDue(new Date('2026-08-01T08:00:00Z')),
+    ).rejects.toThrow(
+      'Zone publication publication-1 was superseded before candidacy',
+    );
+
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(1);
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
     ).not.toHaveBeenCalled();
   });
 
@@ -1000,7 +1049,11 @@ describe('ArreteCadreScheduler', () => {
     ).rejects.toThrow('Zone source revision changed during computation');
     expect(
       harness.zonePublicationService.promoteCertifiedPublicationIfAvailable,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith({
+      scheduledFor: '2026-08-01',
+      sourceRevision: '42',
+      preferredPublicationId: 'publication-1',
+    });
   });
 
   it('does not schedule startup catch-up during a maintenance freeze', () => {

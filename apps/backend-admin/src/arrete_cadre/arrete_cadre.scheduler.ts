@@ -113,6 +113,22 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     if (!current) {
       return;
     }
+    if (current.publicationMode === 'versioned') {
+      await this.assertSourceRevision(current.sourceRevision);
+      const marked =
+        await this.zonePublicationService.promoteCertifiedPublicationIfAvailable(
+          {
+            scheduledFor: current.scheduledFor,
+            sourceRevision: current.sourceRevision,
+            preferredPublicationId: current.publicationId,
+          },
+        );
+      if (!marked) {
+        throw new Error(
+          `Zone publication ${current.publicationId} was superseded before candidacy`,
+        );
+      }
+    }
     await this.updateHistoricIfDue(current, now);
   }
 
@@ -456,7 +472,7 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
               : {}),
           };
 
-    const historicResult = await this.registry.executeDailyRun(
+    await this.registry.executeDailyRun(
       NATIONAL_HISTORIC_CATCHUP_JOB_KEY,
       current.scheduledFor,
       async () => {
@@ -492,25 +508,6 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
       now,
       { identity: publicationIdentity },
     );
-    if (
-      current.publicationMode === 'versioned' &&
-      ['succeeded', 'already_succeeded'].includes(historicResult)
-    ) {
-      await this.assertSourceRevision(current.sourceRevision);
-      const marked =
-        await this.zonePublicationService.promoteCertifiedPublicationIfAvailable(
-          {
-            scheduledFor: current.scheduledFor,
-            sourceRevision: current.sourceRevision,
-            preferredPublicationId: current.publicationId,
-          },
-        );
-      if (!marked) {
-        throw new Error(
-          `Zone publication ${current.publicationId} was superseded before candidacy`,
-        );
-      }
-    }
   }
 
   private async getLegacyStatisticBoundary(
