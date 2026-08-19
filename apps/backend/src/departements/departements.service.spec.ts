@@ -1,5 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { DepartementsService } from './departements.service';
+import {
+  DepartementsService,
+  getCurrentDepartementDateKeys,
+} from './departements.service';
 import { Repository } from 'typeorm';
 import { Departement } from '@shared/entities/departement.entity';
 import { Statistic } from '@shared/entities/statistic.entity';
@@ -287,6 +290,190 @@ describe('DepartementsService', () => {
     });
   });
 
+  describe('situationByDepartementWithAvailability', () => {
+    const today = new Date().toISOString().split('T')[0];
+
+    const setCurrentSituation = (department: Record<string, unknown>) => {
+      service['situationDepartements'] = [
+        { date: today, departementSituation: [department] },
+      ];
+    };
+
+    it('marks AEP unavailable even when another water type raises the global level', async () => {
+      setCurrentSituation({
+        code: '49',
+        nom: 'Maine-et-Loire',
+        niveauGraviteMax: 'crise',
+        niveauGraviteSupMax: 'crise',
+        niveauGraviteAepMax: null,
+      });
+      const query = jest.fn().mockResolvedValue([
+        {
+          sourcePublicRevision: '42',
+          departmentCode: '49',
+          zoneType: 'AEP',
+          status: 'unavailable',
+          asOf: '2026-08-19T10:00:00.000Z',
+          availabilityPublicRevision: '42',
+          officialUrl: null,
+        },
+      ]);
+      (service as any).zonePublicationRepository = { query };
+
+      const result =
+        await service.situationByDepartementWithAvailability(today);
+
+      expect(result[0]).toEqual(
+        expect.objectContaining({
+          niveauGraviteMax: 'crise',
+          niveauGraviteAepMax: null,
+          availability: {
+            AEP: expect.objectContaining({
+              status: 'unavailable',
+              sourceRevision: '42',
+              officialUrl: expect.stringContaining('maine-et-loire.gouv.fr'),
+            }),
+          },
+        }),
+      );
+    });
+
+    it('only exposes an empty AEP situation when it is explicitly confirmed', async () => {
+      setCurrentSituation({
+        code: '79',
+        nom: 'Deux-Sevres',
+        niveauGraviteMax: null,
+        niveauGraviteAepMax: null,
+      });
+      (service as any).zonePublicationRepository = {
+        query: jest.fn().mockResolvedValue([
+          {
+            sourcePublicRevision: '43',
+            departmentCode: '79',
+            zoneType: 'AEP',
+            status: 'confirmed_none',
+            asOf: '2026-08-19T11:00:00.000Z',
+            availabilityPublicRevision: '43',
+            officialUrl: null,
+          },
+        ]),
+      };
+
+      const result =
+        await service.situationByDepartementWithAvailability(today);
+
+      expect(result[0].availability?.AEP).toEqual(
+        expect.objectContaining({
+          status: 'confirmed_none',
+          sourceRevision: '43',
+          officialUrl: expect.stringContaining('deux-sevres.gouv.fr'),
+        }),
+      );
+    });
+
+    it('fails closed when the additive availability tables are not readable', async () => {
+      setCurrentSituation({
+        code: '49',
+        nom: 'Maine-et-Loire',
+        niveauGraviteMax: 'alerte',
+        niveauGraviteAepMax: 'alerte',
+      });
+      (service as any).zonePublicationRepository = {
+        query: jest.fn().mockRejectedValue(new Error('relation missing')),
+      };
+
+      const result =
+        await service.situationByDepartementWithAvailability(today);
+
+      expect(result[0].availability?.AEP.status).toBe('unavailable');
+      expect(result[0].availability?.AEP.officialUrl).toContain(
+        'maine-et-loire.gouv.fr',
+      );
+    });
+
+    it('does not project a current certification onto an historic row', async () => {
+      service['situationDepartements'] = [
+        {
+          date: '2024-05-01',
+          departementSituation: [
+            {
+              code: '79',
+              nom: 'Deux-Sevres',
+              niveauGraviteMax: null,
+              niveauGraviteAepMax: null,
+            },
+          ],
+        },
+      ];
+      const query = jest.fn();
+      (service as any).zonePublicationRepository = { query };
+
+      const result =
+        await service.situationByDepartementWithAvailability('2024-05-01');
+
+      expect(result[0].availability).toBeUndefined();
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('evaluates a pinned table against the pinned publication revision', async () => {
+      const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+      service['departements'] = [
+        {
+          id: 49,
+          code: '49',
+          nom: 'Maine-et-Loire',
+          region: { nom: 'Pays de la Loire' },
+        },
+      ] as any;
+      const query = jest.fn().mockResolvedValue([
+        {
+          sourcePublicRevision: '42',
+          departmentCode: '49',
+          zoneType: 'AEP',
+          status: 'available',
+          asOf: '2026-08-19T11:00:00.000Z',
+          availabilityPublicRevision: '43',
+          officialUrl: null,
+        },
+      ]);
+      (service as any).zonePublicationRepository = {
+        findOne: jest.fn().mockResolvedValue({
+          id: publicationId,
+          status: 'retired',
+        }),
+        query,
+      };
+      (service as any).zonePublicationAggregateRepository = {
+        findOne: jest.fn().mockResolvedValue({
+          publicationId,
+          payload: {
+            departments: {
+              '49': {
+                max: 'alerte',
+                sup: null,
+                sou: null,
+                aep: 'alerte',
+              },
+            },
+          },
+        }),
+      };
+
+      const result = await service.situationByDepartementWithAvailability(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        publicationId,
+      );
+
+      expect(query).toHaveBeenCalledWith(expect.any(String), [publicationId]);
+      expect(result[0].niveauGraviteAepMax).toBe('alerte');
+      expect(result[0].availability?.AEP.status).toBe('unavailable');
+      expect(result[0].availability?.AEP.sourceRevision).toBe('42');
+    });
+  });
+
   describe('loadRefData', () => {
     it('should load reference data (departements, regions, bassins versants)', async () => {
       const mockDepartements = [{ id: 1, nom: 'Paris' }];
@@ -456,4 +643,18 @@ describe('DepartementsService', () => {
       expect(service['situationDepartements']).toEqual([]);
     });
   });
+});
+
+describe('getCurrentDepartementDateKeys', () => {
+  it.each([
+    ['summer', '2026-08-19T22:30:00.000Z', ['2026-08-19', '2026-08-20']],
+    ['winter', '2026-01-01T23:30:00.000Z', ['2026-01-01', '2026-01-02']],
+  ])(
+    'covers both the UTC cache key and Paris civil day in %s',
+    (_label, now, expected) => {
+      expect([...getCurrentDepartementDateKeys(new Date(now))]).toEqual(
+        expected,
+      );
+    },
+  );
 });

@@ -326,6 +326,12 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
         if (
+          query.includes('UPDATE "zone_publication_source_state"') &&
+          query.includes('RETURNING "publicRevision"')
+        ) {
+          return [[{ publicRevision: '43' }], 1];
+        }
+        if (
           query.includes('FROM sandre_zone_sync_batch batch') &&
           query.includes("batch.kind = 'snapshot'") &&
           query.includes("batch.mode = 'audit'") &&
@@ -1321,6 +1327,23 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       expect.arrayContaining([
         [expect.stringContaining('"observedSnapshotHash"'), expect.anything()],
       ]),
+    );
+    const publicRevisionCallIndex = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('UPDATE "zone_publication_source_state"'),
+    );
+    expect(publicRevisionCallIndex).toBeGreaterThanOrEqual(0);
+    expect(harness.manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO "zone_type_availability"'),
+      [[department.id], '43'],
+    );
+    expect(harness.manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO "current_zone_recompute_request"'),
+      [[department.id], '43', 'SYNCHRONISATION SANDRE', null],
+    );
+    expect(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    ).toBeLessThan(
+      harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
     );
   });
 

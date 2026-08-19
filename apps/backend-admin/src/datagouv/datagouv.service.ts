@@ -27,6 +27,7 @@ import { RegleauLogger } from '../logger/regleau.logger';
 import { S3Service } from '../shared/services/s3.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
 import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
+import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
 import {
   ExternalPublicationRegistryService,
   PublicationRunIdentity,
@@ -1327,7 +1328,7 @@ export class DatagouvService {
           snapshot."expectedCommuneCount",
           snapshot."processedCommuneCount",
           snapshot."sourceRevision"::text AS "snapshotSourceRevision",
-          source_state."revision"::text AS "currentSourceRevision",
+          ${sourceRevisionColumn('source_state')}::text AS "currentSourceRevision",
           (SELECT COUNT(*)::integer FROM "commune") AS "communeCount"
         FROM "zone_publication_source_state" source_state
         JOIN "statistic_commune_snapshot" snapshot

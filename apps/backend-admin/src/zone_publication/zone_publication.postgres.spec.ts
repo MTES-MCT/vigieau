@@ -48,6 +48,10 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         "candidateAt" timestamptz,
         "failedAt" timestamptz,
         "validationError" text,
+        "legacyPromotedAt" timestamptz,
+        "dataGouvPromotedAt" timestamptz,
+        "promotionLastAttemptAt" timestamptz,
+        "promotionError" text,
         "zoneCount" integer NOT NULL DEFAULT 10,
         "communeLinkCount" integer NOT NULL DEFAULT 20,
         "contentFingerprint" varchar
@@ -58,6 +62,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         "candidatePublicationId" uuid,
         "candidateRequestedAt" timestamptz,
         "automaticPublishingPaused" boolean NOT NULL DEFAULT false,
+        "automaticPublishingPausedAt" timestamptz,
         "updatedAt" timestamptz NOT NULL DEFAULT now()
       ) ON COMMIT DROP;
       CREATE TEMP TABLE "zone_publication_instance" (
@@ -74,13 +79,21 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         "scope" varchar NOT NULL,
         "status" varchar NOT NULL,
         "sourceRevision" bigint,
+        "expectedCommuneCount" integer NOT NULL,
+        "processedCommuneCount" integer NOT NULL,
+        "completedAt" timestamptz,
+        "lastError" text,
+        "updatedAt" timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY ("snapshotDate", "scope")
       ) ON COMMIT DROP;
       CREATE TEMP TABLE "statistic_publication_state" (
         "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL,
         "currentPublishedDate" date,
         "historicPublishedThrough" date,
-        "historicDirtyFrom" date
+        "historicDirtyFrom" date,
+        "historicDirtyThrough" date,
+        "updatedAt" timestamptz NOT NULL DEFAULT now()
       ) ON COMMIT DROP;
       CREATE TEMP TABLE "config" (
         "id" integer PRIMARY KEY,
@@ -152,42 +165,37 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
       [failedPublicationId, rebuiltPublicationId, failedSourceDate],
     );
     await queryRunner.query(
-      `INSERT INTO "statistic_commune_snapshot" VALUES (
-        date '2026-08-01', 'national', 'ready', 10
+      `INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "sourceRevision",
+        "expectedCommuneCount", "processedCommuneCount"
+      ) VALUES (
+        date '2026-08-01', 'national', 'ready', 10, 34800, 34800
       )`,
     );
     await queryRunner.query(
-      `INSERT INTO "statistic_publication_state" VALUES (
-        1, date '2026-07-31', date '2026-07-31', NULL
+      `INSERT INTO "statistic_publication_state" (
+        "id", "revision", "currentPublishedDate", "historicPublishedThrough",
+        "historicDirtyFrom", "historicDirtyThrough"
+      ) VALUES (
+        1, 3, date '2026-07-31', date '2020-01-01',
+        date '2020-01-02', date '2026-07-31'
       )`,
     );
     await queryRunner.query(
       `INSERT INTO "config" VALUES (
-        1, date '2026-07-31', date '2026-07-31', 12, 18
+        1, date '2020-01-01', date '2020-01-01', 12, 18
       )`,
     );
     await queryRunner.query(
       `
-        INSERT INTO "external_publication_run" VALUES
-          (
-            'compute:national-daily', date '2026-08-01', 'succeeded',
-            jsonb_build_object(
-              'publicationId', $1::text,
-              'sourceRevision', '10',
-              'materializationVersion', 4
-            )
-          ),
-          (
-            'compute:historic-catchup', date '2026-08-01', 'succeeded',
-            jsonb_build_object(
-              'sourceRevision', '10',
-              'materializationVersion', 4,
-              'historicMapCursor', '2026-07-31',
-              'historicStatsCursor', '2026-07-31',
-              'historicMapGeneration', '12',
-              'historicStatsGeneration', '18'
-            )
+        INSERT INTO "external_publication_run" VALUES (
+          'compute:national-daily', date '2026-08-01', 'succeeded',
+          jsonb_build_object(
+            'publicationId', $1::text,
+            'sourceRevision', '10',
+            'materializationVersion', 4
           )
+        )
       `,
       [failedPublicationId],
     );
@@ -347,7 +355,7 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
     expect(state.candidatePublicationId).toBe(rebuiltPublicationId);
   });
 
-  it('rejects an old historic success after an equal-date generation invalidation', async () => {
+  it('promotes current data independently from historic cursor changes', async () => {
     await seedCertifiedRecovery();
     await queryRunner.query(
       `UPDATE "config" SET "computeMapGeneration" = 13 WHERE "id" = 1`,
@@ -359,18 +367,16 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
         sourceRevision: '10',
         preferredPublicationId: failedPublicationId,
       }),
-    ).rejects.toThrow(
-      'waiting for certified current statistics or historic catch-up',
-    );
+    ).resolves.toBe(true);
 
     const [publication] = await queryRunner.query(
       `SELECT "status" FROM "zone_publication" WHERE "id" = $1`,
       [rebuiltPublicationId],
     );
-    expect(publication.status).toBe('validated');
+    expect(publication.status).toBe('candidate');
   });
 
-  it('revalidates the exact historic epoch when activating a recovered publication', async () => {
+  it('activates current data while preserving dirty historic state and cursors', async () => {
     await seedCertifiedRecovery();
     await expect(
       service.promoteCertifiedPublicationIfAvailable({
@@ -396,15 +402,60 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
 
     await expect(
       service.activateWhenReady({ minimumReadyInstances: 2 }),
-    ).rejects.toThrow(
-      'waiting for certified current statistics or historic catch-up',
-    );
+    ).resolves.toMatchObject({
+      status: 'activated',
+      publicationId: rebuiltPublicationId,
+    });
 
     const [publication] = await queryRunner.query(
       `SELECT "status" FROM "zone_publication" WHERE "id" = $1`,
       [rebuiltPublicationId],
     );
-    expect(publication.status).toBe('candidate');
+    const [snapshot] = await queryRunner.query(
+      `SELECT "status", "processedCommuneCount", "expectedCommuneCount"
+       FROM "statistic_commune_snapshot"
+       WHERE "snapshotDate" = date '2026-08-01' AND "scope" = 'national'`,
+    );
+    const [statisticState] = await queryRunner.query(
+      `SELECT
+         "revision"::text AS "revision",
+         "currentPublishedDate"::text AS "currentPublishedDate",
+         "historicPublishedThrough"::text AS "historicPublishedThrough",
+         "historicDirtyFrom"::text AS "historicDirtyFrom",
+         "historicDirtyThrough"::text AS "historicDirtyThrough"
+       FROM "statistic_publication_state" WHERE "id" = 1`,
+    );
+    const [historicState] = await queryRunner.query(
+      `SELECT
+         "computeMapDate"::text AS "computeMapDate",
+         "computeStatsDate"::text AS "computeStatsDate",
+         "computeMapGeneration"::text AS "computeMapGeneration"
+       FROM "config" WHERE "id" = 1`,
+    );
+    const [{ historicRunCount }] = await queryRunner.query(
+      `SELECT COUNT(*)::integer AS "historicRunCount"
+       FROM "external_publication_run"
+       WHERE "jobKey" = 'compute:historic-catchup'`,
+    );
+    expect(publication.status).toBe('active');
+    expect(snapshot).toEqual({
+      status: 'completed',
+      processedCommuneCount: 34800,
+      expectedCommuneCount: 34800,
+    });
+    expect(statisticState).toEqual({
+      revision: '4',
+      currentPublishedDate: '2026-08-01',
+      historicPublishedThrough: '2020-01-01',
+      historicDirtyFrom: '2020-01-02',
+      historicDirtyThrough: '2026-07-31',
+    });
+    expect(historicState).toEqual({
+      computeMapDate: '2020-01-01',
+      computeStatsDate: '2020-01-01',
+      computeMapGeneration: '13',
+    });
+    expect(historicRunCount).toBe(0);
   });
 
   it('rejects recovery through a failed publication from another civil day', async () => {
@@ -427,23 +478,17 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
 
   it.each([
     {
-      latestHistoricStatus: 'succeeded',
+      latestDailyStatus: 'succeeded',
       expectedRecompute: true,
-      label:
-        'ignores an older failed historic run after the latest run succeeds',
+      label: 'ignores a pending historic run after the latest daily succeeds',
     },
     {
-      latestHistoricStatus: 'running',
+      latestDailyStatus: 'running',
       expectedRecompute: false,
-      label: 'blocks while the latest historic run is still pending',
+      label: 'blocks while the latest daily run is still pending',
     },
-  ])('$label', async ({ latestHistoricStatus, expectedRecompute }) => {
+  ])('$label', async ({ latestDailyStatus, expectedRecompute }) => {
     await seedCurrentSource();
-    await queryRunner.query(
-      `INSERT INTO "statistic_publication_state" VALUES (
-        1, date '2026-07-31', date '2026-07-31', NULL
-      )`,
-    );
     await queryRunner.query(
       `
         INSERT INTO "external_publication_run" VALUES
@@ -456,15 +501,15 @@ describeWithPostgres('ZonePublicationService PostgreSQL certification', () => {
             '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           ),
           (
-            'compute:national-daily', date '2026-08-01', 'succeeded',
+            'compute:national-daily', date '2026-08-01', $1,
             '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           ),
           (
-            'compute:historic-catchup', date '2026-08-01', $1,
+            'compute:historic-catchup', date '2026-08-01', 'running',
             '{"sourceRevision":"10","materializationVersion":4}'::jsonb
           )
       `,
-      [latestHistoricStatus],
+      [latestDailyStatus],
     );
 
     await expect(service.isRecomputeRequired()).resolves.toBe(

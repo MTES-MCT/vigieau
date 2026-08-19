@@ -2228,6 +2228,24 @@ describe('ZoneAlerteComputedService', () => {
     expect(askCompute).not.toHaveBeenCalled();
   });
 
+  it('keeps web watchdog promotion-only while the dedicated worker is enabled', async () => {
+    process.env.CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED = 'true';
+    zonePublicationService.isRecomputeRequired.mockResolvedValue(true);
+    const askCompute = jest.spyOn(service, 'askCompute');
+
+    try {
+      await service.ensureFreshZonePublication();
+    } finally {
+      delete process.env.CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED;
+    }
+
+    expect(
+      zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.isRecomputeRequired).not.toHaveBeenCalled();
+    expect(askCompute).not.toHaveBeenCalled();
+  });
+
   it('does not run the publication watchdog while the feature is disabled', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const askCompute = jest.spyOn(service, 'askCompute');

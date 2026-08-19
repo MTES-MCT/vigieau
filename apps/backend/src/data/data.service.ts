@@ -31,15 +31,20 @@ import {
 import {
   StatisticCacheArtifactService,
   type StatisticCacheArtifactCandidate,
+  type StatisticCacheArtifactIdentity,
+  type StatisticCacheCandidateTarget,
   type StatisticCacheArtifactPayload,
   type StatisticCacheLatestCommuneWeight,
   type StatisticCacheMaterializationStrategy,
+  STATISTIC_CACHE_PROTOCOL_VERSION,
 } from './statistic-cache-artifact.service';
+import { statisticSourceRevisionSql } from './statistic-cache-config';
 
 interface StatisticPublicationState {
   revision: string;
   activePublicationId: string | null;
   statisticCachePublicationId?: string | null;
+  statisticCacheCandidatePublicationId?: string | null;
   currentPublishedDate: string | null;
   historicPublishedThrough: string | null;
   historicDirtyFrom: string | null;
@@ -73,7 +78,9 @@ interface CertifiedDataCache extends ReferenceDataCache {
   departmentCount: number;
   communeCount: number;
   fingerprint: string;
+  artifactIdentity: StatisticCacheArtifactIdentity | null;
   artifactPublicationId: string | null;
+  artifactProtocolVersion: number | null;
   artifactSourceRevision: string | null;
   latestCommuneWeights: StatisticCacheLatestCommuneWeight[];
   artifactHistoricDirtyFrom: string | null;
@@ -92,8 +99,15 @@ export type StatisticCacheStatus = {
   historicComplete: boolean;
   mode: StatisticCacheMode;
   artifactPublicationId: string | null;
+  artifactProtocolVersion?: number | null;
   artifactLiveInstances: number | null;
   artifactReadyInstances: number | null;
+  artifactCandidatePublicationId?: string | null;
+  artifactCandidateProtocolVersion?: number | null;
+  artifactCandidateReadyInstances?: number | null;
+  targetDate?: string | null;
+  refreshStartedAt?: string | null;
+  nextRetryAt?: string | null;
   currentPublishedDate: string | null;
   expectedPublishedDate: string;
   publicationDeadline: string;
@@ -127,7 +141,28 @@ export type StatisticCacheAcknowledgement = {
   statisticRevision: string | null;
   statisticPublishedDate: string | null;
   statisticFingerprint: string | null;
+  statisticSourceRevision: string | null;
+  statisticProtocolVersion: number | null;
   statisticLastError: string | null;
+  candidateStatisticCachePublicationId: string | null;
+  candidateStatisticRevision: string | null;
+  candidateStatisticPublishedDate: string | null;
+  candidateStatisticSourceRevision: string | null;
+  candidateStatisticFingerprint: string | null;
+  candidateStatisticProtocolVersion: number | null;
+  candidateStatisticLastError: string | null;
+};
+
+export type StatisticCacheReconcileResult = {
+  outcome:
+    | 'disabled'
+    | 'up-to-date'
+    | 'candidate-ready'
+    | 'awaiting-acknowledgements'
+    | 'activated'
+    | 'superseded'
+    | 'retry';
+  reason: string;
 };
 
 type DepartmentDataLoad = {
@@ -166,6 +201,11 @@ export class DataService implements OnModuleInit {
   private referenceDataLoadedAt = 0;
   private referenceDataRefreshFailedAt = 0;
   private certifiedDataCache: CertifiedDataCache | null = null;
+  private candidateDataCache: CertifiedDataCache | null = null;
+  private candidateDataCacheLoading: Promise<void> | null = null;
+  private failedCandidatePublicationId: string | null = null;
+  private failedCandidateAt = 0;
+  private failedCandidatePhase: string | null = null;
   private certifiedDataRefreshLoading: Promise<void> | null = null;
   private dataLoading: Promise<void> | null = null;
   private failedPublicationStateToken: string | null = null;
@@ -205,7 +245,9 @@ export class DataService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    this.startColdDataLoad();
+    if (process.env.VIGIEAU_PROCESS_ROLE !== 'statcache') {
+      this.startColdDataLoad();
+    }
   }
 
   /**
@@ -714,6 +756,7 @@ export class DataService implements OnModuleInit {
             ) &&
             !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
           ) {
+            this.startCandidateDataPreload(publicationState);
             await this.refreshReferenceDataCacheIfStale();
             this.certifiedDataCache.publicationState = publicationState;
             this.publicationState = publicationState;
@@ -740,7 +783,9 @@ export class DataService implements OnModuleInit {
           if (this.isSamePublicationState(publicationState, stateAfter)) {
             const certifiedDataCache = {
               ...candidateCache,
-              revision: stateAfter.revision,
+              revision: candidateCache.artifactPublicationId
+                ? candidateCache.revision
+                : stateAfter.revision,
               publicationState: stateAfter,
             };
             this.publishCertifiedDataCache(certifiedDataCache);
@@ -799,6 +844,18 @@ export class DataService implements OnModuleInit {
     return Boolean(this.statisticCacheArtifactService) && mode === 'read-write';
   }
 
+  private isDistributedStatisticCacheEnabled(): boolean {
+    const value =
+      process.env.STATISTIC_CACHE_DISTRIBUTED_REFRESH_ENABLED?.trim().toLowerCase() ||
+      'false';
+    if (value !== 'true' && value !== 'false') {
+      throw new Error(
+        `Unsupported STATISTIC_CACHE_DISTRIBUTED_REFRESH_ENABLED: ${value}`,
+      );
+    }
+    return value === 'true';
+  }
+
   private async loadArtifactBackedData(
     publicationState: StatisticPublicationState,
   ): Promise<CertifiedDataCache> {
@@ -808,6 +865,28 @@ export class DataService implements OnModuleInit {
       throw new Error('Statistic artifact cache is unavailable');
     }
 
+    if (this.isDistributedStatisticCacheEnabled()) {
+      this.startCandidateDataPreload(publicationState);
+      const promotedCandidate =
+        this.candidateDataCache?.artifactPublicationId ===
+        publicationState.statisticCachePublicationId
+          ? this.candidateDataCache
+          : null;
+      if (promotedCandidate) {
+        this.candidateDataCache = null;
+        return {
+          ...promotedCandidate,
+          publicationState,
+          loadedAt: new Date(),
+        };
+      }
+      const active = await artifactService.loadActive();
+      if (!active) {
+        throw new Error('No active statistic cache artifact is available');
+      }
+      await this.ensureReferenceDataCache();
+      return this.hydrateArtifactPayload(active, publicationState);
+    }
     const active = await artifactService.loadActive();
     if (
       active?.identity.currentPublishedDate === currentPublishedDate &&
@@ -853,12 +932,29 @@ export class DataService implements OnModuleInit {
         active.identity.historicStatsCursor !==
           publicationState.historicStatsCursor),
     );
+    const legacyToVersionedTransition = Boolean(
+      active &&
+      active.identity.mode === 'legacy-bootstrap' &&
+      mode === 'versioned' &&
+      publicationState.historicDirtyFrom !== null &&
+      currentPublishedDate >= active.identity.latestDate,
+    );
     const requiresFullBuild = Boolean(
       !active ||
-      active.identity.mode !== mode ||
+      (active.identity.mode !== mode && !legacyToVersionedTransition) ||
       currentPublishedDate < active.identity.latestDate ||
       historicBoundaryClosed,
     );
+    if (
+      !active &&
+      mode === 'versioned' &&
+      publicationState.historicDirtyFrom !== null
+    ) {
+      return this.createSparseCurrentArtifactCandidate(
+        publicationState,
+        manager,
+      );
+    }
     if (requiresFullBuild) {
       if (
         publicationState.historicDirtyFrom !== null &&
@@ -876,6 +972,15 @@ export class DataService implements OnModuleInit {
         publicationState,
         strategy,
         manager,
+      );
+    }
+
+    if (legacyToVersionedTransition) {
+      return this.createDeltaArtifactCandidate(
+        publicationState,
+        active!,
+        manager,
+        { mode: 'versioned', forceSparseCurrent: true },
       );
     }
 
@@ -920,33 +1025,137 @@ export class DataService implements OnModuleInit {
     };
   }
 
+  private async createSparseCurrentArtifactCandidate(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<StatisticCacheArtifactCandidate> {
+    const currentPublishedDate = publicationState.currentPublishedDate!;
+    const expectedCommuneCount =
+      await this.getCertifiedCurrentSnapshotCommuneCount(
+        publicationState,
+        manager,
+      );
+    const referenceData = await this.loadRefData(manager);
+    const { dataArea, dataDepartement } =
+      await this.loadDailyDepartmentCollections(
+        currentPublishedDate,
+        currentPublishedDate,
+        referenceData,
+        manager,
+      );
+    const weightsByDate = await this.loadDailyCommuneWeights(
+      currentPublishedDate,
+      currentPublishedDate,
+      expectedCommuneCount,
+      publicationState,
+      manager,
+    );
+    const latestCommuneWeights = weightsByDate.get(currentPublishedDate)!;
+    const currentMonth = currentPublishedDate.slice(0, 7);
+    const dataCommune = latestCommuneWeights.map(([code, weight]) => ({
+      code,
+      restrictions: [{ d: currentMonth, p: weight }],
+    }));
+    const candidateWithoutFingerprint: Omit<CertifiedDataCache, 'fingerprint'> =
+      {
+        ...referenceData,
+        revision: publicationState.revision,
+        publicationState,
+        mode: 'versioned',
+        dataArea,
+        dataDepartement,
+        dataCommune,
+        firstDate: currentPublishedDate,
+        latestDate: currentPublishedDate,
+        dateCount: 1,
+        departmentCount: referenceData.departements.length,
+        communeCount: expectedCommuneCount,
+        artifactIdentity: null,
+        artifactPublicationId: null,
+        artifactProtocolVersion: null,
+        artifactSourceRevision: publicationState.sourceRevision,
+        latestCommuneWeights,
+        artifactHistoricDirtyFrom: publicationState.historicDirtyFrom,
+        artifactHistoricDirtyThrough: publicationState.historicDirtyThrough,
+        artifactHistoricMapCursor: publicationState.historicMapCursor,
+        artifactHistoricStatsCursor: publicationState.historicStatsCursor,
+        artifactHistoricComputeEpoch: publicationState.historicComputeEpoch,
+        loadedAt: new Date(),
+      };
+    this.assertArtifactCollections(candidateWithoutFingerprint, true);
+    return {
+      statisticRevision: publicationState.revision,
+      currentPublishedDate,
+      mode: 'versioned',
+      materializationStrategy: 'sparse-current',
+      ...this.getArtifactAudit(publicationState),
+      contentFingerprint: this.computeStatisticCacheFingerprint(
+        candidateWithoutFingerprint,
+      ),
+      firstDate: currentPublishedDate,
+      latestDate: currentPublishedDate,
+      dateCount: 1,
+      departmentCount: candidateWithoutFingerprint.departmentCount,
+      communeCount: expectedCommuneCount,
+      dataArea,
+      dataDepartement,
+      dataCommune,
+      latestCommuneWeights,
+    };
+  }
+
   private async createDeltaArtifactCandidate(
     publicationState: StatisticPublicationState,
     active: StatisticCacheArtifactPayload,
     manager: EntityManager,
+    options?: {
+      mode?: StatisticCacheMode;
+      forceSparseCurrent?: boolean;
+    },
   ): Promise<StatisticCacheArtifactCandidate> {
     const currentPublishedDate = publicationState.currentPublishedDate!;
     if (currentPublishedDate < active.identity.latestDate) {
       throw new Error('Statistic artifact delta cannot move backwards');
     }
     const appendOnly = currentPublishedDate > active.identity.latestDate;
-    const startDate = appendOnly
-      ? moment
-          .utc(active.identity.latestDate, 'YYYY-MM-DD', true)
-          .add(1, 'day')
-          .format('YYYY-MM-DD')
-      : active.identity.latestDate;
-    const strategy: StatisticCacheMaterializationStrategy = appendOnly
-      ? 'daily-delta'
-      : 'current-replace';
+    const nextDate = moment
+      .utc(active.identity.latestDate, 'YYYY-MM-DD', true)
+      .add(1, 'day')
+      .format('YYYY-MM-DD');
+    let sparseCurrent =
+      options?.forceSparseCurrent === true ||
+      active.identity.materializationStrategy === 'sparse-current';
+    let snapshotCoverageValidated = false;
+    if (appendOnly && currentPublishedDate > nextDate && !sparseCurrent) {
+      snapshotCoverageValidated = await this.hasCertifiedDeltaSnapshotCoverage(
+        nextDate,
+        currentPublishedDate,
+        active.identity.communeCount,
+        publicationState,
+        manager,
+      );
+      sparseCurrent = !snapshotCoverageValidated;
+    }
+    const startDate = sparseCurrent
+      ? currentPublishedDate
+      : appendOnly
+        ? nextDate
+        : active.identity.latestDate;
+    const strategy: StatisticCacheMaterializationStrategy = sparseCurrent
+      ? 'sparse-current'
+      : appendOnly
+        ? 'daily-delta'
+        : 'current-replace';
+    if (!snapshotCoverageValidated) {
+      await this.assertDeltaSnapshotCoverage(
+        startDate,
+        currentPublishedDate,
+        active.identity.communeCount,
+        publicationState,
+        manager,
+      );
+    }
     const referenceData = await this.loadRefData(manager);
-    await this.assertDeltaSnapshotCoverage(
-      startDate,
-      currentPublishedDate,
-      active.identity.communeCount,
-      publicationState,
-      manager,
-    );
     const targetDepartments = await this.loadDailyDepartmentCollections(
       startDate,
       currentPublishedDate,
@@ -984,7 +1193,7 @@ export class DataService implements OnModuleInit {
         ...referenceData,
         revision: publicationState.revision,
         publicationState,
-        mode: active.identity.mode,
+        mode: options?.mode ?? active.identity.mode,
         dataArea,
         dataDepartement,
         dataCommune,
@@ -993,7 +1202,9 @@ export class DataService implements OnModuleInit {
         dateCount: dataArea.length,
         departmentCount: active.identity.departmentCount,
         communeCount: active.identity.communeCount,
+        artifactIdentity: null,
         artifactPublicationId: null,
+        artifactProtocolVersion: null,
         artifactSourceRevision: publicationState.sourceRevision,
         latestCommuneWeights,
         artifactHistoricDirtyFrom: publicationState.historicDirtyFrom,
@@ -1003,11 +1214,11 @@ export class DataService implements OnModuleInit {
         artifactHistoricComputeEpoch: publicationState.historicComputeEpoch,
         loadedAt: new Date(),
       };
-    this.assertArtifactCollections(candidateWithoutFingerprint);
+    this.assertArtifactCollections(candidateWithoutFingerprint, sparseCurrent);
     return {
       statisticRevision: publicationState.revision,
       currentPublishedDate,
-      mode: active.identity.mode,
+      mode: options?.mode ?? active.identity.mode,
       materializationStrategy: strategy,
       ...this.getArtifactAudit(publicationState),
       contentFingerprint: this.computeStatisticCacheFingerprint(
@@ -1043,6 +1254,63 @@ export class DataService implements OnModuleInit {
     publicationState: StatisticPublicationState,
     manager: EntityManager,
   ): Promise<void> {
+    if (
+      !(await this.hasCertifiedDeltaSnapshotCoverage(
+        startDate,
+        endDate,
+        expectedCommuneCount,
+        publicationState,
+        manager,
+      ))
+    ) {
+      throw new Error(
+        `Statistic delta snapshots are not certified for ${startDate}..${endDate}`,
+      );
+    }
+  }
+
+  private async getCertifiedCurrentSnapshotCommuneCount(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<number> {
+    const [snapshot] = await manager.query(
+      `
+        SELECT
+          snapshot."status", snapshot."expectedCommuneCount",
+          snapshot."processedCommuneCount",
+          snapshot."sourceRevision"::text AS "sourceRevision",
+          (SELECT COUNT(*)::integer FROM "commune") AS "communeCount"
+        FROM "statistic_commune_snapshot" snapshot
+        WHERE snapshot."snapshotDate" = $1::date
+          AND snapshot."scope" = 'national'
+      `,
+      [publicationState.currentPublishedDate],
+    );
+    const expectedCommuneCount = Number(snapshot?.expectedCommuneCount ?? 0);
+    if (
+      !snapshot ||
+      snapshot.status !== 'completed' ||
+      !Number.isSafeInteger(expectedCommuneCount) ||
+      expectedCommuneCount <= 0 ||
+      Number(snapshot.processedCommuneCount) !== expectedCommuneCount ||
+      Number(snapshot.communeCount) !== expectedCommuneCount ||
+      String(snapshot.sourceRevision ?? '') !==
+        String(publicationState.sourceRevision ?? '')
+    ) {
+      throw new Error(
+        `Statistic current snapshot is not certified for ${publicationState.currentPublishedDate}`,
+      );
+    }
+    return expectedCommuneCount;
+  }
+
+  private async hasCertifiedDeltaSnapshotCoverage(
+    startDate: string,
+    endDate: string,
+    expectedCommuneCount: number,
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<boolean> {
     const rows: Array<{
       snapshotDate: string | Date;
       status: string;
@@ -1064,7 +1332,7 @@ export class DataService implements OnModuleInit {
     const expectedDates = this.generateDateRange(startDate, endDate).map(
       ({ date }) => date,
     );
-    if (
+    return !(
       rows.length !== expectedDates.length ||
       rows.some((row, index) => {
         const date = this.normalizeDate(row.snapshotDate);
@@ -1078,11 +1346,7 @@ export class DataService implements OnModuleInit {
               String(publicationState.sourceRevision ?? ''))
         );
       })
-    ) {
-      throw new Error(
-        `Statistic delta snapshots are not certified for ${startDate}..${endDate}`,
-      );
-    }
+    );
   }
 
   private async loadDailyDepartmentCollections(
@@ -1290,10 +1554,21 @@ export class DataService implements OnModuleInit {
         'Reference data must be loaded before artifact hydration',
       );
     }
+    const artifactPublicationState: StatisticPublicationState = {
+      ...publicationState,
+      revision: payload.identity.statisticRevision,
+      currentPublishedDate: payload.identity.currentPublishedDate,
+      historicDirtyFrom: payload.identity.historicDirtyFrom,
+      historicDirtyThrough: payload.identity.historicDirtyThrough,
+      historicMapCursor: payload.identity.historicMapCursor,
+      historicStatsCursor: payload.identity.historicStatsCursor,
+      sourceRevision: payload.identity.sourceRevision,
+      historicComputeEpoch: payload.identity.historicComputeEpoch,
+    };
     const cacheWithoutFingerprint: Omit<CertifiedDataCache, 'fingerprint'> = {
       ...referenceData,
       revision: payload.identity.statisticRevision,
-      publicationState,
+      publicationState: artifactPublicationState,
       mode: payload.identity.mode,
       dataArea: payload.dataArea,
       dataDepartement: payload.dataDepartement,
@@ -1303,7 +1578,9 @@ export class DataService implements OnModuleInit {
       dateCount: payload.identity.dateCount,
       departmentCount: payload.identity.departmentCount,
       communeCount: payload.identity.communeCount,
+      artifactIdentity: { ...payload.identity },
       artifactPublicationId: payload.identity.id,
+      artifactProtocolVersion: payload.identity.protocolVersion,
       artifactSourceRevision: payload.identity.sourceRevision,
       latestCommuneWeights: payload.latestCommuneWeights,
       artifactHistoricDirtyFrom: payload.identity.historicDirtyFrom,
@@ -1313,18 +1590,26 @@ export class DataService implements OnModuleInit {
       artifactHistoricComputeEpoch: payload.identity.historicComputeEpoch,
       loadedAt: new Date(),
     };
-    this.assertArtifactCollections(cacheWithoutFingerprint);
+    this.assertArtifactCollections(
+      cacheWithoutFingerprint,
+      payload.identity.materializationStrategy === 'sparse-current',
+    );
     const fingerprint = this.computeStatisticCacheFingerprint(
       cacheWithoutFingerprint,
     );
     if (fingerprint !== payload.identity.contentFingerprint) {
       throw new Error('Statistic artifact public fingerprint is invalid');
     }
-    return { ...cacheWithoutFingerprint, fingerprint };
+    return {
+      ...cacheWithoutFingerprint,
+      fingerprint,
+      publicationState,
+    };
   }
 
   private assertArtifactCollections(
     cache: Omit<CertifiedDataCache, 'fingerprint'>,
+    allowSparseDates = false,
   ): void {
     const areaDates = cache.dataArea.map(({ date }) => String(date));
     const departmentDates = cache.dataDepartement.map(({ date }) =>
@@ -1339,11 +1624,13 @@ export class DataService implements OnModuleInit {
       areaDates.some(
         (date, index) =>
           index > 0 &&
-          date !==
-            moment
-              .utc(areaDates[index - 1], 'YYYY-MM-DD', true)
-              .add(1, 'day')
-              .format('YYYY-MM-DD'),
+          (allowSparseDates
+            ? date <= areaDates[index - 1]
+            : date !==
+              moment
+                .utc(areaDates[index - 1], 'YYYY-MM-DD', true)
+                .add(1, 'day')
+                .format('YYYY-MM-DD')),
       )
     ) {
       throw new Error('Statistic artifact date coverage is invalid');
@@ -1517,6 +1804,7 @@ export class DataService implements OnModuleInit {
         ) &&
         !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
       ) {
+        this.startCandidateDataPreload(publicationState);
         this.certifiedDataCache.publicationState = publicationState;
         this.publicationState = publicationState;
         this.failedPublicationStateToken = null;
@@ -1551,17 +1839,247 @@ export class DataService implements OnModuleInit {
       });
   }
 
+  @Cron(CronExpression.EVERY_10_SECONDS)
+  async refreshDistributedStatisticCache(): Promise<void> {
+    if (process.env.VIGIEAU_PROCESS_ROLE === 'statcache') return;
+    try {
+      if (
+        !this.isStatisticArtifactCacheEnabled() ||
+        !this.isDistributedStatisticCacheEnabled()
+      ) {
+        return;
+      }
+      this.startCertifiedDataRefresh();
+    } catch (error) {
+      this.logger.warn(
+        `DISTRIBUTED STATISTIC CACHE CHECK FAILED: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private startCandidateDataPreload(
+    publicationState: StatisticPublicationState,
+  ): void {
+    if (!this.isDistributedStatisticCacheEnabled()) return;
+    const candidateId =
+      publicationState.statisticCacheCandidatePublicationId ?? null;
+    if (!candidateId) {
+      if (
+        this.candidateDataCache?.artifactPublicationId !==
+        publicationState.statisticCachePublicationId
+      ) {
+        this.candidateDataCache = null;
+      }
+      this.failedCandidatePublicationId = null;
+      this.failedCandidateAt = 0;
+      this.failedCandidatePhase = null;
+      return;
+    }
+    if (
+      this.candidateDataCache?.artifactPublicationId === candidateId ||
+      this.candidateDataCacheLoading ||
+      (this.failedCandidatePublicationId === candidateId &&
+        Date.now() - this.failedCandidateAt <
+          this.publicationRefreshRetryIntervalMs)
+    ) {
+      return;
+    }
+    const artifactService = this.statisticCacheArtifactService;
+    if (!artifactService) return;
+    const preload = (async () => {
+      try {
+        const payload = await artifactService.loadCandidate();
+        if (
+          !payload ||
+          payload.identity.id !== candidateId ||
+          !this.isArtifactIdentityForState(payload.identity, publicationState)
+        ) {
+          throw new Error('Statistic cache candidate identity is inconsistent');
+        }
+        await this.ensureReferenceDataCache();
+        const candidateCache = this.hydrateArtifactPayload(
+          payload,
+          publicationState,
+        );
+        const latestState = await this.getPublicationState(true);
+        if (
+          latestState.statisticCacheCandidatePublicationId !== candidateId ||
+          !this.isArtifactIdentityForState(payload.identity, latestState)
+        ) {
+          return;
+        }
+        this.candidateDataCache = candidateCache;
+        this.failedCandidatePublicationId = null;
+        this.failedCandidateAt = 0;
+        this.failedCandidatePhase = null;
+      } catch (error) {
+        this.failedCandidatePublicationId = candidateId;
+        this.failedCandidateAt = Date.now();
+        this.failedCandidatePhase = 'candidate-preload';
+        this.logger.warn(
+          `STATISTIC CACHE CANDIDATE PRELOAD FAILED - SERVING ACTIVE CACHE: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    })();
+    this.candidateDataCacheLoading = preload;
+    void preload.finally(() => {
+      if (this.candidateDataCacheLoading === preload) {
+        this.candidateDataCacheLoading = null;
+      }
+    });
+  }
+
+  async reconcileStatisticCacheCandidate(): Promise<StatisticCacheReconcileResult> {
+    try {
+      if (
+        !this.isStatisticArtifactCacheEnabled() ||
+        !this.isDistributedStatisticCacheEnabled()
+      ) {
+        return { outcome: 'disabled', reason: 'feature-flag-disabled' };
+      }
+      const artifactService = this.statisticCacheArtifactService!;
+      const publicationState = await this.getPublicationState(true);
+      if (!publicationState.currentPublishedDate) {
+        return { outcome: 'retry', reason: 'publication-date-unavailable' };
+      }
+      const target = this.getCandidateTarget(publicationState);
+      const active = await artifactService.loadActiveIdentity();
+      if (
+        active &&
+        publicationState.statisticCachePublicationId === active.id &&
+        this.isArtifactIdentityForState(active, publicationState)
+      ) {
+        return { outcome: 'up-to-date', reason: 'active-target-matches' };
+      }
+      const staged = await artifactService.stageCandidate(
+        target,
+        async (manager) => {
+          const latestState = await this.readPublicationState(manager);
+          if (!this.isSameMaterializationState(publicationState, latestState)) {
+            throw new Error(
+              'Statistic publication state changed before materialization',
+            );
+          }
+          const base = await artifactService.loadActive(manager);
+          return this.createArtifactCandidate(latestState, base, manager);
+        },
+      );
+      if (
+        publicationState.statisticCachePublicationId === staged.id &&
+        this.isArtifactIdentityForState(staged, publicationState)
+      ) {
+        return { outcome: 'up-to-date', reason: 'active-target-matches' };
+      }
+      const activation = await artifactService.activateCandidate(
+        target,
+        this.getRequiredStatisticAcknowledgements(),
+        this.getStatisticInstanceLeaseSeconds(),
+      );
+      if (activation.outcome === 'activated') {
+        return {
+          outcome: 'activated',
+          reason: `${activation.readyInstances}-acknowledgements`,
+        };
+      }
+      return {
+        outcome: activation.outcome,
+        reason: activation.reason,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes('publication state changed') ||
+        message.includes('materialization boundary changed') ||
+        message.includes('candidate does not match its target')
+      ) {
+        return { outcome: 'superseded', reason: message };
+      }
+      if (
+        message.includes('Timed out waiting') ||
+        message.includes('snapshot') ||
+        message.includes('current_zone_recompute_request') ||
+        message.includes('monthly recovery') ||
+        message.includes('refresh cooldown')
+      ) {
+        return { outcome: 'retry', reason: message };
+      }
+      throw error;
+    }
+  }
+
+  private getCandidateTarget(
+    publicationState: StatisticPublicationState,
+  ): StatisticCacheCandidateTarget {
+    return {
+      statisticRevision: publicationState.revision,
+      currentPublishedDate: publicationState.currentPublishedDate!,
+      protocolVersion: STATISTIC_CACHE_PROTOCOL_VERSION,
+      historicDirtyFrom: publicationState.historicDirtyFrom,
+      historicDirtyThrough: publicationState.historicDirtyThrough,
+      historicMapCursor: publicationState.historicMapCursor ?? null,
+      historicStatsCursor: publicationState.historicStatsCursor ?? null,
+      sourceRevision: publicationState.sourceRevision ?? null,
+      historicComputeEpoch: publicationState.historicComputeEpoch ?? null,
+    };
+  }
+
+  private isArtifactIdentityForState(
+    identity: StatisticCacheArtifactIdentity,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    const target = this.getCandidateTarget(publicationState);
+    return (
+      identity.statisticRevision === target.statisticRevision &&
+      identity.currentPublishedDate === target.currentPublishedDate &&
+      identity.protocolVersion === target.protocolVersion &&
+      identity.historicDirtyFrom === target.historicDirtyFrom &&
+      identity.historicDirtyThrough === target.historicDirtyThrough &&
+      identity.historicMapCursor === target.historicMapCursor &&
+      identity.historicStatsCursor === target.historicStatsCursor &&
+      identity.sourceRevision === target.sourceRevision &&
+      identity.historicComputeEpoch === target.historicComputeEpoch
+    );
+  }
+
+  private getRequiredStatisticAcknowledgements(): number {
+    const value = Number(process.env.STATISTIC_CACHE_REQUIRED_ACKS ?? 2);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+      throw new Error(
+        'STATISTIC_CACHE_REQUIRED_ACKS must be an integer between 1 and 100',
+      );
+    }
+    return value;
+  }
+
+  private getStatisticInstanceLeaseSeconds(): number {
+    const value = Number(
+      process.env.STATISTIC_CACHE_INSTANCE_LEASE_SECONDS ?? 30,
+    );
+    if (!Number.isSafeInteger(value) || value < 1 || value > 3600) {
+      throw new Error(
+        'STATISTIC_CACHE_INSTANCE_LEASE_SECONDS must be an integer between 1 and 3600',
+      );
+    }
+    return value;
+  }
+
   async getStatisticCacheStatus(
     checkPublicationState = false,
   ): Promise<StatisticCacheStatus> {
     let availableState = this.publicationState;
     let stateCheckFailed = false;
+    let currentCheckFailed = false;
     let stateCheckErrorPhase: string | null = null;
     if (checkPublicationState) {
       try {
         availableState = await this.getPublicationState(true);
       } catch {
         stateCheckFailed = true;
+        currentCheckFailed = true;
         stateCheckErrorPhase = 'publication-state-check';
       }
     }
@@ -1571,6 +2089,7 @@ export class DataService implements OnModuleInit {
       publicationExpectation = this.getStatisticPublicationExpectation();
     } catch {
       stateCheckFailed = true;
+      currentCheckFailed = true;
       stateCheckErrorPhase ??= 'publication-deadline-check';
       publicationExpectation = resolveStatisticPublicationExpectation(
         new Date(),
@@ -1585,6 +2104,7 @@ export class DataService implements OnModuleInit {
       artifactEnabled = this.isStatisticArtifactCacheEnabled();
     } catch {
       stateCheckFailed = true;
+      currentCheckFailed = true;
       stateCheckErrorPhase ??= 'artifact-mode-check';
     }
     let mode: StatisticCacheMode = cache?.mode ?? 'versioned';
@@ -1592,6 +2112,7 @@ export class DataService implements OnModuleInit {
       mode = this.getStatisticCacheMode(availableState);
     } catch {
       stateCheckFailed = true;
+      currentCheckFailed = true;
       stateCheckErrorPhase ??= 'cache-mode-check';
     }
     let snapshotCoverage: LegacySnapshotCoverageStatus = {
@@ -1625,10 +2146,41 @@ export class DataService implements OnModuleInit {
         stateCheckErrorPhase = 'artifact-instance-summary';
       }
     }
-    const stateMatches = Boolean(
+    let candidateSummary: {
+      publicationId: string | null;
+      protocolVersion: number | null;
+      readyInstances: number | null;
+      createdAt: string | null;
+    } = {
+      publicationId: null,
+      protocolVersion: null,
+      readyInstances: null,
+      createdAt: null,
+    };
+    if (
+      artifactEnabled &&
+      availableState?.statisticCacheCandidatePublicationId &&
+      !stateCheckFailed
+    ) {
+      try {
+        candidateSummary = await this.getStatisticCandidateSummary(
+          availableState.statisticCacheCandidatePublicationId,
+        );
+      } catch {
+        stateCheckFailed = true;
+        stateCheckErrorPhase = 'artifact-candidate-summary';
+      }
+    }
+    const legacyCurrentMatches = Boolean(
       cache &&
       availableState &&
-      this.isSamePublicationState(cache.publicationState, availableState),
+      cache.latestDate === availableState.currentPublishedDate &&
+      cache.publicationState.currentPublishedDate ===
+        availableState.currentPublishedDate &&
+      cache.publicationState.activePublicationId ===
+        availableState.activePublicationId &&
+      (cache.publicationState.sourceRevision ?? null) ===
+        (availableState.sourceRevision ?? null),
     );
     const artifactCurrentMatches = Boolean(
       cache?.artifactPublicationId &&
@@ -1668,12 +2220,6 @@ export class DataService implements OnModuleInit {
       availableState &&
       !artifactLoadTargetMatches,
     );
-    const historicCoverageIsComplete = !availableState?.historicDirtyFrom;
-    const legacySnapshotCoverageIsComplete =
-      mode !== 'legacy-bootstrap' ||
-      (snapshotCoverage.incompleteSnapshotCount === 0 &&
-        !this.legacySnapshotCoverageDirty &&
-        this.isLegacyCacheContinuous(cache, availableState));
     const lagDays = getPublicationLagDays(
       availableState?.currentPublishedDate ?? null,
       publicationExpectation.expectedPublishedDate,
@@ -1684,12 +2230,8 @@ export class DataService implements OnModuleInit {
         publicationExpectation.expectedPublishedDate &&
       availableState.currentPublishedDate <= publicationExpectation.today,
     );
-    let currentSnapshotIsCertified = true;
-    if (
-      artifactEnabled &&
-      availableState?.currentPublishedDate &&
-      !stateCheckFailed
-    ) {
+    let currentSnapshotIsCertified = false;
+    if (availableState?.currentPublishedDate && !currentCheckFailed) {
       try {
         currentSnapshotIsCertified = await this.isCurrentSnapshotCertified(
           availableState.currentPublishedDate,
@@ -1698,28 +2240,25 @@ export class DataService implements OnModuleInit {
       } catch {
         currentSnapshotIsCertified = false;
         stateCheckFailed = true;
+        currentCheckFailed = true;
         stateCheckErrorPhase = 'current-snapshot-check';
       }
     }
-    const legacyFresh = Boolean(
-      cache &&
-      stateMatches &&
-      cache.latestDate === availableState?.currentPublishedDate &&
-      currentPublicationIsFresh &&
-      historicCoverageIsComplete &&
-      legacySnapshotCoverageIsComplete &&
-      !stateCheckFailed &&
-      !this.lastDataCacheError,
-    );
     const currentFresh = artifactEnabled
       ? Boolean(
           cache &&
           artifactCurrentMatches &&
           currentPublicationIsFresh &&
           currentSnapshotIsCertified &&
-          !stateCheckFailed,
+          !currentCheckFailed,
         )
-      : legacyFresh;
+      : Boolean(
+          cache &&
+          legacyCurrentMatches &&
+          currentPublicationIsFresh &&
+          currentSnapshotIsCertified &&
+          !currentCheckFailed,
+        );
     const historicComplete = Boolean(
       cache &&
       (!artifactEnabled ||
@@ -1737,19 +2276,31 @@ export class DataService implements OnModuleInit {
       !this.legacySnapshotCoverageDirty &&
       this.isLegacyCacheContinuous(cache, availableState),
     );
-    const fresh = artifactEnabled ? currentFresh : legacyFresh;
+    const fresh = currentFresh;
     const status = !usable ? 'unavailable' : fresh ? 'ready' : 'degraded';
 
     const result: StatisticCacheStatus = {
       status: stateCheckFailed && status === 'ready' ? 'degraded' : status,
       usable,
       fresh: fresh && !stateCheckFailed,
-      currentFresh: currentFresh && !stateCheckFailed,
+      currentFresh: currentFresh && !currentCheckFailed,
       historicComplete,
       mode,
       artifactPublicationId: cache?.artifactPublicationId ?? null,
+      artifactProtocolVersion: cache?.artifactProtocolVersion ?? null,
       artifactLiveInstances: artifactInstanceSummary.liveInstances,
       artifactReadyInstances: artifactInstanceSummary.readyInstances,
+      artifactCandidatePublicationId: candidateSummary.publicationId,
+      artifactCandidateProtocolVersion: candidateSummary.protocolVersion,
+      artifactCandidateReadyInstances: candidateSummary.readyInstances,
+      targetDate: availableState?.currentPublishedDate ?? null,
+      refreshStartedAt: candidateSummary.createdAt,
+      nextRetryAt:
+        this.failedCandidateAt > 0
+          ? new Date(
+              this.failedCandidateAt + this.publicationRefreshRetryIntervalMs,
+            ).toISOString()
+          : null,
       currentPublishedDate: availableState?.currentPublishedDate ?? null,
       expectedPublishedDate: publicationExpectation.expectedPublishedDate,
       publicationDeadline: publicationExpectation.deadline,
@@ -1799,22 +2350,72 @@ export class DataService implements OnModuleInit {
 
   getStatisticCacheAcknowledgement(): StatisticCacheAcknowledgement {
     const cache = this.certifiedDataCache;
-    if (!cache?.artifactPublicationId) {
+    const candidateId =
+      this.publicationState?.statisticCacheCandidatePublicationId ?? null;
+    const candidate =
+      candidateId &&
+      this.candidateDataCache?.artifactPublicationId === candidateId
+        ? this.candidateDataCache
+        : null;
+    const candidateFailed =
+      candidateId !== null &&
+      this.failedCandidatePublicationId === candidateId &&
+      this.failedCandidatePhase !== null;
+    const candidateAcknowledgement = {
+      candidateStatisticCachePublicationId:
+        candidate?.artifactPublicationId ??
+        (candidateFailed ? candidateId : null),
+      candidateStatisticRevision: candidate?.revision ?? null,
+      candidateStatisticPublishedDate: candidate?.latestDate ?? null,
+      candidateStatisticSourceRevision:
+        candidate?.artifactSourceRevision ?? null,
+      candidateStatisticFingerprint: candidate?.fingerprint ?? null,
+      candidateStatisticProtocolVersion:
+        candidate?.artifactProtocolVersion ?? null,
+      candidateStatisticLastError: candidateFailed
+        ? this.failedCandidatePhase
+        : null,
+    };
+    const artifactIdentity = cache?.artifactIdentity ?? null;
+    const artifactIdentityIsConsistent = Boolean(
+      cache?.artifactPublicationId &&
+      artifactIdentity &&
+      cache.artifactPublicationId === artifactIdentity.id &&
+      cache.revision === artifactIdentity.statisticRevision &&
+      cache.latestDate === artifactIdentity.latestDate &&
+      artifactIdentity.currentPublishedDate === artifactIdentity.latestDate &&
+      cache.fingerprint === artifactIdentity.contentFingerprint &&
+      cache.artifactSourceRevision === artifactIdentity.sourceRevision &&
+      cache.artifactProtocolVersion === artifactIdentity.protocolVersion,
+    );
+    if (!artifactIdentity || !artifactIdentityIsConsistent) {
+      const hasPartialArtifactIdentity = Boolean(
+        cache?.artifactPublicationId || artifactIdentity,
+      );
       return {
         statisticCachePublicationId: null,
         statisticRevision: null,
         statisticPublishedDate: null,
         statisticFingerprint: null,
+        statisticSourceRevision: null,
+        statisticProtocolVersion: null,
         statisticLastError:
-          this.lastDataCacheError?.phase ?? 'statistic-artifact-unavailable',
+          (hasPartialArtifactIdentity
+            ? 'statistic-artifact-identity-inconsistent'
+            : this.lastDataCacheError?.phase) ??
+          'statistic-artifact-unavailable',
+        ...candidateAcknowledgement,
       };
     }
     return {
-      statisticCachePublicationId: cache.artifactPublicationId,
-      statisticRevision: cache.revision,
-      statisticPublishedDate: cache.latestDate,
-      statisticFingerprint: cache.fingerprint,
+      statisticCachePublicationId: artifactIdentity.id,
+      statisticRevision: artifactIdentity.statisticRevision,
+      statisticPublishedDate: artifactIdentity.currentPublishedDate,
+      statisticFingerprint: artifactIdentity.contentFingerprint,
+      statisticSourceRevision: artifactIdentity.sourceRevision,
+      statisticProtocolVersion: artifactIdentity.protocolVersion,
       statisticLastError: this.lastDataCacheError?.phase ?? null,
+      ...candidateAcknowledgement,
     };
   }
 
@@ -1842,17 +2443,22 @@ export class DataService implements OnModuleInit {
               AND instance."statisticRevision" = $2::bigint
               AND instance."statisticPublishedDate" = $3::date
               AND instance."statisticFingerprint" = $4::varchar
+              AND instance."statisticSourceRevision"
+                IS NOT DISTINCT FROM $5::bigint
+              AND instance."statisticProtocolVersion" = $6::integer
               AND instance."statisticLastError" IS NULL
           )::integer AS "readyInstances"
         FROM "zone_publication_instance" instance
         WHERE instance."heartbeatAt" >=
-          now() - ($5::integer * interval '1 second')
+          now() - ($7::integer * interval '1 second')
       `,
       [
         cache.artifactPublicationId,
         cache.revision,
         cache.latestDate,
         cache.fingerprint,
+        cache.artifactSourceRevision,
+        cache.artifactProtocolVersion,
         configuredLease,
       ],
     );
@@ -1868,6 +2474,64 @@ export class DataService implements OnModuleInit {
       throw new Error('Statistic artifact instance summary is invalid');
     }
     return { liveInstances, readyInstances };
+  }
+
+  private async getStatisticCandidateSummary(candidateId: string): Promise<{
+    publicationId: string;
+    protocolVersion: number;
+    readyInstances: number;
+    createdAt: string;
+  }> {
+    const leaseSeconds = this.getStatisticInstanceLeaseSeconds();
+    const [summary] = await this.dataSource.query(
+      `
+        SELECT
+          publication."id"::text AS "publicationId",
+          publication."protocolVersion",
+          publication."createdAt",
+          COUNT(instance."instanceId") FILTER (
+            WHERE instance."candidateStatisticCachePublicationId" =
+                publication."id"
+              AND instance."candidateStatisticRevision" =
+                publication."statisticRevision"
+              AND instance."candidateStatisticPublishedDate" =
+                publication."currentPublishedDate"
+              AND instance."candidateStatisticSourceRevision"
+                IS NOT DISTINCT FROM publication."sourceRevision"
+              AND instance."candidateStatisticFingerprint" =
+                publication."contentFingerprint"
+              AND instance."candidateStatisticProtocolVersion" =
+                publication."protocolVersion"
+              AND instance."candidateStatisticLastError" IS NULL
+          )::integer AS "readyInstances"
+        FROM "statistic_cache_publication" publication
+        LEFT JOIN "zone_publication_instance" instance
+          ON instance."heartbeatAt" >=
+            now() - ($2::integer * interval '1 second')
+        WHERE publication."id" = $1::uuid
+          AND publication."status" = 'ready'
+        GROUP BY publication."id"
+      `,
+      [candidateId, leaseSeconds],
+    );
+    const readyInstances = Number(summary?.readyInstances);
+    const protocolVersion = Number(summary?.protocolVersion);
+    const createdAt = new Date(summary?.createdAt);
+    if (
+      String(summary?.publicationId ?? '') !== candidateId ||
+      !Number.isSafeInteger(readyInstances) ||
+      readyInstances < 0 ||
+      protocolVersion !== STATISTIC_CACHE_PROTOCOL_VERSION ||
+      Number.isNaN(createdAt.getTime())
+    ) {
+      throw new Error('Statistic cache candidate summary is invalid');
+    }
+    return {
+      publicationId: candidateId,
+      protocolVersion,
+      readyInstances,
+      createdAt: createdAt.toISOString(),
+    };
   }
 
   private async isCurrentSnapshotCertified(
@@ -2315,7 +2979,9 @@ export class DataService implements OnModuleInit {
       dateCount: areaDates.length,
       departmentCount: expectedDepartmentCodes.size,
       communeCount: this.dataCommune.length,
+      artifactIdentity: null,
       artifactPublicationId: null,
+      artifactProtocolVersion: null,
       artifactSourceRevision: publicationState.sourceRevision,
       latestCommuneWeights: [],
       artifactHistoricDirtyFrom: null,
@@ -2441,10 +3107,12 @@ export class DataService implements OnModuleInit {
   private async readPublicationState(
     queryable: Pick<DataSource | EntityManager, 'query'>,
   ): Promise<StatisticPublicationState> {
+    const sourceRevisionSql = statisticSourceRevisionSql('source_state');
     const rows: Array<{
       revision: string | number;
       activePublicationId: string | null;
       statisticCachePublicationId: string | null;
+      statisticCacheCandidatePublicationId: string | null;
       currentPublishedDate: string | Date | null;
       historicPublishedThrough: string | Date | null;
       historicDirtyFrom: string | Date | null;
@@ -2459,6 +3127,8 @@ export class DataService implements OnModuleInit {
         zone_state."activePublicationId"::text AS "activePublicationId",
         cache_state."activePublicationId"::text
           AS "statisticCachePublicationId",
+        cache_state."candidatePublicationId"::text
+          AS "statisticCacheCandidatePublicationId",
         statistic_state."currentPublishedDate"::text AS "currentPublishedDate",
         statistic_state."historicPublishedThrough"::text
           AS "historicPublishedThrough",
@@ -2466,7 +3136,7 @@ export class DataService implements OnModuleInit {
         statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough",
         config."computeMapDate"::text AS "historicMapCursor",
         config."computeStatsDate"::text AS "historicStatsCursor",
-        source_state."revision"::text AS "sourceRevision",
+        ${sourceRevisionSql}::text AS "sourceRevision",
         config."historicComputeEpoch"::text AS "historicComputeEpoch"
       FROM "statistic_publication_state" statistic_state
       LEFT JOIN "zone_publication_state" zone_state ON zone_state."id" = 1
@@ -2487,6 +3157,10 @@ export class DataService implements OnModuleInit {
         : null,
       statisticCachePublicationId: rows[0].statisticCachePublicationId
         ? String(rows[0].statisticCachePublicationId)
+        : null,
+      statisticCacheCandidatePublicationId: rows[0]
+        .statisticCacheCandidatePublicationId
+        ? String(rows[0].statisticCacheCandidatePublicationId)
         : null,
       currentPublishedDate: this.normalizeDate(rows[0].currentPublishedDate),
       historicPublishedThrough: this.normalizeDate(
@@ -2528,6 +3202,8 @@ export class DataService implements OnModuleInit {
       left.activePublicationId === right.activePublicationId &&
       (left.statisticCachePublicationId ?? null) ===
         (right.statisticCachePublicationId ?? null) &&
+      (left.statisticCacheCandidatePublicationId ?? null) ===
+        (right.statisticCacheCandidatePublicationId ?? null) &&
       left.currentPublishedDate === right.currentPublishedDate
     );
   }
@@ -2553,6 +3229,7 @@ export class DataService implements OnModuleInit {
       state.revision,
       state.activePublicationId,
       state.statisticCachePublicationId,
+      state.statisticCacheCandidatePublicationId,
       state.currentPublishedDate,
     ]);
   }

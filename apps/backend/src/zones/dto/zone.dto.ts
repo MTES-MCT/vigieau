@@ -148,3 +148,37 @@ export class ZonePublicationDto {
   @ApiProperty({ example: 123 })
   zoneCount: number;
 }
+
+export type ZoneAvailabilityStatus =
+  | 'available'
+  | 'confirmed_none'
+  | 'unavailable';
+
+export class ZoneTypeAvailabilityDto {
+  @ApiProperty({
+    enum: ['available', 'confirmed_none', 'unavailable'],
+    example: 'available',
+  })
+  status: ZoneAvailabilityStatus;
+
+  @ApiProperty({ nullable: true, required: false })
+  asOf?: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  sourceRevision?: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  officialUrl?: string | null;
+}
+
+export class ZonesWithAvailabilityDto {
+  @ApiProperty({ type: [ZoneDto] })
+  zones: ZoneDto[];
+
+  @ApiProperty({
+    additionalProperties: {
+      $ref: '#/components/schemas/ZoneTypeAvailabilityDto',
+    },
+  })
+  availability: Record<'AEP' | 'SUP' | 'SOU', ZoneTypeAvailabilityDto>;
+}

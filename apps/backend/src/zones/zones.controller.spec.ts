@@ -33,6 +33,7 @@ describe('ZonesController', () => {
 
   const mockZonesService = {
     find: jest.fn(),
+    findWithAvailability: jest.fn(),
     findOne: jest.fn(),
     findByDepartement: jest.fn(),
     getPublication: jest.fn(),
@@ -75,6 +76,31 @@ describe('ZonesController', () => {
         undefined,
       );
       expect(result).toEqual(mockResult);
+    });
+  });
+
+  describe('findAllV2', () => {
+    it('returns zones with their certified availability', async () => {
+      const expected = {
+        zones: [mockZone],
+        availability: {
+          AEP: { status: 'unavailable' },
+          SUP: { status: 'available' },
+          SOU: { status: 'unavailable' },
+        },
+      };
+      mockZonesService.findWithAvailability.mockResolvedValue(expected);
+      const query = { commune: '01001', profil: 'particulier' };
+
+      await expect(zonesController.findAllV2(query)).resolves.toEqual(expected);
+      expect(zonesService.findWithAvailability).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        '01001',
+        'particulier',
+        undefined,
+        undefined,
+      );
     });
   });
 

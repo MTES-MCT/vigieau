@@ -113,3 +113,31 @@ test('schedules one manifest retry at the requested delay', () => {
   scheduler.clear();
   assert.equal(clearedTimeout, 24);
 });
+
+test('backs off manifest retries with bounded jitter and resets after success', () => {
+  const scheduledCallbacks = [];
+  const scheduledDelays = [];
+  const scheduler = createRetryScheduler(() => {}, 5_000, {
+    maxDelayMs: 60_000,
+    jitterRatio: 0.2,
+    randomFn: () => 0.5,
+    setTimeoutFn: (callback, delay) => {
+      scheduledCallbacks.push(callback);
+      scheduledDelays.push(delay);
+      return scheduledCallbacks.length;
+    },
+  });
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    scheduler.schedule();
+    scheduledCallbacks.shift()();
+  }
+  assert.deepEqual(
+    scheduledDelays,
+    [4_500, 9_000, 18_000, 36_000, 54_000, 54_000],
+  );
+
+  scheduler.clear();
+  scheduler.schedule();
+  assert.equal(scheduledDelays.at(-1), 4_500);
+});

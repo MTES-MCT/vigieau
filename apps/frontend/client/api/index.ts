@@ -2,13 +2,21 @@ import { $fetch } from 'ofetch';
 import { ref } from 'vue';
 import { Address } from '../dto/address.dto';
 import { Geo } from '../dto/geo.dto';
+import type { DepartementSituation } from '../dto/departement.dto';
+import type { ZoneSearchResponse } from '../dto/zone-availability.dto';
 import { useZonePublicationStore } from '../store/zonePublication';
 import { fetchAsRefResponse } from '../utils/fetch-response';
 import {
   buildPublishedZonePath,
   getDepartmentsApiDate,
+  getHttpErrorStatus,
   shouldRefreshZonePublication,
 } from '../utils/zone-publication';
+import {
+  getDepartmentCodeFromCommune,
+  isUnsupportedZoneV2Status,
+  normalizeZoneSearchResponse,
+} from '../utils/zone-availability';
 
 const _adresseOptions: string = '&limit=10';
 
@@ -111,10 +119,13 @@ const index = {
     if (publicationPin?.publicationId) {
       params.set('publicationId', publicationPin.publicationId);
     }
-    return useFetch(`/departements?${params.toString()}`, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    return useFetch<DepartementSituation[]>(
+      `/departements?${params.toString()}`,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+    );
   },
 
   getDataArea(dateDebut: string, dateFin: string, area?: string): Promise<any> {
@@ -146,6 +157,14 @@ const index = {
   getDataDuree(): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
     return useFetch(`/data/duree`, {
+      method: 'GET',
+      baseURL: runtimeConfig.public.apiSecheresseUrl,
+    });
+  },
+
+  getDataStatus(): Promise<any> {
+    const runtimeConfig = useRuntimeConfig();
+    return useFetch(`/data/status`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
     });
@@ -282,16 +301,47 @@ const _fetchZones = (
   baseURL: string,
   publicationId?: string | null,
 ): Promise<any> => {
-  return fetchAsRefResponse(() =>
-    $fetch(buildPublishedZonePath(path, searchParams, publicationId), {
-      method: 'GET',
-      baseURL,
-    }),
-  );
+  const departmentCode = _getRequestedDepartmentCode(path, searchParams);
+  return fetchAsRefResponse<ZoneSearchResponse>(async () => {
+    try {
+      const response = await $fetch(
+        buildPublishedZonePath(
+          _getZoneV2Path(path),
+          searchParams,
+          publicationId,
+        ),
+        { method: 'GET', baseURL },
+      );
+      return normalizeZoneSearchResponse(response, departmentCode);
+    } catch (error) {
+      if (!isUnsupportedZoneV2Status(getHttpErrorStatus(error))) {
+        throw error;
+      }
+      const legacyResponse = await $fetch(
+        buildPublishedZonePath(path, searchParams, publicationId),
+        { method: 'GET', baseURL },
+      );
+      return normalizeZoneSearchResponse(legacyResponse, departmentCode);
+    }
+  });
+};
+
+const _getZoneV2Path = (path: string): string =>
+  path === '/zones' ? '/zones/v2' : path.replace('/zones/', '/zones/v2/');
+
+const _getRequestedDepartmentCode = (
+  path: string,
+  searchParams: URLSearchParams,
+): string | null => {
+  const departmentPath = /^\/zones\/departement\/([^/?]+)/.exec(path);
+  if (departmentPath) {
+    return decodeURIComponent(departmentPath[1]);
+  }
+  return getDepartmentCodeFromCommune(searchParams.get('commune'));
 };
 
 const _getErrorStatus = (response: any): number | undefined =>
-  response.error?.value?.statusCode ?? response.error?.value?.status;
+  getHttpErrorStatus(response.error?.value);
 
 const _manifestUnavailableResponse = () => ({
   data: ref(null),

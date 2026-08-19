@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { readStatisticCachePositiveInteger } from './statistic_cache.config';
+import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
 
 export interface StatisticCacheReadyIdentity {
   publicationId: string;
@@ -64,8 +65,8 @@ export class StatisticCacheReadinessService {
             AND publication."latestDate" = $1::date
             AND publication."statisticRevision" = statistic_state."revision"
             AND statistic_state."currentPublishedDate" = $1::date
-            AND publication."sourceRevision" = source_state."revision"
-            AND source_state."revision" = $2::bigint
+            AND publication."sourceRevision" = ${sourceRevisionColumn('source_state')}
+            AND ${sourceRevisionColumn('source_state')} = $2::bigint
             AND publication."historicComputeEpoch" =
                 config."historicComputeEpoch"
             AND (

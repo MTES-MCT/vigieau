@@ -15,11 +15,14 @@ describe('StatisticCommuneService', () => {
     process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
   const previousCurrentLockWaitTimeoutMs =
     process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
+  const previousPublicSourceRevisionEnabled =
+    process.env.PUBLIC_SOURCE_REVISION_ENABLED;
 
   beforeEach(() => {
     delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
     delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
     delete process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
+    delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
   });
 
   afterAll(() => {
@@ -39,6 +42,12 @@ describe('StatisticCommuneService', () => {
     } else {
       process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS =
         previousCurrentLockWaitTimeoutMs;
+    }
+    if (previousPublicSourceRevisionEnabled === undefined) {
+      delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
+    } else {
+      process.env.PUBLIC_SOURCE_REVISION_ENABLED =
+        previousPublicSourceRevisionEnabled;
     }
   });
 
@@ -1292,6 +1301,38 @@ describe('StatisticCommuneService', () => {
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
     expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('certifies the current snapshot against public revision 42 instead of technical revision 100', async () => {
+    process.env.PUBLIC_SOURCE_REVISION_ENABLED = 'true';
+    const harness = createComputationHarness();
+    harness.query.mockResolvedValueOnce([
+      {
+        contextMatches: true,
+        publicationContextMatches: true,
+        readyCount: 1,
+        alreadyPublishedCount: 0,
+        completedCount: 1,
+        completedSiblingCount: 2,
+        clearedBootstrapCount: 1,
+        publishedStateCount: 1,
+        expectedDepartementCount: 101,
+        departementRestrictionCount: 101,
+        departementSituationCount: 101,
+        departementSituationKeyCount: 101,
+      },
+    ]);
+
+    await harness.service.finalizeLegacyCurrentPublication(
+      new Date('2025-07-13T00:00:00.000Z'),
+      '42',
+      '9',
+    );
+
+    const [sql, parameters] = harness.query.mock.calls[0];
+    expect(sql).toContain('source_state."publicRevision" = $2::bigint');
+    expect(sql).not.toContain('source_state."revision" = $2::bigint');
+    expect(parameters).toEqual(['2025-07-13', '42', '9']);
   });
 
   it('does not publish a legacy watermark after source context drift', async () => {

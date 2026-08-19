@@ -129,6 +129,12 @@ describeWithPostgres(
         'StatisticCachePublication1786744800000',
       ]);
       await legacyDataSource.query(`
+        ALTER TABLE "statistic_cache_publication"
+          ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1;
+        ALTER TABLE "statistic_cache_state"
+          ADD COLUMN "candidatePublicationId" uuid
+      `);
+      await legacyDataSource.query(`
       INSERT INTO "historic_department_checkpoint" (
         "computedFor", "departementId", "historicComputeEpoch",
         "sourceRevision", "materializationVersion", "inputSignature",

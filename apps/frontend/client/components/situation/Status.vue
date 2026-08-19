@@ -4,11 +4,13 @@ import { storeToRefs } from 'pinia';
 import { Ref } from 'vue';
 import { useZoneStore } from '../../store/zone';
 import utils from '../../utils';
+import type { ZoneAvailability } from '../../dto/zone-availability.dto';
+import { getZoneSituationState } from '../../utils/zone-availability';
 
 const addressStore = useAddressStore();
 const zoneStore = useZoneStore();
 const { profile, typeEau } = storeToRefs(addressStore);
-const { zones } = storeToRefs(zoneStore);
+const { availability, zones } = storeToRefs(zoneStore);
 const { resetAddress, adressString } = addressStore;
 const { resetZones } = zoneStore;
 const links: Ref<any[]> = ref([
@@ -85,7 +87,7 @@ const zonesOptions = computed(() => {
 });
 
 const usagesByProfile = computed(() => {
-  return zone.value.usages.filter((u) => {
+  return (zone.value?.usages ?? []).filter((u) => {
     switch (profile.value) {
       case 'particulier':
         return u.concerneParticulier;
@@ -101,7 +103,25 @@ const usagesByProfile = computed(() => {
   });
 });
 
+const selectedAvailability = computed<ZoneAvailability>(() =>
+  availability.value?.[typeEau.value] ?? { status: 'unavailable' },
+);
+
+const selectedSituationState = computed(() =>
+  getZoneSituationState(zone.value, selectedAvailability.value),
+);
+
+const availabilityConfirmedNone = computed(
+  () => selectedSituationState.value === 'confirmed_none',
+);
+
 const situationLabel = computed<string>(() => {
+  if (selectedSituationState.value === 'unavailable') {
+    return 'Information indisponible';
+  }
+  if (selectedSituationState.value === 'municipal') {
+    return 'Arrêté municipal à consulter';
+  }
   return utils.getShortSituationLabel(
     utils.getRestrictionRank(zone.value?.niveauGravite),
   );
@@ -253,7 +273,12 @@ watch(
       {{ situationUpdateAnnouncement }}
     </p>
 
-    <SituationHeader :address="addressToUse" :type-eau="typeEau" :zone="zone" />
+    <SituationHeader
+      :address="addressToUse"
+      :availability="selectedAvailability"
+      :type-eau="typeEau"
+      :zone="zone"
+    />
 
     <div
       v-if="zone?.arreteMunicipalCheminFichier
@@ -271,7 +296,9 @@ watch(
         :usages="usagesByProfile"
       />
     </template>
-    <template v-else-if="!zone || !zone.arreteMunicipalCheminFichier">
+    <template
+      v-else-if="availabilityConfirmedNone && (!zone || !zone.arreteMunicipalCheminFichier)"
+    >
       <div class="fr-col-12">
         <div class="fr-grid-row fr-grid-row--center">
           <DsfrHighlight class="fr-my-2w">

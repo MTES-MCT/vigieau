@@ -11,6 +11,8 @@ const route = useRoute();
 const routeAnnouncement = ref('');
 const zonePublicationStore = useZonePublicationStore();
 const ZONE_PUBLICATION_REFRESH_MS = 60_000;
+const ZONE_PUBLICATION_ERROR_RETRY_MAX_MS = 60_000;
+const ZONE_PUBLICATION_ERROR_RETRY_JITTER_RATIO = 0.2;
 let publicationRefreshInterval: ReturnType<typeof setInterval> | null = null;
 let publicationRefreshActive = false;
 let routeChangeSequence = 0;
@@ -34,6 +36,10 @@ const publicationRetry = createRetryScheduler(
     }
   },
   ZONE_PUBLICATION_ERROR_RETRY_MS,
+  {
+    maxDelayMs: ZONE_PUBLICATION_ERROR_RETRY_MAX_MS,
+    jitterRatio: ZONE_PUBLICATION_ERROR_RETRY_JITTER_RATIO,
+  },
 );
 
 watch(

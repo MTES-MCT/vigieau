@@ -29,6 +29,10 @@ const profilesSampleRate = toNumber(process.env.SENTRY_PROFILES_SAMPLE_RATE, 0);
 if (sentryDsn) {
   Sentry.init({
     dsn: sentryDsn,
+    release:
+      process.env.SENTRY_RELEASE?.trim() ||
+      process.env.CONTAINER_VERSION?.trim() ||
+      undefined,
     environment:
       process.env.SENTRY_ENV?.trim() || process.env.NODE_ENV || 'local',
     integrations:

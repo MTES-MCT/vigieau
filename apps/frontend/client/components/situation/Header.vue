@@ -3,12 +3,15 @@ import utils from '../../utils';
 import { Zone } from '../../dto/zone.dto';
 import { useAddressStore } from '../../store/address';
 import niveauxGravite from '../../dto/niveauGravite';
+import type { ZoneAvailability } from '../../dto/zone-availability.dto';
+import { getZoneSituationState } from '../../utils/zone-availability';
 import { VIcon } from '@gouvminint/vue-dsfr';
 
 const props = defineProps<{
   typeEau: 'AEP' | 'SUP' | 'SOU',
   zone: Zone
   address: string
+  availability: ZoneAvailability
 }>();
 
 const addressStore = useAddressStore();
@@ -39,6 +42,16 @@ const typeEauLabels = {
   SUP: 'L\'eau prélevée dans les cours d\'eau',
 } as const;
 const typeEauLabel = computed(() => typeEauLabels[props.typeEau]);
+const situationState = computed(() =>
+  getZoneSituationState(props.zone, props.availability),
+);
+const availabilityUnavailable = computed(
+  () => situationState.value === 'unavailable',
+);
+const availabilityConfirmedNone = computed(
+  () => situationState.value === 'confirmed_none',
+);
+const municipalOnly = computed(() => situationState.value === 'municipal');
 const niveauGravite = computed(() => {
   return niveauxGravite.find(n => n.niveauGravite === (props.zone?.niveauGravite ? props.zone.niveauGravite : null));
 });
@@ -55,6 +68,7 @@ const niveauGravite = computed(() => {
     >
       <div class="fr-mb-2w fr-grid-row fr-grid-row--middle">
         <DsfrBadge
+          v-if="situationState === 'restricted' || availabilityConfirmedNone"
           small
           no-icon
           :class="classObject(utils.getRestrictionRank(zone?.niveauGravite))"
@@ -63,7 +77,12 @@ const niveauGravite = computed(() => {
         <VIcon class="fr-mx-1w" name="ri-map-pin-user-line" />
         {{ address }}
       </div>
-      <h1 v-if="zone?.id" class="h2">
+      <h1 v-if="availabilityUnavailable" class="h2">
+        Les restrictions pour {{ typeEauLabel.toLowerCase() }}
+        <span>ne peuvent pas être confirmées</span>
+        à votre adresse.
+      </h1>
+      <h1 v-else-if="zone?.id" class="h2">
         {{ typeEauLabel }} est en
         <span
           :class="`situation-level-c-${utils.getRestrictionRank(zone?.niveauGravite)}`"
@@ -72,7 +91,11 @@ const niveauGravite = computed(() => {
         </span>
         à votre adresse.
       </h1>
-      <h1 v-else class="h2">
+      <h1 v-else-if="municipalOnly" class="h2">
+        Un arrêté municipal concernant l’eau
+        <span>a été publié pour votre commune</span>.
+      </h1>
+      <h1 v-else-if="availabilityConfirmedNone" class="h2">
         {{ typeEauLabel }} n'est
         <span class="situation-level-c-0">
           pas concernée par des restrictions
@@ -80,11 +103,38 @@ const niveauGravite = computed(() => {
         à votre adresse.
       </h1>
     </div>
-    <div class="fr-col-12 situation-status-header__info-wrapper">
+    <div
+      v-if="availabilityUnavailable"
+      class="fr-col-12 situation-status-header__info-wrapper"
+    >
+      <p class="fr-m-0">
+        La requête n’a pas permis de vérifier la situation. Consultez
+        <a
+          v-if="availability.officialUrl"
+          class="fr-link"
+          :href="availability.officialUrl"
+          target="_blank"
+          rel="noopener external"
+        >
+          le site internet des services de l’État
+        </a><template v-else>
+          le site internet des services de l’État de votre département
+        </template>.
+      </p>
+    </div>
+    <div
+      v-else-if="municipalOnly"
+      class="fr-col-12 situation-status-header__info-wrapper"
+    >
+      <p class="fr-m-0">
+        Consultez l’arrêté municipal pour connaître les restrictions applicables.
+      </p>
+    </div>
+    <div v-else class="fr-col-12 situation-status-header__info-wrapper">
       <p class="fr-m-0">{{ niveauGravite.description }}</p>
     </div>
     <div
-      v-if="!utils.showRestrictions(zone) && isParticulier()"
+      v-if="!availabilityUnavailable && !utils.showRestrictions(zone) && isParticulier()"
       class="fr-col-12 fr-col-md-8 situation-status-header__info-wrapper"
     >
       <p class="fr-m-0">Nous vous conseillons tout de même de suivre les eco-gestes ci-dessous.</p>

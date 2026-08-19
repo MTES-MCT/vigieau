@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { DataController } from './data.controller';
 import { DataService } from './data.service';
 import { CommonDataQueryDto, CommuneQueryDto } from './dto/data.dto';
+import { HEADERS_METADATA } from '@nestjs/common/constants';
 
 describe('DataController', () => {
   let controller: DataController;
@@ -13,6 +14,7 @@ describe('DataController', () => {
     departementFindByDate: jest.fn(),
     duree: jest.fn(),
     commune: jest.fn(),
+    getStatisticCacheStatus: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -86,6 +88,24 @@ describe('DataController', () => {
         query.departement,
       );
       expect(result).toEqual(expectedResult);
+    });
+  });
+
+  describe('status', () => {
+    it('retourne le statut même lorsque les statistiques sont dégradées', async () => {
+      const expectedResult = {
+        status: 'degraded',
+        usable: true,
+        latestDate: '2026-08-17',
+        targetDate: '2026-08-19',
+      };
+      mockDataService.getStatisticCacheStatus.mockResolvedValue(expectedResult);
+
+      await expect(controller.status()).resolves.toBe(expectedResult);
+      expect(service.getStatisticCacheStatus).toHaveBeenCalledWith(true);
+      expect(
+        Reflect.getMetadata(HEADERS_METADATA, controller.status),
+      ).toContainEqual({ name: 'Cache-Control', value: 'no-store' });
     });
   });
 

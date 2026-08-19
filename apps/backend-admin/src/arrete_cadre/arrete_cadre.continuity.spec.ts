@@ -59,6 +59,7 @@ function createHarness() {
     enqueueCurrentZoneRecomputeWithManager: jest
       .fn()
       .mockResolvedValue(undefined),
+    recordPublicMutation: jest.fn().mockResolvedValue('43'),
     updateArreteRestrictionStatut: jest.fn().mockResolvedValue(undefined),
     requestCurrentZoneRecompute: jest.fn(),
     deleteByArreteCadreId: jest.fn().mockResolvedValue([]),
@@ -239,11 +240,11 @@ describe('ArreteCadreService continuity entry points', () => {
       [[100]],
     );
     expect(
-      harness.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager,
-    ).toHaveBeenCalledWith(harness.manager, [65]);
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).toHaveBeenCalledWith(harness.manager, [65], 'TRANSITION AUTOMATIQUE AC');
     expect(
-      harness.arreteRestrictionService.enqueueCurrentZoneRecomputeWithManager
-        .mock.invocationCallOrder[0],
+      harness.arreteRestrictionService.recordPublicMutation.mock
+        .invocationCallOrder[0],
     ).toBeLessThan(
       harness.arreteRestrictionService.updateArreteRestrictionStatut.mock
         .invocationCallOrder[0],

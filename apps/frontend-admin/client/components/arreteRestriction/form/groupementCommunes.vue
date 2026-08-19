@@ -17,6 +17,7 @@ const emit = defineEmits<{
 }>();
 
 const initialName = props.restriction.nomGroupementAep;
+const normalizeGroupName = (value?: string | null): string => (value ?? '').trim().normalize('NFKC').toLocaleLowerCase('fr-FR');
 const arretesCadreOptions = props.arretesCadre.map((ac) => ({
   text: ac.numero,
   value: ac.id,
@@ -26,15 +27,18 @@ const rules = computed(() => {
     nomGroupementAep: {
       required: helpers.withMessage('Le nom du groupement est obligatoire.', required),
       different: helpers.withMessage('Ce nom de groupement existe déjà, veuillez en choisir un autre.', (value: string) => {
-        const existingNames = props.zonesAep.map((r) => r.nomGroupementAep).filter((n) => n !== initialName);
-        return !existingNames.includes(value);
+        const initialNormalizedName = normalizeGroupName(initialName);
+        const existingNames = props.zonesAep
+          .map((r) => normalizeGroupName(r.nomGroupementAep))
+          .filter((name) => name !== initialNormalizedName);
+        return !existingNames.includes(normalizeGroupName(value));
       }),
     },
     communes: {
       required: helpers.withMessage('Le groupement de communes doit contenir au moins un code INSEE.', required),
     },
     arreteCadre: {
-      required: helpers.withMessage('L\'arrêté cadre associé est obligatoire.', required),
+      required: helpers.withMessage("L'arrêté cadre associé est obligatoire.", required),
     },
   };
 });
@@ -43,13 +47,17 @@ const hint = ref('');
 
 const parseCommunes = (communesText: string) => {
   if (!communesText) {
+    props.restriction.communes = [];
+    hint.value = '';
     return;
   }
-  const inseeRegex = new RegExp('(0[1-9]|[1-9][ABab\\d])\\d{3}', 'gim');
-  const inseeRegexWithout0 = new RegExp('(?:\\s|^)([1-9])\\d{3}(?:\\s|$)', 'gim');
+  const inseeRegex = /(0[1-9]|[1-9][AB\d])\d{3}/gi;
+  const inseeRegexWithout0 = /(?:\s|^)([1-9])\d{3}(?:\s|$)/gm;
   let codesExtracted = communesText.match(inseeRegex);
   let codesExtractedWithout0 = communesText.match(inseeRegexWithout0);
   if (!codesExtracted && !codesExtractedWithout0) {
+    props.restriction.communes = [];
+    hint.value = 'Aucun code INSEE valide du département n’a été reconnu.';
     return;
   }
   // On récupère les séries de 4 chiffres au cas où certains mettent des codes INSEE sans le 0 devant
@@ -71,6 +79,7 @@ const v$ = useVuelidate(rules, props.restriction, { $scope: false });
 const submitForm = async () => {
   await v$.value.$validate();
   if (!v$.value.$error) {
+    props.restriction.nomGroupementAep = props.restriction.nomGroupementAep.trim();
     emit('createEdit', props.restriction);
   }
 };
@@ -116,10 +125,7 @@ if (props.arretesCadre.length === 1 && !props.restriction.arreteCadre) {
           />
         </DsfrInputGroup>
 
-        <DsfrAlert
-          type="info"
-          title="Liste des codes INSEE par département"
-          class="fr-mb-2w">
+        <DsfrAlert type="info" title="Liste des codes INSEE par département" class="fr-mb-2w">
           Pour créer vos groupement de commune, vous allez devoir nous fournir les codes INSEE de chaque commune. Copier / coller à partir
           de la liste des codes correspondant à un groupement.
           <br /><a class="fr-link" href="https://www.insee.fr/fr/information/2560452" target="_blank">Liste des codes INSEE</a>
@@ -142,8 +148,6 @@ if (props.arretesCadre.length === 1 && !props.restriction.arreteCadre) {
             {{ hint }}
           </p>
         </DsfrInputGroup>
-
-
       </div>
     </div>
   </form>

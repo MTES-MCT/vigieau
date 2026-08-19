@@ -13,6 +13,151 @@ describe('ZonePublicationOperatorService', () => {
     jest.clearAllMocks();
   });
 
+  it('dry-runs then atomically separates public revision and queues every department', async () => {
+    let separated = false;
+    const manager = {
+      query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [
+            {
+              revision: '166500',
+              publicRevision: '166500',
+              legacyDualWrite: !separated,
+            },
+          ];
+        }
+        if (sql.includes('array_agg("id"')) {
+          return [{ ids: [1, 49, 79] }];
+        }
+        if (sql.includes('UPDATE "zone_publication_source_state"')) {
+          expect(parameters).toEqual([false]);
+          separated = true;
+          return [[{ revision: '166500', publicRevision: '166500' }], 1];
+        }
+        if (sql.includes('INSERT INTO "current_zone_recompute_request"')) {
+          return [];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationOperatorService(dataSource as any);
+
+    await expect(
+      service.setPublicRevisionMode({ mode: 'separated' }),
+    ).resolves.toEqual({
+      status: 'dry_run',
+      mode: 'separated',
+      revision: '166500',
+      publicRevision: '166500',
+      queuedDepartmentCount: 0,
+    });
+    await expect(
+      service.setPublicRevisionMode({ mode: 'separated', apply: true }),
+    ).resolves.toEqual({
+      status: 'applied',
+      mode: 'separated',
+      revision: '166500',
+      publicRevision: '166500',
+      queuedDepartmentCount: 3,
+    });
+    expect(manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO "current_zone_recompute_request"'),
+      [[1, 49, 79], '166500', 'SEPARATION REVISION PUBLIQUE', null],
+    );
+  });
+
+  it('realigns public revision before returning to rolling compatibility', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [
+            {
+              revision: '166510',
+              publicRevision: '166503',
+              legacyDualWrite: false,
+            },
+          ];
+        }
+        if (sql.includes('array_agg("id"')) {
+          return [{ ids: [49] }];
+        }
+        if (sql.includes('UPDATE "zone_publication_source_state"')) {
+          expect(parameters).toEqual([true]);
+          return [[{ revision: '166510', publicRevision: '166510' }], 1];
+        }
+        if (sql.includes('INSERT INTO "current_zone_recompute_request"')) {
+          return [];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const service = new ZonePublicationOperatorService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(
+      service.setPublicRevisionMode({
+        mode: 'compatibility',
+        apply: true,
+      }),
+    ).resolves.toMatchObject({
+      status: 'applied',
+      mode: 'compatibility',
+      revision: '166510',
+      publicRevision: '166510',
+      queuedDepartmentCount: 1,
+    });
+  });
+
+  it('realigns both revisions when compatibility is already enabled but drifted', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('FROM "zone_publication_source_state"')) {
+          return [
+            {
+              revision: '166510',
+              publicRevision: '166520',
+              legacyDualWrite: true,
+            },
+          ];
+        }
+        if (sql.includes('array_agg("id"')) {
+          return [{ ids: [49, 79] }];
+        }
+        if (sql.includes('UPDATE "zone_publication_source_state"')) {
+          expect(parameters).toEqual([true]);
+          expect(sql).toContain(
+            '"revision" = CASE\n              WHEN $1 THEN GREATEST',
+          );
+          return [[{ revision: '166520', publicRevision: '166520' }], 1];
+        }
+        if (sql.includes('INSERT INTO "current_zone_recompute_request"')) {
+          return [];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const service = new ZonePublicationOperatorService({
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    } as any);
+
+    await expect(
+      service.setPublicRevisionMode({
+        mode: 'compatibility',
+        apply: true,
+      }),
+    ).resolves.toEqual({
+      status: 'applied',
+      mode: 'compatibility',
+      revision: '166520',
+      publicRevision: '166520',
+      queuedDepartmentCount: 2,
+    });
+  });
+
   it('returns an actionable publication health snapshot', async () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
     const dataSource = {
@@ -134,6 +279,121 @@ describe('ZonePublicationOperatorService', () => {
         incompleteSnapshotCount: 0,
       },
     });
+  });
+
+  it('certifies confirmed_none only through an exact revision-pinned operator transaction', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('SELECT "id", "code"')) {
+          return [{ id: 49, code: '49' }];
+        }
+        if (sql.includes('INSERT INTO "zone_type_availability"')) {
+          return [[{ departmentCode: '49' }], 1];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationOperatorService(dataSource as any);
+    const asOf = '2026-08-19T12:00:00.000Z';
+
+    await expect(
+      service.confirmNoAvailableZone({
+        departmentCode: '49',
+        zoneType: 'AEP',
+        publicRevision: '43',
+        officialUrl: 'https://www.maine-et-loire.gouv.fr/',
+        asOf,
+      }),
+    ).resolves.toEqual({
+      departmentCode: '49',
+      zoneType: 'AEP',
+      status: 'confirmed_none',
+      publicRevision: '43',
+    });
+
+    expect(dataSource.transaction).toHaveBeenCalledWith(
+      'SERIALIZABLE',
+      expect.any(Function),
+    );
+    expect(manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('source."publicRevision" = $6::bigint'),
+      [
+        49,
+        'AEP',
+        'confirmed_none',
+        new Date(asOf),
+        'https://www.maine-et-loire.gouv.fr/',
+        '43',
+      ],
+    );
+  });
+
+  it('rejects an explicit confirmed_none certification for a superseded revision', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('SELECT "id", "code"')) {
+          return [{ id: 49, code: '49' }];
+        }
+        if (sql.includes('INSERT INTO "zone_type_availability"')) {
+          return [[], 0];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+
+    await expect(
+      new ZonePublicationOperatorService(
+        dataSource as any,
+      ).confirmNoAvailableZone({
+        departmentCode: '49',
+        zoneType: 'AEP',
+        publicRevision: '42',
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('normalizes Corsican department codes and rejects non-HTTPS official URLs', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('SELECT "id", "code"')) {
+          return [{ id: 20, code: '2A' }];
+        }
+        if (sql.includes('INSERT INTO "zone_type_availability"')) {
+          return [[{ departmentCode: '2A' }], 1];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((_isolation, callback) => callback(manager)),
+    };
+    const service = new ZonePublicationOperatorService(dataSource as any);
+
+    await expect(
+      service.confirmNoAvailableZone({
+        departmentCode: ' 2a ',
+        zoneType: 'SUP',
+        publicRevision: '43',
+      }),
+    ).resolves.toMatchObject({ departmentCode: '2A' });
+    expect(manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM "departement"'),
+      ['2A'],
+    );
+    await expect(
+      service.confirmNoAvailableZone({
+        departmentCode: '2A',
+        zoneType: 'SUP',
+        publicRevision: '43',
+        officialUrl: 'http://www.corse-du-sud.gouv.fr/',
+      }),
+    ).rejects.toMatchObject({ status: 400 });
   });
 
   it('keeps rollback preparation read-only during a dry run', async () => {

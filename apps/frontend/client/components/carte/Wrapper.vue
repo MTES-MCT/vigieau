@@ -7,12 +7,15 @@ import {
 import type { LocalDateRollover } from '../../utils/zone-publication';
 import type { ZonePublicationPin } from '../../api';
 
-withDefaults(defineProps<{
-  embedded: any;
-  headingTag?: 'h1' | 'h2';
-}>(), {
-  headingTag: 'h2',
-});
+withDefaults(
+  defineProps<{
+    embedded: any;
+    headingTag?: 'h1' | 'h2';
+  }>(),
+  {
+    headingTag: 'h2',
+  },
+);
 
 const tabs = [
   { id: 'map', label: 'Carte' },
@@ -56,10 +59,10 @@ onBeforeUnmount(() => {
         </component>
         <p>Arrêtés publiés avant le {{ dateCarte }}</p>
         <p id="restrictions-map-instructions" class="fr-mb-2w">
-          La carte interactive se déplace avec les flèches et se zoome avec
-          les touches + et −. Appuyez sur Entrée ou Espace pour sélectionner
-          le point situé au centre. Une alternative accessible est disponible
-          sous forme de tableau.
+          La carte interactive se déplace avec les flèches et se zoome avec les
+          touches + et −. Appuyez sur Entrée ou Espace pour sélectionner le
+          point situé au centre. Une alternative accessible est disponible sous
+          forme de tableau.
         </p>
         <DsfrButton secondary type="button" @click="showDataAlternative">
           Consulter les données sous forme de tableau
@@ -87,6 +90,7 @@ onBeforeUnmount(() => {
           <CarteTable
             :date="dateCarte"
             :publication-pin="displayedPublicationPin"
+            type-eau="AEP"
           />
         </template>
       </AccessibleTabs>

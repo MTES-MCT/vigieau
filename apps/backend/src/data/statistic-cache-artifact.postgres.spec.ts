@@ -14,6 +14,8 @@ describeWithPostgres(
   () => {
     const schemaName = `statistic_cache_artifact_${process.pid}_${Date.now()}`;
     const previousRequired = process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+    const previousPublicSourceRevision =
+      process.env.PUBLIC_SOURCE_REVISION_ENABLED;
     let bootstrapDataSource: DataSource;
     let dataSource: DataSource;
     let firstService: StatisticCacheArtifactService;
@@ -106,6 +108,7 @@ describeWithPostgres(
 
     beforeAll(async () => {
       process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+      process.env.PUBLIC_SOURCE_REVISION_ENABLED = 'false';
       bootstrapDataSource = await new DataSource({
         type: 'postgres',
         url: postgresUrl,
@@ -177,6 +180,22 @@ describeWithPostgres(
       } finally {
         await runner.release();
       }
+      await dataSource.query(`
+        ALTER TABLE "statistic_cache_publication"
+          ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1;
+        ALTER TABLE "statistic_cache_state"
+          ADD COLUMN "candidatePublicationId" uuid;
+        ALTER TABLE "zone_publication_instance"
+          ADD COLUMN "statisticSourceRevision" bigint,
+          ADD COLUMN "statisticProtocolVersion" integer,
+          ADD COLUMN "candidateStatisticCachePublicationId" uuid,
+          ADD COLUMN "candidateStatisticRevision" bigint,
+          ADD COLUMN "candidateStatisticPublishedDate" date,
+          ADD COLUMN "candidateStatisticSourceRevision" bigint,
+          ADD COLUMN "candidateStatisticFingerprint" varchar(64),
+          ADD COLUMN "candidateStatisticProtocolVersion" integer,
+          ADD COLUMN "candidateStatisticLastError" text
+      `);
       firstService = new StatisticCacheArtifactService(dataSource);
       secondService = new StatisticCacheArtifactService(dataSource);
     }, 60_000);
@@ -195,6 +214,12 @@ describeWithPostgres(
         delete process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
       } else {
         process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = previousRequired;
+      }
+      if (previousPublicSourceRevision === undefined) {
+        delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
+      } else {
+        process.env.PUBLIC_SOURCE_REVISION_ENABLED =
+          previousPublicSourceRevision;
       }
     });
 
@@ -318,6 +343,108 @@ describeWithPostgres(
           [replacement.identity.id],
         ),
       ).rejects.toThrow(/identity is immutable/i);
+    }, 60_000);
+
+    it('does not block a source mutation and rejects the stale repeatable-read candidate', async () => {
+      await setBoundary('13', '2026-08-18');
+      await dataSource.query(`
+        DELETE FROM "current_zone_recompute_request";
+        UPDATE "zone_publication_source_state" SET "revision" = 42
+        WHERE "id" = 1
+      `);
+      const [stateBefore] = await dataSource.query(`
+        SELECT "activePublicationId"::text AS "activePublicationId"
+        FROM "statistic_cache_state"
+        WHERE "id" = 1
+      `);
+      let signalFactoryStarted!: () => void;
+      const factoryStarted = new Promise<void>((resolve) => {
+        signalFactoryStarted = resolve;
+      });
+      let releaseFactory!: () => void;
+      const factoryBlocked = new Promise<void>((resolve) => {
+        releaseFactory = resolve;
+      });
+
+      const materialization = firstService.materialize(
+        { statisticRevision: '13', currentPublishedDate: '2026-08-18' },
+        async (manager) => {
+          await manager.query(`
+            SELECT "revision"
+            FROM "zone_publication_source_state"
+            WHERE "id" = 1
+          `);
+          signalFactoryStarted();
+          await factoryBlocked;
+          return candidate('13', '2026-08-18', 13);
+        },
+      );
+
+      try {
+        await factoryStarted;
+        const currentWorkerLock = dataSource.createQueryRunner();
+        await currentWorkerLock.connect();
+        try {
+          const [globalLock] = await currentWorkerLock.query(
+            "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS locked",
+          );
+          const [snapshotLock] = await currentWorkerLock.query(
+            'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+            ['vigieau:statistic-commune:snapshot-computation'],
+          );
+          expect(globalLock.locked).toBe(true);
+          expect(snapshotLock.locked).toBe(true);
+          await currentWorkerLock.query(
+            "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-global'))",
+          );
+          await currentWorkerLock.query(
+            'SELECT pg_advisory_unlock(hashtext($1))',
+            ['vigieau:statistic-commune:snapshot-computation'],
+          );
+        } finally {
+          await currentWorkerLock.release();
+        }
+        const mutation = dataSource.transaction(async (manager) => {
+          await manager.query(`
+            UPDATE "zone_publication_source_state"
+            SET "revision" = 43
+            WHERE "id" = 1
+          `);
+          await manager.query(`
+            INSERT INTO "current_zone_recompute_request" ("departementId")
+            VALUES (49)
+          `);
+        });
+        const mutationCompletedWithoutWaitingForMaterialization =
+          await Promise.race([
+            mutation.then(() => true),
+            new Promise<false>((resolve) =>
+              setTimeout(() => resolve(false), 2_000),
+            ),
+          ]);
+        expect(mutationCompletedWithoutWaitingForMaterialization).toBe(true);
+      } finally {
+        releaseFactory();
+      }
+
+      await expect(materialization).rejects.toThrow(
+        'Statistic materialization boundary changed before activation',
+      );
+      const [stateAfter] = await dataSource.query(`
+        SELECT "activePublicationId"::text AS "activePublicationId"
+        FROM "statistic_cache_state"
+        WHERE "id" = 1
+      `);
+      expect(stateAfter.activePublicationId).toBe(
+        stateBefore.activePublicationId,
+      );
+      await expect(
+        dataSource.query(`
+          SELECT COUNT(*)::integer AS "count"
+          FROM "statistic_cache_publication"
+          WHERE "statisticRevision" = 13
+        `),
+      ).resolves.toEqual([{ count: 0 }]);
     }, 60_000);
   },
 );

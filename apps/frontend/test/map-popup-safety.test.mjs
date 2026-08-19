@@ -87,7 +87,7 @@ test('échappe badges, zones et adresse sans perdre la structure restrictions', 
   );
 });
 
-test('conserve le badge sans restrictions sans ajouter de bouton', () => {
+test('un résultat vide reste neutre tant que la disponibilité n’est pas résolue', () => {
   const content = createRestrictionsPopupContent(
     [],
     false,
@@ -96,10 +96,80 @@ test('conserve le badge sans restrictions sans ajouter de bouton', () => {
   );
 
   assert.equal(
+    content.querySelector('[role="status"]')?.textContent,
+    'Vérification des restrictions en cours…',
+  );
+  assert.equal(content.querySelector('.situation-level-bg-0'), null);
+  assert.equal(content.querySelector('button'), null);
+});
+
+test('affiche sans restrictions uniquement après confirmation explicite', () => {
+  const content = createRestrictionsPopupContent(
+    [],
+    true,
+    '',
+    createDocument(),
+    { status: 'confirmed_none' },
+  );
+
+  assert.equal(
     content.querySelector('p.fr-badge.situation-level-bg-0')?.textContent,
     'Pas de restrictions',
   );
-  assert.equal(content.querySelector('button'), null);
+  assert.equal(
+    content.querySelector('button.btn-map-popup')?.textContent,
+    'Je consulte les restrictions',
+  );
+});
+
+test('rend l’indisponibilité actionnable avec uniquement un lien HTTPS', () => {
+  const official = createRestrictionsPopupContent(
+    [],
+    true,
+    '',
+    createDocument(),
+    {
+      status: 'unavailable',
+      officialUrl: 'https://www.deux-sevres.gouv.fr/eau',
+    },
+  );
+  const unsafe = createRestrictionsPopupContent(
+    [],
+    false,
+    '',
+    createDocument(),
+    { status: 'unavailable', officialUrl: 'javascript:alert(1)' },
+  );
+
+  assert.match(official.textContent, /ne peuvent pas être confirmées/);
+  assert.equal(
+    official.querySelector('a.fr-link')?.href,
+    'https://www.deux-sevres.gouv.fr/eau',
+  );
+  assert.equal(official.querySelector('a.fr-link')?.target, '_blank');
+  assert.match(official.querySelector('a.fr-link')?.rel ?? '', /noopener/);
+  assert.equal(unsafe.querySelector('a'), null);
+  assert.match(unsafe.textContent, /services de l'État de votre département/);
+});
+
+test('présente un arrêté municipal sans badge de rang zéro', () => {
+  const content = createRestrictionsPopupContent(
+    [],
+    true,
+    '',
+    createDocument(),
+    {
+      status: 'municipal',
+      documentUrl: 'https://example.test/arrete-municipal.pdf',
+    },
+  );
+
+  assert.match(content.textContent, /arrêté municipal a été publié/);
+  assert.equal(content.querySelector('.situation-level-bg-0'), null);
+  assert.equal(
+    content.querySelector('a.fr-link')?.href,
+    'https://example.test/arrete-municipal.pdf',
+  );
 });
 
 test('échappe le nom de commune dans les popups de chargement et de bilan', () => {

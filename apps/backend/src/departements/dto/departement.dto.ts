@@ -1,6 +1,33 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsDateString, IsOptional, IsString, IsUUID } from 'class-validator';
 
+export type DepartementAvailabilityStatus =
+  | 'available'
+  | 'confirmed_none'
+  | 'unavailable';
+
+export class DepartementZoneAvailabilityDto {
+  @ApiProperty({
+    enum: ['available', 'confirmed_none', 'unavailable'],
+    example: 'available',
+  })
+  status: DepartementAvailabilityStatus;
+
+  @ApiProperty({ nullable: true, required: false })
+  asOf?: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  sourceRevision?: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  officialUrl?: string | null;
+}
+
+export class DepartementAvailabilityDto {
+  @ApiProperty({ type: DepartementZoneAvailabilityDto })
+  AEP: DepartementZoneAvailabilityDto;
+}
+
 export class DepartementDto {
   @ApiProperty({ example: '01', description: 'Code du département' })
   code: string;
@@ -42,6 +69,14 @@ export class DepartementDto {
       "Niveau de gravité maximum en vigueur sur le département pour les eaux potable, null si pas de zone d'alerte en vigueur. Donnée disponible à partir du 28/04/2024.",
   })
   niveauGraviteAepMax: string;
+
+  @ApiProperty({
+    type: DepartementAvailabilityDto,
+    required: false,
+    description:
+      "Disponibilite certifiee des donnees courantes d'eau potable. Le champ est absent pour l'historique anterieur au jour courant.",
+  })
+  availability?: DepartementAvailabilityDto;
 }
 
 export class QueryDepartementDto {

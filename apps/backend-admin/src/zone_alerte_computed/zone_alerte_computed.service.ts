@@ -41,14 +41,20 @@ import {
   DailyZonePublicationReuseContext,
   ZonePublicationService,
 } from '../zone_publication/zone_publication.service';
-import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import {
+  isZonePublicationEnabled,
+  sourceRevisionColumn,
+} from '../zone_publication/zone_publication.config';
 import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import {
   collectPmtilesFeatureIds,
   generatePmtiles,
 } from './pmtiles-generation';
-import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
+import {
+  isCurrentZoneRecomputeWorkerEnabled,
+  shouldRunWebScheduledJobs,
+} from '../core/scheduling/business-cron';
 import {
   getCivilDateAtUtcNoon,
   getScheduledCivilDate,
@@ -516,6 +522,9 @@ export class ZoneAlerteComputedService {
       if (
         await this.zonePublicationService.promoteCertifiedPublicationIfAvailable()
       ) {
+        return;
+      }
+      if (isCurrentZoneRecomputeWorkerEnabled()) {
         return;
       }
       if (await this.zonePublicationService.isRecomputeRequired()) {
@@ -2028,7 +2037,7 @@ DELETE FROM zone_alerte_computed
       }
       await queryRunner.startTransaction('SERIALIZABLE');
       const [source] = await queryRunner.query(`
-        SELECT "revision"::text AS "revision"
+        SELECT ${sourceRevisionColumn()}::text AS "revision"
         FROM "zone_publication_source_state"
         WHERE "id" = 1
         FOR UPDATE
@@ -2274,7 +2283,7 @@ DELETE FROM zone_alerte_computed
         const [context] = await queryRunner.query(
           `
             SELECT
-              source_state."revision"::text AS "sourceRevision",
+              ${sourceRevisionColumn('source_state')}::text AS "sourceRevision",
               config."computeMapDate"::text AS "mapCursor",
               config."computeStatsDate"::text AS "statsCursor",
               config."computeMapGeneration"::text AS "mapGeneration",
@@ -2348,7 +2357,7 @@ DELETE FROM zone_alerte_computed
             const [cleared] = await queryRunner.query(
               `
                 WITH source_guard AS MATERIALIZED (
-                  SELECT "revision"::text AS "sourceRevision"
+                  SELECT ${sourceRevisionColumn()}::text AS "sourceRevision"
                   FROM "zone_publication_source_state"
                   WHERE "id" = 1
                 ), config_guard AS MATERIALIZED (
@@ -2674,7 +2683,7 @@ DELETE FROM zone_alerte_computed
     const [result] = await this.dataSource.query(
       `
         WITH source_guard AS MATERIALIZED (
-          SELECT source_state."revision"::text AS revision
+          SELECT ${sourceRevisionColumn('source_state')}::text AS revision
           FROM "zone_publication_source_state" source_state
           WHERE source_state."id" = 1
           FOR UPDATE

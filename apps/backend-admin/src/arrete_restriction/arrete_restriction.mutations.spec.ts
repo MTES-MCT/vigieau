@@ -1,11 +1,18 @@
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
+import { Departement } from '@shared/entities/departement.entity';
 import { ArreteRestrictionService } from './arrete_restriction.service';
 
 const currentUser = {
   email: 'mte@example.test',
   role: 'mte',
   role_departements: [],
+} as any;
+
+const ddt53User = {
+  email: 'ddt53@example.test',
+  role: 'departement',
+  role_departements: ['53'],
 } as any;
 
 interface MutableArreteState {
@@ -159,10 +166,21 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
     ]),
     createQueryBuilder: jest.fn(() => arreteCadreLockQuery),
   };
-  const manager = {
-    getRepository: jest.fn((entity) =>
-      entity === ArreteCadre ? arreteCadreRepository : transactionRepository,
+  const departementRepository = {
+    findOne: jest.fn(async ({ where: { id } }) =>
+      id ? { id, code: id === 53 ? '53' : '75' } : null,
     ),
+  };
+  const manager = {
+    getRepository: jest.fn((entity) => {
+      if (entity === ArreteCadre) {
+        return arreteCadreRepository;
+      }
+      if (entity === Departement) {
+        return departementRepository;
+      }
+      return transactionRepository;
+    }),
     query: jest.fn(async (sql: string) =>
       sql.includes('information_schema.columns')
         ? [{ exists: true }]
@@ -206,6 +224,7 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
   jest
     .spyOn(service, 'enqueueCurrentZoneRecomputeWithManager')
     .mockResolvedValue(undefined);
+  jest.spyOn(service, 'recordPublicMutation').mockResolvedValue('43');
   const checkModifications = jest
     .spyOn(service as any, 'checkModifications')
     .mockResolvedValue(undefined);
@@ -225,6 +244,7 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
 
   return {
     checkModifications,
+    departementRepository,
     get transactionRolledBack() {
       return transactionRolledBack;
     },
@@ -246,6 +266,88 @@ describe('ArreteRestrictionService chain mutations', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('préserve les restrictions sur un PATCH scalaire qui les omet', async () => {
+    const harness = createHarness(
+      [createState(300, { statut: 'a_valider' })],
+      300,
+    );
+
+    await harness.service.update(
+      300,
+      { numero: 'AR renommé' } as any,
+      currentUser,
+    );
+
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
+    expect(harness.transactionRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 300, numero: 'AR renommé' }),
+    );
+  });
+
+  it('valide les restrictions PATCH contre les arrêtés cadre persistés quand ils sont omis', async () => {
+    const harness = createHarness(
+      [createState(300, { statut: 'a_valider' })],
+      300,
+    );
+    const restrictions = [
+      {
+        id: 20,
+        isAep: false,
+        arreteCadre: { id: 10 },
+        zoneAlerte: { id: 7 },
+      },
+    ];
+
+    await harness.service.update(300, { restrictions } as any, currentUser);
+
+    expect(harness.restrictionService.updateAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        restrictions,
+        departement: expect.objectContaining({ id: 53 }),
+        arretesCadre: [expect.objectContaining({ id: 10 })],
+      }),
+      300,
+      harness.manager,
+    );
+  });
+
+  it('refuse la création dans un département non autorisé avant toute écriture', async () => {
+    const harness = createHarness([createState(300)], 300);
+
+    await expect(
+      harness.service.create(
+        { numero: 'AR-75', departement: { id: 75 } } as any,
+        ddt53User,
+      ),
+    ).rejects.toThrow(
+      `Vous ne pouvez enregistrer un arrêté de restriction que sur un département autorisé.`,
+    );
+
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
+  });
+
+  it('revalide et refuse le département cible d’un déplacement PATCH', async () => {
+    const harness = createHarness(
+      [createState(300, { statut: 'a_valider' })],
+      300,
+    );
+
+    await expect(
+      harness.service.update(
+        300,
+        { departement: { id: 75 } } as any,
+        ddt53User,
+      ),
+    ).rejects.toThrow(
+      `Vous ne pouvez enregistrer un arrêté de restriction que sur un département autorisé.`,
+    );
+
+    expect(harness.transactionRolledBack).toBe(true);
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
   });
 
   it('restores the old predecessor and truncates the new predecessor when relinking', async () => {
