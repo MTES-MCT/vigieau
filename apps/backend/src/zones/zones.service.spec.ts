@@ -465,6 +465,156 @@ describe('ZonesService', () => {
       expect(result.availability.AEP.status).toBe('available');
     });
 
+    it('reports confirmed none locally when applicable AEP data has no zone for the commune', async () => {
+      const snapshot = makeSnapshot(1) as any;
+      const aepZone = { ...makeZone(2, 'AEP'), departement: '77' };
+      service['activeSnapshot'] = Object.freeze({
+        ...snapshot,
+        zones: Object.freeze([aepZone]),
+        zonesCommunesIndex: Object.freeze({
+          '77168': Object.freeze([aepZone]),
+        }),
+      }) as any;
+      mockZonePublicationRepository.query.mockResolvedValue([
+        {
+          sourcePublicRevision: '45',
+          zoneType: 'AEP',
+          status: 'available',
+          asOf: '2026-08-19T10:10:00.000Z',
+          availabilityPublicRevision: '45',
+          officialUrl: null,
+        },
+      ]);
+
+      const result = await service.findWithAvailability(
+        undefined,
+        undefined,
+        '77010',
+        undefined,
+        'AEP',
+      );
+
+      expect(result.zones).toEqual([]);
+      expect(result.availability.AEP).toEqual({
+        status: 'confirmed_none',
+        asOf: '2026-08-19T10:10:00.000Z',
+        sourceRevision: '45',
+        officialUrl: null,
+      });
+    });
+
+    it('keeps an applicable AEP zone available for a covered commune', async () => {
+      const snapshot = makeSnapshot(1) as any;
+      const aepZone = { ...makeZone(2, 'AEP'), departement: '77' };
+      service['activeSnapshot'] = Object.freeze({
+        ...snapshot,
+        zones: Object.freeze([aepZone]),
+        zonesCommunesIndex: Object.freeze({
+          '77168': Object.freeze([aepZone]),
+        }),
+      }) as any;
+      mockZonePublicationRepository.query.mockResolvedValue([
+        {
+          sourcePublicRevision: '45',
+          zoneType: 'AEP',
+          status: 'available',
+          asOf: '2026-08-19T10:10:00.000Z',
+          availabilityPublicRevision: '45',
+          officialUrl: null,
+        },
+      ]);
+
+      const result = await service.findWithAvailability(
+        undefined,
+        undefined,
+        '77168',
+        undefined,
+        'AEP',
+      );
+
+      expect(result.zones).toMatchObject([{ id: 2, type: 'AEP' }]);
+      expect(result.availability.AEP.status).toBe('available');
+    });
+
+    it('keeps a commune without an AEP zone unavailable when no certification exists', async () => {
+      const snapshot = makeSnapshot(1) as any;
+      const aepZone = { ...makeZone(2, 'AEP'), departement: '77' };
+      service['activeSnapshot'] = Object.freeze({
+        ...snapshot,
+        zones: Object.freeze([aepZone]),
+        zonesCommunesIndex: Object.freeze({
+          '77168': Object.freeze([aepZone]),
+        }),
+      }) as any;
+      mockZonePublicationRepository.query.mockResolvedValue([
+        {
+          sourcePublicRevision: '45',
+          zoneType: null,
+          status: null,
+          asOf: null,
+          availabilityPublicRevision: null,
+          officialUrl: null,
+        },
+      ]);
+
+      const result = await service.findWithAvailability(
+        undefined,
+        undefined,
+        '77010',
+        undefined,
+        'AEP',
+      );
+
+      expect(result.zones).toEqual([]);
+      expect(result.availability.AEP).toMatchObject({
+        status: 'unavailable',
+        sourceRevision: '45',
+      });
+    });
+
+    it('preserves a municipal decree when certified AEP data has no local zone', async () => {
+      service['activeSnapshot'] = Object.freeze({
+        ...(makeSnapshot(1) as any),
+        zones: Object.freeze([]),
+        zonesCommunesIndex: Object.freeze({}),
+        communeArretesMunicipaux: Object.freeze([
+          {
+            code: '77010',
+            arretesMunicipaux: Object.freeze([
+              { fichier: { url: 'https://example.test/municipal.pdf' } },
+            ]),
+          },
+        ]),
+      }) as any;
+      mockZonePublicationRepository.query.mockResolvedValue([
+        {
+          sourcePublicRevision: '45',
+          zoneType: 'AEP',
+          status: 'available',
+          asOf: '2026-08-19T10:10:00.000Z',
+          availabilityPublicRevision: '45',
+          officialUrl: null,
+        },
+      ]);
+
+      const result = await service.findWithAvailability(
+        undefined,
+        undefined,
+        '77010',
+        undefined,
+        'AEP',
+      );
+
+      expect(result.zones).toEqual([
+        {
+          id: null,
+          type: 'AEP',
+          arreteMunicipalCheminFichier: 'https://example.test/municipal.pdf',
+        },
+      ]);
+      expect(result.availability.AEP.status).toBe('confirmed_none');
+    });
+
     it('reports confirmed none for an applicable departmental certification', async () => {
       installSnapshot();
       mockZonePublicationRepository.query.mockResolvedValue([

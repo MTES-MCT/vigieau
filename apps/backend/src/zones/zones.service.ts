@@ -433,6 +433,18 @@ export class ZonesService implements OnModuleInit {
         officialUrl,
       };
     }
+    // Once the recalculated department/type data is certified available,
+    // no matching local zone is a certified local absence.
+    if (certificationApplies && certification?.status === 'available') {
+      return {
+        status: 'confirmed_none',
+        asOf: certification.asOf
+          ? new Date(certification.asOf).toISOString()
+          : null,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+      };
+    }
     return {
       status: 'unavailable',
       asOf: certification?.asOf
@@ -1646,35 +1658,36 @@ export class ZonesService implements OnModuleInit {
     commune?: string,
     snapshot = this.activeSnapshot,
   ): any[] {
-    if (!zones || zones.length === 0) {
-      return [];
-    }
-
     const communeArreteMunicipal = commune
       ? snapshot?.communeArretesMunicipaux.find(
           (c) => c.code === this.communesService.normalizeCodeCommune(commune),
         )?.arretesMunicipaux[0]
       : null;
+    const arreteMunicipalUrl = communeArreteMunicipal?.fichier?.url;
+    const municipalZone = (type: string) => ({
+      id: null,
+      type,
+      arreteMunicipalCheminFichier: arreteMunicipalUrl,
+    });
+    const zonesToFormat = zones ?? [];
 
     if (zoneType) {
-      const toReturn = zones.find((z) => z.type === zoneType);
+      const toReturn = zonesToFormat.find((z) => z.type === zoneType);
       return toReturn
         ? [this.formatZone(toReturn, profil, communeArreteMunicipal)]
-        : [];
+        : arreteMunicipalUrl
+          ? [municipalZone(zoneType)]
+          : [];
     }
 
-    const formattedZones = zones.map((z) =>
+    const formattedZones = zonesToFormat.map((z) =>
       this.formatZone(z, profil, communeArreteMunicipal),
     );
 
-    if (communeArreteMunicipal?.fichier?.url) {
+    if (arreteMunicipalUrl) {
       ['AEP', 'SOU', 'SUP'].forEach((zoneType) => {
         if (!formattedZones.some((zone) => zone.type === zoneType)) {
-          formattedZones.push({
-            id: null,
-            type: zoneType,
-            arreteMunicipalCheminFichier: communeArreteMunicipal.fichier.url,
-          });
+          formattedZones.push(municipalZone(zoneType));
         }
       });
     }
