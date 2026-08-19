@@ -258,6 +258,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
   it('executes the real health query and accepts an exact certified run', async () => {
     await expect(service.getHealthStatus(now)).resolves.toMatchObject({
       status: 'healthy',
+      historicStatus: 'complete',
       serving: true,
       checks: {
         activeServing: true,
@@ -265,6 +266,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
         currentSnapshot: true,
         historicCursors: true,
         certifiedRun: true,
+        historicRun: true,
       },
     });
   });
@@ -286,7 +288,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
   it.each([
     { label: 'the historic run is missing', mutation: 'delete' },
     { label: 'a cursor generation changed', mutation: 'generation' },
-  ])('rejects certification when $label', async ({ mutation }) => {
+  ])('reports incomplete history when $label', async ({ mutation }) => {
     if (mutation === 'delete') {
       await queryRunner.query(
         `DELETE FROM "external_publication_run"
@@ -299,11 +301,13 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
     }
 
     await expect(service.getHealthStatus(now)).resolves.toMatchObject({
-      status: 'updating',
+      status: 'healthy',
+      historicStatus: 'incomplete',
       serving: true,
       checks: {
         historicCursors: true,
-        certifiedRun: false,
+        certifiedRun: true,
+        historicRun: false,
       },
     });
   });

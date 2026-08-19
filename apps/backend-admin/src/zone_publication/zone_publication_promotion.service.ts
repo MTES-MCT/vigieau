@@ -172,7 +172,10 @@ export class ZonePublicationPromotionService {
   }
 
   async promoteDataGouv(): Promise<ZonePublicationPromotionResult> {
-    if (!isZonePublicationEnabled()) {
+    if (
+      !isZonePublicationEnabled() ||
+      !this.datagouvService.canUploadToDataGouv()
+    ) {
       return 'disabled';
     }
     const retrySeconds = this.readPositiveInteger(
@@ -209,9 +212,6 @@ export class ZonePublicationPromotionService {
         }
         publicationId = publication.id;
         await this.recordPromotionAttempt(manager, publication.id);
-        if (!this.datagouvService.canUploadToDataGouv()) {
-          throw new Error('data.gouv.fr upload configuration is incomplete');
-        }
         if (!publication.geojsonUrl || !publication.pmtilesUrl) {
           throw new Error(
             `Zone publication ${publication.id} has incomplete immutable artifact URLs`,

@@ -330,8 +330,7 @@ export class ZonePublicationHealthService {
           ZONE_PUBLICATION_MATERIALIZATION_VERSION &&
         state.activeBusinessDate === businessDate;
       const candidateClear = state.hasCandidate !== true;
-      const legacyPromotion =
-        Boolean(state.legacyPromotedAt) && !state.promotionError;
+      const legacyPromotion = Boolean(state.legacyPromotedAt);
       const currentStatistics = state.currentPublishedDate === businessDate;
       const currentSnapshot = state.currentSnapshot === true;
       const historicStatistics =

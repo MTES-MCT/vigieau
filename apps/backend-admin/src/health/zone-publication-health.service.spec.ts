@@ -190,10 +190,6 @@ describe('ZonePublicationHealthService', () => {
       overrides: { legacyPromotedAt: null },
     },
     {
-      label: 'legacy promotion failed',
-      overrides: { promotionError: 'private failure' },
-    },
-    {
       label: 'current statistics stale',
       overrides: { currentPublishedDate: '2026-08-02' },
     },
@@ -218,6 +214,17 @@ describe('ZonePublicationHealthService', () => {
 
     await expect(service.getHealthStatus(now)).resolves.not.toMatchObject({
       status: 'healthy',
+    });
+  });
+
+  it('keeps current health healthy after stable promotion when data.gouv failed', async () => {
+    const { service } = createHarness(
+      healthyRow({ promotionError: 'private data.gouv failure' }),
+    );
+
+    await expect(service.getHealthStatus(now)).resolves.toMatchObject({
+      status: 'healthy',
+      checks: { legacyPromotion: true },
     });
   });
 

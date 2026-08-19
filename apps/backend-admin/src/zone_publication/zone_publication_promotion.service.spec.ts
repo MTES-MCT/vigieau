@@ -492,15 +492,15 @@ describe('ZonePublicationPromotionService', () => {
     expect(harness.datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
   });
 
-  it('persists an incomplete data.gouv configuration as a retryable error', async () => {
+  it('disables data.gouv promotion before taking locks when upload is not configured', async () => {
     const harness = createHarness();
     harness.datagouvService.canUploadToDataGouv.mockReturnValue(false);
 
-    await expect(harness.service.promoteDataGouv()).resolves.toBe('failed');
+    await expect(harness.service.promoteDataGouv()).resolves.toBe('disabled');
+    expect(harness.dataSource.transaction).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.dataSource.query).not.toHaveBeenCalled();
     expect(harness.datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
-    expect(harness.dataSource.query.mock.calls[0][1]).toEqual([
-      'publication-1',
-      'data.gouv.fr upload configuration is incomplete',
-    ]);
+    expect(harness.getTransactionRollbackCount()).toBe(0);
   });
 });
