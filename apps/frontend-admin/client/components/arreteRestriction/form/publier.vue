@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import useVuelidate from '@vuelidate/core';
-import { requiredIf, helpers, required } from '@vuelidate/validators';
+import { helpers, required, requiredIf } from '@vuelidate/validators';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 
 const props = defineProps<{

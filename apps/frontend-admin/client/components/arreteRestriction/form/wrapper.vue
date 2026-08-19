@@ -165,7 +165,7 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
 
     // Mise à jour des ids des objets nouvellement crées
     props.arreteRestriction.id = data.value.id;
-    syncSavedRestrictionIds(<ArreteRestriction>data.value);
+    syncSavedRestrictionIds(data.value as ArreteRestriction);
     componentKey.value++;
 
     shouldPublishAfterSave = props.arreteRestriction.statut !== 'a_valider';
@@ -387,7 +387,6 @@ const graviteFormRef = ref(null);
     </DsfrTabContent>
     <DsfrTabContent :selected="currentStep === totalSteps" :asc="asc">
       <ArreteRestrictionFormUsages
-        ref="usagesFormRef"
         :key="currentStep"
         :selected="currentStep === totalSteps"
         :arreteRestriction="arreteRestriction"

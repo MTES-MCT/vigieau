@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import useVuelidate from '@vuelidate/core';
-import { helpers, required } from '@vuelidate/validators';
+import { helpers } from '@vuelidate/validators';
 import type { Ref } from 'vue';
 import { Restriction } from '~/dto/restriction.dto';
 import type { Commune } from '~/dto/commune.dto';
@@ -158,7 +158,7 @@ const sortCommunes = () => {
 const showErrorMessage = computed(() => {
   let errorMessage = utils.showInputError(v$.value, 'restrictions');
   if (doublonCommunes.value.length > 0) {
-    errorMessage += ` Les communes suivantes sont présentes dans plusieurs zones AEP : ${doublonCommunes.value.map((c) => c.code + ' ' + c.nom).join(', ')}`;
+    errorMessage += ` Les communes suivantes sont présentes dans plusieurs zones AEP : ${doublonCommunes.value.map((c) => `${c.code} ${c.nom}`).join(', ')}`;
   }
   return errorMessage;
 });
@@ -243,7 +243,7 @@ watch(selectedZoneKeys, () => {
               <DsfrAccordion
                 v-if="r.communes"
                 class="full-width fr-accordion--no-shadow"
-                :title="'Voir les ' + r.communes.length + ' communes'"
+                :title="`Voir les ${r.communes.length} communes`"
                 :expanded-id="expandedId"
                 @expand="expandedId = $event"
               >

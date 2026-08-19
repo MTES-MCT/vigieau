@@ -51,8 +51,8 @@ const parseCommunes = (communesText: string) => {
     hint.value = '';
     return;
   }
-  const inseeRegex = new RegExp('(0[1-9]|[1-9][ABab\\d])\\d{3}', 'gim');
-  const inseeRegexWithout0 = new RegExp('(?:\\s|^)([1-9])\\d{3}(?:\\s|$)', 'gim');
+  const inseeRegex = /(0[1-9]|[1-9][AB\d])\d{3}/gi;
+  const inseeRegexWithout0 = /(?:\s|^)([1-9])\d{3}(?:\s|$)/gm;
   let codesExtracted = communesText.match(inseeRegex);
   let codesExtractedWithout0 = communesText.match(inseeRegexWithout0);
   if (!codesExtracted && !codesExtractedWithout0) {
