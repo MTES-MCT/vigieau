@@ -10,6 +10,8 @@ import {
 const postgresUrl = process.env.HISTORIC_BACKFILL_POSTGRES_URL;
 const describePostgres = postgresUrl ? describe : describe.skip;
 const SHA256 = 'a'.repeat(64);
+const PARTIAL_SHA256 = 'b'.repeat(64);
+const RETRY_SHA256 = 'c'.repeat(64);
 
 function leaseIdentity(
   claim: HistoricBackfillTaskClaim,
@@ -555,25 +557,287 @@ describePostgres('historic backfill PostgreSQL integration', () => {
     expect(claimA.departementId).not.toBe(claimB.departementId);
     expect(claimA.leaseToken).not.toBe(claimB.leaseToken);
 
+    await expect(
+      queue.heartbeat(
+        leaseIdentity(claimA),
+        {
+          progressDate: '2024-04-30',
+          segmentCount: 1,
+          communeCount: 1,
+          artifactPrefix: 'departments/checkpointed',
+        },
+        30,
+      ),
+    ).resolves.toBe(true);
+    await dataSource.query(
+      `INSERT INTO "historic_backfill_department_segment" (
+         "runId", "departementId", "validFrom", "validThrough",
+         "sourceGeneration", "inputSignature", "restriction", "situation",
+         "geojsonObjectKey", "geojsonChecksum", "featureCount"
+       ) VALUES (
+         $1, $2, '2024-04-29', '2024-04-30', $3, $4,
+         '{"computedZoneIds":[1001]}', '{}',
+         'departments/checkpointed/1001.geojson', $4, 1
+       )`,
+      [run.id, claimA.departementId, claimA.departmentGeneration, SHA256],
+    );
+    await dataSource.query(
+      `INSERT INTO "historic_backfill_commune_segment" (
+         "runId", "departementId", "communeId", "validFrom",
+         "validThrough", "SUP", "sourceGeneration", "inputSignature"
+       ) VALUES (
+         $1, $2, $2, '2024-04-29', '2024-04-30', 'alerte', $3, $4
+       )`,
+      [run.id, claimA.departementId, claimA.departmentGeneration, SHA256],
+    );
     await dataSource.query(
       `UPDATE "historic_backfill_task"
        SET "nextAttemptAt" = now() + interval '1 day'
        WHERE "runId" = $1 AND "status" = 'pending'`,
       [run.id],
     );
+    const [exhaustionGateTask] = await dataSource.query(
+      `SELECT "departementId"
+       FROM "historic_backfill_task"
+       WHERE "runId" = $1 AND "status" = 'pending'
+       ORDER BY "departementId"
+       LIMIT 1`,
+      [run.id],
+    );
+    if (!exhaustionGateTask) {
+      throw new Error('An exhaustion gate task is required for the retry test');
+    }
     await dataSource.query(
       `UPDATE "historic_backfill_task"
-       SET "leaseExpiresAt" = now() - interval '1 second'
+       SET "attemptCount" = 5, "nextAttemptAt" = now()
        WHERE "runId" = $1 AND "departementId" = $2`,
-      [run.id, claimA.departementId],
+      [run.id, exhaustionGateTask.departementId],
     );
+    const retryGateKey = [71_401, 71_402] as const;
+    await dataSource.query(`
+      CREATE OR REPLACE FUNCTION historic_backfill_test_exhaustion_gate()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW."status" = 'failed'
+          AND OLD."runId" = TG_ARGV[0]::uuid
+          AND OLD."departementId" = TG_ARGV[1]::integer THEN
+          PERFORM pg_advisory_xact_lock(
+            TG_ARGV[2]::integer,
+            TG_ARGV[3]::integer
+          );
+          RETURN NULL;
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await dataSource.query(`
+      CREATE TRIGGER historic_backfill_test_exhaustion_gate_trigger
+      BEFORE UPDATE ON "historic_backfill_task"
+      FOR EACH ROW EXECUTE FUNCTION historic_backfill_test_exhaustion_gate(
+        '${run.id}', '${exhaustionGateTask.departementId}',
+        '${retryGateKey[0]}', '${retryGateKey[1]}'
+      )
+    `);
 
-    const reclaimed = await queue.claim('department-worker-reclaimer', 30, 5);
+    const interruptedWriter = dataSource.createQueryRunner();
+    const retryGate = dataSource.createQueryRunner();
+    await interruptedWriter.connect();
+    await retryGate.connect();
+    let reclaimedPromise: Promise<HistoricBackfillTaskClaim | null> | undefined;
+    let retryGateLocked = false;
+    let retryGateWaiterObserved = false;
+    let reclaimed: HistoricBackfillTaskClaim | null | undefined;
+    try {
+      await retryGate.query(`SELECT pg_advisory_lock($1, $2)`, [
+        ...retryGateKey,
+      ]);
+      retryGateLocked = true;
+      await dataSource.query(
+        `UPDATE "historic_backfill_task"
+         SET "leaseExpiresAt" = clock_timestamp() + interval '1 second'
+         WHERE "runId" = $1 AND "departementId" = $2`,
+        [run.id, claimA.departementId],
+      );
+      await interruptedWriter.startTransaction('READ COMMITTED');
+      await interruptedWriter.query(`SELECT now()`);
+
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      reclaimedPromise = queue.claim('department-worker-reclaimer', 30, 5);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const [waiting] = await dataSource.query(
+          `SELECT EXISTS (
+             SELECT 1
+             FROM pg_locks
+             WHERE locktype = 'advisory'
+               AND classid = $1::integer::oid
+               AND objid = $2::integer::oid
+               AND objsubid = 2
+               AND NOT granted
+           ) AS waiting`,
+          [...retryGateKey],
+        );
+        if (waiting.waiting === true) {
+          retryGateWaiterObserved = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      const oldContext = await interruptedWriter.query(
+        `SELECT "runId"
+         FROM "historic_backfill_task"
+         WHERE "runId" = $1 AND "departementId" = $2
+           AND "leaseOwner" = $3 AND "leaseToken" = $4
+           AND "leaseExpiresAt" > now()
+         FOR UPDATE`,
+        [run.id, claimA.departementId, claimA.workerId, claimA.leaseToken],
+      );
+      expect(oldContext).toHaveLength(1);
+      await interruptedWriter.query(
+        `INSERT INTO "historic_backfill_department_segment" (
+           "runId", "departementId", "validFrom", "validThrough",
+           "sourceGeneration", "inputSignature", "restriction", "situation",
+           "geojsonObjectKey", "geojsonChecksum", "featureCount"
+         ) VALUES (
+           $1, $2, '2024-05-01', '2024-05-02', $3, $4,
+           '{"computedZoneIds":[1002]}', '{}',
+           'departments/partial/1002.geojson', $5, 1
+         )`,
+        [
+          run.id,
+          claimA.departementId,
+          claimA.departmentGeneration,
+          SHA256,
+          PARTIAL_SHA256,
+        ],
+      );
+      await interruptedWriter.query(
+        `INSERT INTO "historic_backfill_commune_segment" (
+           "runId", "departementId", "communeId", "validFrom",
+           "validThrough", "SUP", "sourceGeneration", "inputSignature"
+         ) VALUES (
+           $1, $2, $2, '2024-05-01', '2024-05-02', 'crise', $3, $4
+         )`,
+        [run.id, claimA.departementId, claimA.departmentGeneration, SHA256],
+      );
+      await interruptedWriter.commitTransaction();
+      await retryGate.query(`SELECT pg_advisory_unlock($1, $2)`, [
+        ...retryGateKey,
+      ]);
+      retryGateLocked = false;
+      reclaimed = await reclaimedPromise;
+    } finally {
+      if (interruptedWriter.isTransactionActive) {
+        await interruptedWriter.rollbackTransaction();
+      }
+      if (retryGateLocked) {
+        await retryGate.query(`SELECT pg_advisory_unlock($1, $2)`, [
+          ...retryGateKey,
+        ]);
+      }
+      if (reclaimedPromise && reclaimed === undefined) {
+        await reclaimedPromise.catch(() => undefined);
+      }
+      await interruptedWriter.release();
+      await retryGate.release();
+      await dataSource.query(
+        `DROP TRIGGER IF EXISTS historic_backfill_test_exhaustion_gate_trigger
+         ON "historic_backfill_task"`,
+      );
+      await dataSource.query(
+        `DROP FUNCTION IF EXISTS historic_backfill_test_exhaustion_gate()`,
+      );
+    }
+
+    expect(retryGateWaiterObserved).toBe(true);
     if (!reclaimed) {
       throw new Error('The expired department lease must be reclaimable');
     }
     expect(reclaimed.departementId).toBe(claimA.departementId);
     expect(reclaimed.leaseToken).not.toBe(claimA.leaseToken);
+    expect(reclaimed).toMatchObject({
+      progressDate: '2024-04-30',
+      segmentCount: 1,
+      communeCount: 1,
+      artifactPrefix: 'departments/checkpointed',
+    });
+    const retryStageRows = await dataSource.query(
+      `SELECT 'department' AS kind, "validFrom"::text AS "validFrom",
+              "validThrough"::text AS "validThrough"
+       FROM "historic_backfill_department_segment"
+       WHERE "runId" = $1 AND "departementId" = $2
+       UNION ALL
+       SELECT 'commune' AS kind, "validFrom"::text AS "validFrom",
+              "validThrough"::text AS "validThrough"
+       FROM "historic_backfill_commune_segment"
+       WHERE "runId" = $1 AND "departementId" = $2
+       ORDER BY kind`,
+      [run.id, claimA.departementId],
+    );
+    expect(retryStageRows).toEqual([
+      {
+        kind: 'commune',
+        validFrom: '2024-04-29',
+        validThrough: '2024-04-30',
+      },
+      {
+        kind: 'department',
+        validFrom: '2024-04-29',
+        validThrough: '2024-04-30',
+      },
+    ]);
+    await dataSource.query(
+      `UPDATE "historic_backfill_task"
+       SET "attemptCount" = 0,
+           "nextAttemptAt" = now() + interval '1 day'
+       WHERE "runId" = $1 AND "departementId" = $2`,
+      [run.id, exhaustionGateTask.departementId],
+    );
+
+    const retriedDepartmentRows = await dataSource.query(
+      `INSERT INTO "historic_backfill_department_segment" AS target (
+         "runId", "departementId", "validFrom", "validThrough",
+         "sourceGeneration", "inputSignature", "restriction", "situation",
+         "geojsonObjectKey", "geojsonChecksum", "featureCount"
+       ) VALUES (
+         $1, $2, '2024-05-01', '2024-05-02', $3, $4,
+         '{"computedZoneIds":[2002]}', '{}',
+         'departments/retry/2002.geojson', $5, 1
+       )
+       ON CONFLICT ("runId", "departementId", "validFrom") DO UPDATE
+       SET "validThrough" = EXCLUDED."validThrough",
+           "sourceGeneration" = EXCLUDED."sourceGeneration",
+           "inputSignature" = EXCLUDED."inputSignature",
+           "restriction" = EXCLUDED."restriction",
+           "situation" = EXCLUDED."situation",
+           "geojsonObjectKey" = EXCLUDED."geojsonObjectKey",
+           "geojsonChecksum" = EXCLUDED."geojsonChecksum",
+           "featureCount" = EXCLUDED."featureCount"
+       WHERE target."validThrough" = EXCLUDED."validThrough"
+         AND target."sourceGeneration" = EXCLUDED."sourceGeneration"
+         AND target."inputSignature" = EXCLUDED."inputSignature"
+         AND target."restriction" = EXCLUDED."restriction"
+         AND target."situation" = EXCLUDED."situation"
+         AND target."geojsonObjectKey" = EXCLUDED."geojsonObjectKey"
+         AND target."geojsonChecksum" = EXCLUDED."geojsonChecksum"
+         AND target."featureCount" = EXCLUDED."featureCount"
+       RETURNING "geojsonObjectKey", "geojsonChecksum", "restriction"`,
+      [
+        run.id,
+        claimA.departementId,
+        claimA.departmentGeneration,
+        SHA256,
+        RETRY_SHA256,
+      ],
+    );
+    expect(retriedDepartmentRows).toEqual([
+      {
+        geojsonObjectKey: 'departments/retry/2002.geojson',
+        geojsonChecksum: RETRY_SHA256,
+        restriction: { computedZoneIds: [2002] },
+      },
+    ]);
     await expect(
       queue.heartbeat(leaseIdentity(claimA), undefined, 30),
     ).resolves.toBe(false);
@@ -588,6 +852,16 @@ describePostgres('historic backfill PostgreSQL integration', () => {
     await expect(
       queue.heartbeat(leaseIdentity(reclaimed), undefined, 30),
     ).resolves.toBe(true);
+    await dataSource.query(
+      `DELETE FROM "historic_backfill_commune_segment"
+       WHERE "runId" = $1 AND "departementId" = $2`,
+      [run.id, claimA.departementId],
+    );
+    await dataSource.query(
+      `DELETE FROM "historic_backfill_department_segment"
+       WHERE "runId" = $1 AND "departementId" = $2`,
+      [run.id, claimA.departementId],
+    );
 
     const staleDepartmentId = 101;
     const preservedDepartmentId = 100;

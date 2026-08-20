@@ -617,7 +617,9 @@ describe('HistoricBackfillQueueService', () => {
               ],
               1,
             ]
-          : [],
+          : sql.includes('WITH claimed_task AS MATERIALIZED')
+            ? [{ contextCount: 1, communeCount: 2, departmentCount: 1 }]
+            : [],
       );
     const dataSource = transactionalDataSource(query);
     const service = new HistoricBackfillQueueService(dataSource as any);
@@ -743,6 +745,71 @@ describe('HistoricBackfillQueueService', () => {
       300,
       5,
     ]);
+    const [cleanupSql, cleanupParameters] = query.mock.calls[4];
+    expect(cleanupSql).toContain('WITH claimed_task AS MATERIALIZED');
+    expect(cleanupSql).toContain('FOR UPDATE OF task');
+    expect(cleanupSql).toContain(
+      'DELETE FROM "historic_backfill_commune_segment"',
+    );
+    expect(cleanupSql).toContain(
+      'DELETE FROM "historic_backfill_department_segment"',
+    );
+    expect(cleanupSql).toContain('task."progressDate" IS NULL');
+    expect(cleanupSql).toContain(
+      'segment."validThrough" > task."progressDate"',
+    );
+    expect(cleanupSql).not.toContain('segment."sourceGeneration"');
+    expect(cleanupParameters).toEqual([
+      RUN_ID,
+      '75',
+      'worker-1',
+      result?.leaseToken,
+    ]);
+  });
+
+  it('fails the claim transaction when cleanup loses the claimed lease context', async () => {
+    const query = jest
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async (_sql: string, parameters: unknown[]) => [
+        [
+          {
+            runId: RUN_ID,
+            departementId: '75',
+            workerId: parameters[0],
+            leaseToken: parameters[1],
+            departementCode: '75',
+            departmentGeneration: '3',
+            departmentLastPublicRevision: '42',
+            attemptCount: '2',
+            leaseExpiresAt: NOW,
+            progressDate: '2024-04-30',
+            segmentCount: '1',
+            communeCount: '1',
+            artifactPrefix: 'departments/checkpointed',
+            mapDateFrom: '2024-04-29',
+            statisticDateFrom: '2024-04-29',
+            dateThrough: '2024-05-02',
+            sourceRevision: '42',
+            historicComputeEpoch: '7',
+            baseStatisticRevision: '12',
+          },
+        ],
+        1,
+      ])
+      .mockResolvedValueOnce([
+        { contextCount: 0, communeCount: 0, departmentCount: 0 },
+      ]);
+    const service = new HistoricBackfillQueueService(
+      transactionalDataSource(query) as any,
+    );
+
+    await expect(service.claim('worker-1', 300, 5)).rejects.toThrow(
+      HistoricBackfillStateError,
+    );
+    expect(query.mock.calls[4][0]).toContain('task."leaseToken" = $4::uuid');
   });
 
   it('returns null when no claim is available', async () => {

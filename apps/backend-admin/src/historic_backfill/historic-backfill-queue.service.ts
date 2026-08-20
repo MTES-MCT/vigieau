@@ -955,7 +955,64 @@ export class HistoricBackfillQueueService {
             [normalizedWorkerId, leaseToken, leaseSeconds, maxAttempts],
           ),
         );
-        return rows[0] ?? null;
+        const claimed = rows[0] ?? null;
+        if (!claimed) {
+          return null;
+        }
+
+        const [cleanup] = await manager.query(
+          `
+            WITH claimed_task AS MATERIALIZED (
+              SELECT
+                task."runId", task."departementId", task."progressDate"
+              FROM "historic_backfill_task" task
+              WHERE task."runId" = $1::uuid
+                AND task."departementId" = $2::integer
+                AND task."status" = 'leased'
+                AND task."leaseOwner" = $3
+                AND task."leaseToken" = $4::uuid
+              FOR UPDATE OF task
+            ), purged_commune_segments AS (
+              DELETE FROM "historic_backfill_commune_segment" segment
+              USING claimed_task task
+              WHERE segment."runId" = task."runId"
+                AND segment."departementId" = task."departementId"
+                AND (
+                  task."progressDate" IS NULL
+                  OR segment."validThrough" > task."progressDate"
+                )
+              RETURNING segment."runId"
+            ), purged_department_segments AS (
+              DELETE FROM "historic_backfill_department_segment" segment
+              USING claimed_task task
+              WHERE segment."runId" = task."runId"
+                AND segment."departementId" = task."departementId"
+                AND (
+                  task."progressDate" IS NULL
+                  OR segment."validThrough" > task."progressDate"
+                )
+              RETURNING segment."runId"
+            )
+            SELECT
+              (SELECT COUNT(*)::integer FROM claimed_task) AS "contextCount",
+              (SELECT COUNT(*)::integer FROM purged_commune_segments)
+                AS "communeCount",
+              (SELECT COUNT(*)::integer FROM purged_department_segments)
+                AS "departmentCount"
+          `,
+          [
+            claimed.runId,
+            claimed.departementId,
+            claimed.workerId,
+            claimed.leaseToken,
+          ],
+        );
+        if (parseCount(cleanup?.contextCount) !== 1) {
+          throw new HistoricBackfillStateError(
+            `Historic backfill claim context was lost for ${claimed.runId}/${claimed.departementId}`,
+          );
+        }
+        return claimed;
       },
     );
     if (!row) {
