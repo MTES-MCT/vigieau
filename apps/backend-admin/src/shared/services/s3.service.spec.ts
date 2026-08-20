@@ -1,4 +1,8 @@
-import { CopyObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import {
+  CopyObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { S3Service } from './s3.service';
 
@@ -109,6 +113,73 @@ describe('S3Service', () => {
       Key: 'prod/geojson/current.geojson',
     });
     expect(harness.send).toHaveBeenCalledWith(command, { abortSignal });
+  });
+
+  it('downloads the exact prefixed object as a buffer', async () => {
+    const harness = createHarness();
+    const abortSignal = AbortSignal.timeout(1_000);
+    harness.send.mockResolvedValueOnce({
+      Body: {
+        transformToByteArray: jest
+          .fn()
+          .mockResolvedValue(Uint8Array.from([1, 2, 3])),
+      },
+    });
+
+    await expect(
+      harness.service.downloadFile('run/segment.geojson', 'historic/', {
+        abortSignal,
+      }),
+    ).resolves.toEqual(Buffer.from([1, 2, 3]));
+
+    const [command] = harness.send.mock.calls[0];
+    expect(command).toBeInstanceOf(GetObjectCommand);
+    expect(command.input).toEqual({
+      Bucket: 'vigieau-bucket',
+      Key: 'prod/historic/run/segment.geojson',
+    });
+    expect(harness.send).toHaveBeenCalledWith(command, { abortSignal });
+  });
+
+  it('rejects an S3 object without a response body', async () => {
+    const harness = createHarness();
+    harness.send.mockResolvedValueOnce({});
+
+    await expect(harness.service.downloadFile('missing')).rejects.toThrow(
+      'has no body',
+    );
+  });
+
+  it.each([
+    { acl: undefined, expectedAcl: 'public-read' },
+    { acl: 'private' as const, expectedAcl: 'private' },
+  ])('uploads with $expectedAcl ACL', async ({ acl, expectedAcl }) => {
+    const harness = createHarness();
+    const abort = jest.fn().mockResolvedValue(undefined);
+    const done = jest.fn().mockResolvedValue({});
+    (Upload as unknown as jest.Mock).mockImplementationOnce(() => ({
+      abort,
+      done,
+    }));
+
+    await harness.service.uploadFile(
+      {
+        originalname: 'artifact.geojson',
+        mimetype: 'application/geo+json',
+        buffer: Buffer.from('{}'),
+      } as Express.Multer.File,
+      'historic/',
+      acl ? { acl } : {},
+    );
+
+    expect(Upload).toHaveBeenCalledWith({
+      client: (harness.service as any).client,
+      params: expect.objectContaining({
+        Bucket: 'vigieau-bucket',
+        Key: 'prod/historic/artifact.geojson',
+        ACL: expectedAcl,
+      }),
+    });
   });
 
   it('aborts an in-flight multipart upload when its deadline expires', async () => {

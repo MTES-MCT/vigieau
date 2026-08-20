@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { open, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, open, rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 
@@ -26,11 +27,31 @@ interface PmtilesFeature {
 
 export interface GeneratePmtilesOptions {
   workingDirectory: string;
+  tippecanoeBinDirectory?: string;
   inputPath: string;
   outputPath: string;
   expectedFeatureIds: readonly string[];
   commandRunner?: CommandRunner;
   decodeRunner?: DecodeRunner;
+}
+
+async function assertExecutable(executable: string): Promise<void> {
+  try {
+    await access(executable, constants.X_OK);
+  } catch {
+    throw new Error(
+      `Required Tippecanoe executable is not executable: ${executable}`,
+    );
+  }
+}
+
+export async function assertTippecanoeExecutables(
+  binDirectory: string,
+  executableNames: readonly string[],
+): Promise<void> {
+  for (const executableName of executableNames) {
+    await assertExecutable(join(binDirectory, executableName));
+  }
 }
 
 export interface AssertPmtilesIntegrityOptions {
@@ -307,22 +328,26 @@ export async function assertPmtilesFeatureIntegrity({
 
 export async function generatePmtiles({
   workingDirectory,
+  tippecanoeBinDirectory = join(workingDirectory, 'tippecanoe_program/bin'),
   inputPath,
   outputPath,
   expectedFeatureIds,
   commandRunner = runCommand,
   decodeRunner = decodeLines,
 }: GeneratePmtilesOptions): Promise<void> {
+  const tippecanoePath = join(tippecanoeBinDirectory, 'tippecanoe');
+  const decoderPath = join(tippecanoeBinDirectory, 'tippecanoe-decode');
   try {
+    await assertTippecanoeExecutables(tippecanoeBinDirectory, [
+      'tippecanoe',
+      'tippecanoe-decode',
+    ]);
     await commandRunner(
-      join(workingDirectory, 'tippecanoe_program/bin/tippecanoe'),
+      tippecanoePath,
       buildTippecanoeArguments(inputPath, outputPath),
     );
     await assertPmtilesFeatureIntegrity({
-      decoderPath: join(
-        workingDirectory,
-        'tippecanoe_program/bin/tippecanoe-decode',
-      ),
+      decoderPath,
       pmtilesPath: outputPath,
       expectedFeatureIds,
       decodeRunner,

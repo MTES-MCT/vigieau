@@ -3842,6 +3842,65 @@ describe('ZoneAlerteComputedHistoricService', () => {
     );
   });
 
+  it('loads legacy historic zones with a department-scoped source query', async () => {
+    const arrete = {
+      id: 42,
+      numero: 'DDT-42',
+      dateDebut: '2024-04-01',
+      dateFin: '2024-04-30',
+      dateSignature: '2024-03-31',
+    };
+    const restriction = {
+      id: 420,
+      niveauGravite: 'alerte',
+      arreteRestriction: arrete,
+      usages: [],
+    };
+    const zone = {
+      id: 101,
+      type: 'SUP',
+      departement: { code: '01' },
+      restrictions: [restriction],
+    };
+    arreteRestrictionService.findByDepartementAndDate.mockResolvedValue([
+      arrete,
+    ]);
+    arreteRestrictionService.findByDate.mockRejectedValue(
+      new Error('national source query must not run'),
+    );
+    zoneAlerteService.findByArreteRestriction.mockResolvedValue([zone]);
+    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+      new Map([[101, '{"type":"Polygon","coordinates":[]}']]),
+    );
+
+    await expect(
+      service.findLegacyHistoricDepartmentZones('01', '2024-04-15'),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: 101,
+        departement: { code: '01' },
+        restrictions: [restriction],
+        restriction,
+        niveauGravite: 'alerte',
+        geom: { type: 'Polygon', coordinates: [] },
+      }),
+    ]);
+
+    expect(
+      arreteRestrictionService.findByDepartementAndDate,
+    ).toHaveBeenCalledWith(
+      '01',
+      expect.objectContaining({ _isAMomentObject: true }),
+    );
+    const [, queriedDate] =
+      arreteRestrictionService.findByDepartementAndDate.mock.calls[0];
+    expect(queriedDate.format('YYYY-MM-DD')).toBe('2024-04-15');
+    expect(arreteRestrictionService.findByDate).not.toHaveBeenCalled();
+    expect(zoneAlerteService.findByArreteRestriction).toHaveBeenCalledWith([
+      42,
+    ]);
+  });
+
   it('uses the reference zone geometry when a historic restriction has no framework order', async () => {
     const departement = {
       id: 16,

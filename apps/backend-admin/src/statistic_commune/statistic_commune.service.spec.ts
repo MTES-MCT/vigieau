@@ -294,7 +294,7 @@ describe('StatisticCommuneService', () => {
     blockingLock?: jest.Mock;
     communes?: Array<{
       id: number;
-      departement: { code: string };
+      departement: { id?: number; code: string };
       statisticCommune: { id: number; restrictions: unknown[] };
     }>;
     intersections?: Array<{ communeId: number; zoneId: number }>;
@@ -509,6 +509,366 @@ describe('StatisticCommuneService', () => {
       events,
     };
   }
+
+  it('stages a stable historic interval in batches without snapshots or canonical JSONB writes', async () => {
+    process.env.COMMUNE_STATISTICS_BATCH_SIZE = '1';
+    const runId = '11111111-1111-4111-8111-111111111111';
+    const inputSignature = 'a'.repeat(64);
+    const sink = {
+      writeSegments: jest.fn().mockResolvedValue(undefined),
+    };
+    const harness = createComputationHarness({
+      communes: [
+        {
+          id: 77001,
+          departement: { id: 77, code: '77' },
+          statisticCommune: { id: 1, restrictions: [] },
+        },
+        {
+          id: 77002,
+          departement: { id: 77, code: '77' },
+          statisticCommune: { id: 2, restrictions: [] },
+        },
+      ],
+      intersections: [{ communeId: 77001, zoneId: 10 }],
+    });
+    const zones = [
+      {
+        id: 10,
+        departement: { code: '77' },
+        type: 'AEP',
+        restriction: { niveauGravite: 'alerte' },
+      },
+    ] as any;
+
+    await expect(
+      harness.service.stageHistoricCommuneStatisticsRestrictions(
+        zones,
+        new Date('2025-07-13T00:00:00.000Z'),
+        {
+          runId,
+          departementId: 77,
+          departementCode: '77',
+          sourceGeneration: '12',
+          inputSignature,
+          validThrough: '2025-07-15',
+          sink,
+        },
+      ),
+    ).resolves.toEqual({
+      expectedCommuneCount: 2,
+      processedCommuneCount: 2,
+      segmentCount: 2,
+    });
+
+    expect(sink.writeSegments).toHaveBeenCalledTimes(2);
+    expect(sink.writeSegments).toHaveBeenNthCalledWith(1, {
+      runId,
+      departementId: 77,
+      departementCode: '77',
+      computedFor: '2025-07-13',
+      validThrough: '2025-07-15',
+      sourceGeneration: '12',
+      inputSignature,
+      offset: 0,
+      expectedCommuneCount: 2,
+      processedCommuneCount: 1,
+      segments: [
+        {
+          runId,
+          departementId: 77,
+          communeId: 77001,
+          validFrom: '2025-07-13',
+          validThrough: '2025-07-15',
+          SOU: null,
+          SUP: null,
+          AEP: 'alerte',
+          sourceGeneration: '12',
+          inputSignature,
+        },
+      ],
+    });
+    expect(sink.writeSegments).toHaveBeenNthCalledWith(2, {
+      runId,
+      departementId: 77,
+      departementCode: '77',
+      computedFor: '2025-07-13',
+      validThrough: '2025-07-15',
+      sourceGeneration: '12',
+      inputSignature,
+      offset: 1,
+      expectedCommuneCount: 2,
+      processedCommuneCount: 2,
+      segments: [
+        {
+          runId,
+          departementId: 77,
+          communeId: 77002,
+          validFrom: '2025-07-13',
+          validThrough: '2025-07-15',
+          SOU: null,
+          SUP: null,
+          AEP: null,
+          sourceGeneration: '12',
+          inputSignature,
+        },
+      ],
+    });
+    expect(harness.communeService.count).toHaveBeenNthCalledWith(1, ['77']);
+    expect(harness.communeService.count).toHaveBeenNthCalledWith(2, ['77']);
+    expect(harness.communeService.findWithStats).toHaveBeenCalledWith(1, 0, [
+      '77',
+    ]);
+    expect(harness.communeService.findWithStats).toHaveBeenCalledWith(1, 1, [
+      '77',
+    ]);
+    const sql = harness.query.mock.calls.map(([statement]) =>
+      String(statement),
+    );
+    expect(sql.join('\n')).toContain('"zone_alerte_computed_historic"');
+    expect(sql.join('\n')).not.toContain('statistic_commune_snapshot');
+    expect(sql.join('\n')).not.toContain('INSERT INTO "statistic_commune"');
+    expect(sql.join('\n')).not.toContain('UPDATE "statistic_commune"');
+    expect(sql.join('\n')).not.toContain('pg_advisory');
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows independent departments to stage concurrently without a shared lock', async () => {
+    const queryRunners = ['18', '65'].map(() => ({
+      connect: jest.fn().mockResolvedValue(undefined),
+      query: jest.fn().mockResolvedValue([]),
+      release: jest.fn().mockResolvedValue(undefined),
+    }));
+    const communeService = {
+      count: jest.fn().mockResolvedValue(1),
+      findWithStats: jest.fn(
+        async (_take: number, _skip: number, codes: string[]) => {
+          const code = codes[0];
+          const departementId = code === '18' ? 18 : 65;
+          return [
+            {
+              id: departementId * 1000 + 1,
+              departement: { id: departementId, code },
+              statisticCommune: null,
+            },
+          ];
+        },
+      ),
+    };
+    const dataSource = {
+      createQueryRunner: jest
+        .fn()
+        .mockReturnValueOnce(queryRunners[0])
+        .mockReturnValueOnce(queryRunners[1]),
+    };
+    const service = new StatisticCommuneService(
+      { createQueryBuilder: jest.fn() } as any,
+      communeService as any,
+      dataSource as any,
+    );
+    let activeWrites = 0;
+    let maxActiveWrites = 0;
+    let releaseWrites: () => void;
+    const bothWritesStarted = new Promise<void>((resolve) => {
+      releaseWrites = resolve;
+    });
+    const sink = {
+      writeSegments: jest.fn(async () => {
+        activeWrites += 1;
+        maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+        if (activeWrites === 2) {
+          releaseWrites();
+        }
+        await bothWritesStarted;
+        activeWrites -= 1;
+      }),
+    };
+    const baseOptions = {
+      sourceGeneration: '3',
+      inputSignature: 'b'.repeat(64),
+      sink,
+    };
+
+    await Promise.all([
+      service.stageHistoricCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        {
+          ...baseOptions,
+          runId: '18181818-1818-4181-8181-181818181818',
+          departementId: 18,
+          departementCode: '18',
+        },
+      ),
+      service.stageHistoricCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        {
+          ...baseOptions,
+          runId: '65656565-6565-4656-8656-656565656565',
+          departementId: 65,
+          departementCode: '65',
+        },
+      ),
+    ]);
+
+    expect(maxActiveWrites).toBe(2);
+    expect(dataSource.createQueryRunner).toHaveBeenCalledTimes(2);
+    for (const queryRunner of queryRunners) {
+      expect(queryRunner.query).not.toHaveBeenCalled();
+      expect(queryRunner.release).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reduces historic segments into an idempotent daily and monthly shadow without I/O', () => {
+    const dataSource = {
+      createQueryRunner: jest.fn(),
+      query: jest.fn(),
+    };
+    const service = new StatisticCommuneService(
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
+      dataSource as any,
+    );
+    const currentRestrictions = [
+      { date: '2025-08-01', SOU: null, SUP: null, AEP: 'crise' },
+      { date: '2025-07-02', SOU: null, SUP: null, AEP: 'crise' },
+      { legacy: true },
+      { date: '2025-07-01', SOU: null, SUP: null, AEP: 'vigilance' },
+    ];
+    const currentRestrictionsByMonth = [
+      { date: '2025-08', ponderation: 4 },
+      { date: '2025-07', ponderation: 99 },
+      { legacyMonth: true },
+    ];
+    const originalDaily = JSON.parse(JSON.stringify(currentRestrictions));
+    const originalMonthly = JSON.parse(
+      JSON.stringify(currentRestrictionsByMonth),
+    );
+    const sharedSegment = {
+      runId: '11111111-1111-4111-8111-111111111111',
+      departementId: 77,
+      communeId: 77001,
+      SOU: null,
+      SUP: null,
+      AEP: 'alerte' as const,
+      sourceGeneration: '12',
+      inputSignature: 'c'.repeat(64),
+    };
+    const segments = [
+      {
+        ...sharedSegment,
+        validFrom: '2025-07-02',
+        validThrough: '2025-07-03',
+      },
+      {
+        ...sharedSegment,
+        validFrom: '2025-07-03',
+        validThrough: '2025-07-03',
+      },
+    ];
+
+    const first = service.reduceHistoricCommuneStatisticShadow({
+      communeId: 77001,
+      currentRestrictions,
+      currentRestrictionsByMonth,
+      segments,
+    });
+    const second = service.reduceHistoricCommuneStatisticShadow({
+      communeId: 77001,
+      currentRestrictions: first.nextRestrictions,
+      currentRestrictionsByMonth: first.nextRestrictionsByMonth,
+      segments,
+    });
+
+    expect(first).toEqual({
+      communeId: 77001,
+      nextRestrictions: [
+        { date: '2025-07-01', SOU: null, SUP: null, AEP: 'vigilance' },
+        { date: '2025-07-02', SOU: null, SUP: null, AEP: 'alerte' },
+        { date: '2025-07-03', SOU: null, SUP: null, AEP: 'alerte' },
+        { date: '2025-08-01', SOU: null, SUP: null, AEP: 'crise' },
+        { legacy: true },
+      ],
+      nextRestrictionsByMonth: [
+        { date: '2025-07', ponderation: 4.5 },
+        { date: '2025-08', ponderation: 4 },
+        { legacyMonth: true },
+      ],
+    });
+    expect(second).toEqual(first);
+    expect(currentRestrictions).toEqual(originalDaily);
+    expect(currentRestrictionsByMonth).toEqual(originalMonthly);
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting overlapping historic segments', () => {
+    const service = new StatisticCommuneService(
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
+      {} as any,
+    );
+    const common = {
+      runId: '11111111-1111-4111-8111-111111111111',
+      departementId: 77,
+      communeId: 77001,
+      validThrough: '2025-07-13',
+      SOU: null,
+      SUP: null,
+      sourceGeneration: '12',
+      inputSignature: 'd'.repeat(64),
+    };
+
+    expect(() =>
+      service.reduceHistoricCommuneStatisticShadow({
+        communeId: 77001,
+        segments: [
+          {
+            ...common,
+            validFrom: '2025-07-12',
+            AEP: 'alerte',
+          },
+          {
+            ...common,
+            validFrom: '2025-07-13',
+            AEP: 'crise',
+          },
+        ],
+      }),
+    ).toThrow(
+      'Conflicting historic statistic segments for commune 77001 on 2025-07-13',
+    );
+  });
+
+  it.each([
+    ['2025-07-13', '2025-07-12'],
+    ['2025-07-13', '2025-7-14'],
+    ['2025-02-01', '2025-02-30'],
+  ])(
+    'rejects invalid historic staging interval %s/%s before opening a connection',
+    async (validFrom, validThrough) => {
+      const harness = createComputationHarness();
+
+      await expect(
+        harness.service.stageHistoricCommuneStatisticsRestrictions(
+          [],
+          new Date(`${validFrom}T00:00:00.000Z`),
+          {
+            runId: '11111111-1111-4111-8111-111111111111',
+            departementId: 18,
+            departementCode: '18',
+            sourceGeneration: '1',
+            inputSignature: 'e'.repeat(64),
+            validThrough,
+            sink: { writeSegments: jest.fn() },
+          },
+        ),
+      ).rejects.toThrow('Invalid historic statistic staging interval');
+      expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+    },
+  );
 
   it('certifies a national snapshot only after every commune', async () => {
     const harness = createComputationHarness();

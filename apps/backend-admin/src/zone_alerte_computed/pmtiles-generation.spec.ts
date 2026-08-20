@@ -1,4 +1,4 @@
-import { mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,6 +14,17 @@ function validPmtilesHeader(maxZoom = 12): Buffer {
   header[7] = 3;
   header[101] = maxZoom;
   return header;
+}
+
+async function createExecutable(
+  binDirectory: string,
+  name: string,
+): Promise<string> {
+  await mkdir(binDirectory, { recursive: true });
+  const executable = join(binDirectory, name);
+  await writeFile(executable, '#!/bin/sh\nexit 0\n');
+  await chmod(executable, 0o700);
+  return executable;
 }
 
 describe('PMTiles generation integrity', () => {
@@ -105,6 +116,9 @@ describe('PMTiles generation integrity', () => {
   it('removes an output that fails validation', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
     const outputPath = join(directory, 'zones.pmtiles');
+    const binDirectory = join(directory, 'tippecanoe_program/bin');
+    await createExecutable(binDirectory, 'tippecanoe');
+    await createExecutable(binDirectory, 'tippecanoe-decode');
 
     await expect(
       generatePmtiles({
@@ -118,6 +132,75 @@ describe('PMTiles generation integrity', () => {
         decodeRunner: async () => undefined,
       }),
     ).rejects.toThrow('missing=1 [10]');
+    await expect(stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the temporary workspace separate from an explicit slug bin directory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const workingDirectory = join(directory, 'tmp');
+    const tippecanoeBinDirectory = join(
+      directory,
+      'apps/backend-admin/tippecanoe_program/bin',
+    );
+    const tippecanoePath = await createExecutable(
+      tippecanoeBinDirectory,
+      'tippecanoe',
+    );
+    const decoderPath = await createExecutable(
+      tippecanoeBinDirectory,
+      'tippecanoe-decode',
+    );
+    await mkdir(workingDirectory);
+    const outputPath = join(workingDirectory, 'zones.pmtiles');
+    const commandRunner = jest.fn(async (executable: string) => {
+      expect(executable).toBe(tippecanoePath);
+      await writeFile(outputPath, validPmtilesHeader());
+    });
+    const decodeRunner = jest.fn(async (executable, _args, onLine) => {
+      expect(executable).toBe(decoderPath);
+      onLine(JSON.stringify({ properties: { id: 10 } }));
+    });
+
+    await generatePmtiles({
+      workingDirectory,
+      tippecanoeBinDirectory,
+      inputPath: join(workingDirectory, 'zones.geojson'),
+      outputPath,
+      expectedFeatureIds: ['10'],
+      commandRunner,
+      decodeRunner,
+    });
+
+    expect(commandRunner).toHaveBeenCalledTimes(1);
+    expect(decodeRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails before generation when a required slug executable is missing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const workingDirectory = join(directory, 'tmp');
+    const tippecanoeBinDirectory = join(directory, 'tippecanoe_program/bin');
+    await mkdir(workingDirectory);
+    await createExecutable(tippecanoeBinDirectory, 'tippecanoe');
+    const outputPath = join(workingDirectory, 'zones.pmtiles');
+    await writeFile(outputPath, Buffer.from('stale'));
+    const commandRunner = jest.fn();
+
+    await expect(
+      generatePmtiles({
+        workingDirectory,
+        tippecanoeBinDirectory,
+        inputPath: join(workingDirectory, 'zones.geojson'),
+        outputPath,
+        expectedFeatureIds: [],
+        commandRunner,
+      }),
+    ).rejects.toThrow(
+      `Required Tippecanoe executable is not executable: ${join(
+        tippecanoeBinDirectory,
+        'tippecanoe-decode',
+      )}`,
+    );
+    expect(commandRunner).not.toHaveBeenCalled();
     await expect(stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

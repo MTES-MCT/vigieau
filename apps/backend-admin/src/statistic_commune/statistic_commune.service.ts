@@ -27,7 +27,7 @@ const STATISTIC_SEVERITIES = [
   'crise',
 ] as const;
 
-type StatisticSeverity = (typeof STATISTIC_SEVERITIES)[number];
+export type StatisticSeverity = (typeof STATISTIC_SEVERITIES)[number];
 
 export function parseCommuneStatisticsBatchSize(
   value: string | undefined,
@@ -112,6 +112,68 @@ interface CommuneStatisticRestriction {
   AEP: StatisticSeverity | null;
 }
 
+export interface HistoricCommuneStatisticSegment {
+  runId: string;
+  departementId: number;
+  communeId: number;
+  validFrom: string;
+  validThrough: string;
+  SOU: StatisticSeverity | null;
+  SUP: StatisticSeverity | null;
+  AEP: StatisticSeverity | null;
+  sourceGeneration: string;
+  inputSignature: string;
+}
+
+export interface HistoricCommuneStatisticSegmentBatch {
+  runId: string;
+  departementId: number;
+  departementCode: string;
+  computedFor: string;
+  validThrough: string;
+  sourceGeneration: string;
+  inputSignature: string;
+  offset: number;
+  expectedCommuneCount: number;
+  processedCommuneCount: number;
+  segments: readonly HistoricCommuneStatisticSegment[];
+}
+
+export interface HistoricCommuneStatisticSegmentSink {
+  /** Implementations must make repeated writes of the same primary keys idempotent. */
+  writeSegments(batch: HistoricCommuneStatisticSegmentBatch): Promise<void>;
+}
+
+export interface HistoricCommuneStatisticStagingOptions {
+  runId: string;
+  departementId: number;
+  departementCode: string;
+  sourceGeneration: string;
+  inputSignature: string;
+  validThrough?: string;
+  historicNotComputed?: boolean;
+  sink: HistoricCommuneStatisticSegmentSink;
+}
+
+export interface HistoricCommuneStatisticStagingResult {
+  expectedCommuneCount: number;
+  processedCommuneCount: number;
+  segmentCount: number;
+}
+
+export interface HistoricCommuneStatisticShadowInput {
+  communeId: number;
+  currentRestrictions?: readonly unknown[] | null;
+  currentRestrictionsByMonth?: readonly unknown[] | null;
+  segments: readonly HistoricCommuneStatisticSegment[];
+}
+
+export interface HistoricCommuneStatisticShadow {
+  communeId: number;
+  nextRestrictions: unknown[];
+  nextRestrictionsByMonth: unknown[];
+}
+
 interface StatisticZoneInput {
   id: number;
   departementCode: string;
@@ -156,6 +218,231 @@ interface MonthlyStatisticComputationOptions {
   allowedReadySnapshot?: {
     date: string;
     sourceRevision: string;
+  };
+}
+
+const HISTORIC_RUN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA_256_PATTERN = /^[0-9a-f]{64}$/;
+
+function getStringProperty(value: unknown, property: string): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = (value as Record<string, unknown>)[property];
+  return typeof candidate === 'string' ? candidate : null;
+}
+
+function isStrictDate(value: string, format: 'YYYY-MM-DD' | 'YYYY-MM') {
+  return moment.utc(value, format, true).isValid();
+}
+
+function sortStatisticValues(
+  values: unknown[],
+  format: 'YYYY-MM-DD' | 'YYYY-MM',
+): unknown[] {
+  return values
+    .map((value, index) => ({ value, index }))
+    .sort((left, right) => {
+      const leftDate = getStringProperty(left.value, 'date');
+      const rightDate = getStringProperty(right.value, 'date');
+      const leftValid = leftDate !== null && isStrictDate(leftDate, format);
+      const rightValid = rightDate !== null && isStrictDate(rightDate, format);
+      if (leftValid !== rightValid) {
+        return leftValid ? -1 : 1;
+      }
+      if (leftValid && rightValid && leftDate !== rightDate) {
+        return leftDate.localeCompare(rightDate);
+      }
+      return left.index - right.index;
+    })
+    .map(({ value }) => value);
+}
+
+function validateHistoricSegment(
+  segment: HistoricCommuneStatisticSegment,
+): void {
+  if (!HISTORIC_RUN_ID_PATTERN.test(segment.runId)) {
+    throw new Error(`Invalid historic statistic run id: ${segment.runId}`);
+  }
+  if (
+    !Number.isInteger(segment.departementId) ||
+    segment.departementId <= 0 ||
+    !Number.isInteger(segment.communeId) ||
+    segment.communeId <= 0
+  ) {
+    throw new Error('Invalid historic statistic segment identifiers');
+  }
+  if (
+    !isStrictDate(segment.validFrom, 'YYYY-MM-DD') ||
+    !isStrictDate(segment.validThrough, 'YYYY-MM-DD') ||
+    segment.validThrough < segment.validFrom
+  ) {
+    throw new Error(
+      `Invalid historic statistic segment range: ${segment.validFrom}/${segment.validThrough}`,
+    );
+  }
+  if (!/^\d+$/.test(segment.sourceGeneration)) {
+    throw new Error(
+      `Invalid historic statistic source generation: ${segment.sourceGeneration}`,
+    );
+  }
+  if (!SHA_256_PATTERN.test(segment.inputSignature)) {
+    throw new Error('Invalid historic statistic input signature');
+  }
+  for (const type of STATISTIC_ZONE_TYPES) {
+    const severity = segment[type];
+    if (
+      severity !== null &&
+      !STATISTIC_SEVERITIES.includes(severity as StatisticSeverity)
+    ) {
+      throw new Error(
+        `Invalid historic statistic severity for ${type}: ${String(severity)}`,
+      );
+    }
+  }
+}
+
+function restrictionFromSegment(
+  segment: HistoricCommuneStatisticSegment,
+  date: string,
+): CommuneStatisticRestriction {
+  return {
+    date,
+    SOU: segment.SOU,
+    SUP: segment.SUP,
+    AEP: segment.AEP,
+  };
+}
+
+function restrictionsAreEqual(
+  left: CommuneStatisticRestriction,
+  right: CommuneStatisticRestriction,
+): boolean {
+  return (
+    left.SOU === right.SOU && left.SUP === right.SUP && left.AEP === right.AEP
+  );
+}
+
+function statisticRestrictionWeight(value: unknown): number {
+  let highestSeverity = -1;
+  for (const type of STATISTIC_ZONE_TYPES) {
+    const severity = getStringProperty(value, type);
+    highestSeverity = Math.max(
+      highestSeverity,
+      STATISTIC_SEVERITIES.indexOf(severity as StatisticSeverity),
+    );
+  }
+  switch (highestSeverity) {
+    case 0:
+      return 0.5;
+    case 1:
+      return 2;
+    case 2:
+      return 3;
+    case 3:
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+export function reduceHistoricCommuneStatisticShadow(
+  input: HistoricCommuneStatisticShadowInput,
+): HistoricCommuneStatisticShadow {
+  if (!Number.isInteger(input.communeId) || input.communeId <= 0) {
+    throw new Error(
+      `Invalid historic statistic commune id: ${input.communeId}`,
+    );
+  }
+
+  const restrictionsByDate = new Map<string, CommuneStatisticRestriction>();
+  let runId: string | null = null;
+  let departementId: number | null = null;
+  let sourceGeneration: string | null = null;
+  for (const segment of input.segments) {
+    validateHistoricSegment(segment);
+    if (segment.communeId !== input.communeId) {
+      throw new Error(
+        `Historic statistic segment commune mismatch: ${segment.communeId}/${input.communeId}`,
+      );
+    }
+    if (
+      (runId !== null && runId !== segment.runId) ||
+      (departementId !== null && departementId !== segment.departementId) ||
+      (sourceGeneration !== null &&
+        sourceGeneration !== segment.sourceGeneration)
+    ) {
+      throw new Error('Historic statistic shadow mixes incompatible segments');
+    }
+    runId = segment.runId;
+    departementId = segment.departementId;
+    sourceGeneration = segment.sourceGeneration;
+
+    const lastDate = moment.utc(segment.validThrough, 'YYYY-MM-DD', true);
+    for (
+      const cursor = moment.utc(segment.validFrom, 'YYYY-MM-DD', true);
+      cursor.isSameOrBefore(lastDate, 'day');
+      cursor.add(1, 'day')
+    ) {
+      const date = cursor.format('YYYY-MM-DD');
+      const restriction = restrictionFromSegment(segment, date);
+      const existing = restrictionsByDate.get(date);
+      if (existing && !restrictionsAreEqual(existing, restriction)) {
+        throw new Error(
+          `Conflicting historic statistic segments for commune ${input.communeId} on ${date}`,
+        );
+      }
+      restrictionsByDate.set(date, restriction);
+    }
+  }
+
+  const touchedDates = new Set(restrictionsByDate.keys());
+  const nextRestrictions = sortStatisticValues(
+    [
+      ...(input.currentRestrictions ?? []).filter(
+        (value) => !touchedDates.has(getStringProperty(value, 'date') ?? ''),
+      ),
+      ...restrictionsByDate.values(),
+    ],
+    'YYYY-MM-DD',
+  );
+
+  const touchedMonths = new Set(
+    [...touchedDates].map((date) => date.slice(0, 7)),
+  );
+  const nextMonthlyValues: unknown[] = [
+    ...(input.currentRestrictionsByMonth ?? []).filter(
+      (value) => !touchedMonths.has(getStringProperty(value, 'date') ?? ''),
+    ),
+  ];
+  const ponderationByMonth = new Map(
+    [...touchedMonths].map((month) => [month, 0]),
+  );
+  for (const value of nextRestrictions) {
+    const date = getStringProperty(value, 'date');
+    if (date === null || !isStrictDate(date, 'YYYY-MM-DD')) {
+      continue;
+    }
+    const month = date.slice(0, 7);
+    const ponderation = ponderationByMonth.get(month);
+    if (ponderation !== undefined) {
+      ponderationByMonth.set(
+        month,
+        ponderation + statisticRestrictionWeight(value),
+      );
+    }
+  }
+  for (const [month, ponderation] of [...ponderationByMonth].sort(
+    ([left], [right]) => left.localeCompare(right),
+  )) {
+    nextMonthlyValues.push({ date: month, ponderation });
+  }
+
+  return {
+    communeId: input.communeId,
+    nextRestrictions,
+    nextRestrictionsByMonth: sortStatisticValues(nextMonthlyValues, 'YYYY-MM'),
   };
 }
 
@@ -324,40 +611,14 @@ export class StatisticCommuneService {
           );
         }
 
-        const intersections = await this.findCommuneZoneIntersections(
+        const restrictions = await this.computeCommuneStatisticBatch(
           queryRunner,
-          communes.map((commune) => commune.id),
+          communes,
+          dateString,
           Boolean(historicNotComputed),
           zoneInputs.length > 0,
+          zonesById,
         );
-
-        const zoneIdsByCommune = new Map<number, Set<number>>();
-        for (const intersection of intersections) {
-          const communeId = Number(intersection.communeId);
-          if (intersection.zoneId === null) {
-            throw new Error(
-              `Geometrie communale invalide pour la commune ${communeId} le ${dateString}`,
-            );
-          }
-          const zoneId = Number(intersection.zoneId);
-          if (!Number.isInteger(communeId) || !Number.isInteger(zoneId)) {
-            throw new Error(
-              `Intersection communale invalide pour le ${dateString}`,
-            );
-          }
-          const zoneIds = zoneIdsByCommune.get(communeId) ?? new Set<number>();
-          zoneIds.add(zoneId);
-          zoneIdsByCommune.set(communeId, zoneIds);
-        }
-
-        const restrictions = communes.map((commune) => ({
-          communeId: commune.id,
-          restriction: this.buildCommuneStatisticRestriction(
-            dateString,
-            zoneIdsByCommune.get(commune.id) ?? new Set<number>(),
-            zonesById,
-          ),
-        }));
         const nextProcessedCommuneCount =
           processedCommuneCount + communes.length;
         await this.persistCommuneStatisticsBatch(
@@ -443,6 +704,167 @@ export class StatisticCommuneService {
         }
       }
     }
+  }
+
+  async stageHistoricCommuneStatisticsRestrictions(
+    zones: ZoneAlerteComputed[],
+    date: Date,
+    options: HistoricCommuneStatisticStagingOptions,
+  ): Promise<HistoricCommuneStatisticStagingResult> {
+    this.validateHistoricStagingOptions(date, options);
+    const batchSize = parseCommuneStatisticsBatchSize(
+      process.env.COMMUNE_STATISTICS_BATCH_SIZE,
+    );
+    const dateString = date.toISOString().slice(0, 10);
+    const validThrough = options.validThrough ?? dateString;
+    const { zoneInputs, zonesById } = this.prepareStatisticZones(
+      zones,
+      dateString,
+    );
+    const foreignZone = zoneInputs.find(
+      (zone) => zone.departementCode !== options.departementCode,
+    );
+    if (foreignZone) {
+      throw new Error(
+        `Zone ${foreignZone.id} hors du departement ${options.departementCode}`,
+      );
+    }
+
+    this.logger.log(
+      `STAGING HISTORIC COMMUNE STATISTICS - ${options.departementCode} - ${dateString}`,
+    );
+    const queryRunner = this.dataSource.createQueryRunner();
+    let connected = false;
+    let statisticZoneGeometryPrepared = false;
+    let processedCommuneCount = 0;
+    let segmentCount = 0;
+
+    try {
+      await queryRunner.connect();
+      connected = true;
+      const departementCodes = [options.departementCode];
+      const communeSize = await this.communeService.count(departementCodes);
+      if (communeSize === 0) {
+        throw new Error(
+          `Aucune commune a calculer pour le departement ${options.departementCode}`,
+        );
+      }
+
+      if (zoneInputs.length > 0) {
+        statisticZoneGeometryPrepared = true;
+        await this.prepareStatisticZoneGeometryTable(
+          queryRunner,
+          zoneInputs,
+          true,
+          options.historicNotComputed === true,
+        );
+      }
+
+      for (let offset = 0; offset < communeSize; offset += batchSize) {
+        const communes = await this.communeService.findWithStats(
+          batchSize,
+          offset,
+          departementCodes,
+        );
+        if (communes.length === 0) {
+          throw new Error(
+            `Lot communal historique vide a partir de ${offset} pour ${communeSize} communes attendues`,
+          );
+        }
+        for (const commune of communes) {
+          if (
+            commune.departement?.id !== options.departementId ||
+            commune.departement?.code !== options.departementCode
+          ) {
+            throw new Error(
+              `Commune ${commune.id} hors du departement historique attendu ${options.departementCode}/${options.departementId}`,
+            );
+          }
+        }
+
+        const restrictions = await this.computeCommuneStatisticBatch(
+          queryRunner,
+          communes,
+          dateString,
+          options.historicNotComputed === true,
+          zoneInputs.length > 0,
+          zonesById,
+        );
+        const segments = restrictions.map(
+          ({ communeId, restriction }): HistoricCommuneStatisticSegment => ({
+            runId: options.runId,
+            departementId: options.departementId,
+            communeId,
+            validFrom: restriction.date,
+            validThrough,
+            SOU: restriction.SOU,
+            SUP: restriction.SUP,
+            AEP: restriction.AEP,
+            sourceGeneration: options.sourceGeneration,
+            inputSignature: options.inputSignature,
+          }),
+        );
+        const nextProcessedCommuneCount =
+          processedCommuneCount + communes.length;
+        await options.sink.writeSegments({
+          runId: options.runId,
+          departementId: options.departementId,
+          departementCode: options.departementCode,
+          computedFor: dateString,
+          validThrough,
+          sourceGeneration: options.sourceGeneration,
+          inputSignature: options.inputSignature,
+          offset,
+          expectedCommuneCount: communeSize,
+          processedCommuneCount: nextProcessedCommuneCount,
+          segments,
+        });
+        processedCommuneCount = nextProcessedCommuneCount;
+        segmentCount += segments.length;
+      }
+
+      const finalCommuneSize =
+        await this.communeService.count(departementCodes);
+      if (processedCommuneCount !== finalCommuneSize) {
+        throw new Error(
+          `Staging communal historique incomplet: ${processedCommuneCount}/${finalCommuneSize} communes calculees`,
+        );
+      }
+      return {
+        expectedCommuneCount: finalCommuneSize,
+        processedCommuneCount,
+        segmentCount,
+      };
+    } finally {
+      if (statisticZoneGeometryPrepared) {
+        try {
+          await queryRunner.query(
+            'DROP TABLE IF EXISTS pg_temp."statistic_zone_geometry"',
+          );
+        } catch (error) {
+          this.logger.error(
+            'ERREUR LORS DU NETTOYAGE DU STAGING COMMUNAL HISTORIQUE',
+            error,
+          );
+        }
+      }
+      if (connected) {
+        try {
+          await queryRunner.release();
+        } catch (error) {
+          this.logger.error(
+            'ERREUR LORS DE LA LIBERATION DU STAGING COMMUNAL HISTORIQUE',
+            error,
+          );
+        }
+      }
+    }
+  }
+
+  reduceHistoricCommuneStatisticShadow(
+    input: HistoricCommuneStatisticShadowInput,
+  ): HistoricCommuneStatisticShadow {
+    return reduceHistoricCommuneStatisticShadow(input);
   }
 
   async finalizeLegacyCurrentPublication(
@@ -924,6 +1346,95 @@ export class StatisticCommuneService {
       }
     }
     return dateStrings;
+  }
+
+  private validateHistoricStagingOptions(
+    date: Date,
+    options: HistoricCommuneStatisticStagingOptions,
+  ): void {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      throw new Error('Invalid historic statistic staging date');
+    }
+    if (!options || !HISTORIC_RUN_ID_PATTERN.test(options.runId)) {
+      throw new Error('Invalid historic statistic staging run id');
+    }
+    if (
+      !Number.isInteger(options.departementId) ||
+      options.departementId <= 0 ||
+      typeof options.departementCode !== 'string' ||
+      options.departementCode.trim() !== options.departementCode ||
+      options.departementCode.length === 0
+    ) {
+      throw new Error('Invalid historic statistic staging department');
+    }
+    if (!/^\d+$/.test(options.sourceGeneration)) {
+      throw new Error('Invalid historic statistic staging source generation');
+    }
+    if (!SHA_256_PATTERN.test(options.inputSignature)) {
+      throw new Error('Invalid historic statistic staging input signature');
+    }
+    const validFrom = date.toISOString().slice(0, 10);
+    if (
+      options.validThrough !== undefined &&
+      (!isStrictDate(options.validThrough, 'YYYY-MM-DD') ||
+        options.validThrough < validFrom)
+    ) {
+      throw new Error(
+        `Invalid historic statistic staging interval: ${validFrom}/${options.validThrough}`,
+      );
+    }
+    if (typeof options.sink?.writeSegments !== 'function') {
+      throw new Error('Invalid historic statistic staging sink');
+    }
+  }
+
+  private async computeCommuneStatisticBatch(
+    queryRunner: QueryRunner,
+    communes: ReadonlyArray<{ id: number }>,
+    dateString: string,
+    historicNotComputed: boolean,
+    hasZones: boolean,
+    zonesById: Map<number, ZoneAlerteComputed>,
+  ): Promise<
+    Array<{
+      communeId: number;
+      restriction: CommuneStatisticRestriction;
+    }>
+  > {
+    const intersections = await this.findCommuneZoneIntersections(
+      queryRunner,
+      communes.map((commune) => commune.id),
+      historicNotComputed,
+      hasZones,
+    );
+
+    const zoneIdsByCommune = new Map<number, Set<number>>();
+    for (const intersection of intersections) {
+      const communeId = Number(intersection.communeId);
+      if (intersection.zoneId === null) {
+        throw new Error(
+          `Geometrie communale invalide pour la commune ${communeId} le ${dateString}`,
+        );
+      }
+      const zoneId = Number(intersection.zoneId);
+      if (!Number.isInteger(communeId) || !Number.isInteger(zoneId)) {
+        throw new Error(
+          `Intersection communale invalide pour le ${dateString}`,
+        );
+      }
+      const zoneIds = zoneIdsByCommune.get(communeId) ?? new Set<number>();
+      zoneIds.add(zoneId);
+      zoneIdsByCommune.set(communeId, zoneIds);
+    }
+
+    return communes.map((commune) => ({
+      communeId: commune.id,
+      restriction: this.buildCommuneStatisticRestriction(
+        dateString,
+        zoneIdsByCommune.get(commune.id) ?? new Set<number>(),
+        zonesById,
+      ),
+    }));
   }
 
   private prepareStatisticZones(

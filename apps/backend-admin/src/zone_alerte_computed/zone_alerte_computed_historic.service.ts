@@ -1261,6 +1261,27 @@ export class ZoneAlerteComputedHistoricService {
     return this.zoneAlerteComputedHistoricRepository.find(options);
   }
 
+  findZonesForHistoricBackfill(departementCodes: string[]) {
+    if (departementCodes.length === 0) {
+      return Promise.resolve([]);
+    }
+    return this.zoneAlerteComputedHistoricRepository.find({
+      relations: [
+        'departement',
+        'restriction',
+        'restriction.arreteRestriction',
+        'restriction.arreteRestriction.fichier',
+        'restriction.usages',
+        'restriction.usages.thematique',
+      ],
+      where: {
+        departement: {
+          code: In(departementCodes),
+        },
+      },
+    });
+  }
+
   async computeRegleAr(departement: Departement, date: Moment) {
     const arretesRestrictions =
       await this.arreteResrictionService.findByDepartementAndDate(
@@ -2140,6 +2161,72 @@ DELETE FROM zone_alerte_computed_historic
         ),
     );
     return allZonesComputed;
+  }
+
+  async findLegacyHistoricDepartmentZones(
+    departementCode: string,
+    computedFor: string,
+  ): Promise<ZoneAlerteComputedHistoric[]> {
+    const date = moment.utc(computedFor, 'YYYY-MM-DD', true);
+    if (!date.isValid() || date.format('YYYY-MM-DD') !== computedFor) {
+      throw new Error(`Invalid historic department date: ${computedFor}`);
+    }
+    const arretes = await this.arreteResrictionService.findByDepartementAndDate(
+      departementCode,
+      date,
+    );
+    const arreteIds = arretes.map((arrete) => arrete.id);
+    if (arreteIds.length === 0) {
+      return [];
+    }
+    const zones = (await this.zoneAlerteService.findByArreteRestriction(
+      arreteIds,
+    )) as ZoneAlerte[];
+    const normalized = await this.formatLegacyHistoricZones(
+      zones,
+      arreteIds,
+      date,
+    );
+    return normalized.zones.map((zone) => {
+      const restriction = zone.restrictions[0];
+      return Object.assign(Object.create(Object.getPrototypeOf(zone)), zone, {
+        restriction,
+        niveauGravite: restriction.niveauGravite,
+      }) as unknown as ZoneAlerteComputedHistoric;
+    });
+  }
+
+  async buildHistoricDepartmentFeatureCollection(
+    zones: readonly ZoneAlerteComputedHistoric[],
+    computedFor: string,
+    legacy: boolean,
+  ): Promise<{ type: 'FeatureCollection'; features: any[] }> {
+    const date = moment.utc(computedFor, 'YYYY-MM-DD', true);
+    if (!date.isValid() || date.format('YYYY-MM-DD') !== computedFor) {
+      throw new Error(`Invalid historic department date: ${computedFor}`);
+    }
+    if (legacy) {
+      const legacyZones = zones as unknown as ZoneAlerte[];
+      const activeArIds = [
+        ...new Set(
+          legacyZones.flatMap((zone) =>
+            (zone.restrictions ?? [])
+              .map((restriction) => restriction.arreteRestriction?.id)
+              .filter((id): id is number => Number.isInteger(id)),
+          ),
+        ),
+      ];
+      const formatted = await this.formatLegacyHistoricZones(
+        legacyZones,
+        activeArIds,
+        date,
+      );
+      return { type: 'FeatureCollection', features: formatted.features };
+    }
+    return {
+      type: 'FeatureCollection',
+      features: await this.formatComputedHistoricZones([...zones], date),
+    };
   }
 
   private async formatComputedHistoricZones(
