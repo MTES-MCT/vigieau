@@ -392,7 +392,9 @@ export class ZonesService implements OnModuleInit {
             availability."publicRevision"::text AS "availabilityPublicRevision",
             availability."officialUrl",
             CASE
-              WHEN $2::uuid IS NULL THEN pending."pendingSince"
+              WHEN $2::uuid IS NULL
+                OR $2::uuid = publication_state."activePublicationId"
+                THEN pending."pendingSince"
               ELSE NULL
             END AS "pendingSince"
           FROM "zone_publication_source_state" source
@@ -427,10 +429,7 @@ export class ZonesService implements OnModuleInit {
         : null;
       return {
         sourcePublicRevision,
-        freshness:
-          publicationId === undefined && pendingSince !== null
-            ? 'updating'
-            : 'current',
+        freshness: pendingSince !== null ? 'updating' : 'current',
         pendingSince,
         certifications: new Map(
           rows
