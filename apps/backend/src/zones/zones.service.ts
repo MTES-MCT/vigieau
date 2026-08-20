@@ -102,10 +102,13 @@ type AvailabilityRow = {
   asOf: Date | string | null;
   availabilityPublicRevision: string | null;
   officialUrl: string | null;
+  pendingSince: Date | string | null;
 };
 
 type AvailabilityContext = {
   sourcePublicRevision: string | null;
+  freshness: 'current' | 'updating';
+  pendingSince: string | null;
   certifications: Map<ZoneType, AvailabilityRow>;
 };
 
@@ -238,6 +241,24 @@ export class ZonesService implements OnModuleInit {
   ): Promise<any[]> {
     const snapshot = await this.resolveSnapshot(publicationId);
 
+    return this.findInSnapshot(
+      snapshot,
+      queryLon,
+      queryLat,
+      commune,
+      profil,
+      zoneType,
+    );
+  }
+
+  private findInSnapshot(
+    snapshot: ZoneCacheSnapshot,
+    queryLon?: string,
+    queryLat?: string,
+    commune?: string,
+    profil?: string,
+    zoneType?: string,
+  ): any[] {
     if (queryLon && queryLat) {
       const lon = parseFloat(queryLon);
       const lat = parseFloat(queryLat);
@@ -279,13 +300,14 @@ export class ZonesService implements OnModuleInit {
     zoneType?: string,
     publicationId?: string,
   ): Promise<ZonesWithAvailabilityDto> {
-    const allZones = await this.find(
+    const snapshot = await this.resolveSnapshot(publicationId);
+    const allZones = this.findInSnapshot(
+      snapshot,
       queryLon,
       queryLat,
       commune,
       profil,
       undefined,
-      publicationId,
     );
     const zones = zoneType
       ? allZones.filter((zone) => zone.type === zoneType)
@@ -295,8 +317,14 @@ export class ZonesService implements OnModuleInit {
       ? await this.loadZoneTypeAvailability(departmentCode, publicationId)
       : {
           sourcePublicRevision: null,
+          freshness: 'current' as const,
+          pendingSince: null,
           certifications: new Map<ZoneType, AvailabilityRow>(),
         };
+    const publishedAt =
+      snapshot.publication?.activatedAt ??
+      snapshot.publication?.sourceComputedAt ??
+      snapshot.version;
 
     const availability = Object.fromEntries(
       ZONE_TYPES.map((type) => [
@@ -307,6 +335,15 @@ export class ZonesService implements OnModuleInit {
           departmentCode,
           context.sourcePublicRevision,
           context.certifications.get(type),
+          allZones.some((zone) => zone?.type === type && zone?.id !== null),
+          departmentCode !== null &&
+            snapshot.zones.some(
+              (zone) =>
+                zone?.departement === departmentCode && zone?.type === type,
+            ),
+          publishedAt,
+          context.freshness,
+          context.pendingSince,
         ),
       ]),
     ) as Record<ZoneType, ZoneTypeAvailabilityDto>;
@@ -345,26 +382,56 @@ export class ZonesService implements OnModuleInit {
       const rows = (await this.zonePublicationRepository.query(
         `
           SELECT
-            CASE
-              WHEN $2::uuid IS NULL THEN source."publicRevision"::text
-              ELSE publication."sourceRevision"::text
-            END AS "sourcePublicRevision",
+            COALESCE(
+              publication."sourceRevision",
+              source."publicRevision"
+            )::text AS "sourcePublicRevision",
             availability."zoneType",
             availability."status",
             availability."asOf",
             availability."publicRevision"::text AS "availabilityPublicRevision",
-            availability."officialUrl"
+            availability."officialUrl",
+            CASE
+              WHEN $2::uuid IS NULL THEN pending."pendingSince"
+              ELSE NULL
+            END AS "pendingSince"
           FROM "zone_publication_source_state" source
+          LEFT JOIN "zone_publication_state" publication_state
+            ON publication_state."id" = 1
+          LEFT JOIN "zone_publication" publication
+            ON publication."id" = COALESCE(
+              $2::uuid,
+              publication_state."activePublicationId"
+            )
           LEFT JOIN "zone_type_availability" availability
             ON availability."departmentCode" = $1
-          LEFT JOIN "zone_publication" publication
-            ON publication."id" = $2::uuid
+          LEFT JOIN LATERAL (
+            SELECT MIN(request."requestedAt") AS "pendingSince"
+            FROM "current_zone_recompute_request" request
+            INNER JOIN "departement" pending_department
+              ON pending_department."id" = request."departementId"
+            WHERE pending_department."code" = $1
+              AND (
+                request."currentPending"
+                OR request."scheduledFor" <=
+                  (now() AT TIME ZONE 'Europe/Paris')::date
+              )
+          ) pending ON true
           WHERE source."id" = 1
         `,
         [departmentCode, publicationId ?? null],
       )) as Array<AvailabilityRow & { zoneType: ZoneType | null }>;
+      const sourcePublicRevision = rows[0]?.sourcePublicRevision ?? null;
+      const pendingSince = rows[0]?.pendingSince
+        ? new Date(rows[0].pendingSince).toISOString()
+        : null;
       return {
-        sourcePublicRevision: rows[0]?.sourcePublicRevision ?? null,
+        sourcePublicRevision,
+        freshness:
+          publicationId === undefined && pendingSince !== null
+            ? 'updating'
+            : 'current',
+        pendingSince,
         certifications: new Map(
           rows
             .filter((row) => row.zoneType && ZONE_TYPES.includes(row.zoneType))
@@ -377,6 +444,8 @@ export class ZonesService implements OnModuleInit {
       );
       return {
         sourcePublicRevision: null,
+        freshness: 'current',
+        pendingSince: null,
         certifications: new Map(),
       };
     }
@@ -388,6 +457,11 @@ export class ZonesService implements OnModuleInit {
     departmentCode: string | null,
     sourcePublicRevision: string | null,
     certification?: AvailabilityRow,
+    hasLocalZone = false,
+    departmentTypeWasPublished = false,
+    publishedAt: Date | null = null,
+    freshness: 'current' | 'updating' = 'current',
+    pendingSince: string | null = null,
   ): ZoneTypeAvailabilityDto {
     const officialUrl =
       certification?.officialUrl ??
@@ -402,6 +476,32 @@ export class ZonesService implements OnModuleInit {
         officialUrl,
       };
     }
+    const updatingMetadata =
+      freshness === 'updating'
+        ? {
+            freshness,
+            pendingSince,
+          }
+        : {};
+    const lastPublishedAt = publishedAt?.toISOString() ?? null;
+    if (freshness === 'updating' && hasLocalZone) {
+      return {
+        status: 'available',
+        asOf: lastPublishedAt,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+        ...updatingMetadata,
+      };
+    }
+    if (freshness === 'updating' && departmentTypeWasPublished) {
+      return {
+        status: 'confirmed_none',
+        asOf: lastPublishedAt,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+        ...updatingMetadata,
+      };
+    }
     const certificationApplies = this.publicRevisionIsAtOrBefore(
       certification?.availabilityPublicRevision,
       sourcePublicRevision,
@@ -414,6 +514,7 @@ export class ZonesService implements OnModuleInit {
           : null,
         sourceRevision: sourcePublicRevision,
         officialUrl,
+        ...updatingMetadata,
       };
     }
     if (certificationApplies && certification?.status !== 'available') {
@@ -427,14 +528,16 @@ export class ZonesService implements OnModuleInit {
           : null,
         sourceRevision: sourcePublicRevision,
         officialUrl,
+        ...updatingMetadata,
       };
     }
     if (zones.some((zone) => zone?.type === type && zone?.id !== null)) {
       return {
         status: 'available',
-        asOf: this.activeSnapshot?.version?.toISOString() ?? null,
+        asOf: lastPublishedAt,
         sourceRevision: sourcePublicRevision,
         officialUrl,
+        ...updatingMetadata,
       };
     }
     // Once the recalculated department/type data is certified available,
@@ -447,6 +550,7 @@ export class ZonesService implements OnModuleInit {
           : null,
         sourceRevision: sourcePublicRevision,
         officialUrl,
+        ...updatingMetadata,
       };
     }
     return {
@@ -456,6 +560,7 @@ export class ZonesService implements OnModuleInit {
         : null,
       sourceRevision: sourcePublicRevision,
       officialUrl,
+      ...updatingMetadata,
     };
   }
 

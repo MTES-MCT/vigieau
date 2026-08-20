@@ -4,7 +4,10 @@ import { Zone } from '../../dto/zone.dto';
 import { useAddressStore } from '../../store/address';
 import niveauxGravite from '../../dto/niveauGravite';
 import type { ZoneAvailability } from '../../dto/zone-availability.dto';
-import { getZoneSituationState } from '../../utils/zone-availability';
+import {
+  formatZoneAvailabilityDate,
+  getZoneSituationState,
+} from '../../utils/zone-availability';
 import { VIcon } from '@gouvminint/vue-dsfr';
 
 const props = defineProps<{
@@ -52,6 +55,12 @@ const availabilityConfirmedNone = computed(
   () => situationState.value === 'confirmed_none',
 );
 const municipalOnly = computed(() => situationState.value === 'municipal');
+const availabilityUpdating = computed(
+  () => props.availability.freshness === 'updating',
+);
+const availabilityUpdatedAt = computed(() =>
+  formatZoneAvailabilityDate(props.availability.asOf),
+);
 const niveauGravite = computed(() => {
   return niveauxGravite.find(n => n.niveauGravite === (props.zone?.niveauGravite ? props.zone.niveauGravite : null));
 });
@@ -82,6 +91,15 @@ const niveauGravite = computed(() => {
         <span>ne peuvent pas être confirmées</span>
         à votre adresse.
       </h1>
+      <h1 v-else-if="zone?.id && availabilityUpdating" class="h2">
+        Lors de la dernière actualisation, {{ typeEauLabel.toLowerCase() }} était en
+        <span
+          :class="`situation-level-c-${utils.getRestrictionRank(zone?.niveauGravite)}`"
+        >
+          {{ situationLabel }}
+        </span>
+        à votre adresse.
+      </h1>
       <h1 v-else-if="zone?.id" class="h2">
         {{ typeEauLabel }} est en
         <span
@@ -95,6 +113,13 @@ const niveauGravite = computed(() => {
         Un arrêté municipal concernant l’eau
         <span>a été publié pour votre commune</span>.
       </h1>
+      <h1 v-else-if="availabilityConfirmedNone && availabilityUpdating" class="h2">
+        Lors de la dernière actualisation, {{ typeEauLabel.toLowerCase() }} n'était
+        <span class="situation-level-c-0">
+          pas concernée par des restrictions
+        </span>
+        à votre adresse.
+      </h1>
       <h1 v-else-if="availabilityConfirmedNone" class="h2">
         {{ typeEauLabel }} n'est
         <span class="situation-level-c-0">
@@ -102,6 +127,15 @@ const niveauGravite = computed(() => {
         </span>
         à votre adresse.
       </h1>
+      <p
+        v-if="!availabilityUnavailable && (availabilityUpdatedAt || availabilityUpdating)"
+        class="fr-mt-2w fr-mb-0"
+      >
+        <template v-if="availabilityUpdatedAt">
+          Situation actualisée le <strong>{{ availabilityUpdatedAt }}</strong>.
+        </template>
+        <strong v-if="availabilityUpdating"> Une mise à jour est en cours.</strong>
+      </p>
     </div>
     <div
       v-if="availabilityUnavailable"

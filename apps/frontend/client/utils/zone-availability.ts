@@ -13,6 +13,7 @@ const validStatuses: ZoneAvailabilityStatus[] = [
   'confirmed_none',
   'unavailable',
 ];
+const validFreshness = ['current', 'updating'] as const;
 
 export type ZoneSituationState =
   'restricted' | 'municipal' | 'confirmed_none' | 'unavailable';
@@ -116,7 +117,30 @@ const normalizeAvailability = (
       safeOfficialUrl(candidate?.officialUrl) ?? fallback.officialUrl,
     asOf: normalizeOptionalString(candidate?.asOf),
     sourceRevision: normalizeOptionalString(candidate?.sourceRevision),
+    freshness: validFreshness.includes(
+      candidate?.freshness as (typeof validFreshness)[number],
+    )
+      ? (candidate?.freshness as (typeof validFreshness)[number])
+      : fallback.freshness,
+    pendingSince: normalizeOptionalString(candidate?.pendingSince),
   };
+};
+
+export const formatZoneAvailabilityDate = (
+  value?: string | null,
+): string | null => {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return new Intl.DateTimeFormat('fr-FR', {
+    dateStyle: 'long',
+    timeStyle: 'short',
+    timeZone: 'Europe/Paris',
+  }).format(date);
 };
 
 export const normalizeZoneSearchResponse = (

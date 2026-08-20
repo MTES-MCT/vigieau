@@ -8,6 +8,7 @@ import {
   unavailableStatisticDataStatus,
 } from '../client/utils/statistic-data-status.ts';
 import {
+  formatZoneAvailabilityDate,
   getZoneSituationState,
   isUnsupportedZoneV2Status,
   normalizeZoneSearchResponse,
@@ -135,6 +136,38 @@ test('respecte une absence AEP explicitement certifiée par zones v2', () => {
   assert.equal(response.availability.AEP.sourceRevision, '42');
 });
 
+test('conserve la dernière situation connue pendant une mise à jour', () => {
+  const response = normalizeZoneSearchResponse(
+    {
+      zones: [makeZone({ id: 42, type: 'SUP' })],
+      availability: {
+        SUP: {
+          status: 'available',
+          freshness: 'updating',
+          asOf: '2026-08-20T12:41:00.000Z',
+          pendingSince: '2026-08-20T12:49:00.000Z',
+        },
+      },
+    },
+    '79',
+  );
+
+  assert.equal(response.availability.SUP.status, 'available');
+  assert.equal(response.availability.SUP.freshness, 'updating');
+  assert.equal(
+    response.availability.SUP.pendingSince,
+    '2026-08-20T12:49:00.000Z',
+  );
+  assert.equal(
+    formatZoneAvailabilityDate(response.availability.SUP.asOf),
+    '20 août 2026 à 14:41',
+  );
+});
+
+test('refuse une date d’actualisation invalide', () => {
+  assert.equal(formatZoneAvailabilityDate('date-invalide'), null);
+});
+
 test('ignore un lien non sécurisé et utilise le site officiel des Deux-Sèvres', () => {
   const response = normalizeZoneSearchResponse(
     {
@@ -240,6 +273,8 @@ test('branche le contrat additif sans autoriser une absence AEP implicite', asyn
   assert.match(apiSource, /getDataStatus\(\)/);
   assert.match(apiSource, /_getZoneV2Path/);
   assert.match(headerSource, /v-if="availabilityUnavailable"/);
+  assert.match(headerSource, /Situation actualisée le/);
+  assert.match(headerSource, /Une mise à jour est en cours/);
   assert.match(
     headerSource,
     /v-if="situationState === 'restricted' \|\| availabilityConfirmedNone"/,
