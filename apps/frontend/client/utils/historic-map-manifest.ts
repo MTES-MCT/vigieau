@@ -166,7 +166,7 @@ export async function loadHistoricMapManifest(
     cache: 'no-store',
     headers: { Accept: 'application/json' },
   });
-  if (response.status === 404) {
+  if (response.status === 403 || response.status === 404) {
     return null;
   }
   if (!response.ok) {

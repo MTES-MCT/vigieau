@@ -124,9 +124,9 @@ test('keeps the manifest on a source bump and rejects an epoch bump', () => {
   );
 });
 
-test('treats only a 404 as the pre-backfill legacy state', async () => {
-  const missingFetch = async () => new Response(null, { status: 404 });
-  await assert.doesNotReject(async () => {
+test('treats only 403 and 404 as the pre-backfill legacy state', async () => {
+  for (const status of [403, 404]) {
+    const missingFetch = async () => new Response(null, { status });
     assert.equal(
       await loadHistoricMapManifest(
         'https://objects.example.test/manifest.json',
@@ -134,16 +134,18 @@ test('treats only a 404 as the pre-backfill legacy state', async () => {
       ),
       null,
     );
-  });
+  }
 
-  const unavailableFetch = async () => new Response(null, { status: 503 });
-  await assert.rejects(
-    loadHistoricMapManifest(
-      'https://objects.example.test/manifest.json',
-      unavailableFetch,
-    ),
-    /failed with 503/,
-  );
+  for (const status of [300, 400, 401, 405, 429, 500, 503]) {
+    const unavailableFetch = async () => new Response(null, { status });
+    await assert.rejects(
+      loadHistoricMapManifest(
+        'https://objects.example.test/manifest.json',
+        unavailableFetch,
+      ),
+      new RegExp(`failed with ${status}`),
+    );
+  }
 });
 
 test('rejects gaps and mutable legacy URLs in a published manifest', () => {
