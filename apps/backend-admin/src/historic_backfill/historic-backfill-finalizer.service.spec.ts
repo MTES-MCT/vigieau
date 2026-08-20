@@ -66,6 +66,7 @@ function inspectionRow(overrides: Record<string, unknown> = {}) {
     historicComputeEpochMatches: true,
     historicBackfillGlobalEpochMatches: true,
     baseStatisticRevisionMatches: true,
+    statisticsPublicationClosed: false,
     dirtyRangeCovers: true,
     currentPublishedAfterRange: true,
     statsCursor: '2026-08-18',
@@ -228,7 +229,7 @@ function createRunner(options?: {
       if (sql.includes('SET "statisticsPromotedAt" = now()')) {
         if (statisticsPromotedAt !== null) return [[], 0];
         statisticsPromotedAt = '2026-08-20T09:30:00.000Z';
-        return [[{ statisticsPromotedAt }], 1];
+        return [[{ statisticsPromotedAt, statisticRevision: '13' }], 1];
       }
       return [];
     }),
@@ -976,12 +977,22 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     expect(inspectionSql).toContain('actual_by_department AS MATERIALIZED');
     expect(inspectionSql).toContain('GROUP BY segment."departementId"');
     expect(inspectionSql).toContain('LEFT JOIN actual_by_department actual');
+    expect(inspectionSql).toContain(
+      'run_context."statisticsPromotedAt" IS NOT NULL',
+    );
+    expect(inspectionSql).toContain(
+      'run_context."historicPublishedThrough" >=',
+    );
+    expect(inspectionSql).toContain(
+      'run_context."computeStatsDate" >= run_context."dateThrough"',
+    );
+    expect(inspectionSql).toContain('AS "statisticsPublicationClosed"');
     expect(inspectionSql).not.toContain(
       'FROM commune_segment_rows segment\n            WHERE segment."departementId" = task."departementId"',
     );
   });
 
-  it('atomically promotes statistics and snapshots without map/publication/run writes', async () => {
+  it('atomically publishes statistics and snapshots without map/run completion writes', async () => {
     const { service, runner } = createFinalizeHarness();
 
     await expect(service.apply(RUN_ID)).resolves.toMatchObject({
@@ -1009,9 +1020,16 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     expect(sql).toContain('"computeStatsGeneration" =');
     expect(sql).not.toContain('"computeMapDate" =');
     expect(sql).not.toContain('"computeMapGeneration" =');
-    expect(sql).not.toContain('UPDATE "statistic_publication_state"');
+    expect(sql).toContain('UPDATE "statistic_publication_state" publication');
+    expect(sql).toContain('"revision" = publication."revision" + 1');
+    expect(sql).toContain('"historicPublishedThrough" = $3::date');
+    expect(sql).toContain('"historicDirtyFrom" = NULL');
+    expect(sql).toContain('"historicDirtyThrough" = NULL');
     expect(sql).toContain('UPDATE "historic_backfill_run" run');
     expect(sql).toContain('SET "statisticsPromotedAt" = now()');
+    expect(sql).toContain(
+      '"baseStatisticRevision" = publication_update."revision"',
+    );
     const statements = runner.query.mock.calls.map(
       ([statement]: [string]) => statement,
     );
@@ -1031,6 +1049,8 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     expect(departmentWrite).toBeLessThan(snapshotWrite);
     expect(snapshotWrite).toBeLessThan(markerWrite);
     expect(statements[markerWrite]).not.toContain('SET "status" =');
+    expect(statements[markerWrite]).not.toContain('"computeMapDate"');
+    expect(statements[markerWrite]).not.toContain('"computeMapGeneration"');
     expect(runner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
@@ -1072,6 +1092,34 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
       alreadyApplied: true,
       statsCursor: '2026-08-20',
     });
+  });
+
+  it('keeps an already-closed publication idempotent after a daily revision advances', async () => {
+    const { service, runner } = createFinalizeHarness({
+      inspection: {
+        statisticsPromotedAt: '2026-08-20T09:30:00.000Z',
+        baseStatisticRevision: '13',
+        currentStatisticRevision: '14',
+        baseStatisticRevisionMatches: false,
+        statisticsPublicationClosed: true,
+        statsCursor: '2026-08-20',
+      },
+    });
+
+    await expect(service.apply(RUN_ID)).resolves.toMatchObject({
+      applied: true,
+      alreadyApplied: true,
+      statsCursor: '2026-08-20',
+      inspection: {
+        baseStatisticRevisionMatches: false,
+        statisticsPublicationClosed: true,
+      },
+    });
+    expect(
+      runner.query.mock.calls.some(([sql]: [string]) =>
+        sql.includes('upsertedCommuneCount'),
+      ),
+    ).toBe(false);
   });
 
   it('does not repeat heavy writes after statistics were promoted once', async () => {
@@ -1675,6 +1723,7 @@ describeWithPostgres(
         config."computeMapDate"::text, config."computeMapGeneration"::text,
         config."computeStatsDate"::text, config."computeStatsGeneration"::text,
         publication."revision"::text,
+        publication."historicPublishedThrough"::text,
         publication."historicDirtyFrom"::text,
         publication."historicDirtyThrough"::text
       FROM "historic_backfill_run" run
@@ -1684,15 +1733,60 @@ describeWithPostgres(
     `);
       expect(state).toMatchObject({
         status: 'running',
-        baseStatisticRevision: '13',
+        baseStatisticRevision: '14',
         statisticsPromotedAt: expect.any(Date),
         computeMapDate: '2026-08-14',
         computeMapGeneration: '5',
         computeStatsDate: '2026-08-18',
         computeStatsGeneration: '8',
-        revision: '13',
-        historicDirtyFrom: '2026-08-16',
-        historicDirtyThrough: '2026-08-18',
+        revision: '14',
+        historicPublishedThrough: '2026-08-18',
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+      });
+      await dataSource.query(`
+        UPDATE "statistic_publication_state"
+        SET "revision" = "revision" + 1
+        WHERE "id" = 1;
+        UPDATE "config"
+        SET "computeStatsDate" = date '2026-08-20'
+        WHERE "id" = 1
+      `);
+      await expect(service.apply(RUN_ID)).resolves.toMatchObject({
+        applied: true,
+        alreadyApplied: true,
+        statsCursor: '2026-08-20',
+        inspection: {
+          baseStatisticRevision: '14',
+          currentStatisticRevision: '15',
+          baseStatisticRevisionMatches: false,
+          statisticsPublicationClosed: true,
+        },
+      });
+      const [afterDaily] = await dataSource.query(`
+        SELECT run."status", run."baseStatisticRevision"::text,
+               publication."revision"::text,
+               publication."historicPublishedThrough"::text,
+               publication."historicDirtyFrom"::text,
+               publication."historicDirtyThrough"::text,
+               config."computeMapDate"::text,
+               config."computeMapGeneration"::text
+        FROM "historic_backfill_run" run
+        CROSS JOIN "statistic_publication_state" publication
+        CROSS JOIN "config" config
+        WHERE run."id" = '${RUN_ID}'
+          AND publication."id" = 1
+          AND config."id" = 1
+      `);
+      expect(afterDaily).toMatchObject({
+        status: 'running',
+        baseStatisticRevision: '14',
+        revision: '15',
+        historicPublishedThrough: '2026-08-18',
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+        computeMapDate: '2026-08-14',
+        computeMapGeneration: '5',
       });
       const [coverage] = await dataSource.query(`
       SELECT

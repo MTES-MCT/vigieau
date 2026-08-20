@@ -61,6 +61,7 @@ export interface HistoricBackfillFinalizationInspection {
   historicComputeEpochMatches: boolean;
   historicBackfillGlobalEpochMatches: boolean;
   baseStatisticRevisionMatches: boolean;
+  statisticsPublicationClosed: boolean;
   dirtyRangeCovers: boolean;
   currentPublishedAfterRange: boolean;
   statsCursor: string | null;
@@ -168,6 +169,7 @@ interface InspectionRow {
   historicComputeEpochMatches: boolean | string;
   historicBackfillGlobalEpochMatches: boolean | string;
   baseStatisticRevisionMatches: boolean | string;
+  statisticsPublicationClosed: boolean | string;
   dirtyRangeCovers: boolean | string;
   currentPublishedAfterRange: boolean | string;
   statsCursor: string | null;
@@ -210,6 +212,11 @@ interface SnapshotWriteRow {
   siblingSnapshotCount: number | string;
   cursorUpdateCount: number | string;
   statsCursor: string | null;
+}
+
+interface StatisticPublicationWriteRow {
+  statisticsPromotedAt: Date | string;
+  statisticRevision: string | number;
 }
 
 export class HistoricBackfillFinalizerValidationError extends Error {}
@@ -707,13 +714,20 @@ export class HistoricBackfillFinalizerService {
           inspection.expectedDateCount,
           inspection.dateThrough!,
         );
-        const statisticsPromotedAt = await this.markStatisticsPromoted(
+        const statisticPublication = await this.publishStatistics(
           queryRunner,
           runId,
+          inspection.currentStatisticRevision!,
+          inspection.dateThrough!,
         );
         const appliedInspection = {
           ...inspection,
-          statisticsPromotedAt,
+          statisticsPromotedAt: statisticPublication.statisticsPromotedAt,
+          baseStatisticRevision: statisticPublication.statisticRevision,
+          currentStatisticRevision: statisticPublication.statisticRevision,
+          baseStatisticRevisionMatches: true,
+          statisticsPublicationClosed: true,
+          dirtyRangeCovers: true,
           statsCursor: snapshotWrite.statsCursor,
         };
 
@@ -1093,6 +1107,9 @@ export class HistoricBackfillFinalizerService {
       baseStatisticRevisionMatches: databaseBoolean(
         row.baseStatisticRevisionMatches,
       ),
+      statisticsPublicationClosed: databaseBoolean(
+        row.statisticsPublicationClosed,
+      ),
       dirtyRangeCovers: databaseBoolean(row.dirtyRangeCovers),
       currentPublishedAfterRange: databaseBoolean(
         row.currentPublishedAfterRange,
@@ -1190,7 +1207,10 @@ export class HistoricBackfillFinalizerService {
     if (!inspection.historicBackfillGlobalEpochMatches) {
       failures.push('historic-backfill-global-epoch');
     }
-    if (!inspection.baseStatisticRevisionMatches) {
+    if (
+      !inspection.baseStatisticRevisionMatches &&
+      !inspection.statisticsPublicationClosed
+    ) {
       failures.push('base-statistic-revision');
     }
     if (!inspection.dirtyRangeCovers) failures.push('dirty-range');
@@ -1593,33 +1613,55 @@ export class HistoricBackfillFinalizerService {
     };
   }
 
-  private async markStatisticsPromoted(
+  private async publishStatistics(
     queryRunner: QueryRunner,
     runId: string,
-  ): Promise<string> {
-    const [row] = unwrapTypeOrmDmlReturningRows<{
-      statisticsPromotedAt: Date | string;
-    }>(
+    expectedStatisticRevision: string,
+    dateThrough: string,
+  ): Promise<{ statisticsPromotedAt: string; statisticRevision: string }> {
+    const [row] = unwrapTypeOrmDmlReturningRows<StatisticPublicationWriteRow>(
       await queryRunner.query(
         `
-        UPDATE "historic_backfill_run" run
-        SET "statisticsPromotedAt" = now(),
-            "updatedAt" = now()
-        WHERE run."id" = $1::uuid
-          AND run."status" = 'running'
-          AND run."statisticsPromotedAt" IS NULL
-        RETURNING run."statisticsPromotedAt"
+        WITH publication_update AS MATERIALIZED (
+          UPDATE "statistic_publication_state" publication
+          SET "revision" = publication."revision" + 1,
+              "historicPublishedThrough" = $3::date,
+              "historicDirtyFrom" = NULL,
+              "historicDirtyThrough" = NULL,
+              "updatedAt" = now()
+          WHERE publication."id" = 1
+            AND publication."revision" = $2::bigint
+            AND publication."historicDirtyFrom" IS NOT NULL
+            AND publication."historicDirtyThrough" IS NOT NULL
+            AND publication."historicDirtyThrough" <= $3::date
+          RETURNING publication."revision"
+        ), promoted_run AS (
+          UPDATE "historic_backfill_run" run
+          SET "statisticsPromotedAt" = now(),
+              "baseStatisticRevision" = publication_update."revision",
+              "updatedAt" = now()
+          FROM publication_update
+          WHERE run."id" = $1::uuid
+            AND run."status" = 'running'
+            AND run."statisticsPromotedAt" IS NULL
+            AND run."baseStatisticRevision" = $2::bigint
+          RETURNING run."statisticsPromotedAt",
+                    run."baseStatisticRevision" AS "statisticRevision"
+        )
+        SELECT "statisticsPromotedAt", "statisticRevision"
+        FROM promoted_run
       `,
-        [runId],
+        [runId, expectedStatisticRevision, dateThrough],
       ),
     );
     const promotedAt = normalizeTimestamp(row?.statisticsPromotedAt);
-    if (promotedAt === null) {
+    const statisticRevision = normalizeRevision(row?.statisticRevision);
+    if (promotedAt === null || statisticRevision === null) {
       throw new HistoricBackfillFinalizerStateError(
-        'Historic statistics promotion marker was not written',
+        'Historic statistic publication was not committed',
       );
     }
-    return promotedAt;
+    return { statisticsPromotedAt: promotedAt, statisticRevision };
   }
 
   private departmentShadowSql(): string {
@@ -2278,15 +2320,34 @@ export class HistoricBackfillFinalizerService {
           false
         ) AS "baseStatisticRevisionMatches",
         COALESCE(
-          run_context."mapDateFrom" <= run_context."historicDirtyFrom"
-          AND run_context."statisticDateFrom" <=
-              run_context."historicDirtyFrom"
-          AND run_context."dateThrough" >=
-              run_context."historicDirtyThrough"
-          AND (
-            run_context."historicPublishedThrough" IS NULL
-            OR run_context."historicPublishedThrough" <=
+          run_context."statisticsPromotedAt" IS NOT NULL
+          AND run_context."historicDirtyFrom" IS NULL
+          AND run_context."historicDirtyThrough" IS NULL
+          AND run_context."historicPublishedThrough" >=
+              run_context."dateThrough"
+          AND run_context."computeStatsDate" >= run_context."dateThrough",
+          false
+        ) AS "statisticsPublicationClosed",
+        COALESCE(
+          (
+            run_context."mapDateFrom" <= run_context."historicDirtyFrom"
+            AND run_context."statisticDateFrom" <=
+                run_context."historicDirtyFrom"
+            AND run_context."dateThrough" >=
+                run_context."historicDirtyThrough"
+            AND (
+              run_context."historicPublishedThrough" IS NULL
+              OR run_context."historicPublishedThrough" <=
+                  run_context."dateThrough"
+            )
+          )
+          OR (
+            run_context."statisticsPromotedAt" IS NOT NULL
+            AND run_context."historicDirtyFrom" IS NULL
+            AND run_context."historicDirtyThrough" IS NULL
+            AND run_context."historicPublishedThrough" >=
                 run_context."dateThrough"
+            AND run_context."computeStatsDate" >= run_context."dateThrough"
           ),
           false
         ) AS "dirtyRangeCovers",

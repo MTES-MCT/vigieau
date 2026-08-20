@@ -31,6 +31,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
     computeMapDate: '2026-08-01',
     computeMapGeneration: '12',
     computeStatsDate: '2026-08-03',
+    currentStatisticRevision: '76',
     historicPublishedThrough: '2026-07-31',
     historicDirtyFrom: '2026-08-01',
     historicDirtyThrough: '2026-08-03',
@@ -324,6 +325,39 @@ describe('HistoricBackfillMapFinalizerService', () => {
       .find((sql) => sql.includes('UPDATE "config"'))!;
     expect(promotionSql).toContain('"computeMapDate" = GREATEST(');
     expect(promotionSql).toContain('config."computeStatsDate" >= $1::date');
+  });
+
+  it('resumes maps after statistics were published without reopening or rebumping their boundary', async () => {
+    const { getOutbox, runners, service } = createHarness();
+    const originalContext = { ...context };
+    Object.assign(context, {
+      computeMapDate: '2026-08-01',
+      computeStatsDate: '2026-08-20',
+      currentStatisticRevision: '77',
+      historicPublishedThrough: '2026-08-03',
+      historicDirtyFrom: null,
+      historicDirtyThrough: null,
+    });
+
+    try {
+      await expect(service.apply(runId)).resolves.toMatchObject({
+        mode: 'applied',
+        statisticRevision: '77',
+      });
+    } finally {
+      Object.assign(context, originalContext);
+    }
+
+    const preparationSql = runners[0].query.mock.calls
+      .map(([sql]) => String(sql))
+      .join('\n');
+    expect(preparationSql).toContain('UPDATE "config" config');
+    expect(preparationSql).not.toContain(
+      'UPDATE "statistic_publication_state"',
+    );
+    expect(getOutbox()).toEqual(
+      expect.objectContaining({ statisticRevision: '77', status: 'published' }),
+    );
   });
 
   it('refuses dry-run and apply when the global epoch changed', async () => {

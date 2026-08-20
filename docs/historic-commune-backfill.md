@@ -27,9 +27,10 @@ defaut et ne remplace pas le calcul quotidien.
 - Les GeoJSON/PMTiles nationaux portent le run, la revision source, l'epoch et
   le checksum. Un manifeste unique rend la nouvelle plage visible; aucun lot
   d'alias dates n'est copie en place.
-- `historicDirtyFrom/Through` ne sont effaces et la revision statistique n'est
-  avancee qu'apres les deux promotions completes. Une outbox persistante rend
-  la publication du manifeste reprenable apres un incident S3.
+- La promotion statistique avance sa revision, fixe
+  `historicPublishedThrough` et efface `historicDirtyFrom/Through` sans attendre
+  les cartes. La publication cartographique conserve son propre curseur et une
+  outbox persistante rend le manifeste reprenable apres un incident S3.
 
 ## Preflight production
 
@@ -856,13 +857,29 @@ scalingo --region osc-fr1 --app "$APP" destroy --force
    endpoints MTE equivalents hors clone). Le shadow est idempotent et peut etre
    reconstruit par departement via
    `/shadow/department/build` pour diagnostic.
-2. Utiliser `prepare-artifacts` (ou l'endpoint MTE equivalent hors clone). Les taches
+2. Reexecuter le dry-run statistiques, puis envoyer `{ "apply": true }`. Cette
+   transaction promeut le shadow, incremente la revision statistique, fixe
+   `historicPublishedThrough` et efface `historicDirtyFrom/Through`. Elle ne
+   modifie ni `computeMapDate`, ni la generation cartographique, et ne termine
+   pas le run: son statut reste `running`.
+3. Laisser le worker statcache produire un candidat `full-clean`, attendre le
+   quorum de toutes les instances web puis son activation. Sur `/data/status`,
+   verifier `artifactPublicationId`, `artifactReadyInstances`,
+   `artifactLiveInstances`, `firstDate`, `dateCount` et la plage dirty fermee.
+   Verifier aussi en base `computeStatsDate` et `historicPublishedThrough`. A ce
+   jalon, `historicComplete=false` est attendu tant que les cartes ne sont pas
+   publiees; ce champ ne doit donc pas servir de gate de succes statistique.
+4. Si la publication cartographique est differee, appeler
+   `POST /historic-backfill/:runId/pause`, puis ramener
+   `historicartifactworker` a zero. Avant de reprendre, appeler
+   `POST /historic-backfill/:runId/resume`, puis preparer les artefacts avec
+   `prepare-artifacts` (ou l'endpoint MTE equivalent hors clone). Les taches
    nationales correspondent a l'union des bornes de segments et sont fences par
    revision source et epoch.
-3. Demarrer `historicartifactworker`. Commencer a 2 conteneurs, puis monter a 4
+5. Demarrer `historicartifactworker`. Commencer a 2 conteneurs, puis monter a 4
    ou 8 selon CPU local, debit S3 et latence PostgreSQL. Chaque tache assemble
    101 GeoJSON departementaux et valide les identifiants PMTiles.
-4. Suivre les taches avec le mode `wait-artifacts` du harness. Exiger toutes les
+6. Suivre les taches avec le mode `wait-artifacts` du harness. Exiger toutes les
    taches artefacts `completed`, une couverture contigue de la plage et des
    checksums valides.
    `HISTORIC_BACKFILL_ARTIFACT_CACHE_MAX_BYTES` borne le cache local des fragments
@@ -870,15 +887,21 @@ scalingo --region osc-fr1 --app "$APP" destroy --force
    `HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY` borne les controles S3 (16 par
    defaut, 32 maximum). L'upload du manifeste expire apres
    `HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS=60000`.
-5. Reexecuter le dry-run statistiques, puis envoyer `{ "apply": true }`. Le
-   cache public courant reste inchange tant que la promotion finale n'est pas
-   terminee.
-6. Executer `POST /historic-backfill/:runId/maps/finalize` en dry-run, puis avec
-   `{ "apply": true }`. La transaction avance les curseurs et cree l'outbox;
-   le manifeste public unique n'est remplace qu'apres ce commit. Un nouvel apply
-   reprend une outbox `pending` sans rejouer la reduction.
-7. Laisser le worker statcache construire le candidat complet, attendre le
-   quorum de tous les webs puis l'activation. Verifier `historicComplete=true`.
+7. Executer `POST /historic-backfill/:runId/maps/finalize` en dry-run, puis avec
+   `{ "apply": true }`. Apres une promotion statistics-first, le finalizer
+   reprend avec la revision statistique courante sans l'incrementer, sans
+   rouvrir `historicDirtyFrom/Through` et sans modifier
+   `historicPublishedThrough`. La transaction avance le curseur et la generation
+   cartographiques puis cree l'outbox; le manifeste public unique n'est remplace
+   qu'apres ce commit. Un nouvel apply reprend une outbox `pending` sans rejouer
+   la reduction.
+8. Attendre la publication du manifeste et son ACK. Seul cet ACK cartographique
+   passe le run a `completed`. L'avance de `historicMapCursor` declenche ensuite
+   une nouvelle materialisation statcache `current-replace`: elle relit le jour
+   courant et produit un artefact immuable sans reconstruction historique
+   complete. Ce workflow de production exige le mode statcache distribue.
+   Attendre le quorum de toutes les instances web puis l'activation de ce
+   candidat, et verifier seulement alors `historicComplete=true`.
 
 Sur le clone avec `HISTORIC_BACKFILL_ARTIFACT_ACL=private`, ne jamais appeler
 `maps/finalize`, meme en dry-run, sauf test de publication explicitement autorise
@@ -905,7 +928,11 @@ dimensionnement s'arrete donc apres les mesures statistiques et artefacts.
 Appeler `POST /historic-backfill/:runId/pause`, puis ramener les deux types de
 workers a zero. La pause revoque les baux departementaux et artefacts. Les
 staging/shadows peuvent rester pour diagnostic: aucun lecteur public ne les
-consomme. Avant la transaction finale, le rollback consiste uniquement a ne pas
-promouvoir. Apres promotion, conserver les anciens artefacts/statcache pendant
-48 heures et utiliser le rollback de publication existant; ne supprimer aucune
-table additive pendant l'incident.
+consomme. Avant toute promotion, le rollback consiste uniquement a ne pas
+promouvoir. Apres la promotion statistique, les cartes restent inchangees mais
+un rollback du seul artefact statcache ne restaure ni les lignes canoniques ni
+la borne statistique. Geler les ecritures, restaurer ces donnees depuis la
+sauvegarde valide ou appliquer un run correctif, puis incrementer la revision et
+rematerialiser statcache. Apres la publication cartographique, conserver les
+anciens artefacts/statcache pendant 48 heures et utiliser les rollbacks de
+publication existants; ne supprimer aucune table additive pendant l'incident.

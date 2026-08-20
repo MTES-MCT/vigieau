@@ -923,12 +923,10 @@ export class DataService implements OnModuleInit {
   ): Promise<StatisticCacheArtifactCandidate> {
     const currentPublishedDate = publicationState.currentPublishedDate!;
     const mode = this.getStatisticCacheMode(publicationState);
-    const historicBoundaryClosed = Boolean(
+    const historicStatisticsBoundaryClosed = Boolean(
       active &&
       publicationState.historicDirtyFrom === null &&
       (active.identity.historicDirtyFrom !== null ||
-        active.identity.historicMapCursor !==
-          publicationState.historicMapCursor ||
         active.identity.historicStatsCursor !==
           publicationState.historicStatsCursor),
     );
@@ -943,7 +941,7 @@ export class DataService implements OnModuleInit {
       !active ||
       (active.identity.mode !== mode && !legacyToVersionedTransition) ||
       currentPublishedDate < active.identity.latestDate ||
-      historicBoundaryClosed,
+      historicStatisticsBoundaryClosed,
     );
     if (
       !active &&
@@ -2259,8 +2257,16 @@ export class DataService implements OnModuleInit {
           currentSnapshotIsCertified &&
           !currentCheckFailed,
         );
+    const historicMapCoversPublishedStatistics = Boolean(
+      availableState &&
+      (availableState.historicPublishedThrough === null ||
+        (availableState.historicMapCursor !== null &&
+          availableState.historicMapCursor >=
+            availableState.historicPublishedThrough)),
+    );
     const historicComplete = Boolean(
       cache &&
+      historicMapCoversPublishedStatistics &&
       (!artifactEnabled ||
         (artifactMaterializationMatches &&
           !cache.artifactHistoricDirtyFrom &&

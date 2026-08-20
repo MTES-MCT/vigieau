@@ -82,6 +82,7 @@ interface HistoricBackfillMapContextRow {
   computeMapDate: string | Date | null;
   computeMapGeneration: string | number;
   computeStatsDate: string | Date | null;
+  currentStatisticRevision: string | number;
   historicPublishedThrough: string | Date | null;
   historicDirtyFrom: string | Date | null;
   historicDirtyThrough: string | Date | null;
@@ -123,6 +124,8 @@ interface HistoricBackfillMapPlan {
   historicComputeEpoch: string;
   historicBackfillGlobalEpoch: string;
   computeMapGeneration: string;
+  statisticRevision: string;
+  statisticsAlreadyPublished: boolean;
   artifacts: HistoricBackfillArtifact[];
   dayCount: number;
 }
@@ -344,6 +347,8 @@ export class HistoricBackfillMapFinalizerService {
           config."computeMapDate"::text AS "computeMapDate",
           config."computeMapGeneration"::text AS "computeMapGeneration",
           config."computeStatsDate"::text AS "computeStatsDate",
+          publication_state."revision"::text
+            AS "currentStatisticRevision",
           publication_state."historicPublishedThrough"::text
             AS "historicPublishedThrough",
           publication_state."historicDirtyFrom"::text AS "historicDirtyFrom",
@@ -436,6 +441,7 @@ export class HistoricBackfillMapFinalizerService {
     const historicBackfillGlobalEpoch = String(
       context.historicBackfillGlobalEpoch,
     );
+    const statisticRevision = String(context.currentStatisticRevision);
 
     if (context.status !== 'running') {
       throw new Error('Historic backfill run is not running');
@@ -462,15 +468,22 @@ export class HistoricBackfillMapFinalizerService {
         `Historic statistic cursor must be at least ${dateThrough}`,
       );
     }
-    if (
-      historicDirtyFrom === null ||
-      historicDirtyThrough === null ||
-      historicDirtyFrom < mapDateFrom ||
-      historicDirtyFrom < statisticDateFrom ||
-      historicDirtyThrough > dateThrough ||
-      (historicPublishedThrough !== null &&
-        historicPublishedThrough > dateThrough)
-    ) {
+    const dirtyRangeCovers = Boolean(
+      historicDirtyFrom !== null &&
+      historicDirtyThrough !== null &&
+      historicDirtyFrom >= mapDateFrom &&
+      historicDirtyFrom >= statisticDateFrom &&
+      historicDirtyThrough <= dateThrough &&
+      (historicPublishedThrough === null ||
+        historicPublishedThrough <= dateThrough),
+    );
+    const statisticsAlreadyPublished = Boolean(
+      historicDirtyFrom === null &&
+      historicDirtyThrough === null &&
+      historicPublishedThrough !== null &&
+      historicPublishedThrough >= dateThrough,
+    );
+    if (!dirtyRangeCovers && !statisticsAlreadyPublished) {
       throw new Error(
         'Historic statistic dirty range is not covered by the run',
       );
@@ -532,6 +545,8 @@ export class HistoricBackfillMapFinalizerService {
       historicComputeEpoch,
       historicBackfillGlobalEpoch,
       computeMapGeneration: String(context.computeMapGeneration),
+      statisticRevision,
+      statisticsAlreadyPublished,
       artifacts,
       dayCount: inclusiveDayCount(mapDateFrom, dateThrough),
     };
@@ -920,29 +935,34 @@ export class HistoricBackfillMapFinalizerService {
         throw new Error('Historic map cursor promotion lost its context');
       }
 
-      const publicationRows = unwrapTypeOrmDmlReturningRows<{
-        revision: string | number;
-      }>(
-        await queryRunner.query(
-          `
-            UPDATE "statistic_publication_state"
-            SET
-              "revision" = "revision" + 1,
-              "historicPublishedThrough" = $1::date,
-              "historicDirtyFrom" = NULL,
-              "historicDirtyThrough" = NULL,
-              "updatedAt" = now()
-            WHERE "id" = 1
-              AND "historicDirtyFrom" IS NOT NULL
-              AND "historicDirtyThrough" IS NOT NULL
-              AND "historicDirtyThrough" <= $1::date
-            RETURNING "revision"::text AS "revision"
-          `,
-          [expected.dateThrough],
-        ),
-      );
-      if (publicationRows.length !== 1) {
-        throw new Error('Historic statistic publication promotion failed');
+      let statisticRevision = actual.statisticRevision;
+      if (!actual.statisticsAlreadyPublished) {
+        const publicationRows = unwrapTypeOrmDmlReturningRows<{
+          revision: string | number;
+        }>(
+          await queryRunner.query(
+            `
+              UPDATE "statistic_publication_state"
+              SET
+                "revision" = "revision" + 1,
+                "historicPublishedThrough" = $1::date,
+                "historicDirtyFrom" = NULL,
+                "historicDirtyThrough" = NULL,
+                "updatedAt" = now()
+              WHERE "id" = 1
+                AND "revision" = $2::bigint
+                AND "historicDirtyFrom" IS NOT NULL
+                AND "historicDirtyThrough" IS NOT NULL
+                AND "historicDirtyThrough" <= $1::date
+              RETURNING "revision"::text AS "revision"
+            `,
+            [expected.dateThrough, actual.statisticRevision],
+          ),
+        );
+        if (publicationRows.length !== 1) {
+          throw new Error('Historic statistic publication promotion failed');
+        }
+        statisticRevision = String(publicationRows[0].revision);
       }
 
       const outboxRows =
@@ -979,7 +999,7 @@ export class HistoricBackfillMapFinalizerService {
               expected.sourceRevision,
               expected.historicComputeEpoch,
               nextMapGeneration,
-              String(publicationRows[0].revision),
+              statisticRevision,
               expected.artifacts.length,
               expected.dayCount,
               HISTORIC_BACKFILL_PUBLIC_MAP_MANIFEST_KEY,
@@ -1286,6 +1306,8 @@ export class HistoricBackfillMapFinalizerService {
         historicComputeEpoch: plan.historicComputeEpoch,
         historicBackfillGlobalEpoch: plan.historicBackfillGlobalEpoch,
         computeMapGeneration: plan.computeMapGeneration,
+        statisticRevision: plan.statisticRevision,
+        statisticsAlreadyPublished: plan.statisticsAlreadyPublished,
         artifacts: plan.artifacts,
       });
     if (identity(expected) !== identity(actual)) {

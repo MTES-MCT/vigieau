@@ -2377,13 +2377,14 @@ describe('DataService', () => {
       expect(communeLoad).not.toHaveBeenCalled();
     });
 
-    it('forces one full rebuild when historic dirty publication finishes', async () => {
+    it('forces a full rebuild when statistics close before the map cursor advances', async () => {
       const cleanState = {
         ...artifactState,
         revision: '12',
         historicDirtyFrom: null,
         historicDirtyThrough: null,
-        historicMapCursor: '2026-09-01',
+        historicPublishedThrough: '2026-09-01',
+        historicMapCursor: artifactState.historicMapCursor,
         historicStatsCursor: '2026-09-01',
       };
       const candidate = { materializationStrategy: 'full-clean' };
@@ -2401,6 +2402,93 @@ describe('DataService', () => {
       expect(full).toHaveBeenCalledWith(
         cleanState,
         'full-clean',
+        mockTransactionManager,
+      );
+      expect(cleanState.historicMapCursor).toBe(
+        activeArtifact.identity.historicMapCursor,
+      );
+    });
+
+    it('replaces only the current slice when the clean map cursor advances', async () => {
+      process.env.STATISTIC_CACHE_MODE = 'versioned';
+      const currentDate = '2026-08-31';
+      const state = {
+        ...artifactState,
+        revision: '12',
+        activePublicationId: '00000000-0000-4000-8000-000000000012',
+        currentPublishedDate: currentDate,
+        historicPublishedThrough: currentDate,
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+        historicMapCursor: currentDate,
+        historicStatsCursor: currentDate,
+      };
+      const cleanActive = {
+        ...activeArtifact,
+        identity: {
+          ...activeArtifact.identity,
+          statisticRevision: '12',
+          currentPublishedDate: currentDate,
+          mode: 'versioned' as const,
+          materializationStrategy: 'full-clean' as const,
+          historicDirtyFrom: null,
+          historicDirtyThrough: null,
+          historicMapCursor: '2026-08-30',
+          historicStatsCursor: currentDate,
+          firstDate: currentDate,
+          latestDate: currentDate,
+          dateCount: 1,
+        },
+        dataArea: [{ date: currentDate, ESO: {}, ESU: {}, AEP: {} }],
+        dataDepartement: [departmentDay(currentDate)],
+        dataCommune: [
+          { code: '01001', restrictions: [{ d: '2026-08', p: 2 }] },
+        ],
+        latestCommuneWeights: [['01001', 2]],
+      };
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      jest
+        .spyOn(service as any, 'assertDeltaSnapshotCoverage')
+        .mockResolvedValue(undefined);
+      jest
+        .spyOn(service as any, 'loadRefData')
+        .mockResolvedValue(referenceData);
+      jest
+        .spyOn(service as any, 'loadDailyDepartmentCollections')
+        .mockResolvedValue({
+          dataArea: [{ date: currentDate, ESO: {}, ESU: {}, AEP: {} }],
+          dataDepartement: [departmentDay(currentDate)],
+        });
+      jest
+        .spyOn(service as any, 'loadDailyCommuneWeights')
+        .mockResolvedValue(new Map([[currentDate, [['01001', 2]]]]));
+      const full = jest.spyOn(service as any, 'createFullArtifactCandidate');
+      const delta = jest.spyOn(service as any, 'createDeltaArtifactCandidate');
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          state,
+          cleanActive,
+          mockTransactionManager,
+        ),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          materializationStrategy: 'current-replace',
+          statisticRevision: '12',
+          historicMapCursor: currentDate,
+          historicStatsCursor: currentDate,
+        }),
+      );
+      expect(full).not.toHaveBeenCalled();
+      expect(delta).toHaveBeenCalledWith(
+        state,
+        cleanActive,
         mockTransactionManager,
       );
     });
@@ -2742,6 +2830,73 @@ describe('DataService', () => {
         }),
       );
     });
+
+    it.each([
+      ['before map publication', '2023-01-01', '2022-12-31', false],
+      ['after map publication', '2023-01-01', '2023-01-01', true],
+      ['legacy boundary without a published watermark', null, null, true],
+    ])(
+      'reports historic completion %s',
+      async (
+        _label,
+        historicPublishedThrough,
+        historicMapCursor,
+        expectedHistoricComplete,
+      ) => {
+        process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
+        (service as any).statisticCacheArtifactService = {};
+        const activeId = '00000000-0000-4000-8000-000000000024';
+        const state = {
+          ...stablePublicationState,
+          revision: '24',
+          statisticCachePublicationId: activeId,
+          historicPublishedThrough,
+          historicMapCursor,
+          historicStatsCursor: '2023-01-01',
+          sourceRevision: '42',
+          historicComputeEpoch: '7',
+        };
+        certifyData({
+          revision: state.revision,
+          publicationState: state,
+          mode: 'versioned',
+          firstDate: '2023-01-01',
+          latestDate: state.currentPublishedDate,
+          dateCount: 2,
+          artifactPublicationId: activeId,
+          artifactProtocolVersion: 1,
+          artifactSourceRevision: state.sourceRevision,
+          artifactHistoricDirtyFrom: null,
+          artifactHistoricDirtyThrough: null,
+          artifactHistoricMapCursor: state.historicMapCursor,
+          artifactHistoricStatsCursor: state.historicStatsCursor,
+          artifactHistoricComputeEpoch: state.historicComputeEpoch,
+          latestCommuneWeights: [],
+        });
+        jest
+          .spyOn(service as any, 'getPublicationState')
+          .mockResolvedValue(state);
+        jest
+          .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
+          .mockResolvedValue({
+            incompleteSnapshotCount: 0,
+            oldestIncompleteSnapshot: null,
+          });
+        jest
+          .spyOn(service as any, 'getStatisticArtifactInstanceSummary')
+          .mockResolvedValue({ liveInstances: 2, readyInstances: 2 });
+        jest
+          .spyOn(service as any, 'isLegacyCacheContinuous')
+          .mockReturnValue(true);
+
+        await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
+          expect.objectContaining({
+            currentFresh: true,
+            historicComplete: expectedHistoricComplete,
+          }),
+        );
+      },
+    );
 
     it('replaces the current date by subtracting its previous private weight first', async () => {
       const sameDateState = {
