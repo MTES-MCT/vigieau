@@ -5,10 +5,13 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { RegleauLogger } from '../logger/regleau.logger';
 import { S3Service } from '../shared/services/s3.service';
 import { generateEmptyPmtiles } from '../zone_alerte_computed/empty-pmtiles';
+import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from '../zone_alerte_computed/legacy-historic-empty-geometries';
 import {
   assertTippecanoeExecutables,
+  collectLegacyHistoricBackfillPmtilesFeatureIds,
   collectPmtilesFeatureIds,
   generatePmtiles,
 } from '../zone_alerte_computed/pmtiles-generation';
@@ -19,6 +22,7 @@ import {
 } from './historic-backfill-artifact-queue.service';
 import { HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT } from './historic-backfill-queue.service';
 import { readHistoricBackfillArtifactAcl } from './historic-backfill.config';
+import { COMPUTED_HISTORIC_START_DATE } from './historic-backfill-task-handler';
 
 interface GeoJsonFeatureCollection {
   type: 'FeatureCollection';
@@ -69,6 +73,9 @@ function parseFeatureCollection(
 
 @Injectable()
 export class HistoricBackfillArtifactBuilderService {
+  private readonly logger = new RegleauLogger(
+    'HistoricBackfillArtifactBuilderService',
+  );
   private readonly departmentArtifactCache = new Map<string, Buffer>();
   private departmentArtifactCacheBytes = 0;
   private readonly artifactAcl = readHistoricBackfillArtifactAcl();
@@ -131,7 +138,26 @@ export class HistoricBackfillArtifactBuilderService {
       type: 'FeatureCollection',
       features,
     };
-    const expectedFeatureIds = collectPmtilesFeatureIds(features);
+    let expectedFeatureIds: string[];
+    if (lease.validFrom < COMPUTED_HISTORIC_START_DATE) {
+      const legacyFeatureIds = collectLegacyHistoricBackfillPmtilesFeatureIds(
+        features,
+        LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
+      );
+      expectedFeatureIds = legacyFeatureIds.expectedFeatureIds;
+      if (legacyFeatureIds.excludedEmptyGeometryIds.length > 0) {
+        this.logger.warn(
+          JSON.stringify({
+            type: 'historic_backfill_pmtiles_empty_geometries_excluded',
+            runId: lease.runId,
+            validFrom: lease.validFrom,
+            zoneIds: legacyFeatureIds.excludedEmptyGeometryIds,
+          }),
+        );
+      }
+    } else {
+      expectedFeatureIds = collectPmtilesFeatureIds(features);
+    }
     const temporaryRoot =
       this.configService.get<string>('PATH_TO_WRITE_FILE') || '/tmp';
     const workingDirectory = await mkdtemp(
@@ -142,7 +168,7 @@ export class HistoricBackfillArtifactBuilderService {
 
     try {
       await writeFile(geojsonPath, JSON.stringify(geojson));
-      if (features.length === 0) {
+      if (expectedFeatureIds.length === 0) {
         await generateEmptyPmtiles({
           workingDirectory,
           tippecanoeBinDirectory,

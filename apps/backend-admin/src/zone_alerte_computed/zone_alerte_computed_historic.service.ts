@@ -32,8 +32,10 @@ import {
   HistoricDepartmentCheckpointOptions,
   HistoricDepartmentCheckpointService,
 } from './historic-department-checkpoint.service';
+import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from './legacy-historic-empty-geometries';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import {
+  collectLegacyHistoricBackfillPmtilesFeatureIds,
   collectPmtilesFeatureIds,
   generatePmtiles,
 } from './pmtiles-generation';
@@ -339,7 +341,22 @@ export class ZoneAlerteComputedHistoricService {
         type: 'FeatureCollection',
         features: zasFormated,
       };
-      const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(zasFormated);
+      const legacyPmtilesFeatureIds =
+        collectLegacyHistoricBackfillPmtilesFeatureIds(
+          zasFormated,
+          LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
+        );
+      const expectedPmtilesFeatureIds =
+        legacyPmtilesFeatureIds.expectedFeatureIds;
+      if (legacyPmtilesFeatureIds.excludedEmptyGeometryIds.length > 0) {
+        this.logger.warn(
+          JSON.stringify({
+            type: 'legacy_historic_pmtiles_empty_geometries_excluded',
+            computedFor: m.format('YYYY-MM-DD'),
+            zoneIds: legacyPmtilesFeatureIds.excludedEmptyGeometryIds,
+          }),
+        );
+      }
 
       const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
@@ -350,7 +367,7 @@ export class ZoneAlerteComputedHistoricService {
         [geojsonPath, pmtilesPath],
         async () => {
           await writeFile(geojsonPath, JSON.stringify(geojson));
-          if (zasFormated.length === 0) {
+          if (expectedPmtilesFeatureIds.length === 0) {
             await generateEmptyPmtiles({
               workingDirectory: path,
               outputPath: pmtilesPath,
@@ -491,9 +508,11 @@ export class ZoneAlerteComputedHistoricService {
         restrictions: [restriction],
       }) as ZoneAlerte;
     });
-    const rawGeometries = await this.zoneAlerteService.findGeometriesByIds(
-      normalizedZones.map((zone) => zone.id),
-    );
+    const rawGeometries =
+      await this.zoneAlerteService.findLegacyHistoricGeometriesByIds(
+        normalizedZones.map((zone) => zone.id),
+        LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
+      );
 
     const features = normalizedZones.map((zone) => {
       const restriction = zone.restrictions[0];

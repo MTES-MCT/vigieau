@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   assertPmtilesFeatureIntegrity,
   buildTippecanoeArguments,
+  collectLegacyHistoricBackfillPmtilesFeatureIds,
   collectPmtilesFeatureIds,
   generatePmtiles,
 } from './pmtiles-generation';
@@ -61,6 +62,87 @@ describe('PMTiles generation integrity', () => {
         { geometry: { coordinates: [] }, properties: { id: 9 } },
       ]),
     ).toThrow('empty feature geometries (1): 9');
+    expect(() =>
+      collectPmtilesFeatureIds([
+        {
+          geometry: { type: 'MultiPolygon', coordinates: [] },
+          properties: { id: 7626 },
+        },
+      ]),
+    ).toThrow('empty feature geometries (1): 7626');
+  });
+
+  it('excludes only the allowlisted legacy backfill MultiPolygon empty', () => {
+    expect(
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+          {
+            geometry: { type: 'Polygon', coordinates: [[[1, 2]]] },
+            properties: { id: 10 },
+          },
+        ],
+        [7626],
+      ),
+    ).toEqual({
+      expectedFeatureIds: ['10'],
+      excludedEmptyGeometryIds: ['7626'],
+    });
+
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 9 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('empty feature geometries (1): 9');
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'Polygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('empty feature geometries (1): 7626');
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [[]] },
+            properties: { id: 7626 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('empty feature geometries (1): 7626');
+  });
+
+  it('keeps duplicate-id validation strict across excluded legacy features', () => {
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [[[1, 2]]] },
+            properties: { id: 7626 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('duplicate feature ids (1): 7626');
   });
 
   it('accepts every expected id at the archive maximum zoom', async () => {

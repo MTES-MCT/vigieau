@@ -2,12 +2,16 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { RegleauLogger } from '../logger/regleau.logger';
+import { generateEmptyPmtiles } from '../zone_alerte_computed/empty-pmtiles';
 import {
   HistoricBackfillArtifactBuilderService,
   HistoricBackfillArtifactYieldError,
 } from './historic-backfill-artifact-builder.service';
 import {
   assertTippecanoeExecutables,
+  collectLegacyHistoricBackfillPmtilesFeatureIds,
+  collectPmtilesFeatureIds,
   generatePmtiles,
 } from '../zone_alerte_computed/pmtiles-generation';
 
@@ -16,6 +20,14 @@ jest.mock('../zone_alerte_computed/pmtiles-generation', () => ({
   collectPmtilesFeatureIds: jest.fn((features) =>
     features.map((feature) => String(feature.properties.id)),
   ),
+  collectLegacyHistoricBackfillPmtilesFeatureIds: jest.fn((features) => ({
+    expectedFeatureIds: features
+      .filter((feature) => feature.geometry?.coordinates?.length > 0)
+      .map((feature) => String(feature.properties.id)),
+    excludedEmptyGeometryIds: features
+      .filter((feature) => feature.geometry?.coordinates?.length === 0)
+      .map((feature) => String(feature.properties.id)),
+  })),
   generatePmtiles: jest.fn(async ({ outputPath }) => {
     await writeFile(outputPath, Buffer.from('PMTiles\x03artifact'));
   }),
@@ -161,6 +173,10 @@ describe('HistoricBackfillArtifactBuilderService', () => {
       ['tippecanoe', 'tippecanoe-decode', 'tile-join'],
     );
     expect(generatePmtiles).toHaveBeenCalledTimes(1);
+    expect(collectPmtilesFeatureIds).toHaveBeenCalledTimes(1);
+    expect(
+      collectLegacyHistoricBackfillPmtilesFeatureIds,
+    ).not.toHaveBeenCalled();
     expect(generatePmtiles).toHaveBeenCalledWith(
       expect.objectContaining({
         workingDirectory: expect.stringMatching(/\/historic-backfill-[^/]+$/),
@@ -204,6 +220,104 @@ describe('HistoricBackfillArtifactBuilderService', () => {
     );
     expect(result.geojsonChecksum).toMatch(/^[0-9a-f]{64}$/);
     expect(result.pmtilesChecksum).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('retains the certified legacy empty feature but excludes it from PMTiles integrity', async () => {
+    const legacyBody = Buffer.from(
+      JSON.stringify({
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+          {
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [1, 2] },
+            properties: { id: 42 },
+          },
+        ],
+      }),
+    );
+    const harness = await createHarness();
+    harness.segments[0].geojsonChecksum = createHash('sha256')
+      .update(legacyBody)
+      .digest('hex');
+    harness.segments[0].featureCount = 2;
+    harness.s3Service.downloadFile.mockImplementation(async (key: string) =>
+      key.endsWith('/1.geojson') ? legacyBody : emptyBody,
+    );
+    const warning = jest
+      .spyOn(RegleauLogger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    const result = await harness.service.build(
+      { ...lease, validFrom: '2022-06-18', validThrough: '2022-06-18' },
+      new AbortController().signal,
+    );
+
+    expect(collectPmtilesFeatureIds).not.toHaveBeenCalled();
+    expect(collectLegacyHistoricBackfillPmtilesFeatureIds).toHaveBeenCalledWith(
+      expect.any(Array),
+      [7626],
+    );
+    expect(generatePmtiles).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedFeatureIds: ['42'] }),
+    );
+    expect(result.featureCount).toBe(2);
+    const uploadedGeojson = JSON.parse(
+      harness.s3Service.uploadFile.mock.calls[0][0].buffer.toString('utf8'),
+    );
+    expect(uploadedGeojson.features).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          geometry: { type: 'MultiPolygon', coordinates: [] },
+          properties: expect.objectContaining({ id: 7626 }),
+        }),
+      ]),
+    );
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'historic_backfill_pmtiles_empty_geometries_excluded',
+      ),
+    );
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('7626'));
+  });
+
+  it('generates an empty PMTiles when every legacy feature is allowlisted empty', async () => {
+    const emptyLegacyBody = Buffer.from(
+      JSON.stringify({
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+        ],
+      }),
+    );
+    const harness = await createHarness();
+    harness.segments[0].geojsonChecksum = createHash('sha256')
+      .update(emptyLegacyBody)
+      .digest('hex');
+    harness.segments[0].featureCount = 1;
+    harness.s3Service.downloadFile.mockImplementation(async (key: string) =>
+      key.endsWith('/1.geojson') ? emptyLegacyBody : emptyBody,
+    );
+    jest
+      .spyOn(RegleauLogger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    const result = await harness.service.build(
+      { ...lease, validFrom: '2022-06-18', validThrough: '2022-06-18' },
+      new AbortController().signal,
+    );
+
+    expect(generateEmptyPmtiles).toHaveBeenCalledTimes(1);
+    expect(generatePmtiles).not.toHaveBeenCalled();
+    expect(result.featureCount).toBe(1);
   });
 
   it('fails before reading S3 when the slug Tippecanoe install is incomplete', async () => {

@@ -313,10 +313,38 @@ export class ZoneAlerteService {
   async findGeometriesByIds(
     ids: readonly number[],
   ): Promise<ReadonlyMap<number, string>> {
+    return this.findGeometriesByIdsWithEmptyAllowlist(ids);
+  }
+
+  async findLegacyHistoricGeometriesByIds(
+    ids: readonly number[],
+    allowedEmptyGeometryIds: readonly number[],
+  ): Promise<ReadonlyMap<number, string>> {
+    return this.findGeometriesByIdsWithEmptyAllowlist(
+      ids,
+      allowedEmptyGeometryIds,
+    );
+  }
+
+  private async findGeometriesByIdsWithEmptyAllowlist(
+    ids: readonly number[],
+    allowedEmptyGeometryIds?: readonly number[],
+  ): Promise<ReadonlyMap<number, string>> {
     const uniqueIds = [...new Set(ids)];
     if (uniqueIds.length === 0) {
       return new Map();
     }
+
+    const allowLegacyEmpty = allowedEmptyGeometryIds !== undefined;
+    const emptyGeometryRejection = allowLegacyEmpty
+      ? `(
+                  ST_IsEmpty(normalized.geom)
+                  AND (
+                    NOT (normalized.id = ANY($2::int[]))
+                    OR ST_GeometryType(normalized.geom) <> 'ST_MultiPolygon'
+                  )
+                )`
+      : 'ST_IsEmpty(normalized.geom)';
 
     const rows: Array<{ id: number; geom: string | null }> =
       await this.dataSource.query(
@@ -346,7 +374,7 @@ export class ZoneAlerteService {
             normalized.id AS "id",
             CASE
               WHEN normalized.geom IS NULL
-                OR ST_IsEmpty(normalized.geom)
+                OR ${emptyGeometryRejection}
                 OR ST_GeometryType(normalized.geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')
                 OR NOT ST_IsValid(normalized.geom, 0)
               THEN NULL
@@ -355,7 +383,9 @@ export class ZoneAlerteService {
           FROM normalized
           ORDER BY normalized.id
         `,
-        [uniqueIds],
+        allowLegacyEmpty
+          ? [uniqueIds, [...new Set(allowedEmptyGeometryIds)]]
+          : [uniqueIds],
       );
     const geometries = new Map<number, string>();
     for (const row of rows) {

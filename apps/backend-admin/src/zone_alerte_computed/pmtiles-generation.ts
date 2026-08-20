@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { access, open, rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { isExactEmptyMultiPolygonGeometry } from './legacy-historic-empty-geometries';
 
 const PMTILES_HEADER_SIZE = 127;
 const PMTILES_MAX_ZOOM_OFFSET = 101;
@@ -21,8 +22,13 @@ type DecodeRunner = (
 ) => Promise<void>;
 
 interface PmtilesFeature {
-  geometry?: { coordinates?: unknown };
+  geometry?: { type?: unknown; coordinates?: unknown };
   properties?: { id?: unknown };
+}
+
+export interface LegacyHistoricBackfillPmtilesFeatureIds {
+  expectedFeatureIds: string[];
+  excludedEmptyGeometryIds: string[];
 }
 
 export interface GeneratePmtilesOptions {
@@ -199,10 +205,34 @@ function formatIds(ids: readonly string[]): string {
 export function collectPmtilesFeatureIds(
   features: readonly PmtilesFeature[],
 ): string[] {
+  return collectPmtilesFeatureIdsWithEmptyAllowlist(features, [])
+    .expectedFeatureIds;
+}
+
+export function collectLegacyHistoricBackfillPmtilesFeatureIds(
+  features: readonly PmtilesFeature[],
+  allowedEmptyGeometryIds: readonly number[],
+): LegacyHistoricBackfillPmtilesFeatureIds {
+  return collectPmtilesFeatureIdsWithEmptyAllowlist(
+    features,
+    allowedEmptyGeometryIds,
+  );
+}
+
+function collectPmtilesFeatureIdsWithEmptyAllowlist(
+  features: readonly PmtilesFeature[],
+  allowedEmptyGeometryIds: readonly number[],
+): LegacyHistoricBackfillPmtilesFeatureIds {
   const ids: string[] = [];
   const duplicates = new Set<string>();
   const emptyGeometryIds: string[] = [];
+  const disallowedEmptyGeometryIds: string[] = [];
   const seen = new Set<string>();
+  const allowedEmptyIds = new Set(
+    allowedEmptyGeometryIds.map((id) =>
+      normalizeFeatureId(id, 'Allowed empty GeoJSON features'),
+    ),
+  );
 
   for (const feature of features) {
     const id = normalizeFeatureId(feature.properties?.id, 'GeoJSON');
@@ -210,10 +240,18 @@ export function collectPmtilesFeatureIds(
       duplicates.add(id);
     }
     seen.add(id);
-    ids.push(id);
     if (!hasCoordinatePair(feature.geometry?.coordinates)) {
-      emptyGeometryIds.push(id);
+      if (
+        allowedEmptyIds.has(id) &&
+        isExactEmptyMultiPolygonGeometry(feature.geometry)
+      ) {
+        emptyGeometryIds.push(id);
+      } else {
+        disallowedEmptyGeometryIds.push(id);
+      }
+      continue;
     }
+    ids.push(id);
   }
 
   if (duplicates.size > 0) {
@@ -222,12 +260,15 @@ export function collectPmtilesFeatureIds(
       `GeoJSON contains duplicate feature ids (${values.length}): ${formatIds(values)}`,
     );
   }
-  if (emptyGeometryIds.length > 0) {
+  if (disallowedEmptyGeometryIds.length > 0) {
     throw new Error(
-      `GeoJSON contains empty feature geometries (${emptyGeometryIds.length}): ${formatIds(emptyGeometryIds)}`,
+      `GeoJSON contains empty feature geometries (${disallowedEmptyGeometryIds.length}): ${formatIds(disallowedEmptyGeometryIds)}`,
     );
   }
-  return ids;
+  return {
+    expectedFeatureIds: ids,
+    excludedEmptyGeometryIds: emptyGeometryIds,
+  };
 }
 
 async function readPmtilesMaxZoom(pmtilesPath: string): Promise<number> {

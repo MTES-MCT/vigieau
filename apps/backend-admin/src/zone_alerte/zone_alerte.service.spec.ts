@@ -3836,6 +3836,40 @@ describe('ZoneAlerteService geometry reads', () => {
     expect(dataSource.query).not.toHaveBeenCalled();
   });
 
+  it('allows only allowlisted valid MultiPolygon empties for legacy history', async () => {
+    const emptyGeometry = '{"type":"MultiPolygon","coordinates":[]}';
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([{ id: 7626, geom: emptyGeometry }]),
+    };
+    const service = createService({} as any, dataSource);
+
+    const geometries = await service.findLegacyHistoricGeometriesByIds(
+      [7626],
+      [7626],
+    );
+
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'normalized.id = ANY($2::int[])',
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      "ST_GeometryType(normalized.geom) <> 'ST_MultiPolygon'",
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'OR NOT ST_IsValid(normalized.geom, 0)',
+    );
+    expect(dataSource.query.mock.calls[0][1]).toEqual([[7626], [7626]]);
+    expect(geometries.get(7626)).toBe(emptyGeometry);
+  });
+
+  it('fails closed when a legacy geometry is not returned by the allowlisted query', async () => {
+    const dataSource = { query: jest.fn().mockResolvedValue([]) };
+    const service = createService({} as any, dataSource);
+
+    await expect(
+      service.findLegacyHistoricGeometriesByIds([9], [7626]),
+    ).rejects.toThrow('Missing geometry for alert zone(s): 9');
+  });
+
   it('fails when a requested geometry is absent', async () => {
     const dataSource = {
       query: jest

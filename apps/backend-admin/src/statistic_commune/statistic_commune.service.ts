@@ -10,6 +10,10 @@ import { CommuneService } from '../commune/commune.service';
 import moment = require('moment');
 import { Moment } from 'moment';
 import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
+import {
+  isExactEmptyMultiPolygonGeometry,
+  LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
+} from '../zone_alerte_computed/legacy-historic-empty-geometries';
 
 const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
   'vigieau:statistic-commune:snapshot-computation';
@@ -586,11 +590,21 @@ export class StatisticCommuneService {
         zones,
         dateString,
       );
-      if (zoneInputs.length > 0) {
+      const { statisticZoneInputs, excludedEmptyGeometryIds } =
+        this.filterLegacyHistoricEmptyStatisticZoneInputs(
+          zoneInputs,
+          zonesById,
+          historic === true && historicNotComputed === true,
+        );
+      this.warnExcludedLegacyHistoricStatisticGeometries(
+        excludedEmptyGeometryIds,
+        dateString,
+      );
+      if (statisticZoneInputs.length > 0) {
         statisticZoneGeometryPrepared = true;
         await this.prepareStatisticZoneGeometryTable(
           queryRunner,
-          zoneInputs,
+          statisticZoneInputs,
           Boolean(historic),
           Boolean(historicNotComputed),
         );
@@ -616,7 +630,7 @@ export class StatisticCommuneService {
           communes,
           dateString,
           Boolean(historicNotComputed),
-          zoneInputs.length > 0,
+          statisticZoneInputs.length > 0,
           zonesById,
         );
         const nextProcessedCommuneCount =
@@ -729,6 +743,17 @@ export class StatisticCommuneService {
         `Zone ${foreignZone.id} hors du departement ${options.departementCode}`,
       );
     }
+    const { statisticZoneInputs, excludedEmptyGeometryIds } =
+      this.filterLegacyHistoricEmptyStatisticZoneInputs(
+        zoneInputs,
+        zonesById,
+        options.historicNotComputed === true,
+      );
+    this.warnExcludedLegacyHistoricStatisticGeometries(
+      excludedEmptyGeometryIds,
+      dateString,
+      options.runId,
+    );
 
     this.logger.log(
       `STAGING HISTORIC COMMUNE STATISTICS - ${options.departementCode} - ${dateString}`,
@@ -750,11 +775,11 @@ export class StatisticCommuneService {
         );
       }
 
-      if (zoneInputs.length > 0) {
+      if (statisticZoneInputs.length > 0) {
         statisticZoneGeometryPrepared = true;
         await this.prepareStatisticZoneGeometryTable(
           queryRunner,
-          zoneInputs,
+          statisticZoneInputs,
           true,
           options.historicNotComputed === true,
         );
@@ -787,7 +812,7 @@ export class StatisticCommuneService {
           communes,
           dateString,
           options.historicNotComputed === true,
-          zoneInputs.length > 0,
+          statisticZoneInputs.length > 0,
           zonesById,
         );
         const segments = restrictions.map(
@@ -1465,6 +1490,54 @@ export class StatisticCommuneService {
       });
     }
     return { zoneInputs, zonesById };
+  }
+
+  private filterLegacyHistoricEmptyStatisticZoneInputs(
+    zoneInputs: StatisticZoneInput[],
+    zonesById: ReadonlyMap<number, ZoneAlerteComputed>,
+    legacyHistoric: boolean,
+  ): {
+    statisticZoneInputs: StatisticZoneInput[];
+    excludedEmptyGeometryIds: number[];
+  } {
+    if (!legacyHistoric) {
+      return { statisticZoneInputs: zoneInputs, excludedEmptyGeometryIds: [] };
+    }
+
+    const excludedEmptyGeometryIds = zoneInputs
+      .filter((zoneInput) => {
+        const zone = zonesById.get(zoneInput.id);
+        return (
+          LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS.includes(zoneInput.id) &&
+          isExactEmptyMultiPolygonGeometry(zone?.geom)
+        );
+      })
+      .map((zoneInput) => zoneInput.id);
+    const excludedIds = new Set(excludedEmptyGeometryIds);
+    return {
+      statisticZoneInputs: zoneInputs.filter(
+        (zoneInput) => !excludedIds.has(zoneInput.id),
+      ),
+      excludedEmptyGeometryIds,
+    };
+  }
+
+  private warnExcludedLegacyHistoricStatisticGeometries(
+    zoneIds: readonly number[],
+    computedFor: string,
+    runId?: string,
+  ): void {
+    if (zoneIds.length === 0) {
+      return;
+    }
+    this.logger.warn(
+      JSON.stringify({
+        type: 'legacy_historic_statistic_empty_geometries_excluded',
+        ...(runId === undefined ? {} : { runId }),
+        computedFor,
+        zoneIds,
+      }),
+    );
   }
 
   private async findCommuneZoneIntersections(
