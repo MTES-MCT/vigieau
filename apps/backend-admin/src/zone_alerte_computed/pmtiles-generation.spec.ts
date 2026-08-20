@@ -40,6 +40,7 @@ describe('PMTiles generation integrity', () => {
       ]),
     );
     expect(args.join(' ')).not.toMatch(/drop|coalesce/);
+    expect(args).not.toContain('--read-parallel');
   });
 
   it('rejects duplicate ids and empty source geometries', () => {

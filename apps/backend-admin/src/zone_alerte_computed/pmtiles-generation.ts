@@ -258,7 +258,8 @@ export function buildTippecanoeArguments(
     '--no-tile-size-limit',
     '--no-feature-limit',
     '--force',
-    '--read-parallel',
+    // The input is one compact FeatureCollection line; Tippecanoe's line
+    // splitter makes --read-parallel pathologically expensive for this shape.
     '--detect-shared-borders',
     '--no-tiny-polygon-reduction-at-maximum-zoom',
     '--simplification=28',

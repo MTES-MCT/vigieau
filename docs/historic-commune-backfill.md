@@ -879,6 +879,9 @@ scalingo --region osc-fr1 --app "$APP" destroy --force
 5. Demarrer `historicartifactworker`. Commencer a 2 conteneurs, puis monter a 4
    ou 8 selon CPU local, debit S3 et latence PostgreSQL. Chaque tache assemble
    101 GeoJSON departementaux et valide les identifiants PMTiles.
+   Le GeoJSON national est une FeatureCollection compacte sur une ligne : ne pas
+   reactiver `tippecanoe --read-parallel`, dont le decoupage par lignes multiplie
+   fortement le CPU sans modifier le resultat cartographique.
 6. Suivre les taches avec le mode `wait-artifacts` du harness. Exiger toutes les
    taches artefacts `completed`, une couverture contigue de la plage et des
    checksums valides.
