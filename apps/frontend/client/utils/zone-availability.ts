@@ -138,7 +138,6 @@ export const formatZoneAvailabilityDate = (
   }
   return new Intl.DateTimeFormat('fr-FR', {
     dateStyle: 'long',
-    timeStyle: 'short',
     timeZone: 'Europe/Paris',
   }).format(date);
 };

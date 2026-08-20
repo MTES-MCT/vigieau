@@ -160,7 +160,7 @@ test('conserve la dernière situation connue pendant une mise à jour', () => {
   );
   assert.equal(
     formatZoneAvailabilityDate(response.availability.SUP.asOf),
-    '20 août 2026 à 14:41',
+    '20 août 2026',
   );
 });
 
@@ -273,8 +273,9 @@ test('branche le contrat additif sans autoriser une absence AEP implicite', asyn
   assert.match(apiSource, /getDataStatus\(\)/);
   assert.match(apiSource, /_getZoneV2Path/);
   assert.match(headerSource, /v-if="availabilityUnavailable"/);
-  assert.match(headerSource, /Situation actualisée le/);
-  assert.match(headerSource, /Une mise à jour est en cours/);
+  assert.match(headerSource, /Situation au/);
+  assert.match(headerSource, /Mise à jour en cours/);
+  assert.doesNotMatch(headerSource, /Lors de la dernière actualisation/);
   assert.match(
     headerSource,
     /v-if="situationState === 'restricted' \|\| availabilityConfirmedNone"/,
