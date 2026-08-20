@@ -165,28 +165,8 @@ export async function recordPublicMutation(
     throw new Error('Zone publication source state is missing');
   }
   const publicRevision = String(sourceState.publicRevision);
-  await manager.query(
-    `
-      INSERT INTO "zone_type_availability" (
-        "departmentCode", "zoneType", "status", "asOf",
-        "publicRevision", "officialUrl", "updatedAt"
-      )
-      SELECT
-        departement."code", zone_type, 'unavailable', now(),
-        $2::bigint, NULL, now()
-      FROM "departement" departement
-      CROSS JOIN unnest(ARRAY['SOU', 'SUP', 'AEP']::varchar[])
-        AS zone_type
-      WHERE departement."id" = ANY($1::integer[])
-      ON CONFLICT ("departmentCode", "zoneType") DO UPDATE
-      SET
-        "status" = 'unavailable',
-        "asOf" = now(),
-        "publicRevision" = EXCLUDED."publicRevision",
-        "updatedAt" = now()
-    `,
-    [ids, publicRevision],
-  );
+  // Keep the last successful certification public while its replacement is
+  // computed. The recompute queue carries the pending state exposed by the API.
   await enqueueCurrentZoneRecomputeTarget(manager, ids, publicRevision, reason);
   return publicRevision;
 }

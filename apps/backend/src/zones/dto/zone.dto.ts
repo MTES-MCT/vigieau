@@ -154,6 +154,8 @@ export type ZoneAvailabilityStatus =
   | 'confirmed_none'
   | 'unavailable';
 
+export type ZoneAvailabilityFreshness = 'current' | 'updating';
+
 export class ZoneTypeAvailabilityDto {
   @ApiProperty({
     enum: ['available', 'confirmed_none', 'unavailable'],
@@ -166,6 +168,16 @@ export class ZoneTypeAvailabilityDto {
 
   @ApiProperty({ nullable: true, required: false })
   sourceRevision?: string | null;
+
+  @ApiProperty({
+    enum: ['current', 'updating'],
+    required: false,
+    example: 'updating',
+  })
+  freshness?: ZoneAvailabilityFreshness;
+
+  @ApiProperty({ nullable: true, required: false })
+  pendingSince?: string | null;
 
   @ApiProperty({ nullable: true, required: false })
   officialUrl?: string | null;
