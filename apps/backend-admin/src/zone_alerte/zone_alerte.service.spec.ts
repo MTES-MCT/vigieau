@@ -1393,8 +1393,18 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
     expect(historicInvalidationParameters).toEqual(['2011-06-07']);
     expect(harness.manager.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO "zone_type_availability"'),
+      expect.stringContaining(
+        'INSERT INTO "historic_backfill_department_revision"',
+      ),
       [[department.id], '43'],
+    );
+    expect(harness.manager.query.mock.calls).not.toEqual(
+      expect.arrayContaining([
+        [
+          expect.stringContaining('INSERT INTO "zone_type_availability"'),
+          expect.anything(),
+        ],
+      ]),
     );
     expect(harness.manager.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO "current_zone_recompute_request"'),
