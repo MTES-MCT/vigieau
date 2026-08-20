@@ -31,6 +31,17 @@ describe('StatisticCacheArtifactService', () => {
     dataCommune: [{ code: '01001', restrictions: [{ d: '2026-08', p: 2 }] }],
     latestCommuneWeights: [['01001', 2] as [string, number]],
   };
+  const materializationTarget = {
+    statisticRevision: candidate.statisticRevision,
+    currentPublishedDate: candidate.currentPublishedDate,
+    protocolVersion: 1,
+    historicDirtyFrom: candidate.historicDirtyFrom,
+    historicDirtyThrough: candidate.historicDirtyThrough,
+    historicMapCursor: candidate.historicMapCursor,
+    historicStatsCursor: candidate.historicStatsCursor,
+    sourceRevision: candidate.sourceRevision,
+    historicComputeEpoch: candidate.historicComputeEpoch,
+  };
 
   const createService = () => {
     const dataSource = {
@@ -386,10 +397,7 @@ describe('StatisticCacheArtifactService', () => {
     const factory = jest.fn().mockResolvedValue(candidate);
 
     await expect(
-      service.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-15' },
-        factory,
-      ),
+      service.materialize(materializationTarget, factory),
     ).resolves.toBe(payload);
 
     expect(queryRunner.startTransaction).toHaveBeenCalledWith(
@@ -412,6 +420,84 @@ describe('StatisticCacheArtifactService', () => {
         String(sql).includes('pg_try_advisory_lock'),
       ),
     ).toHaveLength(1);
+  });
+
+  it('rematerializes an active revision/date when its historic identity is stale', async () => {
+    const { service, dataSource } = createService();
+    const staleActive = {
+      identity: {
+        id: previousPublicationId,
+        ...materializationTarget,
+        historicMapCursor: '2014-12-31',
+      },
+    } as any;
+    const published = {
+      identity: { id: publicationId, ...materializationTarget },
+    } as any;
+    const manager = { query: jest.fn() };
+    const queryRunner = {
+      manager,
+      connect: jest.fn(),
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      rollbackTransaction: jest.fn(),
+      release: jest.fn(),
+      query: jest.fn(async (sql: string) =>
+        sql.includes('pg_advisory_unlock')
+          ? [{ unlocked: true }]
+          : [{ locked: true }],
+      ),
+    };
+    dataSource.createQueryRunner.mockReturnValue(queryRunner);
+    jest.spyOn(service, 'loadActive').mockResolvedValue(staleActive);
+    jest.spyOn(service, 'loadPublication').mockResolvedValue(published);
+    const persist = jest
+      .spyOn(service as any, 'persistPublication')
+      .mockResolvedValue(undefined);
+    const factory = jest.fn().mockResolvedValue(candidate);
+
+    await expect(
+      service.materialize(materializationTarget, factory),
+    ).resolves.toBe(published);
+
+    expect(factory).toHaveBeenCalledWith(manager);
+    expect(persist).toHaveBeenCalledWith(
+      manager,
+      expect.any(String),
+      candidate,
+      expect.any(Array),
+    );
+  });
+
+  it('rejects a candidate whose historic identity does not match its target', async () => {
+    const { service, dataSource } = createService();
+    const manager = { query: jest.fn() };
+    const queryRunner = {
+      manager,
+      connect: jest.fn(),
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      rollbackTransaction: jest.fn(),
+      release: jest.fn(),
+      query: jest.fn(async (sql: string) =>
+        sql.includes('pg_advisory_unlock')
+          ? [{ unlocked: true }]
+          : [{ locked: true }],
+      ),
+    };
+    dataSource.createQueryRunner.mockReturnValue(queryRunner);
+    jest.spyOn(service, 'loadActive').mockResolvedValue(null);
+    const persist = jest.spyOn(service as any, 'persistPublication');
+
+    await expect(
+      service.materialize(
+        { ...materializationTarget, historicMapCursor: '2015-01-02' },
+        async () => candidate,
+      ),
+    ).rejects.toThrow('candidate does not match its target');
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -674,12 +760,9 @@ describe('StatisticCacheArtifactService', () => {
     jest.spyOn(service, 'loadActive').mockResolvedValue(null);
 
     await expect(
-      service.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-15' },
-        async () => {
-          throw primaryError;
-        },
-      ),
+      service.materialize(materializationTarget, async () => {
+        throw primaryError;
+      }),
     ).rejects.toBe(primaryError);
 
     expect(queryRunner.query).toHaveBeenCalledWith(
@@ -724,10 +807,7 @@ describe('StatisticCacheArtifactService', () => {
       .mockResolvedValue(undefined);
 
     await expect(
-      service.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-15' },
-        async () => candidate,
-      ),
+      service.materialize(materializationTarget, async () => candidate),
     ).rejects.toThrow(
       'Failed to clean up statistic cache materialization session',
     );

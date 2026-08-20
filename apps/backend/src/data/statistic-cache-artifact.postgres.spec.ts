@@ -33,6 +33,7 @@ describeWithPostgres(
       statisticRevision: string,
       currentPublishedDate: string,
       value: number,
+      overrides: Partial<StatisticCacheArtifactCandidate> = {},
     ): StatisticCacheArtifactCandidate => ({
       statisticRevision,
       currentPublishedDate,
@@ -63,6 +64,18 @@ describeWithPostgres(
         },
       ],
       latestCommuneWeights: [['01001', value]],
+      ...overrides,
+    });
+    const target = (value: StatisticCacheArtifactCandidate) => ({
+      statisticRevision: value.statisticRevision,
+      currentPublishedDate: value.currentPublishedDate,
+      protocolVersion: 1,
+      historicDirtyFrom: value.historicDirtyFrom,
+      historicDirtyThrough: value.historicDirtyThrough,
+      historicMapCursor: value.historicMapCursor,
+      historicStatsCursor: value.historicStatsCursor,
+      sourceRevision: value.sourceRevision,
+      historicComputeEpoch: value.historicComputeEpoch,
     });
 
     async function setBoundary(
@@ -229,17 +242,18 @@ describeWithPostgres(
         releaseCandidate = resolve;
       });
       let factoryCalls = 0;
+      const firstCandidate = candidate('10', '2026-08-15', 1);
       const firstPublication = firstService.materialize(
-        { statisticRevision: '10', currentPublishedDate: '2026-08-15' },
+        target(firstCandidate),
         async () => {
           factoryCalls += 1;
           await candidateBlocked;
-          return candidate('10', '2026-08-15', 1);
+          return firstCandidate;
         },
       );
       await new Promise((resolve) => setTimeout(resolve, 50));
       const concurrentPublication = secondService.materialize(
-        { statisticRevision: '10', currentPublishedDate: '2026-08-15' },
+        target(firstCandidate),
         async () => {
           factoryCalls += 1;
           return candidate('10', '2026-08-15', 99);
@@ -262,14 +276,16 @@ describeWithPostgres(
       );
 
       await setBoundary('11', '2026-08-16');
+      const secondCandidate = candidate('11', '2026-08-16', 2);
       const second = await firstService.materialize(
-        { statisticRevision: '11', currentPublishedDate: '2026-08-16' },
-        async () => candidate('11', '2026-08-16', 2),
+        target(secondCandidate),
+        async () => secondCandidate,
       );
       await setBoundary('12', '2026-08-17');
+      const thirdCandidate = candidate('12', '2026-08-17', 3);
       const third = await firstService.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-17' },
-        async () => candidate('12', '2026-08-17', 3),
+        target(thirdCandidate),
+        async () => thirdCandidate,
       );
 
       const retainedAfterThird = await dataSource.query(`
@@ -296,9 +312,10 @@ describeWithPostgres(
       });
       expect(rolledBack.identity.id).toBe(second.identity.id);
 
+      const replacementCandidate = candidate('12', '2026-08-17', 4);
       const replacement = await firstService.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-17' },
-        async () => candidate('12', '2026-08-17', 4),
+        target(replacementCandidate),
+        async () => replacementCandidate,
       );
       expect(replacement.identity.id).not.toBe(third.identity.id);
       expect(replacement.identity.contentFingerprint).not.toBe(
@@ -345,6 +362,45 @@ describeWithPostgres(
       ).rejects.toThrow(/identity is immutable/i);
     }, 60_000);
 
+    it('activates one current replacement when only the clean map cursor advances', async () => {
+      const before = await firstService.loadActive();
+      expect(before).not.toBeNull();
+      await dataSource.query(
+        `UPDATE "config" SET "computeMapDate" = $1::date WHERE "id" = 1`,
+        ['2026-08-17'],
+      );
+      const mapCandidate = candidate('12', '2026-08-17', 4, {
+        materializationStrategy: 'current-replace',
+        historicMapCursor: '2026-08-17',
+      });
+      const factory = jest.fn(async () => mapCandidate);
+
+      const replacement = await firstService.materialize(
+        target(mapCandidate),
+        factory,
+      );
+
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(replacement.identity.id).not.toBe(before!.identity.id);
+      expect(replacement.identity.contentFingerprint).toBe(
+        before!.identity.contentFingerprint,
+      );
+      expect(replacement.identity).toMatchObject({
+        statisticRevision: before!.identity.statisticRevision,
+        currentPublishedDate: before!.identity.currentPublishedDate,
+        historicMapCursor: '2026-08-17',
+        materializationStrategy: 'current-replace',
+      });
+
+      const exactFactory = jest.fn(async () => mapCandidate);
+      const exact = await secondService.materialize(
+        target(mapCandidate),
+        exactFactory,
+      );
+      expect(exact.identity.id).toBe(replacement.identity.id);
+      expect(exactFactory).not.toHaveBeenCalled();
+    });
+
     it('does not block a source mutation and rejects the stale repeatable-read candidate', async () => {
       await setBoundary('13', '2026-08-18');
       await dataSource.query(`
@@ -367,7 +423,7 @@ describeWithPostgres(
       });
 
       const materialization = firstService.materialize(
-        { statisticRevision: '13', currentPublishedDate: '2026-08-18' },
+        target(candidate('13', '2026-08-18', 13)),
         async (manager) => {
           await manager.query(`
             SELECT "revision"

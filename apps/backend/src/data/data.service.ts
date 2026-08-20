@@ -750,8 +750,8 @@ export class DataService implements OnModuleInit {
           if (
             hadInitializedCache &&
             this.certifiedDataCache &&
-            this.isSamePublicationState(
-              this.certifiedDataCache.publicationState,
+            this.canReuseCertifiedCache(
+              this.certifiedDataCache,
               publicationState,
             ) &&
             !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
@@ -887,20 +887,18 @@ export class DataService implements OnModuleInit {
       await this.ensureReferenceDataCache();
       return this.hydrateArtifactPayload(active, publicationState);
     }
+    const target = this.getCandidateTarget(publicationState);
     const active = await artifactService.loadActive();
     if (
-      active?.identity.currentPublishedDate === currentPublishedDate &&
-      active.identity.statisticRevision === publicationState.revision
+      active &&
+      this.isArtifactIdentityForState(active.identity, publicationState)
     ) {
       await this.ensureReferenceDataCache();
       return this.hydrateArtifactPayload(active, publicationState);
     }
 
     const payload = await artifactService.materialize(
-      {
-        statisticRevision: publicationState.revision,
-        currentPublishedDate,
-      },
+      target,
       async (manager) => {
         const latestState = await this.readPublicationState(manager);
         if (!this.isSameMaterializationState(publicationState, latestState)) {
@@ -1796,8 +1794,8 @@ export class DataService implements OnModuleInit {
       const publicationState = await this.getPublicationState();
       if (
         this.certifiedDataCache &&
-        this.isSamePublicationState(
-          this.certifiedDataCache.publicationState,
+        this.canReuseCertifiedCache(
+          this.certifiedDataCache,
           publicationState,
         ) &&
         !(await this.shouldRefreshUnchangedLegacyCache(publicationState))
@@ -2213,10 +2211,17 @@ export class DataService implements OnModuleInit {
       cache.revision === availableState.revision &&
       cache.latestDate === availableState.currentPublishedDate,
     );
+    const artifactHistoricIdentityMatches = Boolean(
+      cache &&
+      availableState &&
+      this.isHistoricArtifactStateCurrent(cache, availableState),
+    );
     const artifactRequiresRefresh = Boolean(
       cache?.artifactPublicationId &&
       availableState &&
-      !artifactLoadTargetMatches,
+      (!artifactLoadTargetMatches ||
+        (availableState.historicDirtyFrom === null &&
+          !artifactHistoricIdentityMatches)),
     );
     const lagDays = getPublicationLagDays(
       availableState?.currentPublishedDate ?? null,
@@ -3214,6 +3219,41 @@ export class DataService implements OnModuleInit {
     );
   }
 
+  private canReuseCertifiedCache(
+    cache: CertifiedDataCache,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    if (
+      !this.isSamePublicationState(cache.publicationState, publicationState)
+    ) {
+      return false;
+    }
+    if (
+      !this.isStatisticArtifactCacheEnabled() ||
+      this.isDistributedStatisticCacheEnabled() ||
+      publicationState.historicDirtyFrom !== null
+    ) {
+      return true;
+    }
+    return this.isHistoricArtifactStateCurrent(cache, publicationState);
+  }
+
+  private isHistoricArtifactStateCurrent(
+    cache: CertifiedDataCache,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    return (
+      cache.artifactHistoricDirtyFrom === publicationState.historicDirtyFrom &&
+      cache.artifactHistoricDirtyThrough ===
+        publicationState.historicDirtyThrough &&
+      cache.artifactHistoricMapCursor === publicationState.historicMapCursor &&
+      cache.artifactHistoricStatsCursor ===
+        publicationState.historicStatsCursor &&
+      cache.artifactHistoricComputeEpoch ===
+        publicationState.historicComputeEpoch
+    );
+  }
+
   private isSameMaterializationState(
     left: StatisticPublicationState,
     right: StatisticPublicationState,
@@ -3237,6 +3277,12 @@ export class DataService implements OnModuleInit {
       state.statisticCachePublicationId,
       state.statisticCacheCandidatePublicationId,
       state.currentPublishedDate,
+      state.historicDirtyFrom,
+      state.historicDirtyThrough,
+      state.historicMapCursor,
+      state.historicStatsCursor,
+      state.sourceRevision,
+      state.historicComputeEpoch,
     ]);
   }
 
