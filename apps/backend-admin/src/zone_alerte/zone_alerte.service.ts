@@ -25,8 +25,10 @@ import { isMainThread } from 'worker_threads';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { BassinVersantService } from '../bassin_versant/bassin_versant.service';
 import { BusinessCron } from '../core/scheduling/business-cron';
+import { invalidateHistoricComputationsFromWithManager } from '../config/historic-computation-invalidation';
 import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
+import { getCurrentParisCivilDate } from '../shared/arrete-date-continuity';
 import { MailService } from '../shared/services/mail.service';
 import { runCurrentZoneComputeWorker } from '../worker_threads/run-current-zone-compute';
 import { recordPublicMutation } from '../zone_publication/public-mutation';
@@ -2013,6 +2015,24 @@ export class ZoneAlerteService {
       }
       await stateRepository.save(state);
       if (recomputeRequired) {
+        const businessDate = getCurrentParisCivilDate();
+        const [historicBoundary] = (await queryRunner.manager.query(
+          `
+            SELECT MIN(restriction_order."dateDebut")::text AS "dirtyFrom"
+            FROM "arrete_restriction" restriction_order
+            WHERE restriction_order."departementId" = $1
+              AND restriction_order."statut" <> 'a_valider'
+              AND restriction_order."dateDebut" IS NOT NULL
+              AND restriction_order."dateDebut" < $2::date
+          `,
+          [departement.id, businessDate],
+        )) as Array<{ dirtyFrom: string | null }>;
+        if (historicBoundary?.dirtyFrom) {
+          await invalidateHistoricComputationsFromWithManager(
+            queryRunner.manager,
+            historicBoundary.dirtyFrom,
+          );
+        }
         await recordPublicMutation(
           queryRunner.manager,
           [departement.id],

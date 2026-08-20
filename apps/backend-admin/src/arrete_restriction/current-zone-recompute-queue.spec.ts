@@ -225,6 +225,7 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       .fn()
       .mockResolvedValueOnce([[{ publicRevision: '43' }], 1])
       .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
     const harness = createHarness([]);
 
@@ -238,15 +239,20 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
 
     expect(query.mock.calls[0][0]).toContain('WHEN "legacyDualWrite" THEN 0');
     expect(query.mock.calls[0][0]).toContain('ELSE 1');
-    expect(query.mock.calls[1][0]).toContain("'unavailable'");
     expect(query.mock.calls[1][0]).toContain(
+      '"historic_backfill_department_revision"',
+    );
+    expect(query.mock.calls[1][0]).toContain('"generation" + 1');
+    expect(query.mock.calls[1][1]).toEqual([[2, 7], '43']);
+    expect(query.mock.calls[2][0]).toContain("'unavailable'");
+    expect(query.mock.calls[2][0]).toContain(
       'ON CONFLICT ("departmentCode", "zoneType") DO UPDATE',
     );
-    expect(query.mock.calls[1][0]).not.toContain(
+    expect(query.mock.calls[2][0]).not.toContain(
       '"officialUrl" = EXCLUDED."officialUrl"',
     );
-    expect(query.mock.calls[1][1]).toEqual([[2, 7], '43']);
-    expect(query.mock.calls[2][1]).toEqual([
+    expect(query.mock.calls[2][1]).toEqual([[2, 7], '43']);
+    expect(query.mock.calls[3][1]).toEqual([
       [2, 7],
       '43',
       'PUBLICATION AR',
