@@ -732,7 +732,7 @@ scalingo --region osc-fr1 --app "$APP" run --silent --size XL \
   | tee "$REPORT_DIR/05-prepare-artifacts.jsonl"
 assert_benchmark_complete "$REPORT_DIR/05-prepare-artifacts.jsonl"
 scalingo --region osc-fr1 --app "$APP" scale --synchronous \
-  historicartifactworker:2:2XL
+  historicartifactworker:2:3XL
 scalingo --region osc-fr1 --app "$APP" run --silent --size XL \
   npm run benchmark:historic-backfill -- \
   --mode wait-artifacts --run-id "$RUN_ID" \
@@ -877,8 +877,10 @@ scalingo --region osc-fr1 --app "$APP" destroy --force
    nationales correspondent a l'union des bornes de segments et sont fences par
    revision source et epoch.
 5. Demarrer `historicartifactworker`. Commencer a 2 conteneurs, puis monter a 4
-   ou 8 selon CPU local, debit S3 et latence PostgreSQL. Chaque tache assemble
-   101 GeoJSON departementaux et valide les identifiants PMTiles.
+   ou 8 selon CPU local, debit S3 et latence PostgreSQL. Utiliser des conteneurs
+   3XL : Tippecanoe seul depasse 2 Gio de RSS et le parent Node conserve encore
+   les GeoJSON et les sorties. Chaque tache assemble 101 GeoJSON departementaux
+   et valide les identifiants PMTiles.
    Le GeoJSON national est une FeatureCollection compacte sur une ligne : ne pas
    reactiver `tippecanoe --read-parallel`, dont le decoupage par lignes multiplie
    fortement le CPU sans modifier le resultat cartographique.
