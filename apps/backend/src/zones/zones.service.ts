@@ -71,6 +71,7 @@ type ZoneCacheSnapshot = Readonly<{
 export type ZonePublicationManifest = Readonly<{
   id: string;
   revision: string;
+  sourceRevision: string;
   geojsonUrl: string | null;
   geojsonChecksum: string | null;
   pmtilesUrl: string | null;
@@ -1051,6 +1052,7 @@ export class ZonesService implements OnModuleInit {
         SELECT
           publication."id" AS "publicationId",
           publication."revision" AS "revision",
+          publication."sourceRevision"::text AS "sourceRevision",
           publication."status" AS "status",
           publication."sourceComputedAt" AS "sourceComputedAt",
           publication."zoneCount" AS "zoneCount",
@@ -1086,6 +1088,7 @@ export class ZonesService implements OnModuleInit {
         GROUP BY
           publication."id",
           publication."revision",
+          publication."sourceRevision",
           publication."status",
           publication."sourceComputedAt",
           publication."zoneCount",
@@ -1204,6 +1207,12 @@ export class ZonesService implements OnModuleInit {
         `Publication ${publicationId}: date de calcul source invalide.`,
       );
     }
+    const sourceRevision = String(metadata.sourceRevision ?? '');
+    if (!/^\d+$/.test(sourceRevision)) {
+      throw new Error(
+        `Publication ${publicationId}: revision source invalide.`,
+      );
+    }
 
     return Object.freeze({
       zones,
@@ -1220,6 +1229,7 @@ export class ZonesService implements OnModuleInit {
       publication: Object.freeze({
         id: metadata.publicationId,
         revision: String(metadata.revision),
+        sourceRevision,
         geojsonUrl: metadata.geojsonUrl || null,
         geojsonChecksum: metadata.geojsonChecksum || null,
         pmtilesUrl: metadata.pmtilesUrl || null,
@@ -1859,6 +1869,8 @@ export class ZonesService implements OnModuleInit {
   async getPublication(): Promise<{
     id: string;
     revision: string;
+    sourceRevision: string;
+    historicComputeEpoch?: string;
     geojsonUrl: string | null;
     geojsonChecksum: string | null;
     pmtilesUrl: string | null;
@@ -1880,9 +1892,12 @@ export class ZonesService implements OnModuleInit {
         HttpStatus.NOT_FOUND,
       );
     }
+    const historicComputeEpoch = await this.getHistoricComputeEpoch();
     return {
       id: publication.id,
       revision: publication.revision,
+      sourceRevision: publication.sourceRevision,
+      ...(historicComputeEpoch ? { historicComputeEpoch } : {}),
       geojsonUrl: publication.geojsonUrl,
       geojsonChecksum: publication.geojsonChecksum,
       pmtilesUrl: publication.pmtilesUrl,
@@ -1892,6 +1907,22 @@ export class ZonesService implements OnModuleInit {
         ? { contentFingerprint: publication.contentFingerprint }
         : {}),
     };
+  }
+
+  private async getHistoricComputeEpoch(): Promise<string | undefined> {
+    try {
+      const config = await this.configRepository.findOne({
+        select: { historicComputeEpoch: true },
+        where: { id: 1 },
+      });
+      const epoch = String(config?.historicComputeEpoch ?? '');
+      return /^\d+$/.test(epoch) ? epoch : undefined;
+    } catch (error) {
+      // The current map remains usable during a database/schema transition;
+      // historic manifests fail closed until the epoch can be certified.
+      this.reportOperationalError(error, 'historic-compute-epoch');
+      return undefined;
+    }
   }
 
   private async resolveSnapshot(

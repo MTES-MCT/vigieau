@@ -130,6 +130,19 @@ export class ZonePublicationDto {
   @ApiProperty({ example: '42' })
   revision: string;
 
+  @ApiProperty({
+    example: '41',
+    description: 'Revision publique des donnees source de la publication',
+  })
+  sourceRevision: string;
+
+  @ApiProperty({
+    example: '9',
+    description: 'Epoch courant des calculs historiques',
+    required: false,
+  })
+  historicComputeEpoch?: string;
+
   @ApiProperty({ nullable: true })
   geojsonUrl: string | null;
 

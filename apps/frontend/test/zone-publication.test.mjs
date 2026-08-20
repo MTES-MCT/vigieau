@@ -14,6 +14,7 @@ import {
   getNextSuccessfulRefreshVersion,
   isCurrentMapDate,
   isZonePublication,
+  resolveCurrentZonePmtilesUrl,
   selectLegacyPmtilesEtag,
   shouldRefreshZonePublication,
   shouldReplaceZoneLayers,
@@ -23,6 +24,8 @@ import {
 const validPublication = {
   id: '29959a00-0000-4000-8000-000000000000',
   revision: '42',
+  sourceRevision: '41',
+  historicComputeEpoch: '9',
   pmtilesUrl: 'https://example.test/zones/42.pmtiles',
   pmtilesChecksum: 'a'.repeat(64),
 };
@@ -32,8 +35,35 @@ test('validates a complete publication manifest', () => {
   assert.equal(isZonePublication({ ...validPublication, id: '' }), false);
   assert.equal(isZonePublication({ ...validPublication, revision: 42 }), false);
   assert.equal(
+    isZonePublication({ ...validPublication, sourceRevision: 'invalid' }),
+    false,
+  );
+  assert.equal(
+    isZonePublication({ ...validPublication, historicComputeEpoch: 'bad' }),
+    false,
+  );
+  assert.equal(
     isZonePublication({ ...validPublication, pmtilesChecksum: '' }),
     false,
+  );
+});
+
+test('accepts an older API 200 and preserves its current PMTiles URL', () => {
+  const legacyApiPublication = {
+    ...validPublication,
+    sourceRevision: undefined,
+    historicComputeEpoch: undefined,
+  };
+
+  assert.equal(isZonePublication(legacyApiPublication), true);
+  assert.equal(
+    resolveCurrentZonePmtilesUrl(
+      legacyApiPublication,
+      false,
+      'https://example.test/zones/legacy.pmtiles',
+      null,
+    ),
+    validPublication.pmtilesUrl,
   );
 });
 

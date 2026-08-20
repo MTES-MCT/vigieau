@@ -114,6 +114,7 @@ export default defineNuxtConfig({
       apiSecheresseUrl: process.env.API_SECHERESSE_URL,
       domainName: process.env.DOMAIN_NAME,
       domainProdNotActivated: process.env.DOMAIN_PROD_NOT_ACTIVATED,
+      historicMapManifestUrl: process.env.HISTORIC_MAP_MANIFEST_URL,
       pmtilesUrl: process.env.PMTILES_URL,
       s3vhost: process.env.S3_VHOST,
       sentryDsn: process.env.SENTRY_DSN,

@@ -137,6 +137,20 @@ export const buildLegacyPmtilesUrl = (
   return url.toString();
 };
 
+export const resolveCurrentZonePmtilesUrl = (
+  publication: ZonePublication | null,
+  useLegacyFallback: boolean,
+  configuredUrl: string,
+  legacyEtag: string | null,
+): string => {
+  if (publication) {
+    return publication.pmtilesUrl;
+  }
+  return useLegacyFallback
+    ? buildLegacyPmtilesUrl(configuredUrl, legacyEtag)
+    : '';
+};
+
 export const isZonePublication = (value: unknown): value is ZonePublication => {
   const publication = value as Partial<ZonePublication> | null;
   return Boolean(
@@ -145,6 +159,12 @@ export const isZonePublication = (value: unknown): value is ZonePublication => {
     publication.id &&
     typeof publication.revision === 'string' &&
     publication.revision &&
+    (publication.sourceRevision === undefined ||
+      (typeof publication.sourceRevision === 'string' &&
+        /^\d+$/.test(publication.sourceRevision))) &&
+    (publication.historicComputeEpoch === undefined ||
+      (typeof publication.historicComputeEpoch === 'string' &&
+        /^\d+$/.test(publication.historicComputeEpoch))) &&
     typeof publication.pmtilesUrl === 'string' &&
     publication.pmtilesUrl &&
     typeof publication.pmtilesChecksum === 'string' &&

@@ -174,6 +174,7 @@ describe('ZonesService', () => {
   ) => ({
     publicationId,
     revision: '42',
+    sourceRevision: '41',
     status,
     sourceComputedAt: version,
     zoneCount: 1,
@@ -249,6 +250,7 @@ describe('ZonesService', () => {
       publication: Object.freeze({
         id: publicationId,
         revision: '42',
+        sourceRevision: '41',
         geojsonUrl: `https://example.test/${publicationId}.geojson`,
         geojsonChecksum: 'b'.repeat(64),
         pmtilesUrl: `https://example.test/${publicationId}.pmtiles`,
@@ -295,6 +297,7 @@ describe('ZonesService', () => {
     arreteQueryBuilder.getCount.mockResolvedValue(0);
     mockConfigRepository.findOne.mockResolvedValue({
       computeZoneAlerteComputedDate: version,
+      historicComputeEpoch: '9',
     });
     mockZonePublicationStateRepository.findOne.mockResolvedValue({
       activePublicationId: null,
@@ -1465,12 +1468,24 @@ describe('ZonesService', () => {
     await expect(service.getPublication()).resolves.toEqual({
       id: publicationId,
       revision: '42',
+      sourceRevision: '41',
+      historicComputeEpoch: '9',
       geojsonUrl: `https://example.test/${publicationId}.geojson`,
       geojsonChecksum: 'b'.repeat(64),
       pmtilesUrl: `https://example.test/${publicationId}.pmtiles`,
       pmtilesChecksum: 'a'.repeat(64),
       zoneCount: 1,
     });
+    expect(mockConfigRepository.findOne).toHaveBeenCalledWith({
+      select: { historicComputeEpoch: true },
+      where: { id: 1 },
+    });
+    expect(mockZonePublicationRepository.query).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'publication."sourceRevision"::text AS "sourceRevision"',
+      ),
+      [publicationId, ['active']],
+    );
     await expect(
       service.find(
         undefined,
