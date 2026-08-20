@@ -391,11 +391,7 @@ const graviteFormRef = ref(null);
       />
     </DsfrTabContent>
     <DsfrTabContent :selected="currentStep === totalSteps" :asc="asc">
-      <ArreteRestrictionFormUsages
-        :key="currentStep"
-        :selected="currentStep === totalSteps"
-        :arreteRestriction="arreteRestriction"
-      />
+      <ArreteRestrictionFormUsages :key="currentStep" :selected="currentStep === totalSteps" :arreteRestriction="arreteRestriction" />
     </DsfrTabContent>
   </DsfrTabs>
   <ul
