@@ -506,6 +506,9 @@ describe('ZonesService', () => {
         undefined,
         undefined,
         '79191',
+        undefined,
+        undefined,
+        snapshot.publication.id,
       );
 
       expect(result.zones).toMatchObject([{ id: 2, type: 'AEP' }]);
@@ -519,7 +522,13 @@ describe('ZonesService', () => {
       });
       expect(mockZonePublicationRepository.query).toHaveBeenCalledWith(
         expect.stringContaining('publication_state."activePublicationId"'),
-        ['79', null],
+        ['79', snapshot.publication.id],
+      );
+      expect(mockZonePublicationRepository.query).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '$2::uuid = publication_state."activePublicationId"',
+        ),
+        expect.any(Array),
       );
     });
 
@@ -562,6 +571,7 @@ describe('ZonesService', () => {
         '77010',
         undefined,
         'AEP',
+        snapshot.publication.id,
       );
 
       expect(result.zones).toEqual([]);
@@ -573,7 +583,7 @@ describe('ZonesService', () => {
       });
     });
 
-    it('does not mark an explicitly pinned publication as updating', async () => {
+    it('does not mark a pinned publication without a pending replacement as updating', async () => {
       const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
       const snapshot = makeVersionedSnapshot(publicationId) as any;
       const aepZone = { ...makeZone(2, 'AEP'), departement: '79' };
