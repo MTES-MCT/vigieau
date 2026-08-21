@@ -244,6 +244,8 @@ function assertAccessibleTablesAt320(expectedTableCount) {
           expect($scrollRegion[0].scrollWidth).to.be.greaterThan(
             $scrollRegion[0].clientWidth,
           );
+          expect($scrollRegion).to.have.attr('role', 'region');
+          expect($scrollRegion).to.have.attr('tabindex', '0');
         });
         cy.get('table[id]').then(($table) => {
           const tableId = $table.attr('id');
@@ -632,7 +634,7 @@ describe('Balayage Chrome des routes publiques de données à 320 px', () => {
       path: '/stats',
       readySelector: '#department-search-statistics-table',
       expectedTitle: 'Statistiques depuis le 10 Juillet 2023',
-      tableCount: 1,
+      tableCount: 3,
       openDataTab: true,
     },
   ];
@@ -648,6 +650,24 @@ describe('Balayage Chrome des routes publiques de données à 320 px', () => {
       if (route.openDataTab) {
         cy.get('#search-statistics-tab-data').click();
         cy.get('#search-statistics-panel-data').should('be.visible');
+      }
+
+      cy.document().then((document) => {
+        const ids = [...document.querySelectorAll('[id]')]
+          .map(element => element.id)
+          .filter(Boolean);
+        const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
+
+        expect([...new Set(duplicates)], 'IDs dupliqués').to.deep.equal([]);
+      });
+
+      if (route.path === '/stats') {
+        cy.get('figure').should('have.length.at.least', 2);
+        cy.get('#daily-statistics-table').should('exist');
+        cy.get('#profile-statistics-table').should('exist');
+      }
+      if (route.path === '/donnees/commune/75107') {
+        cy.get('[id^="commune-chart-"]').should('have.length', 4);
       }
 
       assertNoGlobalHorizontalOverflow();

@@ -22,7 +22,7 @@ const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessi
     <AppBreadcrumb :links="links" />
     <div>
       <h1>Déclaration d’accessibilité</h1>
-      <p>Établie le <span>22 mai 2024</span>.</p>
+      <p>Établie initialement le <span>22 mai 2024</span> et mise à jour le <span>21 août 2026</span>.</p>
       <p>
         Le <span>Ministère de la Transition écologique, de la Biodiversité et des Négociations internationales sur le
           climat et la nature</span> s’engage à rendre son service accessible, conformément à l’article 47 de la loi
@@ -108,6 +108,19 @@ const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessi
       <ul>
         <li>Carte géolocalisation</li>
       </ul>
+      <h2>Établissement de cette déclaration d’accessibilité</h2>
+      <p>
+        Cette déclaration d’accessibilité a été créée le 10 mai 2023. Elle a été établie le 22 mai 2024 et sa dernière
+        mise à jour date du 21 août 2026.
+      </p>
+      <h3>Technologies utilisées pour la réalisation du site</h3>
+      <ul>
+        <li>HTML5</li>
+        <li>CSS</li>
+        <li>JavaScript</li>
+        <li>SVG</li>
+        <li>WAI-ARIA</li>
+      </ul>
       <h2 id="amelioration-contact">
         Amélioration et contact
       </h2>
@@ -157,17 +170,6 @@ const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessi
           Libre réponse 71120 75342 Paris CEDEX 07
         </li>
       </ul>
-      <hr>
-      <p>
-        Cette déclaration d’accessibilité a été créée le <span>10 mai 2023</span> grâce au <a
-          href="https://betagouv.github.io/a11y-generateur-declaration/"
-          title="https://betagouv.github.io/a11y-generateur-declaration/ (nouvelle fenêtre)"
-          target="_blank"
-          rel="external"
-        >
-          Générateur de Déclaration d’Accessibilité de BetaGouv
-        </a>.
-      </p>
     </div>
   </div>
 </template>

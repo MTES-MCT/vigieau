@@ -4,6 +4,7 @@ import {
   ensureButtonAccessibleText,
   trapTabKey,
 } from '../utils/focus-management';
+import { getMandatoryFooterLinks } from '../utils/accessibility';
 
 const route = useRoute();
 
@@ -15,26 +16,8 @@ const operatorImgStyle: any = {
 };
 const serviceDescription =
   "S'informer sur les restrictions d'eau en période de sécheresse";
-const a11yCompliance: string = 'Partiellement conforme';
 let quickLinks: any[] = [];
-const mandatoryLinks: any[] = [
-  {
-    label: `Accessibilité : ${a11yCompliance}`,
-    to: '/accessibilite',
-  },
-  {
-    label: 'Mentions légales',
-    to: '/mentions-legales',
-  },
-  {
-    label: 'Données personnelles',
-    to: '/donnees-personnelles',
-  },
-  {
-    label: 'Cookies',
-    to: '/cookies',
-  },
-];
+const mandatoryLinks: any[] = getMandatoryFooterLinks();
 const ecosystemLinks: any[] = [
   {
     label: 'legifrance.gouv.fr',

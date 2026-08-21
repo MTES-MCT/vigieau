@@ -2,25 +2,34 @@
 import { ChartOptions } from "chart.js";
 import { Line } from "vue-chartjs";
 import moment from 'moment';
+import { getDailyStatisticsRows } from '../../utils/statistics-accessibility';
+import utils from '../../utils';
 
 const props = defineProps<{
   stats: any
 }>();
 
+const rows = getDailyStatisticsRows(props.stats);
+const tableRows = rows.map((row) => [
+  moment(row.date).format('DD/MM/YYYY'),
+  utils.numberWithSpaces(row.visits),
+  utils.numberWithSpaces(row.restrictionsSearch),
+  utils.numberWithSpaces(row.arreteDownloads),
+]);
 const chartLineData = {
-  labels: props.stats.statsByDay.map((s: any) => s.date),
+  labels: rows.map(row => row.date),
   datasets: [
     {
       label: 'Visiteurs',
-      data: props.stats.statsByDay.map((s: any) => s.visits)
+      data: rows.map(row => row.visits)
     },
     {
       label: 'Recherche de restrictions',
-      data: props.stats.statsByDay.map((s: any) => s.restrictionsSearch)
+      data: rows.map(row => row.restrictionsSearch)
     },
     {
       label: 'Téléchargement d\'arrêtés',
-      data: props.stats.statsByDay.map((s: any) => s.arreteDownloads)
+      data: rows.map(row => row.arreteDownloads)
     }
   ]
 };
@@ -56,8 +65,23 @@ const chartLineOptions: ChartOptions = {
 
 <template>
   <DsfrCallout>
-    <Line :options="chartLineOptions"
-          :data="chartLineData"
-          :style="{'min-height': '400px'}"/>
+    <figure>
+      <figcaption class="fr-h3">Activité quotidienne de VigiEau</figcaption>
+      <p>Nombre quotidien de visites, recherches de restrictions et téléchargements d’arrêtés depuis le 10 juillet 2023.</p>
+      <div aria-hidden="true">
+        <Line :options="chartLineOptions"
+              :data="chartLineData"
+              tabindex="-1"
+              :style="{'min-height': '400px'}"/>
+      </div>
+      <AccessibleDataTable
+        table-id="daily-statistics-table"
+        title="Données détaillées de l’activité quotidienne de VigiEau"
+        :headers="['Date', 'Visiteurs', 'Recherches de restrictions', 'Téléchargements d’arrêtés']"
+        :rows="tableRows"
+        :row-header-column="0"
+        table-class="fr-table--sm"
+      />
+    </figure>
   </DsfrCallout>  
 </template>

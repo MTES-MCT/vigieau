@@ -61,6 +61,7 @@ watch(() => [props.typeEau, props.dataArea], () => {
     title="Évolution journalière du pourcentage de la surface concernée par des niveaux de gravité"
     :headers="headers"
     :rows="rows"
+    :row-header-column="0"
     table-class="fr-table--sm"
     fixed-layout
   />

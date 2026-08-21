@@ -19,6 +19,7 @@ const props = withDefaults(
     headers: Array<string | Record<string, any>>;
     paginationContext?: string;
     resultsPerPage?: number;
+    rowHeaderColumn?: number | null;
     rows: TableRow[];
     statusPrefix?: string;
     tableClass?: string | string[] | Record<string, boolean>;
@@ -29,6 +30,7 @@ const props = withDefaults(
     fixedLayout: false,
     paginationContext: '',
     resultsPerPage: 10,
+    rowHeaderColumn: null,
     statusPrefix: '',
     tableClass: '',
   },
@@ -37,6 +39,9 @@ const props = withDefaults(
 const resultsPerPageOptions = [5, 10, 25, 50, 100];
 const currentPage = ref(1);
 const selectedResultsPerPage = ref(props.resultsPerPage);
+const scrollContainer = ref<HTMLElement | null>(null);
+const hasHorizontalOverflow = ref(false);
+let resizeObserver: ResizeObserver | null = null;
 
 const normalizedRows = computed(() =>
   props.rows.map((row) => (Array.isArray(row) ? row : row.rowData || [])),
@@ -65,9 +70,10 @@ const resultsPerPageId = computed(
 const paginationAccessibleContext = computed(
   () => props.paginationContext || `du tableau « ${props.title} »`,
 );
-const scrollRegionLabel = computed(
-  () =>
-    `${props.title}. Le tableau peut défiler horizontalement sur petit écran.`,
+const scrollRegionLabel = computed(() =>
+  hasHorizontalOverflow.value
+    ? `${props.title}. Le tableau peut défiler horizontalement.`
+    : undefined,
 );
 const paginationStatus = computed(() => {
   const { currentPage, firstResult, lastResult, totalPages } = pagination.value;
@@ -156,10 +162,29 @@ function goToPage(page: number) {
   ).currentPage;
 }
 
+function updateHorizontalOverflow() {
+  const element = scrollContainer.value;
+  hasHorizontalOverflow.value = Boolean(
+    element && element.scrollWidth > element.clientWidth + 1,
+  );
+}
+
+onMounted(() => {
+  updateHorizontalOverflow();
+  if (typeof ResizeObserver !== 'undefined' && scrollContainer.value) {
+    resizeObserver = new ResizeObserver(updateHorizontalOverflow);
+    resizeObserver.observe(scrollContainer.value);
+  }
+});
+
+onBeforeUnmount(() => resizeObserver?.disconnect());
+
 watch(
   () => props.rows,
-  () => {
+  async () => {
     currentPage.value = 1;
+    await nextTick();
+    updateHorizontalOverflow();
   },
 );
 </script>
@@ -176,10 +201,11 @@ watch(
       <div class="fr-table__wrapper">
         <div class="fr-table__container">
           <div
+            ref="scrollContainer"
             class="fr-table__content accessible-data-table__scroll"
-            role="region"
+            :role="hasHorizontalOverflow ? 'region' : undefined"
             :aria-label="scrollRegionLabel"
-            tabindex="0"
+            :tabindex="hasHorizontalOverflow ? 0 : undefined"
           >
             <table :id="tableId">
               <caption>
@@ -203,22 +229,39 @@ watch(
                   :key="`${pagination.startIndex + rowIndex}-${getCellText(row[0])}`"
                   v-bind="getRowAttributes(rowIndex)"
                 >
-                  <td
+                  <template
                     v-for="(cell, cellIndex) of row"
                     :key="cellIndex"
-                    v-bind="getCellAttributes(cell)"
                   >
-                    <component
-                      :is="cell.component"
-                      v-if="isComponentCell(cell)"
-                      v-bind="getComponentCellAttributes(cell)"
+                    <th
+                      v-if="cellIndex === rowHeaderColumn"
+                      scope="row"
+                      v-bind="getCellAttributes(cell)"
                     >
-                      {{ getCellText(cell) }}
-                    </component>
-                    <template v-else>
-                      {{ getCellText(cell) }}
-                    </template>
-                  </td>
+                      <component
+                        :is="cell.component"
+                        v-if="isComponentCell(cell)"
+                        v-bind="getComponentCellAttributes(cell)"
+                      >
+                        {{ getCellText(cell) }}
+                      </component>
+                      <template v-else>
+                        {{ getCellText(cell) }}
+                      </template>
+                    </th>
+                    <td v-else v-bind="getCellAttributes(cell)">
+                      <component
+                        :is="cell.component"
+                        v-if="isComponentCell(cell)"
+                        v-bind="getComponentCellAttributes(cell)"
+                      >
+                        {{ getCellText(cell) }}
+                      </component>
+                      <template v-else>
+                        {{ getCellText(cell) }}
+                      </template>
+                    </td>
+                  </template>
                 </tr>
               </tbody>
             </table>

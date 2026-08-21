@@ -9,14 +9,14 @@ const props = defineProps<{
   dateFin: string,
 }>();
 
-const headers = ['Commune', 'Pourcentage', 'Pondération'];
+const headers = ['Code INSEE', 'Pourcentage', 'Pondération'];
 const rows = ref([]);
 
 async function downloadCsv() {
   const formatData = rows.value
     .map((r: any) => {
       return {
-        commune: r[0],
+        code_insee: r[0],
         pourcentage: r[1].replace('%', ''),
         ponderation: r[2],
       };
@@ -55,6 +55,7 @@ watch(() => [props.dataCommune], () => {
     title="Intensité des sécheresses passées"
     :headers="headers"
     :rows="rows"
+    :row-header-column="0"
     fixed-layout
   />
 

@@ -16,9 +16,12 @@ import moment from 'moment';
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
 
 const props = defineProps<{
-  typeEau: string,
+  chartId: string,
+  typeEau?: string,
   restrictions: any[],
   communeNom: string,
+  tableId: string,
+  title: string,
 }>();
 
 ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, PointElement, TimeScale, ArcElement, Colors, Filler);
@@ -151,12 +154,17 @@ watch(() => props.restrictions, () => {
 </script>
 
 <template>
-  <div class="chart-container">
-    <Bar v-if="chartLineData"
-         id="area-chart-line"
-         :options="chartLineOptions"
-         :data="chartLineData" />
-  </div>
+  <figure>
+    <figcaption class="fr-h6">{{ title }}</figcaption>
+    <div class="chart-container" aria-hidden="true">
+      <Bar v-if="chartLineData"
+           :id="chartId"
+           :options="chartLineOptions"
+           :data="chartLineData"
+           tabindex="-1" />
+    </div>
+    <a :href="`#${tableId}`">Consulter les données détaillées dans le tableau</a>
+  </figure>
 </template>
 
 <style lang="scss" scoped>

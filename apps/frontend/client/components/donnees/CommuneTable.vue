@@ -59,6 +59,7 @@ watch(() => [props.dataCommune], () => {
     title="Évolution journalière du niveau de gravité de la commune"
     :headers="headers"
     :rows="rows"
+    :row-header-column="0"
     table-class="fr-table--sm"
     fixed-layout
   />

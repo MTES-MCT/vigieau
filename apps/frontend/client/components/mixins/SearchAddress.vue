@@ -296,6 +296,7 @@ if (props.query && !props.address && !props.geo) {
       <Loader
         class="adresse-loader"
         :show="loadingAdresses || loading"
+        label="Chargement des adresses"
       />
       <DsfrButton
         v-if="showGeoloc"

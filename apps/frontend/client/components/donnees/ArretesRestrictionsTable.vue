@@ -93,7 +93,7 @@ watch(() => props, () => {
 </script>
 
 <template>
-  <div>
+  <div :aria-busy="loading">
     <template v-if="!loading">
       <AccessibleDataTable
         table-id="restriction-orders-table"
@@ -113,7 +113,7 @@ watch(() => props, () => {
     </template>
     <template v-else>
       <div class="fr-grid-row fr-grid-row--center fr-my-2w">
-        <Loader :show="true" />
+        <Loader :show="true" label="Chargement du tableau des arrêtés" />
       </div>
     </template>
   </div>

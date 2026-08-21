@@ -1,25 +1,14 @@
 <script setup lang="ts">
+import { getMandatoryFooterLinks } from '../../utils/accessibility';
+
 const logoText = ['Ministère', 'de la transition', 'écologique', 'et de la cohésion', 'des territoires'];
 const operatorImgSrc: string = '/logo_smgc_veolia.png'
 const operatorImgAlt: string = 'SMGC et Veolia'
 const operatorImgStyle: any = {
   'max-width': '300px'
 };
-const a11yCompliance: string = 'Partiellement conforme';
 const quickLinks: any[] = [];
-const mandatoryLinks: any[] = [{
-  label: `Accessibilité : ${a11yCompliance}`,
-  to: '/accessibilite',
-}, {
-  label: 'Mentions légales',
-  to: '/mentions-legales',
-}, {
-  label: 'Données personnelles',
-  to: '/donnees-personnelles',
-}, {
-  label: 'Cookies',
-  to: '/cookies',
-}];
+const mandatoryLinks: any[] = getMandatoryFooterLinks();
 const ecosystemLinks: any[] = [
   {
     "label": "beta.gouv.fr",
@@ -36,9 +25,14 @@ const ecosystemLinks: any[] = [
 ];
 const key = ref(0);
 const runTimeConfig = useRuntimeConfig().public;
+const skipLinks = [
+  { id: 'main-content', text: 'Contenu' },
+  { id: 'footer', text: 'Pied de page' },
+];
 </script>
 
 <template>
+  <DsfrSkipLinks :links="skipLinks" />
   <DsfrHeader :logo-text="logoText"
               :operatorImgSrc="operatorImgSrc"
               :operatorImgAlt="operatorImgAlt"
@@ -46,10 +40,10 @@ const runTimeConfig = useRuntimeConfig().public;
               :quickLinks="quickLinks"
               :key="key"
               :show-beta="runTimeConfig.domainName !== 'vigieau.gouv.fr' || runTimeConfig.domainProdNotActivated === 'true'"
-              serviceTitle=""
-              serviceDescription="''">
+              service-title="VigiEau - SMGC et Veolia"
+              service-description="Conseils pour économiser l’eau">
   </DsfrHeader>
-  <div class="fr-mb-8w">
+  <main id="main-content" role="main" tabindex="-1" class="fr-mb-8w">
     <div class="fr-container" v-if="runTimeConfig.appEnv !== 'prod'">
       <DsfrAlert title="Plateforme de développement"
                  description="Plateforme de développement, les données sont fictives. Si vous souhaitez accéder à la plateforme de production, allez sur https://vigieau.gouv.fr"
@@ -59,13 +53,14 @@ const runTimeConfig = useRuntimeConfig().public;
       />
     </div>
     <slot/>
-  </div>
+  </main>
   <DsfrFooter :logo-text="logoText"
               :mandatoryLinks="mandatoryLinks"
               :operatorImgSrc="operatorImgSrc"
               :operatorImgAlt="operatorImgAlt"
               :operatorImgStyle="operatorImgStyle"
-              :ecosystemLinks="ecosystemLinks">
+              :ecosystemLinks="ecosystemLinks"
+              tabindex="-1">
   </DsfrFooter>
 </template>
 

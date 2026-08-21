@@ -366,7 +366,7 @@ defineExpose({
       <Loader
         class="adresse-loader fr-ml-1w"
         :show="subscribing"
-        aria-hidden="true"
+        :announce="false"
       />
     </div>
   </form>

@@ -74,6 +74,7 @@ watch(() => [props.typeEau, props.dataDepartement], () => {
     title="Évolution journalière du nombre de départements soumis à restriction"
     :headers="headers"
     :rows="rows"
+    :row-header-column="0"
     table-class="fr-table--sm"
     fixed-layout
   />

@@ -127,6 +127,10 @@ describe('Navigation accessible du site public', () => {
   });
 
   it('conserve un contenu principal unique et focalise le titre de la carte', () => {
+    cy.intercept('GET', '**/departements?*', {
+      statusCode: 200,
+      body: [],
+    });
     cy.visit('/mentions-legales');
 
     cy.get('main#main-content').then(($main) =>

@@ -1,16 +1,30 @@
 <script setup lang="ts">
-defineProps<{
-  show: boolean
-}>()
+withDefaults(defineProps<{
+  announce?: boolean;
+  label?: string;
+  show: boolean;
+}>(), {
+  announce: true,
+  label: 'Chargement en cours',
+});
 </script>
 
 <template>
   <Transition>
-    <div v-if="show" class="lds-ring">
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
+    <div
+      v-if="show"
+      class="loader"
+      :role="announce ? 'status' : undefined"
+      :aria-live="announce ? 'polite' : undefined"
+      :aria-atomic="announce ? 'true' : undefined"
+    >
+      <span v-if="announce" class="fr-sr-only">{{ label }}</span>
+      <span class="lds-ring" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
     </div>
   </Transition>
 </template>
@@ -22,7 +36,7 @@ defineProps<{
   width: 24px;
   height: 24px;
 
-  div {
+  > span {
     box-sizing: border-box;
     display: block;
     position: absolute;
@@ -65,5 +79,17 @@ defineProps<{
 .v-enter-from,
 .v-leave-to {
   opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lds-ring > span {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+  }
+
+  .v-enter-active,
+  .v-leave-active {
+    transition: none;
+  }
 }
 </style>

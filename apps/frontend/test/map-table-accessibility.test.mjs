@@ -154,7 +154,7 @@ test('derives collision-free control IDs from each required table ID', async () 
     tableIds.push(...ids);
   }
 
-  assert.equal(tableIds.length, 7);
+  assert.equal(tableIds.length, 9);
   assert.equal(new Set(tableIds).size, tableIds.length);
   assert.match(
     accessibleTableSource,

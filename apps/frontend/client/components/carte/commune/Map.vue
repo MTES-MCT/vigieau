@@ -474,7 +474,7 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
   <div v-if="isMapSupported">
     <div v-if="loading"
          class="fr-grid-row fr-grid-row--center fr-my-2w">
-      <Loader :show="true" />
+      <Loader :show="true" label="Chargement des données de la carte" />
     </div>
     <div v-show="!loading">
       <div data-html2canvas-ignore="true" class="map-pre-actions">

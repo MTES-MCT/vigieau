@@ -17,6 +17,7 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, {
 const filterData: any = ref(null);
 const filterText: any = ref(null);
 const screenshotZone = ref();
+const statusMessage = ref('Chargement des données…');
 
 const setFilterData = (data: any) => {
   filterData.value = JSON.parse(JSON.stringify(data));
@@ -25,6 +26,9 @@ const setFilterData = (data: any) => {
   } else {
     filterText.value = null;
   }
+  statusMessage.value = filterText.value
+    ? `Filtres appliqués pour ${filterText.value}. Les données sont mises à jour.`
+    : 'Filtres appliqués. Les données sont mises à jour.';
 };
 
 const downloadMap = (typeEau) => {
@@ -47,6 +51,9 @@ const downloadMap = (typeEau) => {
   <div class="fr-container">
     <AppBreadcrumb :links="links" />
     <h1>Carte et historique des restrictions</h1>
+    <p role="status" aria-live="polite" aria-atomic="true" class="fr-sr-only">
+      {{ statusMessage }}
+    </p>
   </div>
   <div class="background-blue fr-py-2w">
     <div class="fr-container">

@@ -14,7 +14,9 @@
     "preview": "nuxt preview",
     "cy:open": "cypress open",
     "cy:run": "cypress run",
+    "cy:rgaa": "cypress run --spec 'cypress/e2e/rgaa-*.cy.js'",
     "cy:e2e": "start-server-and-test dev http://localhost:3000 cy:run",
+    "cy:e2e:rgaa": "start-server-and-test dev http://localhost:3000 cy:rgaa",
     "test:unit": "node --test --experimental-strip-types test/*.test.mjs",
     "purgecss": "purgecss --config ./purgecss.config.js",
     "postinstall": "node -e \"if (process.env.NODE_ENV !== 'production') require('child_process').execSync('nuxt prepare', {stdio: 'inherit'})\""

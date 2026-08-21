@@ -197,7 +197,7 @@ watch(() => refDataStore.departements, () => {
                   @click="askLoadData()">
         <div class="fr-grid-row fr-grid-row--middle">
           Calculer
-          <Loader class="fr-ml-1w" :show="loading" />
+          <Loader class="fr-ml-1w" :show="loading" :announce="false" />
         </div>
       </DsfrButton>
     </div>

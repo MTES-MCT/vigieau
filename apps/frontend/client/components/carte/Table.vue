@@ -179,7 +179,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="carte-table" :class="light ? 'carte-table__light' : ''">
+  <div class="carte-table" :class="light ? 'carte-table__light' : ''" :aria-busy="loading">
     <template v-if="rows.length > 0">
       <div class="carte-table-header">
         <h3 class="fr-mt-2w fr-mb-1w fr-h4">
@@ -250,7 +250,7 @@ onBeforeUnmount(() => {
     </template>
     <template v-else-if="loading">
       <div class="fr-grid-row fr-grid-row--center fr-my-2w">
-        <Loader :show="true" />
+        <Loader :show="true" label="Chargement du tableau des départements" />
       </div>
     </template>
     <template v-else>

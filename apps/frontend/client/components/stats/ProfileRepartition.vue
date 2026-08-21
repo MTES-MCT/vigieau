@@ -1,23 +1,25 @@
 <script setup lang="ts">
 import { ChartOptions } from "chart.js";
 import { Doughnut } from "vue-chartjs";
-import { Profile } from "../../dto/profile.enum";
 import utils from "../../utils";
+import { getProfileStatisticsRows } from '../../utils/statistics-accessibility';
 
 const props = defineProps<{
   stats: any
 }>();
 
+const rows = getProfileStatisticsRows(props.stats);
+const tableRows = rows.map(row => [
+  row.label,
+  utils.numberWithSpaces(row.count),
+  `${row.percentage.toFixed(2)} %`,
+]);
 const chartePieData = {
-  labels: Object.values(Profile),
+  labels: rows.map(row => row.label),
   datasets: [{
-    data: []
+    data: rows.map(row => row.count),
   }]
 };
-const profiles = Object.keys(Profile);
-profiles.forEach(p => {
-  chartePieData.datasets[0].data.push(props.stats.profileRepartition[p]);
-});
 
 const tooltipPieLabel = (tooltipItem: any): string => {
   const sum = tooltipItem.dataset.data.reduce((a: number, b: number) => {
@@ -41,9 +43,23 @@ const chartPieOptions: ChartOptions = {
 </script>
 
 <template>
-  <DsfrCallout title="Répartition des profils des visiteurs sur les 30 derniers jours">
-    <Doughnut :options="chartPieOptions"
-              :data="chartePieData"
-              :style="{'max-height': '400px'}"/>
+  <DsfrCallout>
+    <figure>
+      <figcaption class="fr-h3">Répartition des profils des visiteurs sur les 30 derniers jours</figcaption>
+      <div aria-hidden="true">
+        <Doughnut :options="chartPieOptions"
+                  :data="chartePieData"
+                  tabindex="-1"
+                  :style="{'max-height': '400px'}"/>
+      </div>
+      <AccessibleDataTable
+        table-id="profile-statistics-table"
+        title="Données détaillées de la répartition des profils"
+        :headers="['Profil', 'Nombre', 'Pourcentage']"
+        :rows="tableRows"
+        :row-header-column="0"
+        table-class="fr-table--sm"
+      />
+    </figure>
   </DsfrCallout>
 </template>

@@ -20,9 +20,9 @@ useHead({
              alt=""
         />
       </div>
-      <div class="fr-col-9">
+      <p class="fr-col-9 fr-mb-0">
         Retrouvez nous tout l'été pour des conseils sur les économies d'eau !
-      </div>
+      </p>
     </div>
   </div>
 </template>

@@ -39,6 +39,12 @@ function visitDepartmentTable(viewportWidth = 1400) {
   cy.contains('[role="tab"]', 'Données').click();
   cy.get('#restrictions-panel-data').should('be.visible');
   cy.get('#departments-table tbody tr').should('have.length', 10);
+  if (viewportWidth >= 1000) {
+    cy.get('.carte-table .accessible-data-table__scroll').should(($element) => {
+      expect($element.attr('tabindex')).to.equal(undefined);
+      expect($element.attr('role')).to.equal(undefined);
+    });
+  }
 }
 
 function departmentTableStatus() {
@@ -245,6 +251,8 @@ describe('Tableau public des départements accessible', () => {
       expect($scrollRegion[0].scrollWidth).to.be.greaterThan(
         $scrollRegion[0].clientWidth,
       );
+      expect($scrollRegion).to.have.attr('role', 'region');
+      expect($scrollRegion).to.have.attr('tabindex', '0');
     });
     cy.get(
       [

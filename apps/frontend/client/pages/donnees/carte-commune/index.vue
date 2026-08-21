@@ -16,10 +16,22 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, {
 }, { text: 'Évolution de la situation de la sécheresse par commune' }]);
 const filterData: any = ref(null);
 const loading = ref(false);
+const statusMessage = ref('Sélectionnez un territoire et une période, puis lancez le calcul.');
 const screenshotZone = ref();
 
 const setFilterData = (data: any) => {
   filterData.value = JSON.parse(JSON.stringify(data));
+  statusMessage.value = 'Chargement des données de la carte…';
+};
+
+const beginLoading = () => {
+  loading.value = true;
+  statusMessage.value = 'Chargement des données de la carte…';
+};
+
+const endLoading = () => {
+  loading.value = false;
+  statusMessage.value = `Données mises à jour pour ${filterData.value?.areaText || 'France entière'}, du ${filterData.value?.dateDebut} au ${filterData.value?.dateFin}.`;
 };
 
 const downloadMap = () => {
@@ -44,6 +56,9 @@ const downloadMap = () => {
     <h1>Intensité des sécheresses passées</h1>
     <p>Durée et gravité des situations de sécheresse sur un territoire (département ou commune) et une période
       donnée</p>
+    <p role="status" aria-live="polite" aria-atomic="true" class="fr-sr-only">
+      {{ statusMessage }}
+    </p>
   </div>
   <div class="background-blue fr-py-2w">
     <div class="fr-container">
@@ -65,14 +80,14 @@ const downloadMap = () => {
             à la maille de la commune.
           </p>
         </DsfrAlert>
-        <div style="position: relative;">
+        <div style="position: relative;" :aria-busy="loading">
           <CarteCommuneMap :embedded="false"
                            :light="true"
                            :dateBegin="filterData?.dateDebut"
                            :dateEnd="filterData?.dateFin"
                            :area="filterData?.area"
-                           @beginLoading="loading = true"
-                           @endLoading="loading = false"
+                           @beginLoading="beginLoading"
+                           @endLoading="endLoading"
                            @downloadMap="downloadMap()" />
         </div>
       </div>

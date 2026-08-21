@@ -28,6 +28,7 @@ ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale
 
 const refDataStore = useRefDataStore();
 const loading = ref(false);
+const statusMessage = ref('Chargement des données…');
 const chartLineData = ref(null);
 const dataDepartement = ref(null);
 const computeDisabled = ref(true);
@@ -130,18 +131,24 @@ async function loadData() {
     return;
   }
   loading.value = true;
-  const { data } = await api.getDataDepartement(formData.dateDebut, formData.dateFin, formData.area);
+  statusMessage.value = 'Chargement des données…';
+  const { data, error } = await api.getDataDepartement(formData.dateDebut, formData.dateFin, formData.area);
   if (data.value) {
     dataDepartement.value = data.value;
     territoire.value = areaOptions.value.find((a: any) => a.value === formData.area);
-    sortData();
+    sortData(false);
+    statusMessage.value = resultStatusMessage();
+  } else if (error.value) {
+    statusMessage.value = 'Le chargement des données a échoué. Veuillez réessayer.';
   }
   computeDisabled.value = true;
   loading.value = false;
 }
 
-function sortData() {
-  loading.value = true;
+function sortData(announce = true) {
+  if (!dataDepartement.value) {
+    return;
+  }
   chartLineData.value = {
     labels: dataDepartement.value.map((d: any) => d.date),
     datasets: [
@@ -183,7 +190,15 @@ function sortData() {
       },
     ],
   };
-  loading.value = false;
+  if (announce) {
+    statusMessage.value = resultStatusMessage();
+  }
+}
+
+function resultStatusMessage() {
+  const waterType = typesEauOptions.find(option => option.value === formData.typeEau)?.text;
+  const area = territoire.value?.text || 'France entière';
+  return `Données mises à jour pour ${area}, ${waterType}, du ${moment(formData.dateDebut).format('DD/MM/YYYY')} au ${moment(formData.dateFin).format('DD/MM/YYYY')}.`;
 }
 
 const getNiveauGravite = (departement: any) => {
@@ -291,7 +306,10 @@ watch(() => refDataStore.departements, () => {
 </script>
 
 <template>
-  <div ref="screenshotZone">
+  <p role="status" aria-live="polite" aria-atomic="true" class="fr-sr-only">
+    {{ statusMessage }}
+  </p>
+  <div ref="screenshotZone" :aria-busy="loading">
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-lg-2 fr-col-md-6 fr-col-12">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'typeEau')">
@@ -363,10 +381,16 @@ watch(() => refDataStore.departements, () => {
       </DsfrAlert>
     </div>
     <template v-if="!loading">
-      <Line v-if="chartLineData"
-            id="departement-chart-line"
-            :options="chartLineOptions"
-            :data="chartLineData" />
+      <figure v-if="chartLineData">
+        <figcaption class="fr-h3">Évolution du nombre de départements soumis à restriction</figcaption>
+        <div aria-hidden="true">
+          <Line id="departement-chart-line"
+                :options="chartLineOptions"
+                :data="chartLineData"
+                tabindex="-1" />
+        </div>
+        <a href="#department-restrictions-history-table">Consulter les données détaillées dans le tableau</a>
+      </figure>
     </template>
   </div>
   <template v-if="!loading">
@@ -385,7 +409,7 @@ watch(() => refDataStore.departements, () => {
   </template>
   <template v-else>
     <div class="fr-grid-row fr-grid-row--center fr-my-2w">
-      <Loader :show="true" />
+      <Loader :show="true" :announce="false" />
     </div>
   </template>
 </template>
