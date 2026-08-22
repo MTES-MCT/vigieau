@@ -2284,7 +2284,7 @@ export class DataService implements OnModuleInit {
             availableState?.historicComputeEpoch)) &&
       !availableState?.historicDirtyFrom &&
       snapshotCoverage.incompleteSnapshotCount === 0 &&
-      !this.legacySnapshotCoverageDirty &&
+      (mode !== 'legacy-bootstrap' || !this.legacySnapshotCoverageDirty) &&
       this.isLegacyCacheContinuous(cache, availableState),
     );
     const fresh = currentFresh;
@@ -3051,20 +3051,9 @@ export class DataService implements OnModuleInit {
 
   private publishCertifiedDataCache(cache: CertifiedDataCache): void {
     this.certifiedDataCache = cache;
-    const closesSnapshotRepair =
-      cache.mode === 'legacy-bootstrap' ||
-      Boolean(
-        cache.artifactIdentity &&
-        this.isArtifactIdentityForState(
-          cache.artifactIdentity,
-          cache.publicationState,
-        ) &&
-        this.isLegacyCacheContinuous(cache, cache.publicationState),
-      );
     if (
-      cache.publicationState.historicDirtyFrom === null &&
-      cache.publicationState.historicDirtyThrough === null &&
-      closesSnapshotRepair
+      cache.mode === 'legacy-bootstrap' &&
+      cache.publicationState.historicDirtyFrom === null
     ) {
       this.legacySnapshotCoverageDirty = false;
     }

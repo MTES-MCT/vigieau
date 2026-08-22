@@ -1475,107 +1475,6 @@ describe('DataService', () => {
       expect(service['legacySnapshotCoverageDirty']).toBe(false);
     });
 
-    it('clears the repair signal after publishing an exact continuous versioned artifact', async () => {
-      process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
-      (service as any).statisticCacheArtifactService = {};
-      (service as any).beginDate = '2015-05-18';
-      const activeId = '00000000-0000-4000-8000-000000000024';
-      const versionedPublicationState = {
-        ...stablePublicationState,
-        revision: '57',
-        statisticCachePublicationId: activeId,
-        currentPublishedDate: '2015-05-20',
-        historicPublishedThrough: '2015-05-19',
-        historicMapCursor: '2015-05-19',
-        historicStatsCursor: '2015-05-19',
-        sourceRevision: '168407',
-        historicComputeEpoch: '514',
-      };
-      const artifactIdentity = {
-        id: activeId,
-        statisticRevision: versionedPublicationState.revision,
-        currentPublishedDate: versionedPublicationState.currentPublishedDate,
-        protocolVersion: 1,
-        mode: 'versioned',
-        materializationStrategy: 'full-clean',
-        historicDirtyFrom: null,
-        historicDirtyThrough: null,
-        historicMapCursor: versionedPublicationState.historicMapCursor,
-        historicStatsCursor: versionedPublicationState.historicStatsCursor,
-        sourceRevision: versionedPublicationState.sourceRevision,
-        historicComputeEpoch: versionedPublicationState.historicComputeEpoch,
-        contentFingerprint: 'test-fingerprint',
-        firstDate: '2015-05-18',
-        latestDate: '2015-05-20',
-        dateCount: 3,
-        areaCount: 1,
-        departmentCount: 101,
-        communeCount: 34943,
-        readyAt: new Date('2015-05-20T12:00:00.000Z'),
-      } as const;
-      const exactCache = certifyData({
-        revision: versionedPublicationState.revision,
-        publicationState: versionedPublicationState,
-        mode: 'versioned',
-        firstDate: '2015-05-18',
-        latestDate: '2015-05-20',
-        dateCount: 3,
-        artifactIdentity,
-        artifactPublicationId: activeId,
-        artifactProtocolVersion: 1,
-        artifactSourceRevision: versionedPublicationState.sourceRevision,
-        artifactHistoricDirtyFrom: null,
-        artifactHistoricDirtyThrough: null,
-        artifactHistoricMapCursor: versionedPublicationState.historicMapCursor,
-        artifactHistoricStatsCursor:
-          versionedPublicationState.historicStatsCursor,
-        artifactHistoricComputeEpoch:
-          versionedPublicationState.historicComputeEpoch,
-      });
-      service['legacySnapshotCoverageDirty'] = true;
-
-      (service as any).publishCertifiedDataCache({
-        ...exactCache,
-        artifactIdentity: {
-          ...artifactIdentity,
-          historicMapCursor: '2015-05-18',
-        },
-      });
-      expect(service['legacySnapshotCoverageDirty']).toBe(true);
-
-      (service as any).publishCertifiedDataCache(exactCache);
-      expect(service['legacySnapshotCoverageDirty']).toBe(false);
-
-      jest
-        .spyOn(service as any, 'getPublicationState')
-        .mockResolvedValue(versionedPublicationState);
-      jest
-        .spyOn(service as any, 'getStatisticPublicationExpectation')
-        .mockReturnValue({
-          today: '2015-05-20',
-          expectedPublishedDate: '2015-05-20',
-          deadline: '06:00',
-          afterDeadline: true,
-        });
-      jest
-        .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
-        .mockResolvedValue({
-          incompleteSnapshotCount: 0,
-          oldestIncompleteSnapshot: null,
-        });
-      jest
-        .spyOn(service as any, 'getStatisticArtifactInstanceSummary')
-        .mockResolvedValue({ liveInstances: 3, readyInstances: 3 });
-
-      await expect(service.getStatisticCacheStatus(true)).resolves.toEqual(
-        expect.objectContaining({
-          status: 'ready',
-          currentFresh: true,
-          historicComplete: true,
-        }),
-      );
-    });
-
     it('does not refresh or clear the legacy repair signal while the historic range is dirty', async () => {
       process.env.STATISTIC_CACHE_MODE = 'legacy-bootstrap';
       const dirtyPublicationState = {
@@ -2933,15 +2832,23 @@ describe('DataService', () => {
     });
 
     it.each([
-      ['before map publication', '2023-01-01', '2022-12-31', false],
-      ['after map publication', '2023-01-01', '2023-01-01', true],
-      ['legacy boundary without a published watermark', null, null, true],
+      ['before map publication', '2023-01-01', '2022-12-31', 0, false],
+      ['after map publication', '2023-01-01', '2023-01-01', 0, true],
+      [
+        'after map publication with an incomplete snapshot',
+        '2023-01-01',
+        '2023-01-01',
+        1,
+        false,
+      ],
+      ['legacy boundary without a published watermark', null, null, 0, true],
     ])(
       'reports historic completion %s',
       async (
         _label,
         historicPublishedThrough,
         historicMapCursor,
+        incompleteSnapshotCount,
         expectedHistoricComplete,
       ) => {
         process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
@@ -2974,13 +2881,14 @@ describe('DataService', () => {
           artifactHistoricComputeEpoch: state.historicComputeEpoch,
           latestCommuneWeights: [],
         });
+        service['legacySnapshotCoverageDirty'] = true;
         jest
           .spyOn(service as any, 'getPublicationState')
           .mockResolvedValue(state);
         jest
           .spyOn(service as any, 'getLegacySnapshotCoverageStatus')
           .mockResolvedValue({
-            incompleteSnapshotCount: 0,
+            incompleteSnapshotCount,
             oldestIncompleteSnapshot: null,
           });
         jest
