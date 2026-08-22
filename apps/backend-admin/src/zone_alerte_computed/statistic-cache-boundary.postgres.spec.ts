@@ -87,6 +87,13 @@ describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
         "updatedAt" timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY ("snapshotDate", "scope")
       );
+      CREATE TABLE "commune" (
+        "id" varchar PRIMARY KEY
+      );
+      CREATE TABLE "statistic_commune" (
+        "communeId" varchar PRIMARY KEY,
+        "restrictions" jsonb NOT NULL
+      );
       INSERT INTO "zone_publication_source_state" VALUES (1, 42);
       INSERT INTO "config" VALUES (
         1, date '2026-08-10', date '2026-08-10', 4, 6, 7
@@ -102,7 +109,20 @@ describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
       INSERT INTO "statistic_commune_snapshot" VALUES (
         date '2026-08-09', 'departements:03', 'completed', 3, 3, 41,
         now(), NULL, now()
-      )
+      );
+      INSERT INTO "commune" VALUES ('01001');
+      INSERT INTO "statistic_commune" ("communeId", "restrictions")
+      SELECT
+        '01001',
+        jsonb_agg(
+          jsonb_build_object('date', day::date::text)
+          ORDER BY day
+        ) || jsonb_build_array(jsonb_build_object('date', 'date-inconnue'))
+      FROM generate_series(
+        date '2026-01-01',
+        date '2026-08-10',
+        interval '1 day'
+      ) day;
     `);
 
     service = new ZoneAlerteComputedService(
@@ -207,5 +227,39 @@ describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
       ),
     ).resolves.toEqual([{ monthlyFrom: null }]);
     expect(statisticCommuneService.computeByMonth).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
+  it('validates JSON daily coverage without casting malformed legacy dates', async () => {
+    await dataSource.query(`
+      UPDATE "config"
+      SET "computeMapDate" = date '2026-08-11',
+          "computeStatsDate" = date '2026-08-11'
+      WHERE "id" = 1;
+      UPDATE "statistic_commune_snapshot"
+      SET "status" = 'completed', "processedCommuneCount" = 3,
+          "sourceRevision" = 42, "completedAt" = now(),
+          "lastError" = NULL, "updatedAt" = now()
+      WHERE "snapshotDate" = date '2026-08-10';
+      INSERT INTO "statistic_commune_snapshot" (
+        "snapshotDate", "scope", "status", "expectedCommuneCount",
+        "processedCommuneCount", "sourceRevision", "completedAt",
+        "lastError", "updatedAt"
+      ) VALUES (
+        date '2026-08-10', 'national', 'completed', 3, 3, 42,
+        now(), NULL, now()
+      )
+      ON CONFLICT ("snapshotDate", "scope") DO UPDATE SET
+        "status" = 'completed', "expectedCommuneCount" = 3,
+        "processedCommuneCount" = 3, "sourceRevision" = 42,
+        "completedAt" = now(), "lastError" = NULL, "updatedAt" = now()
+    `);
+
+    await expect(
+      (service as any).assertHistoricCatchUpComplete(
+        '2026-08-10',
+        '42',
+        '2026-08-09',
+      ),
+    ).resolves.toBeUndefined();
   }, 60_000);
 });

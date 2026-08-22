@@ -3051,8 +3051,8 @@ DELETE FROM zone_alerte_computed
           LEFT JOIN LATERAL jsonb_array_elements(
             COALESCE(statistic."restrictions", '[]'::jsonb)
           ) restriction(value)
-            ON restriction.value ->> 'date' >= $1
-           AND restriction.value ->> 'date' <= $2
+            ON restriction.value ->> 'date' >= ($1::date)::text
+           AND restriction.value ->> 'date' <= ($2::date)::text
           GROUP BY commune."id"
         )
         SELECT
