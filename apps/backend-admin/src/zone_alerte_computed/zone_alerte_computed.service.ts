@@ -44,6 +44,7 @@ import {
 import {
   isZonePublicationEnabled,
   sourceRevisionColumn,
+  zoneGeojsonContentDisposition,
 } from '../zone_publication/zone_publication.config';
 import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
@@ -1574,6 +1575,13 @@ DELETE FROM zone_alerte_computed
       {
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl: 'public, max-age=0, must-revalidate',
+        ...(kind === 'geojson'
+          ? {
+              contentDisposition: zoneGeojsonContentDisposition(
+                file.originalname,
+              ),
+            }
+          : {}),
         contentType:
           kind === 'geojson'
             ? 'application/geo+json'
@@ -1629,6 +1637,12 @@ DELETE FROM zone_alerte_computed
             this.getZonePublicationS3TimeoutMs(),
           ),
           cacheControl: 'public, max-age=0, must-revalidate',
+          ...(kind === 'geojson'
+            ? {
+                contentDisposition:
+                  zoneGeojsonContentDisposition(datedFileName),
+              }
+            : {}),
           contentType:
             kind === 'geojson'
               ? 'application/geo+json'
@@ -1672,6 +1686,13 @@ DELETE FROM zone_alerte_computed
       {
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl: 'public, max-age=31536000, immutable',
+        ...(kind === 'geojson'
+          ? {
+              contentDisposition: zoneGeojsonContentDisposition(
+                'zones_arretes_en_vigueur.geojson',
+              ),
+            }
+          : {}),
         contentType:
           kind === 'geojson'
             ? 'application/geo+json'

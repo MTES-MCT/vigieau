@@ -71,16 +71,17 @@ describe('S3Service', () => {
     });
   });
 
-  it('copies stable aliases with explicit cache and content metadata', async () => {
+  it('copies GeoJSON aliases with explicit download metadata', async () => {
     const harness = createHarness();
 
     await harness.service.copyFile(
-      'immutable.pmtiles',
-      'current.pmtiles',
-      'pmtiles/',
+      'immutable.geojson',
+      'current.geojson',
+      'geojson/',
       {
         cacheControl: 'public, max-age=0, must-revalidate',
-        contentType: 'application/vnd.pmtiles',
+        contentDisposition: 'attachment; filename="current.geojson"',
+        contentType: 'application/geo+json',
       },
     );
 
@@ -89,10 +90,11 @@ describe('S3Service', () => {
     expect(command.input).toEqual(
       expect.objectContaining({
         Bucket: 'vigieau-bucket',
-        Key: 'prod/pmtiles/current.pmtiles',
-        CopySource: '/vigieau-bucket/prod/pmtiles/immutable.pmtiles',
+        Key: 'prod/geojson/current.geojson',
+        CopySource: '/vigieau-bucket/prod/geojson/immutable.geojson',
         CacheControl: 'public, max-age=0, must-revalidate',
-        ContentType: 'application/vnd.pmtiles',
+        ContentDisposition: 'attachment; filename="current.geojson"',
+        ContentType: 'application/geo+json',
         MetadataDirective: 'REPLACE',
       }),
     );
@@ -169,7 +171,10 @@ describe('S3Service', () => {
         buffer: Buffer.from('{}'),
       } as Express.Multer.File,
       'historic/',
-      acl ? { acl } : {},
+      {
+        ...(acl ? { acl } : {}),
+        contentDisposition: 'attachment; filename="artifact.geojson"',
+      },
     );
 
     expect(Upload).toHaveBeenCalledWith({
@@ -178,6 +183,7 @@ describe('S3Service', () => {
         Bucket: 'vigieau-bucket',
         Key: 'prod/historic/artifact.geojson',
         ACL: expectedAcl,
+        ContentDisposition: 'attachment; filename="artifact.geojson"',
       }),
     });
   });
