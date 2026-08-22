@@ -1619,7 +1619,7 @@ describe('StatisticCommuneService', () => {
     ]);
   });
 
-  it('allows only bootstrap and the matching ready candidate while aggregating through J', async () => {
+  it('accepts an exact completed candidate without extending the ready bootstrap exemption', async () => {
     const harness = createComputationHarness();
 
     await harness.service.computeCommuneStatisticsRestrictionsByMonth(
@@ -1650,8 +1650,17 @@ describe('StatisticCommuneService', () => {
       'failed_national_snapshot."snapshotDate" =\n                     (daily.value ->> \'date\')::date',
     );
     expect(sql).toContain('allowed_ready_snapshot AS MATERIALIZED');
+    expect(sql).toContain('allowed_completed_snapshot AS MATERIALIZED');
+    expect(sql).toContain('snapshot."status" = \'completed\'');
+    expect(sql).toContain('snapshot."expectedCommuneCount" > 0');
+    expect(sql).toContain(
+      'snapshot."processedCommuneCount" =\n                  snapshot."expectedCommuneCount"',
+    );
     expect(sql).toContain(
       'AND NOT EXISTS (SELECT 1 FROM allowed_ready_snapshot)',
+    );
+    expect(sql).toContain(
+      'AND NOT EXISTS (SELECT 1 FROM allowed_completed_snapshot)',
     );
     expect(parameters).toEqual([
       null,
@@ -1681,11 +1690,16 @@ describe('StatisticCommuneService', () => {
           candidate.status === 'ready' &&
           parameters[8] === candidate.sourceRevision &&
           parameters[9] === candidate.date;
+        const completedExceptionMatches =
+          candidate.status === 'completed' &&
+          sql.includes('allowed_completed_snapshot AS MATERIALIZED') &&
+          parameters[8] === candidate.sourceRevision &&
+          parameters[9] === candidate.date;
         const bootstrapExceptionMatches =
           bootstrapPresent && readyExceptionMatches;
         if (
           (bootstrapPresent && !bootstrapExceptionMatches) ||
-          (candidate.status !== 'completed' && !readyExceptionMatches)
+          (!readyExceptionMatches && !completedExceptionMatches)
         ) {
           return [{ blocked: true, expected: 0, affected: 0 }];
         }
@@ -1724,6 +1738,16 @@ describe('StatisticCommuneService', () => {
     // Candidate activation completes J and removes the bootstrap barrier atomically.
     candidate.status = 'completed';
     bootstrapPresent = false;
+    await service.computeCommuneStatisticsRestrictionsByMonth(
+      new Date('2025-07-01T00:00:00.000Z'),
+      undefined,
+      false,
+      candidate.date,
+      {
+        date: candidate.date,
+        sourceRevision: candidate.sourceRevision,
+      },
+    );
     expect(readPublishedMonth()).toBe(7.5);
   });
 

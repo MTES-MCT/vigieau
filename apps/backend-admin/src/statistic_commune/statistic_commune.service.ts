@@ -2968,6 +2968,19 @@ export class StatisticCommuneService {
               AND snapshot."status" = 'ready'
               AND snapshot."sourceRevision" = $9::bigint
             LIMIT 1
+          ), allowed_completed_snapshot AS MATERIALIZED (
+            SELECT 1
+            FROM "statistic_commune_snapshot" snapshot
+            WHERE $9::bigint IS NOT NULL
+              AND $10::date IS NOT NULL
+              AND snapshot."snapshotDate" = $10::date
+              AND snapshot."scope" = 'national'
+              AND snapshot."status" = 'completed'
+              AND snapshot."sourceRevision" = $9::bigint
+              AND snapshot."expectedCommuneCount" > 0
+              AND snapshot."processedCommuneCount" =
+                  snapshot."expectedCommuneCount"
+            LIMIT 1
           ), incomplete_snapshot AS MATERIALIZED (
             SELECT 1
             FROM "statistic_commune_snapshot" snapshot
@@ -3027,6 +3040,7 @@ export class StatisticCommuneService {
               OR (
                 $9::bigint IS NOT NULL
                 AND NOT EXISTS (SELECT 1 FROM allowed_ready_snapshot)
+                AND NOT EXISTS (SELECT 1 FROM allowed_completed_snapshot)
               ) AS blocked
           ), selected_statistics AS MATERIALIZED (
             SELECT statistic.id
