@@ -2765,11 +2765,11 @@ DELETE FROM zone_alerte_computed
             AND publication_state."historicDirtyThrough" IS NOT NULL
             AND (
               $3::bigint IS NULL
-              OR publication_state."revision" = $3::bigint
+              OR publication_state."revision" = ($3::bigint)::text
             )
             AND (
               $4::date IS NULL
-              OR publication_state."currentPublishedDate" = $4::date
+              OR publication_state."currentPublishedDate" = ($4::date)::text
             )
             AND EXISTS (
               SELECT 1

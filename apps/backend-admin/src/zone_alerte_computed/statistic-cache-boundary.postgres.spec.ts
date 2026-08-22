@@ -262,4 +262,61 @@ describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
       ),
     ).resolves.toBeUndefined();
   }, 60_000);
+
+  it('publishes the guarded historic range with text materialized guards', async () => {
+    await dataSource.query(`
+      UPDATE "config"
+      SET "computeMapDate" = date '2026-08-14',
+          "computeStatsDate" = date '2026-08-14',
+          "computeMapGeneration" = 4,
+          "computeStatsGeneration" = 6,
+          "historicComputeEpoch" = 7
+      WHERE "id" = 1;
+      UPDATE "statistic_publication_state"
+      SET "revision" = 11,
+          "currentPublishedDate" = date '2026-08-15',
+          "historicPublishedThrough" = date '2026-08-09',
+          "historicDirtyFrom" = date '2026-08-10',
+          "historicDirtyThrough" = date '2026-08-14',
+          "updatedAt" = now()
+      WHERE "id" = 1;
+    `);
+
+    await expect(
+      (service as any).publishHistoricStatistics(
+        '2026-08-14',
+        '42',
+        {
+          statisticRevision: '11',
+          currentPublishedDate: '2026-08-15',
+        },
+        {
+          mapCursor: '2026-08-14',
+          statsCursor: '2026-08-14',
+          mapGeneration: '4',
+          statsGeneration: '6',
+        },
+        '7',
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      dataSource.query(`
+        SELECT
+          "revision"::text AS "revision",
+          "historicPublishedThrough"::text AS "historicPublishedThrough",
+          "historicDirtyFrom"::text AS "historicDirtyFrom",
+          "historicDirtyThrough"::text AS "historicDirtyThrough"
+        FROM "statistic_publication_state"
+        WHERE "id" = 1
+      `),
+    ).resolves.toEqual([
+      {
+        revision: '12',
+        historicPublishedThrough: '2026-08-14',
+        historicDirtyFrom: null,
+        historicDirtyThrough: null,
+      },
+    ]);
+  }, 60_000);
 });

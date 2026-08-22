@@ -1359,6 +1359,12 @@ describe('ZoneAlerteComputedService', () => {
     expect(publicationSql).toContain(
       '$1::date >= publication_state."historicDirtyThrough"',
     );
+    expect(publicationSql).toContain(
+      'publication_state."revision" = ($3::bigint)::text',
+    );
+    expect(publicationSql).toContain(
+      'publication_state."currentPublishedDate" = ($4::date)::text',
+    );
     expect(publicationSql).not.toContain(
       'snapshot."snapshotDate" >= state."historicDirtyFrom"',
     );
