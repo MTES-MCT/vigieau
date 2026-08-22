@@ -11,9 +11,10 @@ import { generateEmptyPmtiles } from '../zone_alerte_computed/empty-pmtiles';
 import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from '../zone_alerte_computed/legacy-historic-empty-geometries';
 import {
   assertTippecanoeExecutables,
+  collectComputedHistoricBackfillPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
-  collectPmtilesFeatureIds,
   generatePmtiles,
+  HISTORIC_BACKFILL_PMTILES_MAX_ZOOM,
 } from '../zone_alerte_computed/pmtiles-generation';
 import {
   HistoricBackfillArtifactLease,
@@ -156,7 +157,19 @@ export class HistoricBackfillArtifactBuilderService {
         );
       }
     } else {
-      expectedFeatureIds = collectPmtilesFeatureIds(features);
+      const computedFeatureIds =
+        collectComputedHistoricBackfillPmtilesFeatureIds(features);
+      expectedFeatureIds = computedFeatureIds.expectedFeatureIds;
+      if (computedFeatureIds.excludedNonRenderableGeometryIds.length > 0) {
+        this.logger.warn(
+          JSON.stringify({
+            type: 'historic_backfill_pmtiles_non_renderable_geometries_excluded',
+            runId: lease.runId,
+            validFrom: lease.validFrom,
+            zoneIds: computedFeatureIds.excludedNonRenderableGeometryIds,
+          }),
+        );
+      }
     }
     const temporaryRoot =
       this.configService.get<string>('PATH_TO_WRITE_FILE') || '/tmp';
@@ -181,6 +194,10 @@ export class HistoricBackfillArtifactBuilderService {
           inputPath: geojsonPath,
           outputPath: pmtilesPath,
           expectedFeatureIds,
+          maximumZoom:
+            lease.validFrom >= COMPUTED_HISTORIC_START_DATE
+              ? HISTORIC_BACKFILL_PMTILES_MAX_ZOOM
+              : undefined,
         });
       }
       if (signal.aborted) {

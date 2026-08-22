@@ -10,16 +10,20 @@ import {
 } from './historic-backfill-artifact-builder.service';
 import {
   assertTippecanoeExecutables,
+  collectComputedHistoricBackfillPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
-  collectPmtilesFeatureIds,
   generatePmtiles,
 } from '../zone_alerte_computed/pmtiles-generation';
 
 jest.mock('../zone_alerte_computed/pmtiles-generation', () => ({
+  HISTORIC_BACKFILL_PMTILES_MAX_ZOOM: 12,
   assertTippecanoeExecutables: jest.fn().mockResolvedValue(undefined),
-  collectPmtilesFeatureIds: jest.fn((features) =>
-    features.map((feature) => String(feature.properties.id)),
-  ),
+  collectComputedHistoricBackfillPmtilesFeatureIds: jest.fn((features) => ({
+    expectedFeatureIds: features.map((feature) =>
+      String(feature.properties.id),
+    ),
+    excludedNonRenderableGeometryIds: [],
+  })),
   collectLegacyHistoricBackfillPmtilesFeatureIds: jest.fn((features) => ({
     expectedFeatureIds: features
       .filter((feature) => feature.geometry?.coordinates?.length > 0)
@@ -173,7 +177,9 @@ describe('HistoricBackfillArtifactBuilderService', () => {
       ['tippecanoe', 'tippecanoe-decode', 'tile-join'],
     );
     expect(generatePmtiles).toHaveBeenCalledTimes(1);
-    expect(collectPmtilesFeatureIds).toHaveBeenCalledTimes(1);
+    expect(
+      collectComputedHistoricBackfillPmtilesFeatureIds,
+    ).toHaveBeenCalledTimes(1);
     expect(
       collectLegacyHistoricBackfillPmtilesFeatureIds,
     ).not.toHaveBeenCalled();
@@ -182,6 +188,7 @@ describe('HistoricBackfillArtifactBuilderService', () => {
         workingDirectory: expect.stringMatching(/\/historic-backfill-[^/]+$/),
         tippecanoeBinDirectory:
           '/workspace/apps/backend-admin/tippecanoe_program/bin',
+        maximumZoom: 12,
       }),
     );
     expect(harness.s3Service.uploadFile).toHaveBeenCalledTimes(2);
@@ -222,6 +229,46 @@ describe('HistoricBackfillArtifactBuilderService', () => {
     expect(result.pmtilesChecksum).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('keeps collapsed computed features in GeoJSON and excludes them from PMTiles', async () => {
+    const harness = await createHarness();
+    jest
+      .mocked(collectComputedHistoricBackfillPmtilesFeatureIds)
+      .mockReturnValueOnce({
+        expectedFeatureIds: [],
+        excludedNonRenderableGeometryIds: ['42'],
+      });
+    const warning = jest
+      .spyOn(RegleauLogger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    const result = await harness.service.build(
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(generateEmptyPmtiles).toHaveBeenCalledTimes(1);
+    expect(generatePmtiles).not.toHaveBeenCalled();
+    expect(result.featureCount).toBe(1);
+    const uploadedGeojson = JSON.parse(
+      harness.s3Service.uploadFile.mock.calls[0][0].buffer.toString('utf8'),
+    );
+    expect(uploadedGeojson.features).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          properties: expect.objectContaining({ id: 42 }),
+        }),
+      ]),
+    );
+    expect(warning).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: 'historic_backfill_pmtiles_non_renderable_geometries_excluded',
+        runId,
+        validFrom: lease.validFrom,
+        zoneIds: ['42'],
+      }),
+    );
+  });
+
   it('retains the certified legacy empty feature but excludes it from PMTiles integrity', async () => {
     const legacyBody = Buffer.from(
       JSON.stringify({
@@ -257,7 +304,9 @@ describe('HistoricBackfillArtifactBuilderService', () => {
       new AbortController().signal,
     );
 
-    expect(collectPmtilesFeatureIds).not.toHaveBeenCalled();
+    expect(
+      collectComputedHistoricBackfillPmtilesFeatureIds,
+    ).not.toHaveBeenCalled();
     expect(collectLegacyHistoricBackfillPmtilesFeatureIds).toHaveBeenCalledWith(
       expect.any(Array),
       [7626],

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   assertPmtilesFeatureIntegrity,
   buildTippecanoeArguments,
+  collectComputedHistoricBackfillPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
   collectPmtilesFeatureIds,
   generatePmtiles,
@@ -42,6 +43,16 @@ describe('PMTiles generation integrity', () => {
     );
     expect(args.join(' ')).not.toMatch(/drop|coalesce/);
     expect(args).not.toContain('--read-parallel');
+  });
+
+  it('can pin the historic archive maximum zoom', () => {
+    const args = buildTippecanoeArguments('zones.geojson', 'zones.pmtiles', 12);
+
+    expect(args).toContain('-z12');
+    expect(args).not.toContain('-zg');
+    expect(() =>
+      buildTippecanoeArguments('zones.geojson', 'zones.pmtiles', 25),
+    ).toThrow('maximum zoom must be between 0 and 24');
   });
 
   it('rejects duplicate ids and empty source geometries', () => {
@@ -143,6 +154,99 @@ describe('PMTiles generation integrity', () => {
         [7626],
       ),
     ).toThrow('duplicate feature ids (1): 7626');
+  });
+
+  it('excludes only polygons that collapse on the historic PMTiles grid', () => {
+    const collapsedPolygon = {
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.000001, 47],
+            [2, 47.000001],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 10 },
+    };
+    const collapsedMultiPolygon = {
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: [
+          [
+            [
+              [-2, 48],
+              [-2, 48],
+              [-2, 48],
+              [-2, 48],
+            ],
+          ],
+        ],
+      },
+      properties: { id: 20 },
+    };
+    const renderablePolygon = {
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.01, 47],
+            [2, 47.01],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 30 },
+    };
+    const partlyRenderableMultiPolygon = {
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: [
+          collapsedMultiPolygon.geometry.coordinates[0],
+          [renderablePolygon.geometry.coordinates[0]],
+        ],
+      },
+      properties: { id: 40 },
+    };
+
+    expect(
+      collectComputedHistoricBackfillPmtilesFeatureIds([
+        collapsedPolygon,
+        collapsedMultiPolygon,
+        renderablePolygon,
+        partlyRenderableMultiPolygon,
+      ]),
+    ).toEqual({
+      expectedFeatureIds: ['30', '40'],
+      excludedNonRenderableGeometryIds: ['10', '20'],
+    });
+    expect(collectPmtilesFeatureIds([collapsedPolygon])).toEqual(['10']);
+  });
+
+  it('keeps empty and duplicate validation strict for computed backfills', () => {
+    expect(() =>
+      collectComputedHistoricBackfillPmtilesFeatureIds([
+        {
+          geometry: { type: 'Polygon', coordinates: [] },
+          properties: { id: 9 },
+        },
+      ]),
+    ).toThrow('empty feature geometries (1): 9');
+    expect(() =>
+      collectComputedHistoricBackfillPmtilesFeatureIds([
+        {
+          geometry: { type: 'Polygon', coordinates: [[[1, 2]]] },
+          properties: { id: 7 },
+        },
+        {
+          geometry: { type: 'Polygon', coordinates: [[[3, 4]]] },
+          properties: { id: 7 },
+        },
+      ]),
+    ).toThrow('duplicate feature ids (1): 7');
   });
 
   it('accepts every expected id at the archive maximum zoom', async () => {
