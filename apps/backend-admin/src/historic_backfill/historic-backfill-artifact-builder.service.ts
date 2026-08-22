@@ -11,10 +11,10 @@ import { generateEmptyPmtiles } from '../zone_alerte_computed/empty-pmtiles';
 import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from '../zone_alerte_computed/legacy-historic-empty-geometries';
 import {
   assertTippecanoeExecutables,
-  collectComputedHistoricBackfillPmtilesFeatureIds,
+  collectComputedHistoricPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
+  COMPUTED_HISTORIC_PMTILES_MAX_ZOOM,
   generatePmtiles,
-  HISTORIC_BACKFILL_PMTILES_MAX_ZOOM,
 } from '../zone_alerte_computed/pmtiles-generation';
 import {
   HistoricBackfillArtifactLease,
@@ -158,7 +158,7 @@ export class HistoricBackfillArtifactBuilderService {
       }
     } else {
       const computedFeatureIds =
-        collectComputedHistoricBackfillPmtilesFeatureIds(features);
+        collectComputedHistoricPmtilesFeatureIds(features);
       expectedFeatureIds = computedFeatureIds.expectedFeatureIds;
       if (computedFeatureIds.excludedNonRenderableGeometryIds.length > 0) {
         this.logger.warn(
@@ -196,7 +196,7 @@ export class HistoricBackfillArtifactBuilderService {
           expectedFeatureIds,
           maximumZoom:
             lease.validFrom >= COMPUTED_HISTORIC_START_DATE
-              ? HISTORIC_BACKFILL_PMTILES_MAX_ZOOM
+              ? COMPUTED_HISTORIC_PMTILES_MAX_ZOOM
               : undefined,
         });
       }

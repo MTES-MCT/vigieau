@@ -9,7 +9,7 @@ const PMTILES_HEADER_SIZE = 127;
 const PMTILES_MAX_ZOOM_OFFSET = 101;
 const PMTILES_LAYER_NAME = 'zones_arretes_en_vigueur';
 const ERROR_OUTPUT_LIMIT = 8_000;
-export const HISTORIC_BACKFILL_PMTILES_MAX_ZOOM = 12;
+export const COMPUTED_HISTORIC_PMTILES_MAX_ZOOM = 12;
 const VECTOR_TILE_EXTENT = 4_096;
 const WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066;
 
@@ -34,7 +34,7 @@ export interface LegacyHistoricBackfillPmtilesFeatureIds {
   excludedEmptyGeometryIds: string[];
 }
 
-export interface ComputedHistoricBackfillPmtilesFeatureIds {
+export interface ComputedHistoricPmtilesFeatureIds {
   expectedFeatureIds: string[];
   excludedNonRenderableGeometryIds: string[];
 }
@@ -218,7 +218,7 @@ function quantizeWebMercatorPosition(value: unknown): [number, number] | null {
   ) {
     return null;
   }
-  const scale = VECTOR_TILE_EXTENT * 2 ** HISTORIC_BACKFILL_PMTILES_MAX_ZOOM;
+  const scale = VECTOR_TILE_EXTENT * 2 ** COMPUTED_HISTORIC_PMTILES_MAX_ZOOM;
   const longitude = value[0];
   const latitude = Math.max(
     -WEB_MERCATOR_MAX_LATITUDE,
@@ -323,9 +323,9 @@ export function collectLegacyHistoricBackfillPmtilesFeatureIds(
   };
 }
 
-export function collectComputedHistoricBackfillPmtilesFeatureIds(
+export function collectComputedHistoricPmtilesFeatureIds(
   features: readonly PmtilesFeature[],
-): ComputedHistoricBackfillPmtilesFeatureIds {
+): ComputedHistoricPmtilesFeatureIds {
   const result = collectPmtilesFeatureIdsWithEmptyAllowlist(features, [], true);
   return {
     expectedFeatureIds: result.expectedFeatureIds,

@@ -10,15 +10,15 @@ import {
 } from './historic-backfill-artifact-builder.service';
 import {
   assertTippecanoeExecutables,
-  collectComputedHistoricBackfillPmtilesFeatureIds,
+  collectComputedHistoricPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
   generatePmtiles,
 } from '../zone_alerte_computed/pmtiles-generation';
 
 jest.mock('../zone_alerte_computed/pmtiles-generation', () => ({
-  HISTORIC_BACKFILL_PMTILES_MAX_ZOOM: 12,
+  COMPUTED_HISTORIC_PMTILES_MAX_ZOOM: 12,
   assertTippecanoeExecutables: jest.fn().mockResolvedValue(undefined),
-  collectComputedHistoricBackfillPmtilesFeatureIds: jest.fn((features) => ({
+  collectComputedHistoricPmtilesFeatureIds: jest.fn((features) => ({
     expectedFeatureIds: features.map((feature) =>
       String(feature.properties.id),
     ),
@@ -177,9 +177,7 @@ describe('HistoricBackfillArtifactBuilderService', () => {
       ['tippecanoe', 'tippecanoe-decode', 'tile-join'],
     );
     expect(generatePmtiles).toHaveBeenCalledTimes(1);
-    expect(
-      collectComputedHistoricBackfillPmtilesFeatureIds,
-    ).toHaveBeenCalledTimes(1);
+    expect(collectComputedHistoricPmtilesFeatureIds).toHaveBeenCalledTimes(1);
     expect(
       collectLegacyHistoricBackfillPmtilesFeatureIds,
     ).not.toHaveBeenCalled();
@@ -231,12 +229,10 @@ describe('HistoricBackfillArtifactBuilderService', () => {
 
   it('keeps collapsed computed features in GeoJSON and excludes them from PMTiles', async () => {
     const harness = await createHarness();
-    jest
-      .mocked(collectComputedHistoricBackfillPmtilesFeatureIds)
-      .mockReturnValueOnce({
-        expectedFeatureIds: [],
-        excludedNonRenderableGeometryIds: ['42'],
-      });
+    jest.mocked(collectComputedHistoricPmtilesFeatureIds).mockReturnValueOnce({
+      expectedFeatureIds: [],
+      excludedNonRenderableGeometryIds: ['42'],
+    });
     const warning = jest
       .spyOn(RegleauLogger.prototype, 'warn')
       .mockImplementation(() => undefined);
@@ -304,9 +300,7 @@ describe('HistoricBackfillArtifactBuilderService', () => {
       new AbortController().signal,
     );
 
-    expect(
-      collectComputedHistoricBackfillPmtilesFeatureIds,
-    ).not.toHaveBeenCalled();
+    expect(collectComputedHistoricPmtilesFeatureIds).not.toHaveBeenCalled();
     expect(collectLegacyHistoricBackfillPmtilesFeatureIds).toHaveBeenCalledWith(
       expect.any(Array),
       [7626],

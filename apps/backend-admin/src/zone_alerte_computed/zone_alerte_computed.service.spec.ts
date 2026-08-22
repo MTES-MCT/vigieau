@@ -5007,6 +5007,163 @@ describe('ZoneAlerteComputedHistoricService', () => {
     }
   });
 
+  it('excludes non-renderable computed historic polygons from PMTiles integrity', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-historic-non-renderable-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generatePmtiles = jest
+      .spyOn(pmtilesGeneration, 'generatePmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-computed'));
+      });
+    const warning = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const collapsedFeature = {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.000001, 47],
+            [2, 47.000001],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 10 },
+    };
+    const renderableFeature = {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.01, 47],
+            [2, 47.01],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 30 },
+    };
+    zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).formatComputedHistoricZones = jest
+      .fn()
+      .mockResolvedValue([collapsedFeature, renderableFeature]);
+    (service as any).computeGeoJson =
+      ZoneAlerteComputedHistoricService.prototype.computeGeoJson.bind(service);
+
+    try {
+      await service.computeGeoJson(moment('2026-08-20', 'YYYY-MM-DD'), []);
+
+      expect(generatePmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        inputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2026-08-20.geojson',
+        ),
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2026-08-20.pmtiles',
+        ),
+        expectedFeatureIds: ['30'],
+        maximumZoom: 12,
+      });
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString()).features).toEqual(
+        [collapsedFeature, renderableFeature],
+      );
+      expect(warning).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: 'computed_historic_pmtiles_non_renderable_geometries_excluded',
+          computedFor: '2026-08-20',
+          zoneIds: ['10'],
+        }),
+      );
+    } finally {
+      warning.mockRestore();
+      generatePmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('generates empty PMTiles when every computed historic polygon is non-renderable', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-historic-all-non-renderable-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generatePmtiles = jest.spyOn(pmtilesGeneration, 'generatePmtiles');
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const warning = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const collapsedFeature = {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.000001, 47],
+            [2, 47.000001],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 10 },
+    };
+    zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).formatComputedHistoricZones = jest
+      .fn()
+      .mockResolvedValue([collapsedFeature]);
+    (service as any).computeGeoJson =
+      ZoneAlerteComputedHistoricService.prototype.computeGeoJson.bind(service);
+
+    try {
+      await service.computeGeoJson(moment('2026-08-20', 'YYYY-MM-DD'), []);
+
+      expect(generatePmtiles).not.toHaveBeenCalled();
+      expect(generateEmptyPmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2026-08-20.pmtiles',
+        ),
+      });
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString()).features).toEqual(
+        [collapsedFeature],
+      );
+    } finally {
+      warning.mockRestore();
+      generateEmptyPmtiles.mockRestore();
+      generatePmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rejects an empty computed artifact when source restrictions are mappable', async () => {
     zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
     arreteRestrictionService.findByDate.mockResolvedValue([{ id: 42 }]);

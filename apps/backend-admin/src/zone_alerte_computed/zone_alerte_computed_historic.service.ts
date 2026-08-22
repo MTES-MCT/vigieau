@@ -35,8 +35,9 @@ import {
 import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from './legacy-historic-empty-geometries';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import {
+  collectComputedHistoricPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
-  collectPmtilesFeatureIds,
+  COMPUTED_HISTORIC_PMTILES_MAX_ZOOM,
   generatePmtiles,
 } from './pmtiles-generation';
 
@@ -2133,7 +2134,19 @@ DELETE FROM zone_alerte_computed_historic
       type: 'FeatureCollection',
       features: allZones,
     };
-    const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(allZones);
+    const computedPmtilesFeatureIds =
+      collectComputedHistoricPmtilesFeatureIds(allZones);
+    const expectedPmtilesFeatureIds =
+      computedPmtilesFeatureIds.expectedFeatureIds;
+    if (computedPmtilesFeatureIds.excludedNonRenderableGeometryIds.length > 0) {
+      this.logger.warn(
+        JSON.stringify({
+          type: 'computed_historic_pmtiles_non_renderable_geometries_excluded',
+          computedFor: date.format('YYYY-MM-DD'),
+          zoneIds: computedPmtilesFeatureIds.excludedNonRenderableGeometryIds,
+        }),
+      );
+    }
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
     const fileName = `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}`;
@@ -2143,7 +2156,7 @@ DELETE FROM zone_alerte_computed_historic
       [geojsonPath, pmtilesPath],
       async () => {
         await writeFile(geojsonPath, JSON.stringify(geojson));
-        if (allZones.length === 0) {
+        if (expectedPmtilesFeatureIds.length === 0) {
           await generateEmptyPmtiles({
             workingDirectory: path,
             outputPath: pmtilesPath,
@@ -2154,6 +2167,7 @@ DELETE FROM zone_alerte_computed_historic
             inputPath: geojsonPath,
             outputPath: pmtilesPath,
             expectedFeatureIds: expectedPmtilesFeatureIds,
+            maximumZoom: COMPUTED_HISTORIC_PMTILES_MAX_ZOOM,
           });
         }
         const fileToTransferPmtiles = {

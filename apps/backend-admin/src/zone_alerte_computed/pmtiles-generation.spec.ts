@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import {
   assertPmtilesFeatureIntegrity,
   buildTippecanoeArguments,
-  collectComputedHistoricBackfillPmtilesFeatureIds,
+  collectComputedHistoricPmtilesFeatureIds,
   collectLegacyHistoricBackfillPmtilesFeatureIds,
   collectPmtilesFeatureIds,
   generatePmtiles,
@@ -213,7 +213,7 @@ describe('PMTiles generation integrity', () => {
     };
 
     expect(
-      collectComputedHistoricBackfillPmtilesFeatureIds([
+      collectComputedHistoricPmtilesFeatureIds([
         collapsedPolygon,
         collapsedMultiPolygon,
         renderablePolygon,
@@ -224,11 +224,17 @@ describe('PMTiles generation integrity', () => {
       excludedNonRenderableGeometryIds: ['10', '20'],
     });
     expect(collectPmtilesFeatureIds([collapsedPolygon])).toEqual(['10']);
+    expect(
+      collectLegacyHistoricBackfillPmtilesFeatureIds([collapsedPolygon], []),
+    ).toEqual({
+      expectedFeatureIds: ['10'],
+      excludedEmptyGeometryIds: [],
+    });
   });
 
   it('keeps empty and duplicate validation strict for computed backfills', () => {
     expect(() =>
-      collectComputedHistoricBackfillPmtilesFeatureIds([
+      collectComputedHistoricPmtilesFeatureIds([
         {
           geometry: { type: 'Polygon', coordinates: [] },
           properties: { id: 9 },
@@ -236,7 +242,7 @@ describe('PMTiles generation integrity', () => {
       ]),
     ).toThrow('empty feature geometries (1): 9');
     expect(() =>
-      collectComputedHistoricBackfillPmtilesFeatureIds([
+      collectComputedHistoricPmtilesFeatureIds([
         {
           geometry: { type: 'Polygon', coordinates: [[[1, 2]]] },
           properties: { id: 7 },
