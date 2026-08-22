@@ -7,6 +7,10 @@ export const ZONE_PUBLICATION_DATAGOUV_PROMOTION_LOCK =
 export const PUBLIC_SOURCE_REVISION_ENABLED_ENV =
   'PUBLIC_SOURCE_REVISION_ENABLED';
 
+export function zoneGeojsonContentDisposition(fileName: string): string {
+  return `attachment; filename="${fileName}"`;
+}
+
 export function isZonePublicationEnabled(): boolean {
   return process.env.ZONE_PUBLICATION_ENABLED?.trim().toLowerCase() === 'true';
 }

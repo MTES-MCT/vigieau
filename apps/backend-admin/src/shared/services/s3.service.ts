@@ -16,6 +16,7 @@ export type S3ObjectAcl = 'private' | 'public-read';
 export interface S3WriteOptions {
   acl?: S3ObjectAcl;
   cacheControl?: string;
+  contentDisposition?: string;
   contentType?: string;
 }
 
@@ -138,10 +139,15 @@ export class S3Service {
       CopySource: encodeURI(oldFileUrl),
       Key: String(newFileUrl),
       ACL: options?.acl ?? 'public-read',
-      ...(options?.cacheControl || options?.contentType
+      ...(options?.cacheControl ||
+      options?.contentDisposition ||
+      options?.contentType
         ? {
             ...(options.cacheControl
               ? { CacheControl: options.cacheControl }
+              : {}),
+            ...(options.contentDisposition
+              ? { ContentDisposition: options.contentDisposition }
               : {}),
             ...(options.contentType
               ? { ContentType: options.contentType }
@@ -221,6 +227,9 @@ export class S3Service {
         ACL: options.acl ?? 'public-read',
         ContentType: mimetype,
         ...(options.cacheControl ? { CacheControl: options.cacheControl } : {}),
+        ...(options.contentDisposition
+          ? { ContentDisposition: options.contentDisposition }
+          : {}),
       },
     });
 

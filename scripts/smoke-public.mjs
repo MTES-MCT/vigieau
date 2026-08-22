@@ -113,6 +113,11 @@ assert.ok(
   [200, 206].includes(geojsonResponse.status),
   `GeoJSON Range returned ${geojsonResponse.status}`,
 );
+assert.match(
+  geojsonResponse.headers.get("content-disposition") || "",
+  /^attachment;\s*filename="?zones_arretes_en_vigueur\.geojson"?$/i,
+  "The GeoJSON artifact is not served as a download",
+);
 const geojsonReader = geojsonResponse.body?.getReader();
 assert.ok(geojsonReader, "The GeoJSON response has no body");
 const geojsonChunk = await geojsonReader.read();

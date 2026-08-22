@@ -3090,6 +3090,8 @@ describe('ZoneAlerteComputedService', () => {
       {
         abortSignal: expect.any(AbortSignal),
         cacheControl: 'public, max-age=31536000, immutable',
+        contentDisposition:
+          'attachment; filename="zones_arretes_en_vigueur.geojson"',
         contentType: 'application/geo+json',
       },
       {
@@ -3143,6 +3145,7 @@ describe('ZoneAlerteComputedService', () => {
           _options: {
             abortSignal: AbortSignal;
             cacheControl: string;
+            contentDisposition?: string;
             contentType: string;
           },
         ) => {
@@ -3187,6 +3190,7 @@ describe('ZoneAlerteComputedService', () => {
         file: file.originalname,
         prefix,
         cacheControl: options.cacheControl,
+        contentDisposition: options.contentDisposition,
         contentType: options.contentType,
         hasAbortSignal: options.abortSignal instanceof AbortSignal,
       })),
@@ -3195,6 +3199,8 @@ describe('ZoneAlerteComputedService', () => {
         file: 'zones_arretes_en_vigueur.geojson',
         prefix: 'geojson/',
         cacheControl: 'public, max-age=0, must-revalidate',
+        contentDisposition:
+          'attachment; filename="zones_arretes_en_vigueur.geojson"',
         contentType: 'application/geo+json',
         hasAbortSignal: true,
       },
@@ -3202,6 +3208,7 @@ describe('ZoneAlerteComputedService', () => {
         file: 'zones_arretes_en_vigueur.pmtiles',
         prefix: 'pmtiles/',
         cacheControl: 'public, max-age=0, must-revalidate',
+        contentDisposition: undefined,
         contentType: 'application/vnd.pmtiles',
         hasAbortSignal: true,
       },
@@ -3226,6 +3233,8 @@ describe('ZoneAlerteComputedService', () => {
         {
           abortSignal: expect.any(AbortSignal),
           cacheControl: 'public, max-age=0, must-revalidate',
+          contentDisposition:
+            'attachment; filename="zones_arretes_en_vigueur_2026-07-31.geojson"',
           contentType: 'application/geo+json',
         },
       ],
