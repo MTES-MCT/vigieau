@@ -224,7 +224,17 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
   jest
     .spyOn(service, 'enqueueCurrentZoneRecomputeWithManager')
     .mockResolvedValue(undefined);
-  jest.spyOn(service, 'recordPublicMutation').mockResolvedValue('43');
+  const invalidateComputationsFromWithManager = jest.spyOn(
+    service,
+    'invalidateComputationsFromWithManager',
+  );
+  const recordPublicMutation = jest
+    .spyOn(service, 'recordPublicMutation')
+    .mockResolvedValue('43');
+  const synchronizeArreteRestrictionEndDate = jest.spyOn(
+    service as any,
+    'synchronizeArreteRestrictionEndDate',
+  );
   const checkModifications = jest
     .spyOn(service as any, 'checkModifications')
     .mockResolvedValue(undefined);
@@ -250,11 +260,14 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
     },
     lockQuery,
     manager,
+    invalidateComputationsFromWithManager,
+    recordPublicMutation,
     repository,
     requestCurrentZoneRecompute,
     restrictionService,
     service,
     states,
+    synchronizeArreteRestrictionEndDate,
     transactionRepository,
   };
 }
@@ -462,8 +475,17 @@ describe('ArreteRestrictionService chain mutations', () => {
       statut: 'publie',
     });
     expect(harness.transactionRepository.delete).toHaveBeenCalledWith(300);
+    expect(harness.invalidateComputationsFromWithManager).toHaveBeenCalledWith(
+      harness.manager,
+      '2026-07-01',
+    );
+    expect(harness.recordPublicMutation).toHaveBeenCalledWith(
+      harness.manager,
+      [53],
+      'SUPPRESSION AR',
+    );
     expect(harness.manager.query).toHaveBeenLastCalledWith(
-      expect.stringContaining('UPDATE config'),
+      expect.stringContaining('UPDATE "config"'),
       ['2026-07-01'],
     );
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
@@ -630,11 +652,11 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.manager.query).not.toHaveBeenCalled();
   });
 
-  it('deletes an undated draft without triggering historic invalidation', async () => {
+  it('deletes a dated draft without touching historic control-plane state', async () => {
     const harness = createHarness(
       [
         createState(500, {
-          dateDebut: null,
+          dateDebut: '2026-07-01',
           statut: 'a_valider',
         }),
       ],
@@ -644,6 +666,39 @@ describe('ArreteRestrictionService chain mutations', () => {
     await harness.service.remove(500, currentUser);
 
     expect(harness.states.has(500)).toBe(false);
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
+  it('does not reconcile a public predecessor when deleting its draft successor', async () => {
+    const harness = createHarness(
+      [
+        createState(100, { statut: 'publie' }),
+        createState(500, {
+          dateDebut: '2026-07-15',
+          statut: 'a_valider',
+          predecessorId: 100,
+        }),
+      ],
+      500,
+    );
+
+    await harness.service.remove(500, currentUser);
+
+    expect(harness.states.has(500)).toBe(false);
+    expect(harness.states.get(100)).toMatchObject({
+      dateFin: null,
+      statut: 'publie',
+    });
+    expect(harness.synchronizeArreteRestrictionEndDate).not.toHaveBeenCalled();
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
     expect(harness.manager.query).not.toHaveBeenCalled();
     expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
   });

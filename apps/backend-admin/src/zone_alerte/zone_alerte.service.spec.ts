@@ -258,6 +258,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     }>;
     globalLockAvailable?: boolean;
     exactAuditBatch?: Record<string, unknown> | null;
+    historicDirtyFrom?: string | null;
+    historicInvalidationSucceeds?: boolean;
   }) => {
     const zoneRepository = {
       create: jest.fn(() => ({})),
@@ -325,6 +327,30 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const manager = {
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
+        if (
+          query.includes('MIN(restriction_order."dateDebut")') &&
+          query.includes('FROM "arrete_restriction"')
+        ) {
+          return [
+            {
+              dirtyFrom:
+                options && 'historicDirtyFrom' in options
+                  ? options.historicDirtyFrom
+                  : '2011-06-07',
+            },
+          ];
+        }
+        if (
+          query.includes('information_schema.columns') &&
+          query.includes("column_name = 'historicComputeEpoch'")
+        ) {
+          return [{ exists: true }];
+        }
+        if (query.includes('UPDATE "config"')) {
+          return options?.historicInvalidationSucceeds === false
+            ? [[], 0]
+            : [[{ id: 1 }], 1];
+        }
         if (
           query.includes('UPDATE "zone_publication_source_state"') &&
           query.includes('RETURNING "publicRevision"')
@@ -1331,20 +1357,105 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const publicRevisionCallIndex = harness.manager.query.mock.calls.findIndex(
       ([query]) => query.includes('UPDATE "zone_publication_source_state"'),
     );
+    const historicInvalidationCallIndex =
+      harness.manager.query.mock.calls.findIndex(([query]) =>
+        query.includes('UPDATE "config"'),
+      );
+    const historicBoundaryCallIndex =
+      harness.manager.query.mock.calls.findIndex(([query]) =>
+        query.includes('MIN(restriction_order."dateDebut")'),
+      );
     expect(publicRevisionCallIndex).toBeGreaterThanOrEqual(0);
+    expect(historicInvalidationCallIndex).toBeGreaterThanOrEqual(0);
+    expect(historicBoundaryCallIndex).toBeGreaterThanOrEqual(0);
+    const [historicBoundarySql, historicBoundaryParameters] =
+      harness.manager.query.mock.calls[historicBoundaryCallIndex];
+    expect(historicBoundarySql).toContain(
+      'restriction_order."departementId" = $1',
+    );
+    expect(historicBoundarySql).toContain(
+      'restriction_order."dateDebut" < $2::date',
+    );
+    expect(historicBoundaryParameters).toEqual([
+      department.id,
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+    ]);
+    const [historicInvalidationSql, historicInvalidationParameters] =
+      harness.manager.query.mock.calls[historicInvalidationCallIndex];
+    expect(historicInvalidationSql).toContain(
+      '"historicComputeEpoch" = "historicComputeEpoch" + 1',
+    );
+    expect(historicInvalidationSql).toContain(
+      '"computeMapGeneration" = "computeMapGeneration" + 1',
+    );
+    expect(historicInvalidationSql).toContain(
+      '"computeStatsGeneration" = "computeStatsGeneration" + 1',
+    );
+    expect(historicInvalidationParameters).toEqual(['2011-06-07']);
     expect(harness.manager.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO "zone_type_availability"'),
+      expect.stringContaining(
+        'INSERT INTO "historic_backfill_department_revision"',
+      ),
       [[department.id], '43'],
+    );
+    expect(harness.manager.query.mock.calls).not.toEqual(
+      expect.arrayContaining([
+        [
+          expect.stringContaining('INSERT INTO "zone_type_availability"'),
+          expect.anything(),
+        ],
+      ]),
     );
     expect(harness.manager.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO "current_zone_recompute_request"'),
       [[department.id], '43', 'SYNCHRONISATION SANDRE', null],
     );
     expect(
+      harness.manager.query.mock.invocationCallOrder[
+        historicInvalidationCallIndex
+      ],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    );
+    expect(
       harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
     ).toBeLessThan(
       harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
     );
+  });
+
+  it('rolls back the Sandre mutation when historic invalidation fails', async () => {
+    const harness = createHarness({ historicInvalidationSucceeds: false });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'Unable to invalidate zone computations',
+    );
+
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "zone_publication_source_state"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the historic epoch for a current-only Sandre mutation', async () => {
+    const harness = createHarness({ historicDirtyFrom: null });
+
+    await harness.service.updateDepartementZones('65');
+
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "config"'),
+      ),
+    ).toBe(false);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "zone_publication_source_state"'),
+      ),
+    ).toBe(true);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('binds a virtual-target audit before promoting and splitting a strict legacy source', async () => {
@@ -3025,6 +3136,11 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       }),
     );
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "config"'),
+      ),
+    ).toBe(false);
   });
 
   it('fails closed before the domain preflight without an exact audit', async () => {
@@ -3718,6 +3834,40 @@ describe('ZoneAlerteService geometry reads', () => {
 
     await expect(service.findGeometriesByIds([])).resolves.toEqual(new Map());
     expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
+  it('allows only allowlisted valid MultiPolygon empties for legacy history', async () => {
+    const emptyGeometry = '{"type":"MultiPolygon","coordinates":[]}';
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([{ id: 7626, geom: emptyGeometry }]),
+    };
+    const service = createService({} as any, dataSource);
+
+    const geometries = await service.findLegacyHistoricGeometriesByIds(
+      [7626],
+      [7626],
+    );
+
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'normalized.id = ANY($2::int[])',
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      "ST_GeometryType(normalized.geom) <> 'ST_MultiPolygon'",
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'OR NOT ST_IsValid(normalized.geom, 0)',
+    );
+    expect(dataSource.query.mock.calls[0][1]).toEqual([[7626], [7626]]);
+    expect(geometries.get(7626)).toBe(emptyGeometry);
+  });
+
+  it('fails closed when a legacy geometry is not returned by the allowlisted query', async () => {
+    const dataSource = { query: jest.fn().mockResolvedValue([]) };
+    const service = createService({} as any, dataSource);
+
+    await expect(
+      service.findLegacyHistoricGeometriesByIds([9], [7626]),
+    ).rejects.toThrow('Missing geometry for alert zone(s): 9');
   });
 
   it('fails when a requested geometry is absent', async () => {

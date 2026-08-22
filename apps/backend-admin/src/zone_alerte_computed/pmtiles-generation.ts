@@ -1,12 +1,17 @@
 import { spawn } from 'node:child_process';
-import { open, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, open, rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { isExactEmptyMultiPolygonGeometry } from './legacy-historic-empty-geometries';
 
 const PMTILES_HEADER_SIZE = 127;
 const PMTILES_MAX_ZOOM_OFFSET = 101;
 const PMTILES_LAYER_NAME = 'zones_arretes_en_vigueur';
 const ERROR_OUTPUT_LIMIT = 8_000;
+export const COMPUTED_HISTORIC_PMTILES_MAX_ZOOM = 12;
+const VECTOR_TILE_EXTENT = 4_096;
+const WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066;
 
 type CommandRunner = (
   executable: string,
@@ -20,17 +25,48 @@ type DecodeRunner = (
 ) => Promise<void>;
 
 interface PmtilesFeature {
-  geometry?: { coordinates?: unknown };
+  geometry?: { type?: unknown; coordinates?: unknown };
   properties?: { id?: unknown };
+}
+
+export interface LegacyHistoricBackfillPmtilesFeatureIds {
+  expectedFeatureIds: string[];
+  excludedEmptyGeometryIds: string[];
+}
+
+export interface ComputedHistoricPmtilesFeatureIds {
+  expectedFeatureIds: string[];
+  excludedNonRenderableGeometryIds: string[];
 }
 
 export interface GeneratePmtilesOptions {
   workingDirectory: string;
+  tippecanoeBinDirectory?: string;
   inputPath: string;
   outputPath: string;
   expectedFeatureIds: readonly string[];
+  maximumZoom?: number;
   commandRunner?: CommandRunner;
   decodeRunner?: DecodeRunner;
+}
+
+async function assertExecutable(executable: string): Promise<void> {
+  try {
+    await access(executable, constants.X_OK);
+  } catch {
+    throw new Error(
+      `Required Tippecanoe executable is not executable: ${executable}`,
+    );
+  }
+}
+
+export async function assertTippecanoeExecutables(
+  binDirectory: string,
+  executableNames: readonly string[],
+): Promise<void> {
+  for (const executableName of executableNames) {
+    await assertExecutable(join(binDirectory, executableName));
+  }
 }
 
 export interface AssertPmtilesIntegrityOptions {
@@ -171,6 +207,97 @@ function hasCoordinatePair(value: unknown): boolean {
   return value.some(hasCoordinatePair);
 }
 
+function quantizeWebMercatorPosition(value: unknown): [number, number] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length < 2 ||
+    typeof value[0] !== 'number' ||
+    !Number.isFinite(value[0]) ||
+    typeof value[1] !== 'number' ||
+    !Number.isFinite(value[1])
+  ) {
+    return null;
+  }
+  const scale = VECTOR_TILE_EXTENT * 2 ** COMPUTED_HISTORIC_PMTILES_MAX_ZOOM;
+  const longitude = value[0];
+  const latitude = Math.max(
+    -WEB_MERCATOR_MAX_LATITUDE,
+    Math.min(WEB_MERCATOR_MAX_LATITUDE, value[1]),
+  );
+  const sinLatitude = Math.sin((latitude * Math.PI) / 180);
+  return [
+    Math.round(((longitude + 180) / 360) * scale),
+    Math.round(
+      (0.5 - Math.log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * Math.PI)) *
+        scale,
+    ),
+  ];
+}
+
+function quantizedRingHasArea(value: unknown): boolean | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  let first: [number, number] | null = null;
+  let previous: [number, number] | null = null;
+  let twiceArea = 0;
+  for (const coordinate of value) {
+    const position = quantizeWebMercatorPosition(coordinate);
+    if (!position) {
+      return null;
+    }
+    first ??= position;
+    if (previous) {
+      twiceArea += previous[0] * position[1] - position[0] * previous[1];
+    }
+    previous = position;
+  }
+  twiceArea += previous![0] * first![1] - first![0] * previous![1];
+  if (twiceArea !== 0) {
+    return true;
+  }
+
+  // Exact arithmetic is only needed for the rare zero-area candidates.
+  let exactPrevious: [number, number] | null = null;
+  let exactTwiceArea = 0n;
+  for (const coordinate of value) {
+    const position = quantizeWebMercatorPosition(coordinate)!;
+    if (exactPrevious) {
+      exactTwiceArea +=
+        BigInt(exactPrevious[0]) * BigInt(position[1]) -
+        BigInt(position[0]) * BigInt(exactPrevious[1]);
+    }
+    exactPrevious = position;
+  }
+  exactTwiceArea +=
+    BigInt(exactPrevious![0]) * BigInt(first![1]) -
+    BigInt(first![0]) * BigInt(exactPrevious![1]);
+  return exactTwiceArea !== 0n;
+}
+
+function isNonRenderablePolygonGeometry(
+  geometry: PmtilesFeature['geometry'],
+): boolean {
+  if (!geometry || !Array.isArray(geometry.coordinates)) {
+    return false;
+  }
+  let exteriorRings: unknown[];
+  if (geometry.type === 'Polygon') {
+    exteriorRings = [geometry.coordinates[0]];
+  } else if (geometry.type === 'MultiPolygon') {
+    exteriorRings = geometry.coordinates.map((polygon) =>
+      Array.isArray(polygon) ? polygon[0] : undefined,
+    );
+  } else {
+    return false;
+  }
+  if (exteriorRings.length === 0) {
+    return false;
+  }
+  const areas = exteriorRings.map(quantizedRingHasArea);
+  return areas.every((hasArea) => hasArea === false);
+}
+
 function formatIds(ids: readonly string[]): string {
   return ids.slice(0, 20).join(',');
 }
@@ -178,10 +305,52 @@ function formatIds(ids: readonly string[]): string {
 export function collectPmtilesFeatureIds(
   features: readonly PmtilesFeature[],
 ): string[] {
+  return collectPmtilesFeatureIdsWithEmptyAllowlist(features, [])
+    .expectedFeatureIds;
+}
+
+export function collectLegacyHistoricBackfillPmtilesFeatureIds(
+  features: readonly PmtilesFeature[],
+  allowedEmptyGeometryIds: readonly number[],
+): LegacyHistoricBackfillPmtilesFeatureIds {
+  const result = collectPmtilesFeatureIdsWithEmptyAllowlist(
+    features,
+    allowedEmptyGeometryIds,
+  );
+  return {
+    expectedFeatureIds: result.expectedFeatureIds,
+    excludedEmptyGeometryIds: result.excludedEmptyGeometryIds,
+  };
+}
+
+export function collectComputedHistoricPmtilesFeatureIds(
+  features: readonly PmtilesFeature[],
+): ComputedHistoricPmtilesFeatureIds {
+  const result = collectPmtilesFeatureIdsWithEmptyAllowlist(features, [], true);
+  return {
+    expectedFeatureIds: result.expectedFeatureIds,
+    excludedNonRenderableGeometryIds: result.excludedNonRenderableGeometryIds,
+  };
+}
+
+function collectPmtilesFeatureIdsWithEmptyAllowlist(
+  features: readonly PmtilesFeature[],
+  allowedEmptyGeometryIds: readonly number[],
+  excludeNonRenderablePolygonGeometries = false,
+): LegacyHistoricBackfillPmtilesFeatureIds & {
+  excludedNonRenderableGeometryIds: string[];
+} {
   const ids: string[] = [];
   const duplicates = new Set<string>();
   const emptyGeometryIds: string[] = [];
+  const disallowedEmptyGeometryIds: string[] = [];
+  const nonRenderableGeometryIds: string[] = [];
   const seen = new Set<string>();
+  const allowedEmptyIds = new Set(
+    allowedEmptyGeometryIds.map((id) =>
+      normalizeFeatureId(id, 'Allowed empty GeoJSON features'),
+    ),
+  );
 
   for (const feature of features) {
     const id = normalizeFeatureId(feature.properties?.id, 'GeoJSON');
@@ -189,10 +358,25 @@ export function collectPmtilesFeatureIds(
       duplicates.add(id);
     }
     seen.add(id);
-    ids.push(id);
     if (!hasCoordinatePair(feature.geometry?.coordinates)) {
-      emptyGeometryIds.push(id);
+      if (
+        allowedEmptyIds.has(id) &&
+        isExactEmptyMultiPolygonGeometry(feature.geometry)
+      ) {
+        emptyGeometryIds.push(id);
+      } else {
+        disallowedEmptyGeometryIds.push(id);
+      }
+      continue;
     }
+    if (
+      excludeNonRenderablePolygonGeometries &&
+      isNonRenderablePolygonGeometry(feature.geometry)
+    ) {
+      nonRenderableGeometryIds.push(id);
+      continue;
+    }
+    ids.push(id);
   }
 
   if (duplicates.size > 0) {
@@ -201,12 +385,16 @@ export function collectPmtilesFeatureIds(
       `GeoJSON contains duplicate feature ids (${values.length}): ${formatIds(values)}`,
     );
   }
-  if (emptyGeometryIds.length > 0) {
+  if (disallowedEmptyGeometryIds.length > 0) {
     throw new Error(
-      `GeoJSON contains empty feature geometries (${emptyGeometryIds.length}): ${formatIds(emptyGeometryIds)}`,
+      `GeoJSON contains empty feature geometries (${disallowedEmptyGeometryIds.length}): ${formatIds(disallowedEmptyGeometryIds)}`,
     );
   }
-  return ids;
+  return {
+    expectedFeatureIds: ids,
+    excludedEmptyGeometryIds: emptyGeometryIds,
+    excludedNonRenderableGeometryIds: nonRenderableGeometryIds,
+  };
 }
 
 async function readPmtilesMaxZoom(pmtilesPath: string): Promise<number> {
@@ -230,14 +418,22 @@ async function readPmtilesMaxZoom(pmtilesPath: string): Promise<number> {
 export function buildTippecanoeArguments(
   inputPath: string,
   outputPath: string,
+  maximumZoom?: number,
 ): string[] {
+  if (
+    maximumZoom !== undefined &&
+    (!Number.isInteger(maximumZoom) || maximumZoom < 0 || maximumZoom > 24)
+  ) {
+    throw new Error('Tippecanoe maximum zoom must be between 0 and 24');
+  }
   return [
     '-Z4',
-    '-zg',
+    maximumZoom === undefined ? '-zg' : `-z${maximumZoom}`,
     '--no-tile-size-limit',
     '--no-feature-limit',
     '--force',
-    '--read-parallel',
+    // The input is one compact FeatureCollection line; Tippecanoe's line
+    // splitter makes --read-parallel pathologically expensive for this shape.
     '--detect-shared-borders',
     '--no-tiny-polygon-reduction-at-maximum-zoom',
     '--simplification=28',
@@ -307,22 +503,27 @@ export async function assertPmtilesFeatureIntegrity({
 
 export async function generatePmtiles({
   workingDirectory,
+  tippecanoeBinDirectory = join(workingDirectory, 'tippecanoe_program/bin'),
   inputPath,
   outputPath,
   expectedFeatureIds,
+  maximumZoom,
   commandRunner = runCommand,
   decodeRunner = decodeLines,
 }: GeneratePmtilesOptions): Promise<void> {
+  const tippecanoePath = join(tippecanoeBinDirectory, 'tippecanoe');
+  const decoderPath = join(tippecanoeBinDirectory, 'tippecanoe-decode');
   try {
+    await assertTippecanoeExecutables(tippecanoeBinDirectory, [
+      'tippecanoe',
+      'tippecanoe-decode',
+    ]);
     await commandRunner(
-      join(workingDirectory, 'tippecanoe_program/bin/tippecanoe'),
-      buildTippecanoeArguments(inputPath, outputPath),
+      tippecanoePath,
+      buildTippecanoeArguments(inputPath, outputPath, maximumZoom),
     );
     await assertPmtilesFeatureIntegrity({
-      decoderPath: join(
-        workingDirectory,
-        'tippecanoe_program/bin/tippecanoe-decode',
-      ),
+      decoderPath,
       pmtilesPath: outputPath,
       expectedFeatureIds,
       decodeRunner,

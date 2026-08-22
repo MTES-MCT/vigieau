@@ -264,7 +264,12 @@ const publishArrete = async (ar: ArreteRestriction): Promise<boolean> => {
     const { data, error } = await api.arreteRestriction.publish(ar.id?.toString(), ar);
 
     if (error.value) {
-      apiErrorHandler.captureClientError(error.value, publicationContext('publish'));
+      apiErrorHandler.showError(
+        error.value,
+        "Impossible de publier l'arrêté de restriction",
+        'La publication n’a pas abouti. Vérifiez les informations puis réessayez.',
+        publicationContext('publish'),
+      );
       return false;
     }
 
@@ -386,11 +391,7 @@ const graviteFormRef = ref(null);
       />
     </DsfrTabContent>
     <DsfrTabContent :selected="currentStep === totalSteps" :asc="asc">
-      <ArreteRestrictionFormUsages
-        :key="currentStep"
-        :selected="currentStep === totalSteps"
-        :arreteRestriction="arreteRestriction"
-      />
+      <ArreteRestrictionFormUsages :key="currentStep" :selected="currentStep === totalSteps" :arreteRestriction="arreteRestriction" />
     </DsfrTabContent>
   </DsfrTabs>
   <ul

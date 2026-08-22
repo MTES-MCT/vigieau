@@ -43,6 +43,9 @@ describe('ConfigService historic cursor advancement', () => {
       harness.queryBuilder.set.mock.calls[0][0].historicComputeEpoch,
     ).toBeUndefined();
     expect(
+      harness.queryBuilder.set.mock.calls[0][0].historicBackfillGlobalEpoch,
+    ).toBeUndefined();
+    expect(
       harness.queryBuilder.set.mock.calls[0][0].computeMapUpdatedAt(),
     ).toBe('now()');
     expect(harness.queryBuilder.andWhere).toHaveBeenCalledWith(
@@ -112,7 +115,7 @@ describe('ConfigService historic cursor advancement', () => {
     expect(sourceRevisionGuard?.[0]).toContain('FOR SHARE');
   });
 
-  it('increments both cursor generations and the historic epoch once for one invalidation', async () => {
+  it('increments both cursor generations and both global historic fences', async () => {
     const harness = createHarness(1);
 
     await harness.service.setConfig('2026-07-30', '2026-07-30');
@@ -128,6 +131,9 @@ describe('ConfigService historic cursor advancement', () => {
     );
     expect(invalidation.historicComputeEpoch()).toBe(
       '"historicComputeEpoch" + 1',
+    );
+    expect(invalidation.historicBackfillGlobalEpoch()).toBe(
+      '"historicBackfillGlobalEpoch" + 1',
     );
     expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
   });
@@ -146,6 +152,9 @@ describe('ConfigService historic cursor advancement', () => {
       expect(invalidation.historicComputeEpoch()).toBe(
         '"historicComputeEpoch" + 1',
       );
+      expect(invalidation.historicBackfillGlobalEpoch()).toBe(
+        '"historicBackfillGlobalEpoch" + 1',
+      );
       expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
     },
   );
@@ -161,6 +170,9 @@ describe('ConfigService historic cursor advancement', () => {
     expect(
       harness.queryBuilder.set.mock.calls[0][0].historicComputeEpoch,
     ).toBeUndefined();
+    expect(
+      harness.queryBuilder.set.mock.calls[0][0].historicBackfillGlobalEpoch,
+    ).toBeUndefined();
   });
 
   it('invalidates historic checkpoints once when all cursors are reset', async () => {
@@ -170,6 +182,9 @@ describe('ConfigService historic cursor advancement', () => {
 
     const reset = harness.queryBuilder.set.mock.calls[0][0];
     expect(reset.historicComputeEpoch()).toBe('"historicComputeEpoch" + 1');
+    expect(reset.historicBackfillGlobalEpoch()).toBe(
+      '"historicBackfillGlobalEpoch" + 1',
+    );
     expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
   });
 });

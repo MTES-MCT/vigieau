@@ -1374,6 +1374,14 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       monthlyService.computeCommuneStatisticsRestrictionsByMonth(
         new Date('9998-02-01T00:00:00.000Z'),
       );
+    const computeMonthWithCompletedCandidate = (sourceRevision = '1') =>
+      monthlyService.computeCommuneStatisticsRestrictionsByMonth(
+        new Date('9998-02-01T00:00:00.000Z'),
+        undefined,
+        false,
+        '9998-02-03',
+        { date: '9998-02-03', sourceRevision },
+      );
     const readWeight = async () => {
       const [row] = await queryRunner.query(`
         SELECT item.value ->> 'ponderation' AS "weight"
@@ -1387,6 +1395,36 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
     };
 
     await expect(computeMonth()).resolves.toBeUndefined();
+    await expect(computeMonthWithCompletedCandidate()).resolves.toBeUndefined();
+    await expect(computeMonthWithCompletedCandidate('2')).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "processedCommuneCount" = 0
+      WHERE "snapshotDate" = '9998-02-03' AND "scope" = 'national'
+    `);
+    await expect(computeMonthWithCompletedCandidate()).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "processedCommuneCount" = "expectedCommuneCount"
+      WHERE "snapshotDate" = '9998-02-03' AND "scope" = 'national'
+    `);
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "processedCommuneCount" = 0, "expectedCommuneCount" = 0
+      WHERE "snapshotDate" = '9998-02-03' AND "scope" = 'national'
+    `);
+    await expect(computeMonthWithCompletedCandidate()).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+    await queryRunner.query(`
+      UPDATE "statistic_commune_snapshot"
+      SET "processedCommuneCount" = 1, "expectedCommuneCount" = 1
+      WHERE "snapshotDate" = '9998-02-03' AND "scope" = 'national'
+    `);
     await expect(readWeight()).resolves.toBe('2.5');
     await expect(
       queryRunner.query(`
@@ -1405,6 +1443,9 @@ describeWithPostgres('StatisticCommuneService PostgreSQL behavior', () => {
       ) VALUES ('9998-02-02', 'bootstrap', 'running', NULL)
     `);
     await expect(computeMonth()).rejects.toThrow(
+      'Calcul mensuel communal bloque pour 9998-02',
+    );
+    await expect(computeMonthWithCompletedCandidate()).rejects.toThrow(
       'Calcul mensuel communal bloque pour 9998-02',
     );
 

@@ -3,12 +3,12 @@ import { defineStore } from 'pinia';
 import { computed, Ref, ref } from 'vue';
 import type { ZonePublication } from '../dto/zone-publication.dto';
 import {
-  buildLegacyPmtilesUrl,
   classifyManifestFailure,
   fetchLegacyPmtilesEtag,
   getManifestFailureAction,
   getNextSuccessfulRefreshVersion,
   isZonePublication,
+  resolveCurrentZonePmtilesUrl,
   selectLegacyPmtilesEtag,
 } from '../utils/zone-publication';
 
@@ -39,17 +39,21 @@ export const useZonePublicationStore = defineStore(
       return String(runtimeConfig.public.pmtilesUrl || defaultUrl).trim();
     });
 
-    const pmtilesUrl = computed(() => {
-      if (publication.value) {
-        return publication.value.pmtilesUrl;
-      }
-      return manifestStatus.value === 'legacy'
-        ? buildLegacyPmtilesUrl(
-            configuredPmtilesUrl.value,
-            legacyPmtilesEtag.value,
-          )
-        : '';
-    });
+    const pmtilesUrl = computed(() =>
+      resolveCurrentZonePmtilesUrl(
+        publication.value,
+        manifestStatus.value === 'legacy',
+        configuredPmtilesUrl.value,
+        legacyPmtilesEtag.value,
+      ),
+    );
+
+    const activeSourceRevision = computed(
+      () => publication.value?.sourceRevision ?? null,
+    );
+    const activeHistoricComputeEpoch = computed(
+      () => publication.value?.historicComputeEpoch ?? null,
+    );
 
     async function loadPublication(
       force = false,
@@ -136,6 +140,8 @@ export const useZonePublicationStore = defineStore(
       successfulRefreshVersion,
       legacyPmtilesEtag,
       pmtilesUrl,
+      activeSourceRevision,
+      activeHistoricComputeEpoch,
       configuredPmtilesUrl,
       loadPublication,
     };

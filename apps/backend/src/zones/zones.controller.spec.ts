@@ -143,10 +143,16 @@ describe('ZonesController', () => {
 
   describe('getPublication', () => {
     it('delegates publication resolution to the service', async () => {
-      mockZonesService.getPublication.mockReturnValue({ id: '42' });
+      mockZonesService.getPublication.mockReturnValue({
+        id: '42',
+        sourceRevision: '41',
+        historicComputeEpoch: '9',
+      });
 
       await expect(zonesController.getPublication()).resolves.toEqual({
         id: '42',
+        sourceRevision: '41',
+        historicComputeEpoch: '9',
       });
       expect(zonesService.getPublication).toHaveBeenCalled();
     });

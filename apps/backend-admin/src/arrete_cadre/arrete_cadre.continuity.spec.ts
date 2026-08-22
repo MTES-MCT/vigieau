@@ -554,15 +554,18 @@ describe('ArreteCadreService continuity entry points', () => {
     ).toHaveBeenCalledWith(harness.manager, '2026-07-01');
   });
 
-  it('deletes an undated draft without invalidating historical computations', async () => {
+  it('deletes a dated draft without touching historic control-plane state', async () => {
     const harness = createHarness();
     const draft = createArrete({
       id: 200,
-      dateDebut: null,
+      dateDebut: '2026-07-01',
       statut: 'a_valider',
     });
     harness.lockIds([200]);
     harness.transactionRepository.findOneOrFail.mockResolvedValue(draft);
+    harness.arreteRestrictionService.deleteByArreteCadreId.mockResolvedValue([
+      '2026-06-15',
+    ]);
     jest.spyOn(harness.service, 'findOne').mockResolvedValue(draft);
     jest.spyOn(harness.service, 'canRemoveArreteCadre').mockResolvedValue(true);
 
@@ -573,7 +576,53 @@ describe('ArreteCadreService continuity entry points', () => {
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
     ).not.toHaveBeenCalled();
     expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).not.toHaveBeenCalled();
+    expect(
       harness.arreteRestrictionService.updateArreteRestrictionStatut,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.requestCurrentZoneRecompute,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('does not reconcile a public predecessor when deleting its draft successor', async () => {
+    const harness = createHarness();
+    const draft = createArrete({
+      id: 200,
+      dateDebut: '2026-07-15',
+      statut: 'a_valider',
+      arreteCadreAbroge: { id: 100 },
+    });
+    const predecessor = createArrete({
+      id: 100,
+      dateDebut: '2026-07-01',
+      statut: 'publie',
+      arretesCadre: [{ id: 200, dateDebut: '2026-07-15', statut: 'a_valider' }],
+    });
+    harness.lockIds([100, 200]);
+    harness.transactionRepository.findOneOrFail.mockImplementation(
+      async ({ where: { id } }) => (id === 200 ? draft : predecessor),
+    );
+    jest.spyOn(harness.service, 'findOne').mockResolvedValue(draft);
+    jest.spyOn(harness.service, 'canRemoveArreteCadre').mockResolvedValue(true);
+    const synchronizePredecessor = jest.spyOn(
+      harness.service as any,
+      'synchronizeArreteCadreEndDate',
+    );
+
+    await harness.service.remove(200, currentUser);
+
+    expect(harness.transactionRepository.delete).toHaveBeenCalledWith(200);
+    expect(synchronizePredecessor).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.requestCurrentZoneRecompute,
     ).not.toHaveBeenCalled();
   });
 });

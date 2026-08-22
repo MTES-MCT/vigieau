@@ -1,5 +1,5 @@
 import { BaseApiPagination } from '~/api/base-api-pagination';
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class ArreteRestrictionApi extends BaseApiPagination {
   publish = (id: string, payload: any) => {
@@ -13,11 +13,16 @@ export class ArreteRestrictionApi extends BaseApiPagination {
       formData.append('dateSignature', payload.dateSignature);
     }
 
-    return useCustomFetch(`/${this.resource}/${id}/publier`, {
-      method: 'POST',
-      baseURL: '/api',
-      body: formData,
-    });
+    return useCustomFetch(
+      `/${this.resource}/${id}/publier`,
+      {
+        method: 'POST',
+        baseURL: '/api',
+        body: formData,
+      },
+      60000,
+      false,
+    );
   };
 
   repeal = (id: string, payload: any) => {
@@ -36,5 +41,5 @@ export class ArreteRestrictionApi extends BaseApiPagination {
       baseURL: '/api',
       body: payload,
     });
-  };
+  }
 }

@@ -1293,10 +1293,12 @@ export class ArreteCadreService {
               HttpStatus.CONFLICT,
             );
           }
-          const dirtyFrom = current.dateDebut
-            ? [normalizeCivilDate(current.dateDebut)]
-            : [];
-          if (predecessorId) {
+          const affectsPublicComputations = current.statut !== 'a_valider';
+          const dirtyFrom =
+            affectsPublicComputations && current.dateDebut
+              ? [normalizeCivilDate(current.dateDebut)]
+              : [];
+          if (affectsPublicComputations && predecessorId) {
             const predecessor = await this.findOneForContinuity(
               repository,
               predecessorId,
@@ -1305,13 +1307,15 @@ export class ArreteCadreService {
               dirtyFrom.push(normalizeCivilDate(predecessor.dateDebut));
             }
           }
-          dirtyFrom.push(
-            ...(await this.arreteRestrictionService.deleteByArreteCadreId(
+          const deletedRestrictionDirtyDates =
+            await this.arreteRestrictionService.deleteByArreteCadreId(
               id,
               manager,
               businessDate,
-            )),
-          );
+            );
+          if (affectsPublicComputations) {
+            dirtyFrom.push(...deletedRestrictionDirtyDates);
+          }
           await repository.update(
             { arreteCadreAbroge: { id } },
             { arreteCadreAbroge: null },
@@ -1320,7 +1324,7 @@ export class ArreteCadreService {
           if (deleted.affected !== 1) {
             throw new Error(`Unable to delete framework order ${id}`);
           }
-          if (predecessorId) {
+          if (affectsPublicComputations && predecessorId) {
             await this.synchronizeArreteCadreEndDate(
               repository,
               predecessorId,
@@ -1333,7 +1337,7 @@ export class ArreteCadreService {
               dirtyFrom.sort()[0],
             );
           }
-          if (current.statut !== 'a_valider') {
+          if (affectsPublicComputations) {
             await this.arreteRestrictionService.recordPublicMutation(
               manager,
               arrete.departements.map(({ id: departementId }) => departementId),

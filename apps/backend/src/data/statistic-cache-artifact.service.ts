@@ -31,7 +31,7 @@ export interface StatisticCacheArtifactTarget {
   currentPublishedDate: string;
 }
 
-export interface StatisticCacheCandidateTarget extends StatisticCacheArtifactTarget {
+export interface StatisticCacheMaterializationTarget extends StatisticCacheArtifactTarget {
   protocolVersion: number;
   historicDirtyFrom: string | null;
   historicDirtyThrough: string | null;
@@ -40,6 +40,8 @@ export interface StatisticCacheCandidateTarget extends StatisticCacheArtifactTar
   sourceRevision: string | null;
   historicComputeEpoch: string | null;
 }
+
+export type StatisticCacheCandidateTarget = StatisticCacheMaterializationTarget;
 
 export type StatisticCacheCandidateActivationResult =
   | {
@@ -230,20 +232,18 @@ function normalizeMaterializationError(error: unknown): unknown {
   return boundaryError;
 }
 
-function hasTarget(
+function hasMaterializationTarget(
   payload: StatisticCacheArtifactPayload | null,
-  target: StatisticCacheArtifactTarget,
+  target: StatisticCacheMaterializationTarget,
 ): payload is StatisticCacheArtifactPayload {
   return Boolean(
-    payload &&
-    payload.identity.statisticRevision === target.statisticRevision &&
-    payload.identity.currentPublishedDate === target.currentPublishedDate,
+    payload && hasCandidateIdentityTarget(payload.identity, target),
   );
 }
 
 function hasCandidateIdentityTarget(
   identity: StatisticCacheArtifactIdentity | null,
-  target: StatisticCacheCandidateTarget,
+  target: StatisticCacheMaterializationTarget,
 ): identity is StatisticCacheArtifactIdentity {
   return Boolean(
     identity &&
@@ -256,6 +256,23 @@ function hasCandidateIdentityTarget(
     identity.historicStatsCursor === target.historicStatsCursor &&
     identity.sourceRevision === target.sourceRevision &&
     identity.historicComputeEpoch === target.historicComputeEpoch,
+  );
+}
+
+function candidateMatchesTarget(
+  candidate: StatisticCacheArtifactCandidate,
+  target: StatisticCacheMaterializationTarget,
+): boolean {
+  return (
+    candidate.statisticRevision === target.statisticRevision &&
+    candidate.currentPublishedDate === target.currentPublishedDate &&
+    target.protocolVersion === STATISTIC_CACHE_PROTOCOL_VERSION &&
+    candidate.historicDirtyFrom === target.historicDirtyFrom &&
+    candidate.historicDirtyThrough === target.historicDirtyThrough &&
+    candidate.historicMapCursor === target.historicMapCursor &&
+    candidate.historicStatsCursor === target.historicStatsCursor &&
+    candidate.sourceRevision === target.sourceRevision &&
+    candidate.historicComputeEpoch === target.historicComputeEpoch
   );
 }
 
@@ -632,13 +649,13 @@ export class StatisticCacheArtifactService {
   }
 
   async materialize(
-    target: StatisticCacheArtifactTarget,
+    target: StatisticCacheMaterializationTarget,
     candidateFactory: (
       manager: EntityManager,
     ) => Promise<StatisticCacheArtifactCandidate>,
   ): Promise<StatisticCacheArtifactPayload> {
     const activeBeforeLock = await this.loadActive();
-    if (hasTarget(activeBeforeLock, target)) {
+    if (hasMaterializationTarget(activeBeforeLock, target)) {
       return activeBeforeLock;
     }
 
@@ -658,16 +675,13 @@ export class StatisticCacheArtifactService {
       }
 
       const activeAfterLock = await this.loadActive(queryRunner.manager);
-      if (hasTarget(activeAfterLock, target)) {
+      if (hasMaterializationTarget(activeAfterLock, target)) {
         return activeAfterLock;
       }
       await queryRunner.startTransaction('REPEATABLE READ');
       transactionStarted = true;
       const candidate = await candidateFactory(queryRunner.manager);
-      if (
-        candidate.statisticRevision !== target.statisticRevision ||
-        candidate.currentPublishedDate !== target.currentPublishedDate
-      ) {
+      if (!candidateMatchesTarget(candidate, target)) {
         throw new Error('Statistic cache candidate does not match its target');
       }
       const publicationId = randomUUID();
@@ -756,16 +770,7 @@ export class StatisticCacheArtifactService {
       await queryRunner.startTransaction('REPEATABLE READ');
       transactionStarted = true;
       const candidate = await candidateFactory(queryRunner.manager);
-      if (
-        candidate.statisticRevision !== target.statisticRevision ||
-        candidate.currentPublishedDate !== target.currentPublishedDate ||
-        candidate.historicDirtyFrom !== target.historicDirtyFrom ||
-        candidate.historicDirtyThrough !== target.historicDirtyThrough ||
-        candidate.historicMapCursor !== target.historicMapCursor ||
-        candidate.historicStatsCursor !== target.historicStatsCursor ||
-        candidate.sourceRevision !== target.sourceRevision ||
-        candidate.historicComputeEpoch !== target.historicComputeEpoch
-      ) {
+      if (!candidateMatchesTarget(candidate, target)) {
         throw new Error('Statistic cache candidate does not match its target');
       }
       const publicationId = randomUUID();
@@ -1732,12 +1737,12 @@ export class StatisticCacheArtifactService {
   }
 
   private async waitForActivePublication(
-    target: StatisticCacheArtifactTarget,
+    target: StatisticCacheMaterializationTarget,
   ): Promise<StatisticCacheArtifactPayload> {
     const deadline = Date.now() + MATERIALIZATION_WAIT_MS;
     while (Date.now() < deadline) {
       const active = await this.loadActive();
-      if (hasTarget(active, target)) {
+      if (hasMaterializationTarget(active, target)) {
         return active;
       }
       await new Promise((resolve) =>

@@ -26,6 +26,12 @@ test('keeps APIs, publication manifests and PMTiles out of Workbox caches', () =
     true,
   );
   assert.equal(isPwaNetworkOnlyUrl('/manifest.webmanifest'), true);
+  assert.equal(
+    isPwaNetworkOnlyUrl(
+      'https://objects.example.test/pmtiles/historic-backfill-manifest.json',
+    ),
+    true,
+  );
   assert.equal(isPwaNetworkOnlyUrl('/carte'), false);
 });
 
@@ -36,6 +42,7 @@ test('never serves the application shell for data or static-file requests', () =
   assert.equal(denied('/api/zones'), true);
   assert.equal(denied('/zones/publication'), true);
   assert.equal(denied('/maps/zones.pmtiles'), true);
+  assert.equal(denied('/maps/historic-backfill-manifest.json'), true);
   assert.equal(denied('/inject-sw.js'), true);
   assert.equal(denied('/carte'), false);
 });

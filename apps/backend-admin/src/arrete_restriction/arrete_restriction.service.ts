@@ -40,6 +40,7 @@ import {
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { ConfigService } from '../config/config.service';
+import { invalidateHistoricComputationsFromWithManager } from '../config/historic-computation-invalidation';
 import { DepartementService } from '../departement/departement.service';
 import { FichierService } from '../fichier/fichier.service';
 import { RegleauLogger } from '../logger/regleau.logger';
@@ -66,7 +67,6 @@ import {
   isZonePublicationEnabled,
   sourceRevisionColumn,
 } from '../zone_publication/zone_publication.config';
-import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import {
   certifyAvailableZoneTypes,
   certifyZoneTypeAvailability as persistZoneTypeAvailabilityCertification,
@@ -1636,28 +1636,7 @@ export class ArreteRestrictionService {
     manager: EntityManager,
     date: string,
   ): Promise<void> {
-    const [historicEpochColumn] = await manager.query(
-      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'config' AND column_name = 'historicComputeEpoch'`,
-    );
-    const updated = unwrapTypeOrmDmlReturningRows<{ id: number }>(
-      await manager.query(
-        `
-        UPDATE config
-        SET
-          "computeMapDate" = LEAST(COALESCE("computeMapDate", $1::date), $1::date),
-          "computeMapGeneration" = "computeMapGeneration" + 1,
-          "computeStatsDate" = LEAST(COALESCE("computeStatsDate", $1::date), $1::date),
-          "computeStatsGeneration" = "computeStatsGeneration" + 1
-          ${historicEpochColumn ? ', "historicComputeEpoch" = "historicComputeEpoch" + 1' : ''}
-        WHERE id = 1
-        RETURNING id
-        `,
-        [date],
-      ),
-    );
-    if (updated.length !== 1) {
-      throw new Error('Unable to invalidate zone computations');
-    }
+    await invalidateHistoricComputationsFromWithManager(manager, date);
   }
 
   async repeal(
@@ -2001,10 +1980,12 @@ export class ArreteRestrictionService {
               HttpStatus.CONFLICT,
             );
           }
-          const dirtyFrom = current.dateDebut
-            ? [normalizeCivilDate(current.dateDebut)]
-            : [];
-          if (predecessorId) {
+          const affectsPublicComputations = current.statut !== 'a_valider';
+          const dirtyFrom =
+            affectsPublicComputations && current.dateDebut
+              ? [normalizeCivilDate(current.dateDebut)]
+              : [];
+          if (affectsPublicComputations && predecessorId) {
             const predecessor = await this.findOneForContinuity(
               repository,
               predecessorId,
@@ -2021,20 +2002,20 @@ export class ArreteRestrictionService {
           if (deleted.affected !== 1) {
             throw new Error(`Unable to delete restriction order ${id}`);
           }
-          if (predecessorId) {
+          if (affectsPublicComputations && predecessorId) {
             await this.synchronizeArreteRestrictionEndDate(
               repository,
               predecessorId,
               businessDate,
             );
           }
-          if (dirtyFrom.length > 0) {
-            await this.invalidateComputationsFromWithManager(
-              manager,
-              dirtyFrom.sort()[0],
-            );
-          }
-          if (current.statut !== 'a_valider') {
+          if (affectsPublicComputations) {
+            if (dirtyFrom.length > 0) {
+              await this.invalidateComputationsFromWithManager(
+                manager,
+                dirtyFrom.sort()[0],
+              );
+            }
             await this.recordPublicMutation(
               manager,
               [arrete.departement.id],

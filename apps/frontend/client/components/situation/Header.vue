@@ -4,7 +4,10 @@ import { Zone } from '../../dto/zone.dto';
 import { useAddressStore } from '../../store/address';
 import niveauxGravite from '../../dto/niveauGravite';
 import type { ZoneAvailability } from '../../dto/zone-availability.dto';
-import { getZoneSituationState } from '../../utils/zone-availability';
+import {
+  formatZoneAvailabilityDate,
+  getZoneSituationState,
+} from '../../utils/zone-availability';
 import { VIcon } from '@gouvminint/vue-dsfr';
 
 const props = defineProps<{
@@ -52,6 +55,12 @@ const availabilityConfirmedNone = computed(
   () => situationState.value === 'confirmed_none',
 );
 const municipalOnly = computed(() => situationState.value === 'municipal');
+const availabilityUpdating = computed(
+  () => props.availability.freshness === 'updating',
+);
+const availabilityUpdatedAt = computed(() =>
+  formatZoneAvailabilityDate(props.availability.asOf),
+);
 const niveauGravite = computed(() => {
   return niveauxGravite.find(n => n.niveauGravite === (props.zone?.niveauGravite ? props.zone.niveauGravite : null));
 });
@@ -102,6 +111,17 @@ const niveauGravite = computed(() => {
         </span>
         à votre adresse.
       </h1>
+      <p
+        v-if="!availabilityUnavailable && (availabilityUpdatedAt || availabilityUpdating)"
+        class="fr-text--sm fr-mt-1w fr-mb-0 situation-status-header__freshness"
+      >
+        <template v-if="availabilityUpdatedAt">
+          Situation au {{ availabilityUpdatedAt }}
+        </template>
+        <template v-if="availabilityUpdating">
+          <span v-if="availabilityUpdatedAt"> · </span>Mise à jour en cours
+        </template>
+      </p>
     </div>
     <div
       v-if="availabilityUnavailable"
@@ -214,6 +234,10 @@ const niveauGravite = computed(() => {
 
   &__btn-wrapper {
     text-align: right;
+  }
+
+  &__freshness {
+    color: var(--text-mention-grey);
   }
 }
 

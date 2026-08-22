@@ -294,7 +294,7 @@ describe('StatisticCommuneService', () => {
     blockingLock?: jest.Mock;
     communes?: Array<{
       id: number;
-      departement: { code: string };
+      departement: { id?: number; code: string };
       statisticCommune: { id: number; restrictions: unknown[] };
     }>;
     intersections?: Array<{ communeId: number; zoneId: number }>;
@@ -509,6 +509,589 @@ describe('StatisticCommuneService', () => {
       events,
     };
   }
+
+  it('stages a stable historic interval in batches without snapshots or canonical JSONB writes', async () => {
+    process.env.COMMUNE_STATISTICS_BATCH_SIZE = '1';
+    const runId = '11111111-1111-4111-8111-111111111111';
+    const inputSignature = 'a'.repeat(64);
+    const sink = {
+      writeSegments: jest.fn().mockResolvedValue(undefined),
+    };
+    const harness = createComputationHarness({
+      communes: [
+        {
+          id: 77001,
+          departement: { id: 77, code: '77' },
+          statisticCommune: { id: 1, restrictions: [] },
+        },
+        {
+          id: 77002,
+          departement: { id: 77, code: '77' },
+          statisticCommune: { id: 2, restrictions: [] },
+        },
+      ],
+      intersections: [{ communeId: 77001, zoneId: 10 }],
+    });
+    const zones = [
+      {
+        id: 10,
+        departement: { code: '77' },
+        type: 'AEP',
+        restriction: { niveauGravite: 'alerte' },
+      },
+    ] as any;
+
+    await expect(
+      harness.service.stageHistoricCommuneStatisticsRestrictions(
+        zones,
+        new Date('2025-07-13T00:00:00.000Z'),
+        {
+          runId,
+          departementId: 77,
+          departementCode: '77',
+          sourceGeneration: '12',
+          inputSignature,
+          validThrough: '2025-07-15',
+          sink,
+        },
+      ),
+    ).resolves.toEqual({
+      expectedCommuneCount: 2,
+      processedCommuneCount: 2,
+      segmentCount: 2,
+    });
+
+    expect(sink.writeSegments).toHaveBeenCalledTimes(2);
+    expect(sink.writeSegments).toHaveBeenNthCalledWith(1, {
+      runId,
+      departementId: 77,
+      departementCode: '77',
+      computedFor: '2025-07-13',
+      validThrough: '2025-07-15',
+      sourceGeneration: '12',
+      inputSignature,
+      offset: 0,
+      expectedCommuneCount: 2,
+      processedCommuneCount: 1,
+      segments: [
+        {
+          runId,
+          departementId: 77,
+          communeId: 77001,
+          validFrom: '2025-07-13',
+          validThrough: '2025-07-15',
+          SOU: null,
+          SUP: null,
+          AEP: 'alerte',
+          sourceGeneration: '12',
+          inputSignature,
+        },
+      ],
+    });
+    expect(sink.writeSegments).toHaveBeenNthCalledWith(2, {
+      runId,
+      departementId: 77,
+      departementCode: '77',
+      computedFor: '2025-07-13',
+      validThrough: '2025-07-15',
+      sourceGeneration: '12',
+      inputSignature,
+      offset: 1,
+      expectedCommuneCount: 2,
+      processedCommuneCount: 2,
+      segments: [
+        {
+          runId,
+          departementId: 77,
+          communeId: 77002,
+          validFrom: '2025-07-13',
+          validThrough: '2025-07-15',
+          SOU: null,
+          SUP: null,
+          AEP: null,
+          sourceGeneration: '12',
+          inputSignature,
+        },
+      ],
+    });
+    expect(harness.communeService.count).toHaveBeenNthCalledWith(1, ['77']);
+    expect(harness.communeService.count).toHaveBeenNthCalledWith(2, ['77']);
+    expect(harness.communeService.findWithStats).toHaveBeenCalledWith(1, 0, [
+      '77',
+    ]);
+    expect(harness.communeService.findWithStats).toHaveBeenCalledWith(1, 1, [
+      '77',
+    ]);
+    const sql = harness.query.mock.calls.map(([statement]) =>
+      String(statement),
+    );
+    expect(sql.join('\n')).toContain('"zone_alerte_computed_historic"');
+    expect(sql.join('\n')).not.toContain('statistic_commune_snapshot');
+    expect(sql.join('\n')).not.toContain('INSERT INTO "statistic_commune"');
+    expect(sql.join('\n')).not.toContain('UPDATE "statistic_commune"');
+    expect(sql.join('\n')).not.toContain('pg_advisory');
+    expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('excludes only the certified empty legacy geometry from staged commune intersections', async () => {
+    const sink = {
+      writeSegments: jest.fn().mockResolvedValue(undefined),
+    };
+    const harness = createComputationHarness({
+      communes: [
+        {
+          id: 18001,
+          departement: { id: 18, code: '18' },
+          statisticCommune: { id: 1, restrictions: [] },
+        },
+      ],
+      intersections: [{ communeId: 18001, zoneId: 10 }],
+    });
+    const warn = jest
+      .spyOn((harness.service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const zones = [
+      {
+        id: 7626,
+        departement: { code: '18' },
+        type: 'SUP',
+        restriction: { niveauGravite: 'crise' },
+        geom: { type: 'MultiPolygon', coordinates: [] },
+      },
+      {
+        id: 10,
+        departement: { code: '18' },
+        type: 'SUP',
+        restriction: { niveauGravite: 'alerte' },
+        geom: {
+          type: 'MultiPolygon',
+          coordinates: [
+            [
+              [
+                [0, 0],
+                [1, 0],
+                [1, 1],
+                [0, 0],
+              ],
+            ],
+          ],
+        },
+      },
+    ] as any;
+
+    try {
+      await harness.service.stageHistoricCommuneStatisticsRestrictions(
+        zones,
+        new Date('2022-06-18T00:00:00.000Z'),
+        {
+          runId: '11111111-1111-4111-8111-111111111111',
+          departementId: 18,
+          departementCode: '18',
+          sourceGeneration: '12',
+          inputSignature: 'a'.repeat(64),
+          historicNotComputed: true,
+          sink,
+        },
+      );
+
+      const createTableCall = harness.query.mock.calls.find(([statement]) =>
+        String(statement).includes('CREATE TEMP TABLE'),
+      );
+      expect(JSON.parse(String(createTableCall?.[1]?.[0]))).toEqual([
+        { id: 10, departementCode: '18' },
+      ]);
+      expect(zones.map((zone) => zone.id)).toEqual([7626, 10]);
+      expect(sink.writeSegments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          segments: [
+            expect.objectContaining({
+              communeId: 18001,
+              SUP: 'alerte',
+            }),
+          ],
+        }),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: 'legacy_historic_statistic_empty_geometries_excluded',
+          runId: '11111111-1111-4111-8111-111111111111',
+          computedFor: '2022-06-18',
+          zoneIds: [7626],
+        }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('stages null restrictions when the only legacy zone has the certified empty geometry', async () => {
+    const sink = {
+      writeSegments: jest.fn().mockResolvedValue(undefined),
+    };
+    const harness = createComputationHarness({
+      communes: [
+        {
+          id: 18001,
+          departement: { id: 18, code: '18' },
+          statisticCommune: { id: 1, restrictions: [] },
+        },
+      ],
+    });
+    const warn = jest
+      .spyOn((harness.service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+
+    try {
+      await harness.service.stageHistoricCommuneStatisticsRestrictions(
+        [
+          {
+            id: 7626,
+            departement: { code: '18' },
+            type: 'SUP',
+            restriction: { niveauGravite: 'crise' },
+            geom: { type: 'MultiPolygon', coordinates: [] },
+          },
+        ] as any,
+        new Date('2022-06-18T00:00:00.000Z'),
+        {
+          runId: '11111111-1111-4111-8111-111111111111',
+          departementId: 18,
+          departementCode: '18',
+          sourceGeneration: '12',
+          inputSignature: 'a'.repeat(64),
+          historicNotComputed: true,
+          sink,
+        },
+      );
+
+      expect(
+        harness.query.mock.calls.some(([statement]) =>
+          String(statement).includes('CREATE TEMP TABLE'),
+        ),
+      ).toBe(false);
+      expect(
+        harness.query.mock.calls.some(([statement]) =>
+          String(statement).includes(
+            'pg_temp."statistic_zone_geometry" valid_zones',
+          ),
+        ),
+      ).toBe(false);
+      expect(sink.writeSegments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          segments: [
+            expect.objectContaining({
+              communeId: 18001,
+              SOU: null,
+              SUP: null,
+              AEP: null,
+            }),
+          ],
+        }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['another legacy zone', 9, { type: 'MultiPolygon', coordinates: [] }, true],
+    [
+      'a different empty geometry type',
+      7626,
+      { type: 'Polygon', coordinates: [] },
+      true,
+    ],
+    [
+      'the computed historic path',
+      7626,
+      { type: 'MultiPolygon', coordinates: [] },
+      false,
+    ],
+  ])(
+    'keeps %s strict during staged geometry validation',
+    async (_label, zoneId, geom, historicNotComputed) => {
+      const harness = createComputationHarness({
+        invalidZoneIds: [zoneId],
+        communes: [
+          {
+            id: 18001,
+            departement: { id: 18, code: '18' },
+            statisticCommune: { id: 1, restrictions: [] },
+          },
+        ],
+      });
+
+      await expect(
+        harness.service.stageHistoricCommuneStatisticsRestrictions(
+          [
+            {
+              id: zoneId,
+              departement: { code: '18' },
+              type: 'SUP',
+              restriction: { niveauGravite: 'crise' },
+              geom,
+            },
+          ] as any,
+          new Date('2022-06-18T00:00:00.000Z'),
+          {
+            runId: '11111111-1111-4111-8111-111111111111',
+            departementId: 18,
+            departementCode: '18',
+            sourceGeneration: '12',
+            inputSignature: 'a'.repeat(64),
+            historicNotComputed,
+            sink: { writeSegments: jest.fn() },
+          },
+        ),
+      ).rejects.toThrow(
+        `Geometries de zones statistiques invalides: ${zoneId}`,
+      );
+
+      const createTableCall = harness.query.mock.calls.find(([statement]) =>
+        String(statement).includes('CREATE TEMP TABLE'),
+      );
+      expect(JSON.parse(String(createTableCall?.[1]?.[0]))).toEqual([
+        { id: zoneId, departementCode: '18' },
+      ]);
+    },
+  );
+
+  it('allows independent departments to stage concurrently without a shared lock', async () => {
+    const queryRunners = ['18', '65'].map(() => ({
+      connect: jest.fn().mockResolvedValue(undefined),
+      query: jest.fn().mockResolvedValue([]),
+      release: jest.fn().mockResolvedValue(undefined),
+    }));
+    const communeService = {
+      count: jest.fn().mockResolvedValue(1),
+      findWithStats: jest.fn(
+        async (_take: number, _skip: number, codes: string[]) => {
+          const code = codes[0];
+          const departementId = code === '18' ? 18 : 65;
+          return [
+            {
+              id: departementId * 1000 + 1,
+              departement: { id: departementId, code },
+              statisticCommune: null,
+            },
+          ];
+        },
+      ),
+    };
+    const dataSource = {
+      createQueryRunner: jest
+        .fn()
+        .mockReturnValueOnce(queryRunners[0])
+        .mockReturnValueOnce(queryRunners[1]),
+    };
+    const service = new StatisticCommuneService(
+      { createQueryBuilder: jest.fn() } as any,
+      communeService as any,
+      dataSource as any,
+    );
+    let activeWrites = 0;
+    let maxActiveWrites = 0;
+    let releaseWrites: () => void;
+    const bothWritesStarted = new Promise<void>((resolve) => {
+      releaseWrites = resolve;
+    });
+    const sink = {
+      writeSegments: jest.fn(async () => {
+        activeWrites += 1;
+        maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+        if (activeWrites === 2) {
+          releaseWrites();
+        }
+        await bothWritesStarted;
+        activeWrites -= 1;
+      }),
+    };
+    const baseOptions = {
+      sourceGeneration: '3',
+      inputSignature: 'b'.repeat(64),
+      sink,
+    };
+
+    await Promise.all([
+      service.stageHistoricCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        {
+          ...baseOptions,
+          runId: '18181818-1818-4181-8181-181818181818',
+          departementId: 18,
+          departementCode: '18',
+        },
+      ),
+      service.stageHistoricCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        {
+          ...baseOptions,
+          runId: '65656565-6565-4656-8656-656565656565',
+          departementId: 65,
+          departementCode: '65',
+        },
+      ),
+    ]);
+
+    expect(maxActiveWrites).toBe(2);
+    expect(dataSource.createQueryRunner).toHaveBeenCalledTimes(2);
+    for (const queryRunner of queryRunners) {
+      expect(queryRunner.query).not.toHaveBeenCalled();
+      expect(queryRunner.release).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reduces historic segments into an idempotent daily and monthly shadow without I/O', () => {
+    const dataSource = {
+      createQueryRunner: jest.fn(),
+      query: jest.fn(),
+    };
+    const service = new StatisticCommuneService(
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
+      dataSource as any,
+    );
+    const currentRestrictions = [
+      { date: '2025-08-01', SOU: null, SUP: null, AEP: 'crise' },
+      { date: '2025-07-02', SOU: null, SUP: null, AEP: 'crise' },
+      { legacy: true },
+      { date: '2025-07-01', SOU: null, SUP: null, AEP: 'vigilance' },
+    ];
+    const currentRestrictionsByMonth = [
+      { date: '2025-08', ponderation: 4 },
+      { date: '2025-07', ponderation: 99 },
+      { legacyMonth: true },
+    ];
+    const originalDaily = JSON.parse(JSON.stringify(currentRestrictions));
+    const originalMonthly = JSON.parse(
+      JSON.stringify(currentRestrictionsByMonth),
+    );
+    const sharedSegment = {
+      runId: '11111111-1111-4111-8111-111111111111',
+      departementId: 77,
+      communeId: 77001,
+      SOU: null,
+      SUP: null,
+      AEP: 'alerte' as const,
+      sourceGeneration: '12',
+      inputSignature: 'c'.repeat(64),
+    };
+    const segments = [
+      {
+        ...sharedSegment,
+        validFrom: '2025-07-02',
+        validThrough: '2025-07-03',
+      },
+      {
+        ...sharedSegment,
+        validFrom: '2025-07-03',
+        validThrough: '2025-07-03',
+      },
+    ];
+
+    const first = service.reduceHistoricCommuneStatisticShadow({
+      communeId: 77001,
+      currentRestrictions,
+      currentRestrictionsByMonth,
+      segments,
+    });
+    const second = service.reduceHistoricCommuneStatisticShadow({
+      communeId: 77001,
+      currentRestrictions: first.nextRestrictions,
+      currentRestrictionsByMonth: first.nextRestrictionsByMonth,
+      segments,
+    });
+
+    expect(first).toEqual({
+      communeId: 77001,
+      nextRestrictions: [
+        { date: '2025-07-01', SOU: null, SUP: null, AEP: 'vigilance' },
+        { date: '2025-07-02', SOU: null, SUP: null, AEP: 'alerte' },
+        { date: '2025-07-03', SOU: null, SUP: null, AEP: 'alerte' },
+        { date: '2025-08-01', SOU: null, SUP: null, AEP: 'crise' },
+        { legacy: true },
+      ],
+      nextRestrictionsByMonth: [
+        { date: '2025-07', ponderation: 4.5 },
+        { date: '2025-08', ponderation: 4 },
+        { legacyMonth: true },
+      ],
+    });
+    expect(second).toEqual(first);
+    expect(currentRestrictions).toEqual(originalDaily);
+    expect(currentRestrictionsByMonth).toEqual(originalMonthly);
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting overlapping historic segments', () => {
+    const service = new StatisticCommuneService(
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
+      {} as any,
+    );
+    const common = {
+      runId: '11111111-1111-4111-8111-111111111111',
+      departementId: 77,
+      communeId: 77001,
+      validThrough: '2025-07-13',
+      SOU: null,
+      SUP: null,
+      sourceGeneration: '12',
+      inputSignature: 'd'.repeat(64),
+    };
+
+    expect(() =>
+      service.reduceHistoricCommuneStatisticShadow({
+        communeId: 77001,
+        segments: [
+          {
+            ...common,
+            validFrom: '2025-07-12',
+            AEP: 'alerte',
+          },
+          {
+            ...common,
+            validFrom: '2025-07-13',
+            AEP: 'crise',
+          },
+        ],
+      }),
+    ).toThrow(
+      'Conflicting historic statistic segments for commune 77001 on 2025-07-13',
+    );
+  });
+
+  it.each([
+    ['2025-07-13', '2025-07-12'],
+    ['2025-07-13', '2025-7-14'],
+    ['2025-02-01', '2025-02-30'],
+  ])(
+    'rejects invalid historic staging interval %s/%s before opening a connection',
+    async (validFrom, validThrough) => {
+      const harness = createComputationHarness();
+
+      await expect(
+        harness.service.stageHistoricCommuneStatisticsRestrictions(
+          [],
+          new Date(`${validFrom}T00:00:00.000Z`),
+          {
+            runId: '11111111-1111-4111-8111-111111111111',
+            departementId: 18,
+            departementCode: '18',
+            sourceGeneration: '1',
+            inputSignature: 'e'.repeat(64),
+            validThrough,
+            sink: { writeSegments: jest.fn() },
+          },
+        ),
+      ).rejects.toThrow('Invalid historic statistic staging interval');
+      expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+    },
+  );
 
   it('certifies a national snapshot only after every commune', async () => {
     const harness = createComputationHarness();
@@ -855,6 +1438,66 @@ describe('StatisticCommuneService', () => {
     },
   );
 
+  it('excludes the certified empty geometry only from legacy historic snapshot intersections', async () => {
+    const harness = createComputationHarness();
+    const warn = jest
+      .spyOn((harness.service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+
+    try {
+      await harness.service.computeCommuneStatisticsRestrictions(
+        [
+          {
+            id: 7626,
+            type: 'SUP',
+            departement: { code: '18' },
+            restriction: { niveauGravite: 'crise' },
+            geom: { type: 'MultiPolygon', coordinates: [] },
+          },
+        ] as any,
+        new Date('2022-06-18T00:00:00.000Z'),
+        true,
+        true,
+      );
+
+      expect(
+        harness.query.mock.calls.some(([statement]) =>
+          String(statement).includes('CREATE TEMP TABLE'),
+        ),
+      ).toBe(false);
+      expect(
+        harness.query.mock.calls.some(([statement]) =>
+          String(statement).includes(
+            'pg_temp."statistic_zone_geometry" valid_zones',
+          ),
+        ),
+      ).toBe(false);
+      const updateCall = harness.query.mock.calls.find(([statement]) =>
+        String(statement).includes('WITH input AS'),
+      );
+      expect(JSON.parse(String(updateCall?.[1]?.[0]))).toEqual([
+        {
+          communeId: 1,
+          restriction: {
+            date: '2022-06-18',
+            SOU: null,
+            SUP: null,
+            AEP: null,
+          },
+        },
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: 'legacy_historic_statistic_empty_geometries_excluded',
+          computedFor: '2022-06-18',
+          zoneIds: [7626],
+        }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('fails the snapshot when a requested zone geometry cannot be loaded', async () => {
     const harness = createComputationHarness({ invalidZoneIds: [10] });
 
@@ -976,7 +1619,7 @@ describe('StatisticCommuneService', () => {
     ]);
   });
 
-  it('allows only bootstrap and the matching ready candidate while aggregating through J', async () => {
+  it('accepts an exact completed candidate without extending the ready bootstrap exemption', async () => {
     const harness = createComputationHarness();
 
     await harness.service.computeCommuneStatisticsRestrictionsByMonth(
@@ -1007,8 +1650,17 @@ describe('StatisticCommuneService', () => {
       'failed_national_snapshot."snapshotDate" =\n                     (daily.value ->> \'date\')::date',
     );
     expect(sql).toContain('allowed_ready_snapshot AS MATERIALIZED');
+    expect(sql).toContain('allowed_completed_snapshot AS MATERIALIZED');
+    expect(sql).toContain('snapshot."status" = \'completed\'');
+    expect(sql).toContain('snapshot."expectedCommuneCount" > 0');
+    expect(sql).toContain(
+      'snapshot."processedCommuneCount" =\n                  snapshot."expectedCommuneCount"',
+    );
     expect(sql).toContain(
       'AND NOT EXISTS (SELECT 1 FROM allowed_ready_snapshot)',
+    );
+    expect(sql).toContain(
+      'AND NOT EXISTS (SELECT 1 FROM allowed_completed_snapshot)',
     );
     expect(parameters).toEqual([
       null,
@@ -1038,11 +1690,16 @@ describe('StatisticCommuneService', () => {
           candidate.status === 'ready' &&
           parameters[8] === candidate.sourceRevision &&
           parameters[9] === candidate.date;
+        const completedExceptionMatches =
+          candidate.status === 'completed' &&
+          sql.includes('allowed_completed_snapshot AS MATERIALIZED') &&
+          parameters[8] === candidate.sourceRevision &&
+          parameters[9] === candidate.date;
         const bootstrapExceptionMatches =
           bootstrapPresent && readyExceptionMatches;
         if (
           (bootstrapPresent && !bootstrapExceptionMatches) ||
-          (candidate.status !== 'completed' && !readyExceptionMatches)
+          (!readyExceptionMatches && !completedExceptionMatches)
         ) {
           return [{ blocked: true, expected: 0, affected: 0 }];
         }
@@ -1081,6 +1738,16 @@ describe('StatisticCommuneService', () => {
     // Candidate activation completes J and removes the bootstrap barrier atomically.
     candidate.status = 'completed';
     bootstrapPresent = false;
+    await service.computeCommuneStatisticsRestrictionsByMonth(
+      new Date('2025-07-01T00:00:00.000Z'),
+      undefined,
+      false,
+      candidate.date,
+      {
+        date: candidate.date,
+        sourceRevision: candidate.sourceRevision,
+      },
+    );
     expect(readPublishedMonth()).toBe(7.5);
   });
 

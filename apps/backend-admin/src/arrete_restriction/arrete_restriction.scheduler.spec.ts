@@ -56,6 +56,9 @@ const createService = (askCompute: jest.Mock) => {
       if (sql.includes('zone_type_availability')) {
         return [];
       }
+      if (sql.includes('historic_backfill_department_revision')) {
+        return [];
+      }
       if (sql.includes('current_zone_recompute_request')) {
         queuedDepartementIds = [
           ...((parameters?.[0] as number[] | undefined) ?? []),
@@ -65,7 +68,7 @@ const createService = (askCompute: jest.Mock) => {
       if (sql.includes('information_schema.columns')) {
         return [{ exists: true }];
       }
-      if (sql.includes('UPDATE config')) {
+      if (sql.includes('UPDATE "config"')) {
         return [{ id: 1 }];
       }
       throw new Error(`Unexpected query: ${sql}`);
@@ -368,7 +371,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     ).not.toHaveProperty('dateDebut');
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
     ).toBe(false);
   });
@@ -409,9 +412,9 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.find(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
-    ).toEqual([expect.stringContaining('UPDATE config'), ['2026-07-01']]);
+    ).toEqual([expect.stringContaining('UPDATE "config"'), ['2026-07-01']]);
   });
 
   it('reconciles a stale status without extending an unknown legacy end', async () => {
@@ -488,7 +491,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
     ).toBe(false);
   });
@@ -526,7 +529,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
     ).toBe(false);
   });

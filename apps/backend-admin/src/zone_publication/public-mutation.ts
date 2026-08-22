@@ -167,26 +167,22 @@ export async function recordPublicMutation(
   const publicRevision = String(sourceState.publicRevision);
   await manager.query(
     `
-      INSERT INTO "zone_type_availability" (
-        "departmentCode", "zoneType", "status", "asOf",
-        "publicRevision", "officialUrl", "updatedAt"
+      INSERT INTO "historic_backfill_department_revision" (
+        "departementId", "generation", "lastPublicRevision", "updatedAt"
       )
-      SELECT
-        departement."code", zone_type, 'unavailable', now(),
-        $2::bigint, NULL, now()
-      FROM "departement" departement
-      CROSS JOIN unnest(ARRAY['SOU', 'SUP', 'AEP']::varchar[])
-        AS zone_type
-      WHERE departement."id" = ANY($1::integer[])
-      ON CONFLICT ("departmentCode", "zoneType") DO UPDATE
+      SELECT departement_id, 1, $2::bigint, now()
+      FROM unnest($1::integer[]) AS departement_id
+      ON CONFLICT ("departementId") DO UPDATE
       SET
-        "status" = 'unavailable',
-        "asOf" = now(),
-        "publicRevision" = EXCLUDED."publicRevision",
+        "generation" =
+          "historic_backfill_department_revision"."generation" + 1,
+        "lastPublicRevision" = EXCLUDED."lastPublicRevision",
         "updatedAt" = now()
     `,
     [ids, publicRevision],
   );
+  // Keep the last successful certification public while its replacement is
+  // computed. The recompute queue carries the pending state exposed by the API.
   await enqueueCurrentZoneRecomputeTarget(manager, ids, publicRevision, reason);
   return publicRevision;
 }

@@ -44,6 +44,7 @@ import {
 import {
   isZonePublicationEnabled,
   sourceRevisionColumn,
+  zoneGeojsonContentDisposition,
 } from '../zone_publication/zone_publication.config';
 import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
@@ -1574,6 +1575,13 @@ DELETE FROM zone_alerte_computed
       {
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl: 'public, max-age=0, must-revalidate',
+        ...(kind === 'geojson'
+          ? {
+              contentDisposition: zoneGeojsonContentDisposition(
+                file.originalname,
+              ),
+            }
+          : {}),
         contentType:
           kind === 'geojson'
             ? 'application/geo+json'
@@ -1629,6 +1637,12 @@ DELETE FROM zone_alerte_computed
             this.getZonePublicationS3TimeoutMs(),
           ),
           cacheControl: 'public, max-age=0, must-revalidate',
+          ...(kind === 'geojson'
+            ? {
+                contentDisposition:
+                  zoneGeojsonContentDisposition(datedFileName),
+              }
+            : {}),
           contentType:
             kind === 'geojson'
               ? 'application/geo+json'
@@ -1672,6 +1686,13 @@ DELETE FROM zone_alerte_computed
       {
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl: 'public, max-age=31536000, immutable',
+        ...(kind === 'geojson'
+          ? {
+              contentDisposition: zoneGeojsonContentDisposition(
+                'zones_arretes_en_vigueur.geojson',
+              ),
+            }
+          : {}),
         contentType:
           kind === 'geojson'
             ? 'application/geo+json'
@@ -2744,11 +2765,11 @@ DELETE FROM zone_alerte_computed
             AND publication_state."historicDirtyThrough" IS NOT NULL
             AND (
               $3::bigint IS NULL
-              OR publication_state."revision" = $3::bigint
+              OR publication_state."revision" = ($3::bigint)::text
             )
             AND (
               $4::date IS NULL
-              OR publication_state."currentPublishedDate" = $4::date
+              OR publication_state."currentPublishedDate" = ($4::date)::text
             )
             AND EXISTS (
               SELECT 1
@@ -3051,8 +3072,8 @@ DELETE FROM zone_alerte_computed
           LEFT JOIN LATERAL jsonb_array_elements(
             COALESCE(statistic."restrictions", '[]'::jsonb)
           ) restriction(value)
-            ON restriction.value ->> 'date' >= $1
-           AND restriction.value ->> 'date' <= $2
+            ON restriction.value ->> 'date' >= ($1::date)::text
+           AND restriction.value ->> 'date' <= ($2::date)::text
           GROUP BY commune."id"
         )
         SELECT
