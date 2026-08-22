@@ -3051,9 +3051,20 @@ export class DataService implements OnModuleInit {
 
   private publishCertifiedDataCache(cache: CertifiedDataCache): void {
     this.certifiedDataCache = cache;
+    const closesSnapshotRepair =
+      cache.mode === 'legacy-bootstrap' ||
+      Boolean(
+        cache.artifactIdentity &&
+        this.isArtifactIdentityForState(
+          cache.artifactIdentity,
+          cache.publicationState,
+        ) &&
+        this.isLegacyCacheContinuous(cache, cache.publicationState),
+      );
     if (
-      cache.mode === 'legacy-bootstrap' &&
-      cache.publicationState.historicDirtyFrom === null
+      cache.publicationState.historicDirtyFrom === null &&
+      cache.publicationState.historicDirtyThrough === null &&
+      closesSnapshotRepair
     ) {
       this.legacySnapshotCoverageDirty = false;
     }
