@@ -1,6 +1,6 @@
 # GitHub loads scheduled workflows from the default branch. Keep this file and
 # its checked-out smoke scripts on master, the branch deployed to production.
-name: Production smoke
+name: Surveillance production
 
 on:
   schedule:
@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     env:
       VIGIEAU_STATISTICS_DEADLINE: "06:00"
-      VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT: "2"
+      VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT: "3"
       VIGIEAU_EXPECT_STATISTIC_ARTIFACT: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 10
     env:
       VIGIEAU_MIN_ZONE_COUNT: 1
-      VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: legacy
+      VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: healthy
       VIGIEAU_ZONE_PUBLICATION_DEADLINE: "06:00"
       VIGIEAU_LEGACY_ARTIFACT_MAX_SKEW_MINUTES: "30"
     steps:
@@ -57,6 +57,9 @@ jobs:
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      VIGIEAU_BROWSER_SMOKE_TIMEOUT_MS: "90000"
+      VIGIEAU_BROWSER_TARBES_MODE: adaptive
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify checked-out revision
@@ -72,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: legacy
+      VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: healthy
       VIGIEAU_EXPECT_SANDRE_MODES: safe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

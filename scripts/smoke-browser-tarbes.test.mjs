@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildTarbesSituationExpectations,
+  isTarbesZoneLookupUrl,
   parseTarbesCheckMode,
   resolveTarbesLookupOutcome,
 } from "./smoke-browser-tarbes.mjs";
@@ -42,6 +43,27 @@ test("skip mode cannot execute the Tarbes lookup", () => {
   assert.throws(
     () => resolveTarbesLookupOutcome("skip", 409),
     /cannot run in skip mode/,
+  );
+});
+
+test("recognizes legacy and versioned Tarbes zone lookup URLs", () => {
+  for (const path of [
+    "/zones?commune=65440",
+    "/api/zones?commune=65440",
+    "/zones/v2?commune=65440&publicationId=publication-id",
+    "/api/zones/v2/?publicationId=publication-id&commune=65440",
+  ]) {
+    assert.equal(isTarbesZoneLookupUrl(`https://example.test${path}`), true);
+  }
+  assert.equal(
+    isTarbesZoneLookupUrl("https://example.test/api/zones/v2?commune=75056"),
+    false,
+  );
+  assert.equal(
+    isTarbesZoneLookupUrl(
+      "https://example.test/api/zones/departement/65?commune=65440",
+    ),
+    false,
   );
 });
 
