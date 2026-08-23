@@ -20,6 +20,7 @@ export interface SandreApprovedSyncMapping {
     targetCoverage: number;
     iou: number;
   };
+  maximumPairwiseOverlapRatio?: number;
 }
 
 export interface SandreApprovedGeometryEvidence {
@@ -76,9 +77,12 @@ export interface SandreMdmNomenclatureExpectation {
   projectionSha256: string;
 }
 
+const DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO = 1e-10;
+const ABSOLUTE_MAXIMUM_PAIRWISE_OVERLAP_RATIO = 2e-9;
+
 const DEPARTMENT_24_MAPPINGS: SandreApprovedSyncMapping[] = [
   partitionMapping('1028', 12097, ['4116', '4117'], '2026-08-05', {
-    sourceGeometryHash: '1dfe5df2047067b2403c5275ca269945',
+    sourceGeometryHash: 'f70d2c378906e67650d40b6cd8e14690',
     targetGeometryHashes: [
       '93f4317d20505889d136a35ff5d8015f',
       'd21eee234aa3e64316c17775cc6f1f47',
@@ -172,17 +176,24 @@ export const SANDRE_APPROVED_SYNC_SNAPSHOTS: readonly SandreApprovedSyncSnapshot
       expectedSourceCount: 1,
       expectedTargetCount: 2,
       mappings: [
-        partitionMapping('355', 10582, ['3947', '3948'], '2026-06-30', {
-          sourceGeometryHash: '22fe8aef4b0c2742a1adc3caa9e31ccc',
-          targetGeometryHashes: [
-            'e5f1c73a7d9322e889f65d838a176a47',
-            '73d4b862c4f9972f6d8b2d6f85f0085b',
-          ],
-          unionGeometryHash: '6e8a2ec00f197fcdb664122695102ffc',
-          sourceCoverage: 0.9999888461090162,
-          targetCoverage: 0.9999894571755797,
-          iou: 0.9999783035197829,
-        }),
+        partitionMapping(
+          '355',
+          10582,
+          ['3947', '3948'],
+          '2026-06-30',
+          {
+            sourceGeometryHash: '71d342c49c82a7da369c288f6a3d672e',
+            targetGeometryHashes: [
+              'e5f1c73a7d9322e889f65d838a176a47',
+              '73d4b862c4f9972f6d8b2d6f85f0085b',
+            ],
+            unionGeometryHash: '6e8a2ec00f197fcdb664122695102ffc',
+            sourceCoverage: 0.9999888461090162,
+            targetCoverage: 0.9999894571755797,
+            iou: 0.9999783035197829,
+          },
+          2e-9,
+        ),
       ],
       mdmRecords: [
         {
@@ -289,6 +300,8 @@ export async function auditSandreApprovedSyncGeometry(
   mapping: SandreApprovedSyncMapping,
   targetFeatures: SandreZoneFeature[],
 ): Promise<SandreApprovedGeometryEvidence> {
+  const maximumPairwiseOverlapRatio =
+    resolveMaximumPairwiseOverlapRatio(mapping);
   if (
     targetFeatures.length !== mapping.targetCodes.length ||
     targetFeatures.some(
@@ -403,7 +416,9 @@ export async function auditSandreApprovedSyncGeometry(
     evidence.sourceCoverage < mapping.minimumGeometry.sourceCoverage ||
     evidence.targetCoverage < mapping.minimumGeometry.targetCoverage ||
     evidence.iou < mapping.minimumGeometry.iou ||
-    evidence.pairwiseOverlapRatio > 1e-10 ||
+    !Number.isFinite(evidence.pairwiseOverlapRatio) ||
+    evidence.pairwiseOverlapRatio < 0 ||
+    evidence.pairwiseOverlapRatio > maximumPairwiseOverlapRatio ||
     (mapping.requireTopologicalEquality && !evidence.topologicallyEqual) ||
     (mapping.expectedGeometry !== null &&
       (evidence.sourceGeometryHash !==
@@ -504,6 +519,7 @@ function mapping(
       targetCoverage: 0.999999999,
       iou: 0.999999999,
     },
+    maximumPairwiseOverlapRatio: DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO,
   };
 }
 
@@ -513,6 +529,7 @@ function partitionMapping(
   targetCodes: string[],
   effectiveDate: string,
   expectedGeometry: NonNullable<SandreApprovedSyncMapping['expectedGeometry']>,
+  maximumPairwiseOverlapRatio = DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO,
 ): SandreApprovedSyncMapping {
   const margin = 1e-7;
   return {
@@ -527,7 +544,26 @@ function partitionMapping(
       targetCoverage: expectedGeometry.targetCoverage - margin,
       iou: expectedGeometry.iou - margin,
     },
+    maximumPairwiseOverlapRatio,
   };
+}
+
+function resolveMaximumPairwiseOverlapRatio(
+  mapping: SandreApprovedSyncMapping,
+): number {
+  const maximumPairwiseOverlapRatio =
+    mapping.maximumPairwiseOverlapRatio ??
+    DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO;
+  if (
+    !Number.isFinite(maximumPairwiseOverlapRatio) ||
+    maximumPairwiseOverlapRatio < 0 ||
+    maximumPairwiseOverlapRatio > ABSOLUTE_MAXIMUM_PAIRWISE_OVERLAP_RATIO
+  ) {
+    throw new Error(
+      `Invalid approved Sandre pairwise overlap ratio for source ${mapping.sourceCode}`,
+    );
+  }
+  return maximumPairwiseOverlapRatio;
 }
 
 function approval(
@@ -594,6 +630,15 @@ function approval(
           (threshold) =>
             !Number.isFinite(threshold) || threshold < 0.9999 || threshold > 1,
         ) ||
+        !Number.isFinite(
+          item.maximumPairwiseOverlapRatio ??
+            DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO,
+        ) ||
+        (item.maximumPairwiseOverlapRatio ??
+          DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO) < 0 ||
+        (item.maximumPairwiseOverlapRatio ??
+          DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO) >
+          ABSOLUTE_MAXIMUM_PAIRWISE_OVERLAP_RATIO ||
         item.requireTopologicalEquality !== (item.targetCodes.length === 1) ||
         (item.targetCodes.length === 1
           ? item.effectiveDate !== null || item.expectedGeometry !== null

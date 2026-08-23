@@ -6,6 +6,8 @@ import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { of } from 'rxjs';
 import { getMetadataArgsStorage } from 'typeorm';
 import * as approvedReferences from './sandre-zone-sync-approved-references';
+import * as lkgApprovals from './sandre-zone-lkg-approvals';
+import * as reconciliationActions from './sandre-zone-reconciliation-actions';
 import * as syncApprovals from './sandre-zone-sync-approvals';
 import {
   fetchSandreMdmZoneRecordEvidence,
@@ -2244,6 +2246,291 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       query.includes('INSERT INTO sandre_zone_sync_decision'),
     );
     expect(decisionCall?.[1]?.[2]).toContain('GENEALOGY_STALE_OR_MISSING');
+  });
+
+  it('retains an exact approved LKG unchanged across audit and safe modes', async () => {
+    const frozenSnapshot = createSandreZoneSnapshot(
+      [
+        rawFeature({
+          gid: 1380,
+          CdZAS: '1380',
+          LbZAS: 'Zone historique',
+          StZAS: 'Gelé',
+          DateMajZAS: '2026-08-17',
+        }),
+      ],
+      1,
+      department.code,
+    );
+    const feature = frozenSnapshot.features[0];
+    const localZone = {
+      id: 102,
+      departementId: department.id,
+      departmentCode: department.code,
+      bassinVersantId: basin.id,
+      bassinVersantCode: basin.code,
+      idSandre: 1380,
+      codeSandre: '1380',
+      code: '1380',
+      nom: 'Zone historique',
+      type: 'SUP',
+      ressourceInfluencee: false,
+      disabled: false,
+      sandreProvenance: 'official',
+      statutSandre: 'Validé',
+      dateMajSandre: '2026-07-08',
+      numeroVersionSandre: null,
+      numeroVersion: null,
+      codesAlternatifs: [],
+      sandrePayloadHash: '1'.repeat(64),
+      geometryHash: '2'.repeat(32),
+    };
+    const reconciliationState = {
+      zones: [localZone],
+      arreteCadreLinks: [{ arreteCadreId: 10, zoneAlerteId: 102 }],
+      restrictions: [],
+      usages: [],
+      restrictionCommunes: [],
+      customizations: [],
+      customizationCommunes: [],
+      aliases: [],
+    };
+    const emptyFingerprint = fingerprint([]);
+    const referenceEvidenceWithoutFingerprint = {
+      sourceZoneId: 102,
+      lifecycle: 'pre_apply' as const,
+      sourceOperationalEmpty: false,
+      arreteCadreLinks: [{ arreteCadreId: 10, parentStatus: 'publie' }],
+      restrictions: [],
+      customizationCount: 0,
+      aliasCount: 0,
+      targetCollisionFingerprint: emptyFingerprint,
+      targetStateFingerprint: emptyFingerprint,
+      targetState: [],
+    };
+    const referenceEvidence = {
+      ...referenceEvidenceWithoutFingerprint,
+      fingerprint: fingerprint(referenceEvidenceWithoutFingerprint),
+    };
+    const genealogyRelations = [
+      {
+        id: '1',
+        parentCode: 'OTHER',
+        childCode: 'NEW',
+        modificationDate: '2024-10-01',
+        modificationType: '2',
+        reason: null,
+      },
+    ];
+    const genealogyEvidenceFingerprint = fingerprint({
+      count: genealogyRelations.length,
+      latest: '2024-10-01',
+      sourceCode: feature.codeSandre,
+      sourceRelations: [],
+    });
+    const mdmProjectionSha256 = '3'.repeat(64);
+    const approval: lkgApprovals.SandreLkgApproval = {
+      approvalId: 'test-lkg-approval',
+      departmentCode: department.code,
+      snapshotHash: frozenSnapshot.snapshotHash,
+      sourceUpdatedAt: frozenSnapshot.sourceUpdatedAt!,
+      featureCount: frozenSnapshot.featureCount,
+      feature: {
+        ...lkgApprovals.sandreLkgFeatureEvidence(feature),
+        status: 'Gelé',
+      },
+      localZone: {
+        zoneAlerteId: localZone.id,
+        bassinVersantId: localZone.bassinVersantId,
+        bassinVersantCode: localZone.bassinVersantCode,
+        idSandre: localZone.idSandre,
+        codeSandre: localZone.codeSandre,
+        code: localZone.code,
+        nom: localZone.nom,
+        type: 'SUP',
+        ressourceInfluencee: localZone.ressourceInfluencee,
+        disabled: false,
+        sandreProvenance: 'official',
+        statutSandre: localZone.statutSandre,
+        dateMajSandre: localZone.dateMajSandre,
+        numeroVersionSandre: null,
+        numeroVersion: null,
+        sandrePayloadHash: localZone.sandrePayloadHash,
+        ewkbMd5: localZone.geometryHash,
+      },
+      mdmRecords: [
+        {
+          codeSandre: feature.codeSandre,
+          projectionSha256: mdmProjectionSha256,
+          requiredEvolution: null,
+        },
+      ],
+      mdmNomenclature: null,
+      genealogyLatestDate: '2024-10-01',
+      genealogySourceRelationCount: 0,
+      genealogyEvidenceFingerprint,
+      operationalReferenceEvidenceFingerprint: referenceEvidence.fingerprint,
+      reconciliationStateFingerprint: fingerprint(reconciliationState),
+    };
+    const mdmEvidence = {
+      approvalId: approval.approvalId,
+      zoneRecords: [
+        {
+          codeSandre: feature.codeSandre,
+          url: 'https://mdm.sandre.test/1380/json',
+          byteLength: 1,
+          rawSha256: '4'.repeat(64),
+          projection: 'zone_alert_evolution_v1',
+          projectionSha256: mdmProjectionSha256,
+          requiredEvolution: null,
+        },
+      ],
+      nomenclature: null,
+    };
+    const sourceZone = {
+      id: localZone.id,
+      idSandre: localZone.idSandre,
+      codeSandre: localZone.codeSandre,
+      sandreProvenance: localZone.sandreProvenance,
+      disabled: false,
+      type: 'SUP',
+    };
+    const resolvedInactiveFeatures = [
+      {
+        feature,
+        match: { matchType: 'canonical', zone: sourceZone },
+      },
+    ];
+    const harness = createHarness();
+    harness.manager.query.mockResolvedValue([
+      {
+        ...localZone,
+        zoneAlerteId: localZone.id,
+        ewkbMd5: localZone.geometryHash,
+      },
+    ]);
+    harness.getSandreGenealogyRelations.mockResolvedValue(genealogyRelations);
+    const stateSpy = jest
+      .spyOn(reconciliationActions, 'loadSandreReconciliationZoneState')
+      .mockResolvedValue(reconciliationState);
+    const referenceSpy = jest
+      .spyOn(approvedReferences, 'loadSandreApprovedReferenceEvidence')
+      .mockResolvedValue(referenceEvidence);
+    const lockSpy = jest
+      .spyOn(approvedReferences, 'lockSandreApprovedSyncReferences')
+      .mockResolvedValue(undefined);
+    lockSpy.mockClear();
+    const observationSpy = jest
+      .spyOn(lkgApprovals, 'findSandreApprovedLkgRetentionForObservation')
+      .mockReturnValue(approval);
+
+    const auditDecisions: any[] = [];
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        auditDecisions,
+        false,
+        undefined,
+        mdmEvidence,
+      ),
+    ).resolves.toBe(localZone.id);
+    expect(auditDecisions).toEqual([
+      expect.objectContaining({
+        decisionKey: '1380:approved-lkg',
+        action: 'RETAIN_APPROVED_LKG',
+        outcome: 'observed',
+      }),
+    ]);
+    expect(lockSpy).not.toHaveBeenCalled();
+
+    const safeDecisions: any[] = [];
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        safeDecisions,
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([
+            ['1380:approved-lkg', auditDecisions[0].evidence],
+          ]),
+        },
+        mdmEvidence,
+      ),
+    ).resolves.toBe(localZone.id);
+    expect(safeDecisions[0]).toEqual(
+      expect.objectContaining({ outcome: 'applied' }),
+    );
+    expect(lockSpy).toHaveBeenCalledWith(harness.manager, [102], []);
+    expect(sourceZone).toEqual(
+      expect.objectContaining({ disabled: false, codeSandre: '1380' }),
+    );
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('remap_operational_sandre_zone_references'),
+      ),
+    ).toBe(false);
+
+    referenceSpy.mockResolvedValueOnce({
+      ...referenceEvidence,
+      fingerprint: 'f'.repeat(64),
+    });
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        [],
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([
+            ['1380:approved-lkg', auditDecisions[0].evidence],
+          ]),
+        },
+        mdmEvidence,
+      ),
+    ).rejects.toThrow('Approved Sandre LKG retention blocked');
+
+    const serializationError = Object.assign(
+      new Error('serialization failure'),
+      { code: '40001' },
+    );
+    stateSpy.mockRejectedValueOnce(serializationError);
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        [],
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([
+            ['1380:approved-lkg', auditDecisions[0].evidence],
+          ]),
+        },
+        mdmEvidence,
+      ),
+    ).rejects.toBe(serializationError);
+
+    stateSpy.mockRestore();
+    referenceSpy.mockRestore();
+    lockSpy.mockRestore();
+    observationSpy.mockRestore();
   });
 
   it.each(['audit', 'safe'])(

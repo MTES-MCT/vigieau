@@ -458,7 +458,35 @@ export async function loadSandreReconciliationState(
   executor: SandreReconciliationQueryExecutor,
   plan: SandreReconciliationPlan,
 ): Promise<SandreReconciliationState> {
-  const zoneIds = actionZoneIds(plan.actions);
+  return loadSandreReconciliationZoneState(
+    executor,
+    actionZoneIds(plan.actions),
+  );
+}
+
+export async function loadSandreReconciliationZoneState(
+  executor: SandreReconciliationQueryExecutor,
+  zoneIds: number[],
+): Promise<SandreReconciliationState> {
+  if (
+    zoneIds.some((zoneId) => !Number.isInteger(zoneId) || zoneId <= 0) ||
+    new Set(zoneIds).size !== zoneIds.length
+  ) {
+    throw new Error('Invalid Sandre reconciliation zone state scope');
+  }
+  if (zoneIds.length === 0) {
+    return {
+      zones: [],
+      arreteCadreLinks: [],
+      restrictions: [],
+      usages: [],
+      restrictionCommunes: [],
+      customizations: [],
+      customizationCommunes: [],
+      aliases: [],
+    };
+  }
+  const sortedZoneIds = [...zoneIds].sort((left, right) => left - right);
   const zones = await executor.query(
     `
       SELECT
@@ -482,7 +510,7 @@ export async function loadSandreReconciliationState(
       WHERE zone.id = ANY($1::integer[])
       ORDER BY zone.id
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const arreteCadreLinks = await executor.query(
     `
@@ -491,7 +519,7 @@ export async function loadSandreReconciliationState(
       WHERE "zoneAlerteId" = ANY($1::integer[])
       ORDER BY "arreteCadreId", "zoneAlerteId"
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const restrictions = await executor.query(
     `
@@ -509,7 +537,7 @@ export async function loadSandreReconciliationState(
       WHERE "zoneAlerteId" = ANY($1::integer[])
       ORDER BY restriction.id
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const usages = await executor.query(
     `
@@ -519,7 +547,7 @@ export async function loadSandreReconciliationState(
       WHERE restriction."zoneAlerteId" = ANY($1::integer[])
       ORDER BY usage.id
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const restrictionCommunes = await executor.query(
     `
@@ -529,7 +557,7 @@ export async function loadSandreReconciliationState(
       WHERE restriction."zoneAlerteId" = ANY($1::integer[])
       ORDER BY link."restrictionId", link."communeId"
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const customizations = await executor.query(
     `
@@ -538,7 +566,7 @@ export async function loadSandreReconciliationState(
       WHERE "zoneAlerteId" = ANY($1::integer[])
       ORDER BY id
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const customizationCommunes = await executor.query(
     `
@@ -549,7 +577,7 @@ export async function loadSandreReconciliationState(
       WHERE customization."zoneAlerteId" = ANY($1::integer[])
       ORDER BY link."arreteCadreZoneAlerteCommunesId", link."communeId"
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   const aliases = await executor.query(
     `
@@ -564,7 +592,7 @@ export async function loadSandreReconciliationState(
       WHERE "zoneAlerteId" = ANY($1::integer[])
       ORDER BY "departementId", "zoneType", "aliasType", "aliasValue"
     `,
-    [zoneIds],
+    [sortedZoneIds],
   );
   return {
     zones,

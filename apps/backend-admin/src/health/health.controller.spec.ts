@@ -233,6 +233,7 @@ describe('HealthController', () => {
           blockedDepartments: 0,
           failedBatches: 0,
           blockedBatches: 0,
+          retainedLkgZones: 1,
           oldestObservationAt: '2026-08-01T03:00:00.000Z',
           latestObservationAt: '2026-08-01T04:00:00.000Z',
         },
@@ -247,6 +248,7 @@ describe('HealthController', () => {
           appliedDepartments: mode === 'safe' ? 101 : 0,
           recomputePendingDepartments: 0,
           blockedDepartments: 0,
+          retainedLkgZones: 1,
         },
       });
     },
