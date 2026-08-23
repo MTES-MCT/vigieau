@@ -100,6 +100,8 @@ const SANDRE_MDM_REQUEST_TIMEOUT_MS = 60_000;
 const SANDRE_MDM_REQUEST_RETRY_BASE_MS = 250;
 const SANDRE_MDM_PROOF_RETRY_BASE_MS = 2_000;
 const SANDRE_MDM_PROOF_RETRY_MAX_MS = 10_000;
+const SANDRE_TRANSACTION_MAX_ATTEMPTS = 3;
+const SANDRE_TRANSACTION_RETRY_BASE_MS = 50;
 const SANDRE_MDM_TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const SANDRE_VALID_STATUS = 'Validé';
 const SANDRE_ZONE_SELECT = {
@@ -715,12 +717,14 @@ export class ZoneAlerteService {
               },
             });
           recomputeWasPending = Boolean(state?.needsRecompute);
-          const lastFullSyncAt = (
-            state?.lastObservedAt ?? state?.lastFullSyncAt
+          const lastModeSyncAt = (
+            (syncMode === 'safe'
+              ? state?.lastAppliedAt
+              : state?.lastObservedAt) ?? state?.lastFullSyncAt
           )?.getTime();
           const fullSyncExpired =
-            !lastFullSyncAt ||
-            Date.now() - lastFullSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
+            !lastModeSyncAt ||
+            Date.now() - lastModeSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
           const forcedAuditDue =
             syncMode === 'audit' &&
             !auditCoverage.attemptedDepartmentIds.has(d.id);
@@ -1759,11 +1763,136 @@ export class ZoneAlerteService {
     batchId: string | null = null,
     approvedMdmEvidence?: SandreApprovedMdmEvidence,
   ): Promise<SandreSnapshotApplication> {
+    let lastError: unknown;
+    for (
+      let attempt = 1;
+      attempt <= SANDRE_TRANSACTION_MAX_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await this.applySandreSnapshotOnce(
+          depCode,
+          snapshot,
+          snapshotStartedAt,
+          batchId,
+          approvedMdmEvidence,
+        );
+      } catch (error) {
+        lastError = error;
+        if (
+          !this.isRetryableSandreTransactionError(error) ||
+          attempt >= SANDRE_TRANSACTION_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await this.waitForSandreTransactionRetry(
+          SANDRE_TRANSACTION_RETRY_BASE_MS * 2 ** (attempt - 1),
+        );
+      }
+    }
+    throw lastError;
+  }
+
+  private isRetryableSandreTransactionError(error: unknown): boolean {
+    const candidate = error as {
+      code?: string;
+      driverError?: { code?: string };
+    };
+    const code = candidate?.code ?? candidate?.driverError?.code;
+    return code === '40001' || code === '40P01';
+  }
+
+  private async waitForSandreTransactionRetry(delayMs: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private async cleanupSandreDepartmentLockSession(
+    queryRunner: QueryRunner,
+    departementId: number | null,
+    rollbackTransaction: boolean,
+    primaryError: unknown,
+  ): Promise<void> {
+    const cleanupErrors: unknown[] = [];
+    if (rollbackTransaction) {
+      try {
+        await queryRunner.rollbackTransaction();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    let advisoryCleanupFailed = false;
+    if (departementId !== null) {
+      try {
+        const [unlock] = await queryRunner.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau:sandre-zone-sync'), $1) AS unlocked",
+          [departementId],
+        );
+        if (unlock?.unlocked !== true) {
+          throw new Error(
+            `Unable to release the Sandre lock for department ${departementId}`,
+          );
+        }
+      } catch (error) {
+        advisoryCleanupFailed = true;
+        cleanupErrors.push(error);
+      }
+    }
+    if (advisoryCleanupFailed) {
+      try {
+        await queryRunner.query('SELECT pg_advisory_unlock_all()');
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      await queryRunner.release();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (cleanupErrors.length > 0) {
+      const cleanupError = new AggregateError(
+        cleanupErrors,
+        'Failed to clean up Sandre department lock session',
+      );
+      if (primaryError === null) {
+        throw cleanupError;
+      }
+      this.logger.error(
+        'ERREUR LORS DU NETTOYAGE DU VERROU DEPARTEMENTAL SANDRE',
+        cleanupError.stack ?? cleanupError.message,
+      );
+    }
+  }
+
+  private async applySandreSnapshotOnce(
+    depCode: string,
+    snapshot: SandreZoneSnapshot,
+    snapshotStartedAt: Date,
+    batchId: string | null = null,
+    approvedMdmEvidence?: SandreApprovedMdmEvidence,
+  ): Promise<SandreSnapshotApplication> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
-    await queryRunner.startTransaction('SERIALIZABLE');
-
+    let lockedDepartementId: number | null = null;
+    let transactionStarted = false;
+    let primaryError: unknown = null;
     try {
+      const [lockTarget] = (await queryRunner.query(
+        `SELECT "id" FROM "departement" WHERE "code" = $1`,
+        [depCode],
+      )) as Array<{ id: number | string }>;
+      const departementId = Number(lockTarget?.id);
+      if (!Number.isSafeInteger(departementId)) {
+        throw new Error(`Unknown department ${depCode}`);
+      }
+      lockedDepartementId = departementId;
+      await queryRunner.query(
+        "SELECT pg_advisory_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
+        [departementId],
+      );
+      await queryRunner.startTransaction('SERIALIZABLE');
+      transactionStarted = true;
+
       const departementRepository =
         queryRunner.manager.getRepository(Departement);
       const stateRepository =
@@ -1771,13 +1900,9 @@ export class ZoneAlerteService {
       const departement = await departementRepository.findOne({
         where: { code: depCode },
       });
-      if (!departement) {
+      if (!departement || departement.id !== departementId) {
         throw new Error(`Unknown department ${depCode}`);
       }
-      await queryRunner.manager.query(
-        "SELECT pg_advisory_xact_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
-        [departement.id],
-      );
       let state = await stateRepository.findOne({
         where: {
           departement: {
@@ -1818,6 +1943,7 @@ export class ZoneAlerteService {
           );
         }
         await queryRunner.commitTransaction();
+        transactionStarted = false;
         return {
           result: {
             added: 0,
@@ -2078,13 +2204,19 @@ export class ZoneAlerteService {
         );
       }
       await queryRunner.commitTransaction();
+      transactionStarted = false;
 
       return { result, recomputeRequired, decisions, stale: false };
     } catch (error) {
-      await queryRunner.rollbackTransaction();
+      primaryError = error;
       throw error;
     } finally {
-      await queryRunner.release();
+      await this.cleanupSandreDepartmentLockSession(
+        queryRunner,
+        lockedDepartementId,
+        transactionStarted,
+        primaryError,
+      );
     }
   }
 

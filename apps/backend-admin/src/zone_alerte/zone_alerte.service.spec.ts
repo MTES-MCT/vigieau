@@ -466,6 +466,12 @@ describe('ZoneAlerteService Sandre synchronization', () => {
             },
           ];
         }
+        if (
+          query.includes('FROM "departement"') &&
+          query.includes('WHERE "code" = $1')
+        ) {
+          return [{ id: department.id }];
+        }
         if (query.includes('pg_advisory_unlock')) {
           return [{ unlocked: true }];
         }
@@ -1438,6 +1444,272 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         query.includes('UPDATE "zone_publication_source_state"'),
       ),
     ).toBe(false);
+  });
+
+  it('acquires the department session lock before starting the serializable transaction', async () => {
+    const harness = createHarness();
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshotOnce(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ stale: false }));
+
+    const lockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('SELECT pg_advisory_lock('),
+    );
+    const unlockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('SELECT pg_advisory_unlock('),
+    );
+    expect(lockCallIndex).toBeGreaterThanOrEqual(0);
+    expect(unlockCallIndex).toBeGreaterThanOrEqual(0);
+    expect(harness.queryRunner.query.mock.calls[lockCallIndex][1]).toEqual([
+      department.id,
+    ]);
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[lockCallIndex],
+    ).toBeLessThan(
+      harness.queryRunner.startTransaction.mock.invocationCallOrder[0],
+    );
+    expect(
+      harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    );
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    ).toBeLessThan(harness.queryRunner.release.mock.invocationCallOrder[0]);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('pg_advisory_xact_lock'),
+      ),
+    ).toBe(false);
+  });
+
+  it('rolls back before releasing the department session lock', async () => {
+    const harness = createHarness({ historicInvalidationSucceeds: false });
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshotOnce(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toThrow('Unable to invalidate zone computations');
+
+    const unlockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('SELECT pg_advisory_unlock('),
+    );
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.queryRunner.rollbackTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    );
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    ).toBeLessThan(harness.queryRunner.release.mock.invocationCallOrder[0]);
+  });
+
+  it('falls back to unlocking the whole session when the keyed unlock fails', async () => {
+    const harness = createHarness();
+    const originalQuery = harness.queryRunner.query.getMockImplementation();
+    harness.queryRunner.query.mockImplementation(
+      async (query: string, parameters?: any[]) => {
+        if (query.includes('SELECT pg_advisory_unlock(')) {
+          return [{ unlocked: false }];
+        }
+        return originalQuery?.(query, parameters);
+      },
+    );
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshotOnce(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toThrow('Failed to clean up Sandre department lock session');
+
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a new query runner for a retried Sandre transaction', async () => {
+    const harness = createHarness();
+    const serializationFailure = Object.assign(
+      new Error('serialization failure'),
+      { code: '40001' },
+    );
+    const firstRunner = {
+      manager: harness.manager,
+      query: jest.fn(async (query: string) => {
+        if (query.includes('FROM "departement"')) {
+          return [{ id: department.id }];
+        }
+        if (query.includes('SELECT pg_advisory_unlock(')) {
+          return [{ unlocked: true }];
+        }
+        return [];
+      }),
+      connect: jest.fn().mockResolvedValue(undefined),
+      startTransaction: jest.fn().mockRejectedValue(serializationFailure),
+      commitTransaction: jest.fn().mockResolvedValue(undefined),
+      rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+    harness.dataSource.createQueryRunner
+      .mockReturnValueOnce(firstRunner)
+      .mockReturnValueOnce(harness.queryRunner);
+    const waitForRetry = jest
+      .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+      .mockResolvedValue(undefined);
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshot(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ stale: false }));
+
+    expect(harness.dataSource.createQueryRunner).toHaveBeenCalledTimes(2);
+    expect(firstRunner.release).toHaveBeenCalledTimes(1);
+    expect(firstRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).toHaveBeenCalledWith(50);
+  });
+
+  it.each([
+    [
+      'serialization failure',
+      Object.assign(new Error('serialization failure'), { code: '40001' }),
+    ],
+    [
+      'deadlock through the driver error',
+      Object.assign(new Error('deadlock detected'), {
+        driverError: { code: '40P01' },
+      }),
+    ],
+  ])(
+    'retries a %s by replaying the Sandre transaction',
+    async (_label, error) => {
+      const harness = createHarness();
+      const application = {
+        result: { added: 1, updated: 0, disabled: 0, unchanged: 0 },
+        recomputeRequired: true,
+        decisions: [],
+        stale: false,
+      };
+      const applyOnce = jest
+        .spyOn(harness.service as any, 'applySandreSnapshotOnce')
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce(application);
+      const waitForRetry = jest
+        .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+        .mockResolvedValue(undefined);
+      const snapshot = createSandreZoneSnapshot(
+        [rawFeature()],
+        1,
+        department.code,
+      );
+
+      await expect(
+        (harness.service as any).applySandreSnapshot(
+          department.code,
+          snapshot,
+          new Date('2026-08-23T12:00:00.000Z'),
+          'batch-1',
+        ),
+      ).resolves.toBe(application);
+
+      expect(applyOnce).toHaveBeenCalledTimes(2);
+      expect(waitForRetry).toHaveBeenCalledWith(50);
+    },
+  );
+
+  it('bounds Sandre transaction retries and rethrows the last conflict', async () => {
+    const harness = createHarness();
+    const serializationFailure = Object.assign(
+      new Error('serialization failure'),
+      { code: '40001' },
+    );
+    const applyOnce = jest
+      .spyOn(harness.service as any, 'applySandreSnapshotOnce')
+      .mockRejectedValue(serializationFailure);
+    const waitForRetry = jest
+      .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+      .mockResolvedValue(undefined);
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshot(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toBe(serializationFailure);
+
+    expect(applyOnce).toHaveBeenCalledTimes(3);
+    expect(waitForRetry.mock.calls).toEqual([[50], [100]]);
+  });
+
+  it('does not retry a non-transactional Sandre failure', async () => {
+    const harness = createHarness();
+    const validationFailure = new Error('Sandre validation drift');
+    const applyOnce = jest
+      .spyOn(harness.service as any, 'applySandreSnapshotOnce')
+      .mockRejectedValue(validationFailure);
+    const waitForRetry = jest
+      .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+      .mockResolvedValue(undefined);
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshot(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toBe(validationFailure);
+
+    expect(applyOnce).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).not.toHaveBeenCalled();
   });
 
   it('keeps the historic epoch for a current-only Sandre mutation', async () => {
@@ -3391,6 +3663,61 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       expect(harness.httpService.get).not.toHaveBeenCalled();
     },
   );
+
+  it('reapplies a safe snapshot when its last application is expired', async () => {
+    const harness = createHarness({
+      syncMode: 'safe',
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000),
+        observedSnapshotHash: 'same-snapshot',
+        appliedSnapshotHash: 'same-snapshot',
+        observedSourceUpdatedAt: '2026-08-23',
+        appliedSourceUpdatedAt: '2026-08-23',
+      },
+    });
+    const changeSpy = jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest
+      .spyOn(harness.service, 'updateDepartementZones')
+      .mockResolvedValue({
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 1,
+      });
+
+    await harness.service.updateZones();
+
+    expect(updateSpy).toHaveBeenCalledWith('65');
+    expect(changeSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps a fresh audit observation on its normal change check', async () => {
+    const harness = createHarness({
+      syncMode: 'audit',
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000),
+        observedSnapshotHash: 'same-snapshot',
+        appliedSnapshotHash: 'same-snapshot',
+        observedSourceUpdatedAt: '2026-08-23',
+        appliedSourceUpdatedAt: '2026-08-23',
+      },
+    });
+    const changeSpy = jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest.spyOn(harness.service, 'updateDepartementZones');
+
+    await harness.service.updateZones();
+
+    expect(changeSpy).toHaveBeenCalledWith('65', expect.any(Object));
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
 
   it('forces one fresh audit after the configured rollout cutoff', async () => {
     const harness = createHarness({
