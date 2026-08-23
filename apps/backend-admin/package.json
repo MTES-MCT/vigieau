@@ -23,6 +23,7 @@
     "datagouv:publish-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-communes.js",
     "datagouv:publish-historique-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-historique-communes.js",
     "benchmark:historic-backfill": "node dist/apps/backend-admin/src/scripts/benchmark-historic-backfill.js",
+    "operator:historic-backfill": "node dist/apps/backend-admin/src/scripts/historic-backfill-operator.js",
     "recompute:commune-statistics": "node dist/apps/backend-admin/src/scripts/recompute-commune-statistics.js",
     "zones:sandre:reconcile": "node dist/apps/backend-admin/src/scripts/reconcile-sandre-zones.js",
     "arretes:confirm-open-ended-predecessor": "node dist/apps/backend-admin/src/scripts/confirm-open-ended-predecessor.js",
