@@ -771,6 +771,24 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       expected.restrictions.map((restriction) => restriction.restrictionId),
     ).toEqual([1300, 1301]);
 
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'crise' WHERE id = 1300`,
+    );
+    await expect(
+      applySandreApprovedPartitionReferences(
+        runner,
+        expected,
+        [
+          { codeSandre: '3947', zoneAlerteId: 20583 },
+          { codeSandre: '3948', zoneAlerteId: 20584 },
+        ],
+        '2026-06-30',
+      ),
+    ).rejects.toThrow('partition references changed');
+    await runner.query(
+      `UPDATE restriction SET "niveauGravite" = 'alerte_renforcee' WHERE id = 1300`,
+    );
+
     await runner.startTransaction('SERIALIZABLE');
     try {
       await lockSandreApprovedSyncReferences(runner, [20582], [20583, 20584]);
@@ -952,7 +970,7 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         ],
         '2026-06-30',
       ),
-    ).rejects.toThrow('restriction lineage is incomplete');
+    ).rejects.toThrow('post-apply state changed');
     await runner.query(
       `UPDATE restriction SET "niveauGravite" = 'alerte' WHERE id = $1`,
       [futureRestriction.id],
@@ -962,18 +980,43 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       `UPDATE restriction SET "niveauGravite" = 'crise' WHERE id = $1`,
       [cloneRestrictionIds[0]],
     );
-    await expect(
-      loadSandreApprovedReferenceEvidence(
-        runner,
-        20582,
-        [20583, 20584],
-        initialLineage,
-      ),
-    ).rejects.toThrow('restriction lineage is incomplete');
+    const evolvedLineage = await loadSandreApprovedReferenceEvidence(
+      runner,
+      20582,
+      [20583, 20584],
+      initialLineage,
+    );
+    expect(evolvedLineage).toEqual(
+      expect.objectContaining({ lifecycle: 'post_apply' }),
+    );
+    expect(evolvedLineage.fingerprint).not.toBe(initialLineage.fingerprint);
     await runner.query(
       `UPDATE restriction SET "niveauGravite" = 'alerte_renforcee' WHERE id = $1`,
       [cloneRestrictionIds[0]],
     );
+
+    await runner.startTransaction('SERIALIZABLE');
+    try {
+      await runner.query(`DELETE FROM restriction WHERE id = $1`, [
+        cloneRestrictionIds[0],
+      ]);
+      await runner.query(`
+        INSERT INTO restriction (
+          "arreteRestrictionId", "zoneAlerteId", "arreteCadreId",
+          "nomGroupementAep", "niveauGravite"
+        ) VALUES (130, 20584, 130, NULL, 'alerte_renforcee')
+      `);
+      await expect(
+        loadSandreApprovedReferenceEvidence(
+          runner,
+          20582,
+          [20583, 20584],
+          initialLineage,
+        ),
+      ).rejects.toThrow('restriction lineage is incomplete');
+    } finally {
+      await runner.rollbackTransaction();
+    }
 
     await runner.query(`
       UPDATE arrete_cadre SET statut = 'abroge' WHERE id = 130;

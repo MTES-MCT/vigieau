@@ -831,9 +831,9 @@ async function assertPostApplyLineage(
   for (const [targetIndex, targetZoneId] of targetZoneIds.entries()) {
     const requiredState =
       lineage.lifecycle === 'post_apply'
-        ? lineage.targetState.find(
+        ? (lineage.targetState.find(
             (target) => target.targetIndex === targetIndex,
-          )
+          ) ?? null)
         : null;
     const requiredLinks = requiredState
       ? requiredState.arreteCadreIds
@@ -862,7 +862,8 @@ async function assertPostApplyLineage(
             : targetIndex === 0
               ? row.restrictionId === required.restrictionId
               : row.arreteRestrictionId === required.arreteRestrictionId) &&
-          row.payloadFingerprint === required.payloadFingerprint,
+          (requiredState !== null ||
+            row.payloadFingerprint === required.payloadFingerprint),
       );
       if (parentRows.length !== 1 || matches.length !== 1) {
         throw new Error('Approved Sandre restriction lineage is incomplete');

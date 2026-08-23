@@ -2924,8 +2924,8 @@ export class ZoneAlerteService {
         .sort()
         .at(-1);
       const genealogyEvidenceFingerprint = fingerprint({
-        count: relations.length,
-        latest: genealogyLatestDate ?? null,
+        relationCount: relations.length,
+        latestModificationDate: genealogyLatestDate ?? null,
         sourceCode: approval.feature.codeSandre,
         sourceRelations,
       });

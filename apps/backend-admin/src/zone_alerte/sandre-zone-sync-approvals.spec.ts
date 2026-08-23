@@ -65,8 +65,30 @@ describe('exact Sandre sync approvals', () => {
     expect(
       department24.mappings
         .filter((mapping) => mapping.targetCodes.length === 1)
-        .every((mapping) => mapping.requireTopologicalEquality),
+        .every(
+          (mapping) =>
+            !mapping.requireTopologicalEquality &&
+            mapping.effectiveDate === null &&
+            mapping.expectedGeometry !== null,
+        ),
     ).toBe(true);
+    expect(
+      department24.mappings.find((mapping) => mapping.sourceCode === '1029'),
+    ).toEqual(
+      expect.objectContaining({
+        sourceZoneId: 12098,
+        targetCodes: ['4077'],
+        requireTopologicalEquality: false,
+        expectedGeometry: {
+          sourceGeometryHash: 'c887321ceb9a1184d5b874a7ef42877a',
+          targetGeometryHashes: ['165b5b8e4504775213a1805f930f6501'],
+          unionGeometryHash: '22b44390a9b7d459b05acbd79bc4a1f8',
+          sourceCoverage: 0.9999999932936506,
+          targetCoverage: 0.9999999939499236,
+          iou: 0.9999999872435719,
+        },
+      }),
+    );
 
     expect(department85.mappings).toEqual([
       expect.objectContaining({
@@ -118,6 +140,58 @@ describe('exact Sandre sync approvals', () => {
         expect(mapping.maximumPairwiseOverlapRatio).toBeGreaterThanOrEqual(0);
         expect(mapping.maximumPairwiseOverlapRatio).toBeLessThanOrEqual(2e-9);
       }
+    }
+  });
+
+  it('accepts only the exact sealed department 24 equivalent geometry', async () => {
+    const department24 = SANDRE_APPROVED_SYNC_SNAPSHOTS.find(
+      (approval) => approval.departmentCode === '24',
+    )!;
+    const mapping = department24.mappings.find(
+      (item) => item.sourceCode === '1029',
+    )!;
+    const exactRow = geometryRow(mapping);
+    const executor = { query: jest.fn().mockResolvedValue([exactRow]) };
+
+    await expect(
+      auditSandreApprovedSyncGeometry(
+        executor,
+        mapping,
+        targetFeatures(mapping),
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        sourceCoverage: mapping.expectedGeometry!.sourceCoverage,
+        topologicallyEqual: false,
+      }),
+    );
+
+    for (const drift of [
+      { sourceGeometryHash: '0'.repeat(32) },
+      { targetGeometryHashes: ['0'.repeat(32)] },
+      { unionGeometryHash: '0'.repeat(32) },
+      {
+        sourceCoverage: String(
+          mapping.expectedGeometry!.sourceCoverage + 1e-12,
+        ),
+      },
+      {
+        targetCoverage: String(
+          mapping.expectedGeometry!.targetCoverage + 1e-12,
+        ),
+      },
+      { iou: String(mapping.expectedGeometry!.iou + 1e-12) },
+      { pairwiseOverlapRatio: '1e-20' },
+      { topologicallyEqual: true },
+    ]) {
+      executor.query.mockResolvedValueOnce([{ ...exactRow, ...drift }]);
+      await expect(
+        auditSandreApprovedSyncGeometry(
+          executor,
+          mapping,
+          targetFeatures(mapping),
+        ),
+      ).rejects.toThrow('Approved Sandre geometry changed');
     }
   });
 

@@ -2323,8 +2323,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       },
     ];
     const genealogyEvidenceFingerprint = fingerprint({
-      count: genealogyRelations.length,
-      latest: '2024-10-01',
+      relationCount: genealogyRelations.length,
+      latestModificationDate: '2024-10-01',
       sourceCode: feature.codeSandre,
       sourceRelations: [],
     });
