@@ -18,6 +18,7 @@ import {
 } from './sandre-zone-sync-approvals';
 import {
   applySandreApprovedPartitionReferences,
+  fingerprintSandreApprovedPostApplyEvidence,
   loadSandreApprovedReferenceEvidence,
   lockSandreApprovedSyncReferences,
   markSandreApprovedHistoricalRecomputeDebt,
@@ -875,6 +876,55 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       expected,
     );
     expect(initialLineage.lifecycle).toBe('post_apply');
+    await runner.query(
+      `DELETE FROM zone_alerte_computed WHERE id IN (91300, 91301)`,
+    );
+    await runner.query(
+      `
+        INSERT INTO zone_alerte_computed (id, "restrictionId") VALUES
+          (91310, $1), (91311, $2)
+      `,
+      cloneRestrictionIds,
+    );
+    const rematerializedLineage = await loadSandreApprovedReferenceEvidence(
+      runner,
+      20582,
+      [20583, 20584],
+      initialLineage,
+    );
+    expect(rematerializedLineage.fingerprint).not.toBe(
+      initialLineage.fingerprint,
+    );
+    expect(
+      fingerprintSandreApprovedPostApplyEvidence(rematerializedLineage),
+    ).toBe(fingerprintSandreApprovedPostApplyEvidence(initialLineage));
+    await expect(
+      applySandreApprovedPartitionReferences(
+        runner,
+        initialLineage,
+        [
+          { codeSandre: '3947', zoneAlerteId: 20583 },
+          { codeSandre: '3948', zoneAlerteId: 20584 },
+        ],
+        '2026-06-30',
+      ),
+    ).resolves.toEqual({ applied: false });
+    await runner.query(
+      `INSERT INTO zone_alerte_computed (id, "restrictionId") VALUES (91312, $1)`,
+      [cloneRestrictionIds[0]],
+    );
+    await expect(
+      applySandreApprovedPartitionReferences(
+        runner,
+        initialLineage,
+        [
+          { codeSandre: '3947', zoneAlerteId: 20583 },
+          { codeSandre: '3948', zoneAlerteId: 20584 },
+        ],
+        '2026-06-30',
+      ),
+    ).rejects.toThrow('post-apply state changed');
+    await runner.query(`DELETE FROM zone_alerte_computed WHERE id = 91312`);
     const [cursor] = await runner.query(`
       SELECT
         "computeMapDate"::text AS "computeMapDate",

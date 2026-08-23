@@ -78,6 +78,7 @@ import {
 import {
   applySandreApprovedPartitionReferences,
   assertSandreApprovedOneToOneApplied,
+  fingerprintSandreApprovedPostApplyEvidence,
   loadSandreApprovedReferenceEvidence,
   lockSandreApprovedSyncReferences,
   parseSandreApprovedReferenceEvidence,
@@ -3376,12 +3377,18 @@ export class ZoneAlerteService {
               ? expectedReferences
               : undefined),
         );
+        const referencesMatch =
+          currentReferences.fingerprint === expectedReferences.fingerprint ||
+          (currentReferences.lifecycle === 'post_apply' &&
+            expectedReferences.lifecycle === 'post_apply' &&
+            fingerprintSandreApprovedPostApplyEvidence(currentReferences) ===
+              fingerprintSandreApprovedPostApplyEvidence(expectedReferences));
         auditedSourceIdentity = parseSandreApprovedSourceIdentityEvidence(
           audited.observedSourceIdentity,
         );
         const sourceZone = item.source.match.zone;
         if (
-          currentReferences.fingerprint === expectedReferences.fingerprint &&
+          referencesMatch &&
           (sourceZone.idSandre !== item.source.feature.gid ||
             sourceZone.codeSandre !== item.source.feature.codeSandre ||
             sourceZone.sandreProvenance !== 'official')
@@ -3391,7 +3398,7 @@ export class ZoneAlerteService {
           sourceZone.sandreProvenance = 'official';
           await manager.getRepository(ZoneAlerte).save(sourceZone);
         }
-        if (currentReferences.fingerprint === expectedReferences.fingerprint) {
+        if (referencesMatch) {
           if (
             fingerprint(observedSourceIdentity) !==
             fingerprint(auditedSourceIdentity)

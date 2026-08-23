@@ -28,6 +28,33 @@ export interface SandreApprovedReferenceEvidence {
   fingerprint: string;
 }
 
+export function fingerprintSandreApprovedPostApplyEvidence(
+  evidence: SandreApprovedReferenceEvidence,
+): string {
+  const targetState = evidence.targetState.map((target) => ({
+    ...target,
+    restrictions: target.restrictions.map(
+      ({ computedIds, historicIds, ...restriction }) => ({
+        ...restriction,
+        computedCount: computedIds.length,
+        historicCount: historicIds.length,
+      }),
+    ),
+  }));
+  return fingerprint({
+    sourceZoneId: evidence.sourceZoneId,
+    lifecycle: evidence.lifecycle,
+    sourceOperationalEmpty: evidence.sourceOperationalEmpty,
+    arreteCadreLinks: evidence.arreteCadreLinks,
+    restrictions: evidence.restrictions,
+    customizationCount: evidence.customizationCount,
+    aliasCount: evidence.aliasCount,
+    targetCollisionFingerprint: evidence.targetCollisionFingerprint,
+    targetStateFingerprint: fingerprint(targetState),
+    targetState,
+  });
+}
+
 interface RestrictionPayloadRow extends SandreApprovedRestrictionEvidence {
   zoneAlerteId: number;
   payload: Record<string, unknown>;
@@ -422,7 +449,9 @@ export async function applySandreApprovedPartitionReferences(
   if (current.lifecycle === 'post_apply') {
     if (
       expected.lifecycle === 'post_apply' &&
-      current.fingerprint !== expected.fingerprint
+      current.fingerprint !== expected.fingerprint &&
+      fingerprintSandreApprovedPostApplyEvidence(current) !==
+        fingerprintSandreApprovedPostApplyEvidence(expected)
     ) {
       throw new Error(
         `Approved Sandre partition post-apply state changed for zone ${expected.sourceZoneId}`,

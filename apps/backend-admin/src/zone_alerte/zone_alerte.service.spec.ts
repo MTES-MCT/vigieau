@@ -1903,6 +1903,17 @@ describe('ZoneAlerteService Sandre synchronization', () => {
           : targetState.map((target) => ({
               ...target,
               arreteCadreIds: [700],
+              restrictions: [
+                {
+                  restrictionId: 900 + target.targetIndex,
+                  arreteRestrictionId: 800 + target.targetIndex,
+                  parentStatus: 'publie',
+                  parentDateDebut: '2026-06-30',
+                  payloadFingerprint: `${target.targetIndex + 1}`.repeat(64),
+                  computedIds: [1000 + target.targetIndex],
+                  historicIds: [2000 + target.targetIndex],
+                },
+              ],
             }));
       const unsigned = {
         sourceZoneId: sourceZone.id,
@@ -2048,6 +2059,93 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
     expect(referencesSpy).toHaveBeenCalledTimes(3);
 
+    const rematerializedTargetState = postApplyLineage.targetState.map(
+      (target) => ({
+        ...target,
+        restrictions: target.restrictions.map((restriction) => ({
+          ...restriction,
+          computedIds: restriction.computedIds.map((id) => id + 100),
+          historicIds: restriction.historicIds.map((id) => id + 100),
+        })),
+      }),
+    );
+    const rematerializedUnsigned = {
+      sourceZoneId: postApplyLineage.sourceZoneId,
+      lifecycle: postApplyLineage.lifecycle,
+      sourceOperationalEmpty: postApplyLineage.sourceOperationalEmpty,
+      arreteCadreLinks: postApplyLineage.arreteCadreLinks,
+      restrictions: postApplyLineage.restrictions,
+      customizationCount: postApplyLineage.customizationCount,
+      aliasCount: postApplyLineage.aliasCount,
+      targetCollisionFingerprint: postApplyLineage.targetCollisionFingerprint,
+      targetStateFingerprint: fingerprint(rematerializedTargetState),
+      targetState: rematerializedTargetState,
+    };
+    const rematerializedReferences = {
+      ...rematerializedUnsigned,
+      fingerprint: fingerprint(rematerializedUnsigned),
+    };
+    const postApplySourceIdentity = {
+      matchType: 'canonical',
+      idSandre: sourceFeature.gid,
+      codeSandre: sourceFeature.codeSandre,
+      provenance: 'official',
+      disabled: sourceZone.disabled,
+      statutSandre: sourceZone.statutSandre,
+      dateMajSandre: sourceZone.dateMajSandre,
+      numeroVersionSandre: sourceZone.numeroVersionSandre,
+      sandrePayloadHash: sourceZone.sandrePayloadHash,
+    };
+    const postApplyAudit = {
+      ...audited,
+      referenceEvidence: postApplyLineage,
+      migrationLineage: postApplyLineage,
+      observedSourceIdentity: postApplySourceIdentity,
+      approvalFingerprint: fingerprint({
+        staticFingerprint: audited.staticFingerprint,
+        referenceEvidence: postApplyLineage,
+        migrationLineage: postApplyLineage,
+        observedSourceIdentity: postApplySourceIdentity,
+      }),
+    };
+    referencesSpy.mockResolvedValueOnce(rematerializedReferences);
+    const replayDecisions: any[] = [];
+
+    await (harness.service as any).reconcileApprovedSandreSnapshotMappings(
+      harness.manager,
+      department,
+      snapshot,
+      approval,
+      [
+        {
+          feature: sourceFeature,
+          match: { zone: sourceZone, matchType: 'canonical' },
+        },
+      ],
+      new Map(
+        targetFeatures.map((feature, index) => [
+          feature.codeSandre,
+          targetZones[index],
+        ]),
+      ),
+      replayDecisions,
+      true,
+      {
+        batchId: 'audit-2',
+        decisions: new Map([['355:approved-snapshot', postApplyAudit]]),
+      },
+      mdmEvidence,
+    );
+
+    expect(replayDecisions[0]).toEqual(
+      expect.objectContaining({
+        outcome: 'applied',
+        reason: 'APPROVED_MAPPING_ALREADY_APPLIED',
+      }),
+    );
+    expect(referencesSpy).toHaveBeenCalledTimes(4);
+    expect(partitionSpy).toHaveBeenCalledTimes(1);
+
     materializedSpy.mockRejectedValueOnce(
       new Error('Approved Sandre materialized target geometry changed'),
     );
@@ -2079,7 +2177,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       ),
     ).rejects.toThrow('materialized target geometry changed');
     expect(partitionSpy).toHaveBeenCalledTimes(1);
-    expect(geometrySpy).toHaveBeenCalledTimes(2);
+    expect(geometrySpy).toHaveBeenCalledTimes(3);
   });
 
   it('exposes a redacted operator status with observed, applied and blocked state', async () => {
