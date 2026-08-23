@@ -2259,14 +2259,25 @@ export class ArreteRestrictionService {
     const queryRunner =
       this.arreteRestrictionRepository.manager.connection.createQueryRunner();
     await queryRunner.connect();
-    let locked = false;
+    let currentZoneLockAcquired = false;
+    let sandreGlobalLockAcquired = false;
+    let operationError: unknown;
     try {
       const [lockResult] = await queryRunner.query(
         `SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('current-zone-recompute')) AS locked`,
       );
-      locked = lockResult?.locked === true;
-      if (!locked) {
+      currentZoneLockAcquired = lockResult?.locked === true;
+      if (!currentZoneLockAcquired) {
         return 'busy';
+      }
+      if (isZonePublicationEnabled()) {
+        const [sandreLockResult] = await queryRunner.query(
+          `SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS locked`,
+        );
+        sandreGlobalLockAcquired = sandreLockResult?.locked === true;
+        if (!sandreGlobalLockAcquired) {
+          return 'busy';
+        }
       }
 
       let processed = false;
@@ -2631,20 +2642,75 @@ export class ArreteRestrictionService {
         }
       }
       return processed ? 'processed' : superseded ? 'superseded' : 'empty';
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
+      let cleanupError: unknown;
+      let connectionDestroyed = false;
       try {
-        if (locked) {
+        if (sandreGlobalLockAcquired) {
           const [unlockResult] = await queryRunner.query(
-            `SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('current-zone-recompute'))`,
+            `SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS unlocked`,
           );
-          if (unlockResult?.pg_advisory_unlock !== true) {
+          if (unlockResult?.unlocked !== true) {
+            throw new Error('Unable to release the global Sandre lock');
+          }
+        }
+      } catch (error) {
+        cleanupError = error;
+      }
+      try {
+        if (currentZoneLockAcquired) {
+          const [unlockResult] = await queryRunner.query(
+            `SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('current-zone-recompute')) AS unlocked`,
+          );
+          if (unlockResult?.unlocked !== true) {
             throw new Error(
               'Unable to release the current zone recompute lock',
             );
           }
         }
-      } finally {
-        await queryRunner.release();
+      } catch (error) {
+        cleanupError ??= error;
+      }
+      if (cleanupError) {
+        try {
+          await queryRunner.query('SELECT pg_advisory_unlock_all()');
+        } catch (error) {
+          const connectionError =
+            error instanceof Error ? error : new Error(String(error));
+          connectionDestroyed = true;
+          try {
+            // TypeORM keeps this pool-destroying release private to PostgresQueryRunner.
+            await (
+              queryRunner as typeof queryRunner & {
+                releasePostgresConnection: (error: Error) => Promise<void>;
+              }
+            ).releasePostgresConnection(connectionError);
+          } catch (destroyError) {
+            cleanupError ??= destroyError;
+          }
+        }
+      }
+      if (!connectionDestroyed) {
+        try {
+          await queryRunner.release();
+        } catch (error) {
+          cleanupError ??= error;
+        }
+      }
+      if (cleanupError) {
+        if (operationError) {
+          this.logger.error(
+            'ERREUR LORS DE LA LIBERATION DES VERROUS DE RECALCUL COURANT',
+            cleanupError instanceof Error
+              ? cleanupError.toString()
+              : String(cleanupError),
+          );
+        } else {
+          throw cleanupError;
+        }
       }
     }
   }

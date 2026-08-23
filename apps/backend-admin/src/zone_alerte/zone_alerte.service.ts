@@ -3,6 +3,7 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CronExpression } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { Departement } from '@shared/entities/departement.entity';
 import { SandreZoneAlias } from '@shared/entities/sandre_zone_alias.entity';
@@ -165,6 +166,11 @@ interface SandreSyncResult {
   unchanged: number;
 }
 
+interface SandreRecomputeDebt {
+  departementId: number;
+  recomputeRevision: number;
+}
+
 interface SandreZoneMatch {
   matchType: 'canonical' | 'alias' | 'legacy_gid';
   zone: ZoneAlerte;
@@ -268,6 +274,8 @@ export class ZoneAlerteService {
   private readonly logger = new RegleauLogger('ZoneAlerteService');
   private sandreSyncRunning = false;
   private sandreGlobalLockHeld = false;
+  private readonly sandreBatchRecomputeContext =
+    new AsyncLocalStorage<boolean>();
   private sandreSyncConfigurationWarned = false;
   private sandreGenealogyCache: {
     expiresAt: number;
@@ -718,7 +726,6 @@ export class ZoneAlerteService {
       }
 
       for (const d of departements) {
-        let recomputeWasPending = false;
         try {
           const state = await this.dataSource
             .getRepository(SandreZoneSyncState)
@@ -729,7 +736,6 @@ export class ZoneAlerteService {
                 },
               },
             });
-          recomputeWasPending = Boolean(state?.needsRecompute);
           const lastModeSyncAt = (
             (syncMode === 'safe'
               ? state?.lastAppliedAt
@@ -761,7 +767,13 @@ export class ZoneAlerteService {
             applicationPending ||
             sourceChanged
           ) {
-            await this.updateDepartementZones(d.code);
+            if (syncMode === 'safe') {
+              await this.sandreBatchRecomputeContext.run(true, () =>
+                this.updateDepartementZones(d.code),
+              );
+            } else {
+              await this.updateDepartementZones(d.code);
+            }
           }
         } catch (error) {
           this.logger.error(
@@ -769,15 +781,15 @@ export class ZoneAlerteService {
             error,
           );
         }
-        if (syncMode === 'safe' && recomputeWasPending) {
-          try {
-            await this.recomputeSandreDepartment(d.code);
-          } catch (error) {
-            this.logger.error(
-              `ERREUR LORS DU RECALCUL DES ZONES D'ALERTES DU DEPARTEMENT ${d.code}`,
-              error,
-            );
-          }
+      }
+      if (syncMode === 'safe') {
+        try {
+          await this.recomputePendingSandreDepartments();
+        } catch (error) {
+          this.logger.error(
+            'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+            error,
+          );
         }
       }
     } catch (error) {
@@ -998,7 +1010,10 @@ export class ZoneAlerteService {
       );
     }
 
-    if (recomputeRequired) {
+    if (
+      recomputeRequired &&
+      this.sandreBatchRecomputeContext.getStore() !== true
+    ) {
       try {
         await this.recomputeSandreDepartment(depCode);
       } catch (error) {
@@ -4401,16 +4416,93 @@ export class ZoneAlerteService {
       throw new Error(result?.error || 'Zone recomputation did not complete');
     }
 
+    await this.clearSandreRecomputeDebts([
+      {
+        departementId: departement.id,
+        recomputeRevision,
+      },
+    ]);
+  }
+
+  private async clearSandreRecomputeDebts(
+    debts: readonly SandreRecomputeDebt[],
+  ): Promise<void> {
+    if (debts.length === 0) {
+      return;
+    }
     await this.dataSource.query(
       `
-        UPDATE sandre_zone_sync_state
+        UPDATE sandre_zone_sync_state state
         SET "needsRecompute" = false, "updatedAt" = now()
-        WHERE "departementId" = $1
-          AND "recomputeRevision" = $2
-          AND "needsRecompute" = true
+        FROM unnest($1::integer[], $2::integer[])
+          AS completed("departementId", "recomputeRevision")
+        WHERE state."departementId" = completed."departementId"
+          AND state."recomputeRevision" = completed."recomputeRevision"
+          AND state."needsRecompute" = true
       `,
-      [departement.id, recomputeRevision],
+      [
+        debts.map((debt) => debt.departementId),
+        debts.map((debt) => debt.recomputeRevision),
+      ],
     );
+  }
+
+  private async recomputePendingSandreDepartments(): Promise<void> {
+    const pendingStates: SandreRecomputeDebt[] = await this.dataSource.query(`
+      SELECT
+        state."departementId" AS "departementId",
+        state."recomputeRevision" AS "recomputeRevision"
+      FROM sandre_zone_sync_state state
+      WHERE state."needsRecompute" = true
+      ORDER BY state."departementId"
+    `);
+    if (pendingStates.length === 0) {
+      return;
+    }
+
+    pendingStates.sort(
+      (left, right) => left.departementId - right.departementId,
+    );
+    const departmentIds = pendingStates.map((state) => state.departementId);
+    const result = await this.runCurrentZoneComputeWorker(departmentIds);
+    if (result?.success === true) {
+      await this.clearSandreRecomputeDebts(pendingStates);
+      return;
+    }
+    if (result?.success !== false || pendingStates.length === 1) {
+      throw new Error(result?.error || 'Zone recomputation did not complete');
+    }
+
+    const failures: Error[] = [];
+    const failedDepartmentIds: number[] = [];
+    for (const pendingState of pendingStates) {
+      try {
+        const departmentResult = await this.runCurrentZoneComputeWorker([
+          pendingState.departementId,
+        ]);
+        if (departmentResult?.success !== true) {
+          throw new Error(
+            departmentResult?.error || 'Zone recomputation did not complete',
+          );
+        }
+        await this.clearSandreRecomputeDebts([pendingState]);
+      } catch (error) {
+        failedDepartmentIds.push(pendingState.departementId);
+        failures.push(
+          new Error(
+            `Department ${pendingState.departementId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        );
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `Zone recomputation did not complete for departments ${failedDepartmentIds.join(', ')}`,
+      );
+    }
   }
 
   private runCurrentZoneComputeWorker(departmentIds: number[]) {

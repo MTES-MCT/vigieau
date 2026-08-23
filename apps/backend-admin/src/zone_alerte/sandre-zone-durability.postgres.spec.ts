@@ -1049,9 +1049,12 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     );
   }, 30_000);
 
-  it('pins approved split geometry and its materialized target rows', async () => {
+  it('accepts an exact polygon target and rejects translated or invalid targets', async () => {
     await runner.query(
-      `UPDATE zone_alerte SET geom = ST_Multi(geom) WHERE id IN (20583, 20584)`,
+      `UPDATE zone_alerte SET geom = ST_GeometryN(geom, 1) WHERE id = 20583`,
+    );
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_Multi(geom) WHERE id = 20584`,
     );
     const targetFeatures = [
       {
@@ -1126,6 +1129,16 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     await expect(
       auditSandreApprovedSyncGeometry(runner, pinned, targetFeatures),
     ).resolves.toEqual(observed);
+    const geometryTypes = await runner.query(`
+      SELECT id, GeometryType(geom) AS type
+      FROM zone_alerte
+      WHERE id IN (20583, 20584)
+      ORDER BY id
+    `);
+    expect(geometryTypes).toEqual([
+      { id: 20583, type: 'POLYGON' },
+      { id: 20584, type: 'MULTIPOLYGON' },
+    ]);
     await expect(
       assertSandreApprovedMaterializedTargets(runner, 86, [
         { feature: targetFeatures[0], zoneAlerteId: 20583 },
@@ -1158,6 +1171,64 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
     await expect(
       assertSandreApprovedMaterializedTargets(runner, 86, [
         { feature: targetFeatures[0], zoneAlerteId: 20583 },
+        { feature: targetFeatures[1], zoneAlerteId: 20584 },
+      ]),
+    ).rejects.toThrow('materialized target geometry changed');
+    await runner.query(
+      `UPDATE zone_alerte SET geom = ST_GeomFromEWKB($1) WHERE id = 20583`,
+      [stored.target],
+    );
+
+    const invalidTargetFeature = {
+      ...targetFeatures[0],
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [0, 10],
+            [1, 10],
+            [1, 8],
+            [0, 8],
+            [0, 10],
+          ],
+        ],
+      },
+    };
+    await runner.query(`
+      UPDATE zone_alerte
+      SET geom = ST_GeomFromText(
+        'POLYGON((0 8,1 8,1 10,0 10,0 8,0.5 9,0 8))',
+        4326
+      )
+      WHERE id = 20583
+    `);
+    const [invalidTargetState] = await runner.query(
+      `
+        WITH expected AS (
+          SELECT ST_Multi(ST_CollectionExtract(ST_MakeValid(
+            ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)
+          ), 3)) AS geom
+        )
+        SELECT
+          ST_IsValid(zone.geom) AS "localValid",
+          ST_Equals(zone.geom, expected.geom) AS "topologicallyEqual",
+          md5(ST_AsEWKB(ST_Multi(ST_CollectionExtract(
+            ST_MakeValid(zone.geom), 3
+          )))) = md5(ST_AsEWKB(expected.geom)) AS "canonicalHashEqual"
+        FROM zone_alerte zone
+        CROSS JOIN expected
+        WHERE zone.id = 20583
+      `,
+      [JSON.stringify(invalidTargetFeature.geometry)],
+    );
+    expect(invalidTargetState).toEqual({
+      localValid: false,
+      topologicallyEqual: true,
+      canonicalHashEqual: true,
+    });
+    await expect(
+      assertSandreApprovedMaterializedTargets(runner, 86, [
+        { feature: invalidTargetFeature, zoneAlerteId: 20583 },
         { feature: targetFeatures[1], zoneAlerteId: 20584 },
       ]),
     ).rejects.toThrow('materialized target geometry changed');

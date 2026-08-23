@@ -1033,7 +1033,10 @@ export async function assertSandreApprovedMaterializedTargets(
         zone.disabled,
         zone.type,
         zone."departementId",
-        md5(ST_AsEWKB(zone.geom)) AS "localGeometryHash",
+        ST_IsValid(zone.geom) AS "localValid",
+        md5(ST_AsEWKB(ST_Multi(ST_CollectionExtract(
+          ST_MakeValid(zone.geom), 3
+        )))) AS "localGeometryHash",
         md5(ST_AsEWKB(expected.geom)) AS "expectedGeometryHash",
         ST_Equals(zone.geom, expected.geom) AS "topologicallyEqual"
       FROM expected
@@ -1062,6 +1065,7 @@ export async function assertSandreApprovedMaterializedTargets(
         row.disabled !== false ||
         row.type !== 'SUP' ||
         Number(row.departementId) !== departmentId ||
+        row.localValid !== true ||
         row.localGeometryHash !== row.expectedGeometryHash ||
         row.topologicallyEqual !== true,
     )

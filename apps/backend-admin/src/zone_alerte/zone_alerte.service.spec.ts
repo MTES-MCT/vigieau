@@ -234,6 +234,10 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     basinFind?: jest.Mock;
     basinMappings?: Record<number, { localBasinCode: number; source: string }>;
     recomputeResult?: any;
+    pendingRecomputeRows?: Array<{
+      departementId: number;
+      recomputeRevision: number;
+    }>;
     syncMode?: string;
     forceFullAuditAfter?: string;
     rolloutAuditRows?: Array<{
@@ -514,6 +518,32 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         }
         if (query.includes('INSERT INTO sandre_zone_sync_batch')) {
           return [{ id: '1' }];
+        }
+        if (query.includes('FROM sandre_zone_sync_state state')) {
+          if (options && 'pendingRecomputeRows' in options) {
+            return options.pendingRecomputeRows;
+          }
+          return storedState?.needsRecompute
+            ? [
+                {
+                  departementId: department.id,
+                  recomputeRevision: storedState.recomputeRevision ?? 0,
+                },
+              ]
+            : [];
+        }
+        if (query.includes('FROM unnest($1::integer[], $2::integer[])')) {
+          const departmentIndex = (parameters?.[0] ?? []).indexOf(
+            department.id,
+          );
+          if (
+            departmentIndex >= 0 &&
+            storedState?.recomputeRevision ===
+              parameters?.[1]?.[departmentIndex]
+          ) {
+            storedState.needsRecompute = false;
+          }
+          return [];
         }
         if (
           query.includes('UPDATE sandre_zone_sync_state') &&
@@ -3609,8 +3639,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
 
     expect(state.needsRecompute).toBe(true);
     expect(harness.dataSource.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE sandre_zone_sync_state'),
-      [65, 1],
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      [[65], [1]],
     );
   });
 
@@ -3900,11 +3930,18 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     await firstRun;
   });
 
-  it('continues the Sandre sync when a pending recomputation retry fails', async () => {
+  it('does not retry a singleton when its grouped recomputation fails', async () => {
+    const state = {
+      needsRecompute: true,
+      recomputeRevision: 2,
+      lastFullSyncAt: null,
+      departement: department,
+    };
     const harness = createHarness({
-      state: {
-        needsRecompute: true,
-        lastFullSyncAt: null,
+      state,
+      recomputeResult: {
+        success: false,
+        error: 'worker unavailable',
       },
     });
     const updateSpy = jest
@@ -3915,13 +3952,193 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         disabled: 0,
         unchanged: 0,
       });
-    jest
-      .spyOn(harness.service as any, 'recomputeSandreDepartment')
-      .mockRejectedValue(new Error('worker unavailable'));
+    const loggerError = jest.fn();
+    (harness.service as any).logger.error = loggerError;
 
     await harness.service.updateZones();
 
     expect(updateSpy).toHaveBeenCalledWith('65');
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledTimes(1);
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65]);
+    expect(state.needsRecompute).toBe(true);
+    expect(harness.dataSource.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      expect.anything(),
+    );
+    expect(loggerError).toHaveBeenCalledWith(
+      'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+      expect.objectContaining({ message: 'worker unavailable' }),
+    );
+  });
+
+  it('isolates a returned grouped failure and clears only successful departments', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: true,
+        lastFullSyncAt: null,
+      },
+      pendingRecomputeRows: [
+        { departementId: 71, recomputeRevision: 4 },
+        { departementId: 65, recomputeRevision: 3 },
+      ],
+    });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    harness.runCurrentZoneComputeWorker
+      .mockReset()
+      .mockResolvedValueOnce({ success: false, error: 'group failed' })
+      .mockResolvedValueOnce({ success: true })
+      .mockResolvedValueOnce({ success: false, error: 'invalid department' });
+    const loggerError = jest.fn();
+    (harness.service as any).logger.error = loggerError;
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker.mock.calls).toEqual([
+      [[65, 71]],
+      [[65]],
+      [[71]],
+    ]);
+    const clearCalls = harness.dataSource.query.mock.calls.filter(([query]) =>
+      query.includes('FROM unnest($1::integer[], $2::integer[])'),
+    );
+    expect(clearCalls).toEqual([[expect.any(String), [[65], [3]]]]);
+    const reportedError = loggerError.mock.calls.find(
+      ([message]) =>
+        message ===
+        'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+    )?.[1] as Error;
+    expect(reportedError).toBeInstanceOf(AggregateError);
+    expect(reportedError.message).toContain('71');
+    expect(reportedError.message).not.toContain('65');
+  });
+
+  it('does not isolate a thrown grouped recomputation and keeps every debt', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: true,
+        lastFullSyncAt: null,
+      },
+      pendingRecomputeRows: [
+        { departementId: 71, recomputeRevision: 4 },
+        { departementId: 65, recomputeRevision: 3 },
+      ],
+    });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    harness.runCurrentZoneComputeWorker
+      .mockReset()
+      .mockRejectedValue(new Error('worker timed out'));
+    const loggerError = jest.fn();
+    (harness.service as any).logger.error = loggerError;
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker.mock.calls).toEqual([
+      [[65, 71]],
+    ]);
+    expect(
+      harness.dataSource.query.mock.calls.some(([query]) =>
+        query.includes('FROM unnest($1::integer[], $2::integer[])'),
+      ),
+    ).toBe(false);
+    expect(loggerError).toHaveBeenCalledWith(
+      'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+      expect.objectContaining({ message: 'worker timed out' }),
+    );
+  });
+
+  it('recomputes every pending safe cron department once in sorted order', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: true,
+        lastFullSyncAt: null,
+      },
+      pendingRecomputeRows: [
+        { departementId: 71, recomputeRevision: 4 },
+        { departementId: 65, recomputeRevision: 3 },
+      ],
+    });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledTimes(1);
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65, 71]);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      [
+        [65, 71],
+        [3, 4],
+      ],
+    );
+  });
+
+  it('does not clear a newer grouped recomputation revision', async () => {
+    const state = {
+      needsRecompute: true,
+      recomputeRevision: 1,
+      lastFullSyncAt: null,
+      departement: department,
+    };
+    const harness = createHarness({ state });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    let finishRecompute: (result: any) => void;
+    harness.runCurrentZoneComputeWorker.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishRecompute = resolve;
+        }),
+    );
+
+    const recompute = harness.service.updateZones();
+    await new Promise((resolve) => setImmediate(resolve));
+    state.recomputeRevision = 2;
+    finishRecompute({ success: true });
+    await recompute;
+
+    expect(state.needsRecompute).toBe(true);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'state."recomputeRevision" = completed."recomputeRevision"',
+      ),
+      [[65], [1]],
+    );
+  });
+
+  it('defers a safe cron application recompute until the grouped flush', async () => {
+    const harness = createHarness();
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledTimes(1);
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65]);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      [[65], [1]],
+    );
+    expect(harness.dataSource.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('WHERE "departementId" = $1'),
+      [65, 1],
+    );
   });
 
   it.each(['audit', 'safe'])(
