@@ -35,6 +35,14 @@ export function resolveTarbesLookupOutcome(mode, status) {
   return status === 409 ? "precision" : "situation";
 }
 
+export function isTarbesZoneLookupUrl(value) {
+  const url = new URL(value);
+  return (
+    /^\/(?:api\/)?zones(?:\/v2)?\/?$/.test(url.pathname) &&
+    url.searchParams.get("commune") === "65440"
+  );
+}
+
 export function buildTarbesSituationExpectations(payload) {
   assert.ok(
     Array.isArray(payload),
