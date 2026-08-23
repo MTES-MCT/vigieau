@@ -89,6 +89,21 @@ describe('exact Sandre sync approvals', () => {
         },
       }),
     );
+    expect(
+      department24.mappings
+        .filter((mapping) => mapping.expectedInvalidSourceReason)
+        .map((mapping) => [
+          mapping.sourceCode,
+          mapping.expectedInvalidSourceReason,
+        ]),
+    ).toEqual([
+      ['1054', 'Ring Self-intersection[0.48995063 45.302290107]'],
+      ['1545', 'Ring Self-intersection[1.021924504 44.884407817]'],
+      [
+        '3935',
+        'Too few points in geometry component[0.839975063 45.195338896]',
+      ],
+    ]);
 
     expect(department85.mappings).toEqual([
       expect.objectContaining({
@@ -193,6 +208,61 @@ describe('exact Sandre sync approvals', () => {
         ),
       ).rejects.toThrow('Approved Sandre geometry changed');
     }
+  });
+
+  it('accepts only the three exactly sealed invalid historical sources', async () => {
+    const department24 = SANDRE_APPROVED_SYNC_SNAPSHOTS.find(
+      (approval) => approval.departmentCode === '24',
+    )!;
+    const mapping = department24.mappings.find(
+      (item) => item.sourceCode === '1054',
+    )!;
+    const exactInvalidRow = geometryRow(mapping, {
+      sourceValid: false,
+      sourceValidityReason: mapping.expectedInvalidSourceReason,
+    });
+    const executor = {
+      query: jest.fn().mockResolvedValue([exactInvalidRow]),
+    };
+
+    await expect(
+      auditSandreApprovedSyncGeometry(
+        executor,
+        mapping,
+        targetFeatures(mapping),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ sourceValid: false }));
+
+    for (const drift of [
+      { sourceValid: true, sourceValidityReason: 'Valid Geometry' },
+      { sourceValidityReason: 'Ring Self-intersection[0 0]' },
+    ]) {
+      executor.query.mockResolvedValueOnce([{ ...exactInvalidRow, ...drift }]);
+      await expect(
+        auditSandreApprovedSyncGeometry(
+          executor,
+          mapping,
+          targetFeatures(mapping),
+        ),
+      ).rejects.toThrow('Approved Sandre geometry changed');
+    }
+
+    const validMapping = department24.mappings.find(
+      (item) => item.sourceCode === '1029',
+    )!;
+    executor.query.mockResolvedValueOnce([
+      geometryRow(validMapping, {
+        sourceValid: false,
+        sourceValidityReason: 'Ring Self-intersection[0 0]',
+      }),
+    ]);
+    await expect(
+      auditSandreApprovedSyncGeometry(
+        executor,
+        validMapping,
+        targetFeatures(validMapping),
+      ),
+    ).rejects.toThrow('Approved Sandre geometry changed');
   });
 
   it('accepts the bounded department 85 overlap without relaxing the default', async () => {

@@ -21,6 +21,7 @@ export interface SandreApprovedSyncMapping {
     iou: number;
   };
   maximumPairwiseOverlapRatio?: number;
+  expectedInvalidSourceReason?: string;
 }
 
 export interface SandreApprovedGeometryEvidence {
@@ -90,6 +91,7 @@ type SandreApprovedEquivalentMappingTuple = readonly [
   sourceCoverage: number,
   targetCoverage: number,
   iou: number,
+  expectedInvalidSourceReason?: string,
 ];
 
 const DEPARTMENT_24_EQUIVALENT_MAPPINGS: readonly SandreApprovedEquivalentMappingTuple[] =
@@ -280,6 +282,7 @@ const DEPARTMENT_24_EQUIVALENT_MAPPINGS: readonly SandreApprovedEquivalentMappin
       0.9999999969378257,
       0.9999999970664307,
       0.9999999940042508,
+      'Ring Self-intersection[0.48995063 45.302290107]',
     ],
     [
       '1531',
@@ -346,6 +349,7 @@ const DEPARTMENT_24_EQUIVALENT_MAPPINGS: readonly SandreApprovedEquivalentMappin
       0.9999999962865106,
       0.9999999964023488,
       0.9999999926888644,
+      'Ring Self-intersection[1.021924504 44.884407817]',
     ],
     [
       '1547',
@@ -676,6 +680,7 @@ const DEPARTMENT_24_EQUIVALENT_MAPPINGS: readonly SandreApprovedEquivalentMappin
       0.9999999950222872,
       0.9999999950480444,
       0.9999999900703325,
+      'Too few points in geometry component[0.839975063 45.195338896]',
     ],
   ];
 
@@ -917,6 +922,7 @@ export async function auditSandreApprovedSyncGeometry(
           ELSE overlap_area / target_area END::text AS "pairwiseOverlapRatio",
         ST_Equals(source_geom, target_geom) AS "topologicallyEqual",
         ST_IsValid(source_geom) AS "sourceValid",
+        ST_IsValidReason(source_geom) AS "sourceValidityReason",
         targets_valid AS "targetsValid",
         ST_SRID(source_geom) AS "sourceSrid",
         CASE WHEN min_srid = max_srid THEN min_srid ELSE NULL END AS "targetsSrid",
@@ -956,8 +962,12 @@ export async function auditSandreApprovedSyncGeometry(
     targetType: String(row.targetType),
   };
   const isExactEquivalentMapping = mapping.targetCodes.length === 1;
+  const expectedInvalidSourceReason =
+    mapping.expectedInvalidSourceReason ?? null;
   if (
-    !evidence.sourceValid ||
+    evidence.sourceValid !== (expectedInvalidSourceReason === null) ||
+    (expectedInvalidSourceReason !== null &&
+      String(row.sourceValidityReason) !== expectedInvalidSourceReason) ||
     !evidence.targetsValid ||
     evidence.sourceSrid !== 4326 ||
     evidence.targetsSrid !== 4326 ||
@@ -1070,6 +1080,7 @@ function equivalentMapping(
   sourceCoverage: number,
   targetCoverage: number,
   iou: number,
+  expectedInvalidSourceReason?: string,
 ): SandreApprovedSyncMapping {
   return {
     sourceCode,
@@ -1091,6 +1102,9 @@ function equivalentMapping(
       iou,
     },
     maximumPairwiseOverlapRatio: 0,
+    ...(expectedInvalidSourceReason
+      ? { expectedInvalidSourceReason }
+      : undefined),
   };
 }
 
@@ -1211,6 +1225,9 @@ function approval(
           DEFAULT_MAXIMUM_PAIRWISE_OVERLAP_RATIO) >
           ABSOLUTE_MAXIMUM_PAIRWISE_OVERLAP_RATIO ||
         item.requireTopologicalEquality ||
+        (item.expectedInvalidSourceReason !== undefined &&
+          (item.targetCodes.length !== 1 ||
+            !/^[ -~]{1,300}$/.test(item.expectedInvalidSourceReason))) ||
         (item.targetCodes.length === 1
           ? item.effectiveDate !== null ||
             item.maximumPairwiseOverlapRatio !== 0
