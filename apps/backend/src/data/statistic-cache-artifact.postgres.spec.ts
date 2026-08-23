@@ -207,7 +207,15 @@ describeWithPostgres(
           ADD COLUMN "candidateStatisticSourceRevision" bigint,
           ADD COLUMN "candidateStatisticFingerprint" varchar(64),
           ADD COLUMN "candidateStatisticProtocolVersion" integer,
-          ADD COLUMN "candidateStatisticLastError" text
+          ADD COLUMN "candidateStatisticLastError" text;
+        ALTER TABLE "statistic_cache_state"
+          ADD CONSTRAINT "FK_statistic_cache_state_candidate"
+          FOREIGN KEY ("candidatePublicationId")
+          REFERENCES "statistic_cache_publication"("id") ON DELETE RESTRICT;
+        ALTER TABLE "zone_publication_instance"
+          ADD CONSTRAINT "FK_zone_publication_instance_candidate_statistic_cache"
+          FOREIGN KEY ("candidateStatisticCachePublicationId")
+          REFERENCES "statistic_cache_publication"("id") ON DELETE RESTRICT
       `);
       firstService = new StatisticCacheArtifactService(dataSource);
       secondService = new StatisticCacheArtifactService(dataSource);
@@ -400,6 +408,100 @@ describeWithPostgres(
       expect(exact.identity.id).toBe(replacement.identity.id);
       expect(exactFactory).not.toHaveBeenCalled();
     });
+
+    it('replaces a candidate after a concurrent heartbeat without aborting the snapshot transaction', async () => {
+      await dataSource.query(`
+        DELETE FROM "current_zone_recompute_request";
+        UPDATE "zone_publication_source_state" SET "revision" = 42
+        WHERE "id" = 1
+      `);
+      await setBoundary('13', '2026-08-18');
+      const previousCandidate = candidate('13', '2026-08-18', 13);
+      const previous = await firstService.stageCandidate(
+        target(previousCandidate),
+        async () => previousCandidate,
+      );
+      await dataSource.query(
+        `
+          INSERT INTO "zone_publication_instance" (
+            "instanceId", "heartbeatAt",
+            "candidateStatisticCachePublicationId",
+            "candidateStatisticRevision", "candidateStatisticPublishedDate",
+            "candidateStatisticSourceRevision",
+            "candidateStatisticFingerprint",
+            "candidateStatisticProtocolVersion"
+          ) VALUES (
+            'web-concurrent', now(), $1::uuid, 13, date '2026-08-18', 42,
+            $2, 1
+          )
+        `,
+        [previous.id, previous.contentFingerprint],
+      );
+
+      await setBoundary('14', '2026-08-19');
+      const replacementCandidate = candidate('14', '2026-08-19', 14);
+      let signalFactoryStarted!: () => void;
+      const factoryStarted = new Promise<void>((resolve) => {
+        signalFactoryStarted = resolve;
+      });
+      let releaseFactory!: () => void;
+      const factoryBlocked = new Promise<void>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const staging = firstService.stageCandidate(
+        target(replacementCandidate),
+        async (manager) => {
+          await manager.query(
+            `SELECT "revision" FROM "statistic_publication_state" WHERE "id" = 1`,
+          );
+          signalFactoryStarted();
+          await factoryBlocked;
+          return replacementCandidate;
+        },
+      );
+
+      try {
+        await factoryStarted;
+        await dataSource.query(`
+          UPDATE "zone_publication_instance"
+          SET "heartbeatAt" = now(),
+              "candidateStatisticLastError" = 'heartbeat refreshed'
+          WHERE "instanceId" = 'web-concurrent'
+        `);
+      } finally {
+        releaseFactory();
+      }
+
+      const replacement = await staging;
+      expect(replacement.id).not.toBe(previous.id);
+      await expect(
+        dataSource.query(
+          `
+            SELECT "candidatePublicationId"::text AS "candidatePublicationId"
+            FROM "statistic_cache_state" WHERE "id" = 1
+          `,
+        ),
+      ).resolves.toEqual([{ candidatePublicationId: replacement.id }]);
+      await expect(
+        dataSource.query(
+          `
+            SELECT COUNT(*)::integer AS "count"
+            FROM "statistic_cache_publication" WHERE "id" = $1::uuid
+          `,
+          [previous.id],
+        ),
+      ).resolves.toEqual([{ count: 0 }]);
+      await expect(
+        dataSource.query(
+          `
+            SELECT "candidateStatisticCachePublicationId"::text
+              AS "candidateStatisticCachePublicationId"
+            FROM "zone_publication_instance"
+            WHERE "instanceId" = 'web-concurrent'
+          `,
+        ),
+      ).resolves.toEqual([{ candidateStatisticCachePublicationId: null }]);
+    }, 60_000);
 
     it('does not block a source mutation and rejects the stale repeatable-read candidate', async () => {
       await setBoundary('13', '2026-08-18');

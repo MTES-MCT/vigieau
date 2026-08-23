@@ -196,7 +196,7 @@ describe('StatisticCacheArtifactService', () => {
     );
   });
 
-  it('persists in lifecycle order and purges retired publications outside active/previous', async () => {
+  it('persists lifecycle transitions without touching volatile instance rows', async () => {
     const { service } = createService();
     const statements: string[] = [];
     const manager = {
@@ -250,17 +250,71 @@ describe('StatisticCacheArtifactService', () => {
     expect(index(`SET "status" = 'retired'`)).toBeLessThan(
       index(`SET "status" = 'active'`),
     );
-    expect(index('UPDATE "statistic_cache_state"')).toBeLessThan(
-      index('UPDATE "zone_publication_instance" instance'),
-    );
-    expect(index('UPDATE "zone_publication_instance" instance')).toBeLessThan(
-      index('DELETE FROM "statistic_cache_publication" publication'),
+    expect(index('UPDATE "zone_publication_instance"')).toBe(-1);
+    expect(index('DELETE FROM "statistic_cache_publication" publication')).toBe(
+      -1,
     );
     expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBe(false);
     expect(manager.query.mock.calls[0]?.[0]).toContain(
       "'daily-delta', 'current-replace', 'sparse-current'",
     );
   });
+
+  it('garbage collects only detached and unreferenced ready or retired publications', async () => {
+    const { service } = createService();
+    const manager = { query: jest.fn().mockResolvedValue([]) };
+
+    await (service as any).garbageCollectPublications(manager);
+
+    expect(manager.query).toHaveBeenCalledTimes(3);
+    expect(manager.query.mock.calls[0][0]).toContain(
+      'IS DISTINCT FROM state."candidatePublicationId"',
+    );
+    expect(manager.query.mock.calls[0][0]).not.toContain(
+      'publication."status"',
+    );
+    expect(manager.query.mock.calls[1][0]).toContain(
+      `publication."status" IN ('ready', 'retired')`,
+    );
+    const deleteSql = manager.query.mock.calls[2][0];
+    expect(deleteSql).toContain(`publication."status" IN ('ready', 'retired')`);
+    expect(deleteSql).toContain(
+      'publication."id" IS DISTINCT FROM state."activePublicationId"',
+    );
+    expect(deleteSql).toContain(
+      'publication."id" IS DISTINCT FROM state."previousPublicationId"',
+    );
+    expect(deleteSql).toContain(
+      'publication."id" IS DISTINCT FROM state."candidatePublicationId"',
+    );
+    expect(deleteSql).toContain(
+      'instance."candidateStatisticCachePublicationId"',
+    );
+    expect(deleteSql).toContain('instance."statisticCachePublicationId"');
+  });
+
+  it.each(['40001', '23503'])(
+    'defers garbage collection error %s without masking a committed transition',
+    async (code) => {
+      const { service } = createService();
+      const cleanupError = Object.assign(new Error('concurrent heartbeat'), {
+        code,
+      });
+      const manager = { query: jest.fn().mockRejectedValue(cleanupError) };
+      const warn = jest
+        .spyOn((service as any).logger, 'warn')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        (service as any).garbageCollectPublications(manager),
+      ).resolves.toBeUndefined();
+
+      expect(manager.query).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('concurrent heartbeat'),
+      );
+    },
+  );
 
   it('guards materialization with publicRevision when enabled', async () => {
     process.env.PUBLIC_SOURCE_REVISION_ENABLED = 'true';
@@ -374,7 +428,13 @@ describe('StatisticCacheArtifactService', () => {
         currentPublishedDate: '2026-08-15',
       },
     } as any;
-    const manager = { query: jest.fn() };
+    const garbageCollectionError = Object.assign(
+      new Error('concurrent heartbeat'),
+      { code: '40001' },
+    );
+    const manager = {
+      query: jest.fn().mockRejectedValue(garbageCollectionError),
+    };
     const queryRunner = {
       manager,
       connect: jest.fn(),
@@ -394,6 +454,9 @@ describe('StatisticCacheArtifactService', () => {
     jest
       .spyOn(service as any, 'persistPublication')
       .mockResolvedValue(undefined);
+    jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
     const factory = jest.fn().mockResolvedValue(candidate);
 
     await expect(
@@ -405,6 +468,9 @@ describe('StatisticCacheArtifactService', () => {
     );
     expect(factory).toHaveBeenCalledWith(manager);
     expect(queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      queryRunner.commitTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(manager.query.mock.invocationCallOrder[0]);
     expect(
       queryRunner.query.mock.calls.some(([sql]) =>
         String(sql).includes('LOCK TABLE'),
@@ -420,6 +486,24 @@ describe('StatisticCacheArtifactService', () => {
         String(sql).includes('pg_try_advisory_lock'),
       ),
     ).toHaveLength(1);
+  });
+
+  it('retries garbage collection when the requested publication is already active', async () => {
+    const { service, dataSource } = createService();
+    const active = {
+      identity: { id: publicationId, ...materializationTarget },
+    } as any;
+    const factory = jest.fn();
+    jest.spyOn(service, 'loadActive').mockResolvedValue(active);
+    dataSource.query.mockResolvedValue([]);
+
+    await expect(
+      service.materialize(materializationTarget, factory),
+    ).resolves.toBe(active);
+
+    expect(factory).not.toHaveBeenCalled();
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(dataSource.query).toHaveBeenCalledTimes(3);
   });
 
   it('rematerializes an active revision/date when its historic identity is stale', async () => {
@@ -733,6 +817,16 @@ describe('StatisticCacheArtifactService', () => {
       expect(activationWrites).toHaveLength(
         expectedOutcome === 'activated' ? 1 : 0,
       );
+      expect(
+        queryRunner.query.mock.calls.some(([sql]) =>
+          String(sql).includes('UPDATE "zone_publication_instance"'),
+        ),
+      ).toBe(false);
+      expect(
+        queryRunner.query.mock.calls.some(([sql]) =>
+          String(sql).includes('DELETE FROM "statistic_cache_publication"'),
+        ),
+      ).toBe(false);
     },
   );
 
