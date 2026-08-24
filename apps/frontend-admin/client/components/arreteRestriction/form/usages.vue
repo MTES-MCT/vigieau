@@ -5,6 +5,11 @@ import { Usage } from '~/dto/usage.dto';
 import deburr from 'lodash.deburr';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { useAlertStore } from '~/stores/alert';
+import {
+  getUsageTargetAssignments,
+  haveSameRestrictionUsageDefinition,
+  replaceRestrictionUsageDefinition,
+} from '~/utils/restriction-usage';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -36,23 +41,48 @@ const modalActions = ref([
     },
   },
 ]);
-const usageNameEdited: Ref<string | null> = ref(null);
+const usageDefinitionEdited: Ref<Usage | null> = ref(null);
 
 const arreteRestrictionUsages = computed(() => {
   return props.arreteRestriction.restrictions
     .map((r) => r.usages)
     .flat()
-    .filter((value, index, self) => index === self.findIndex((t) => t.nom === value.nom))
+    .filter((value, index, self) => index === self.findIndex((candidate) => haveSameRestrictionUsageDefinition(candidate, value)))
     .sort((a, b) => a.nom.localeCompare(b.nom));
+});
+
+const arreteRestrictionUsageLabels = computed(() => {
+  const occurrencesByName = new Map<string | null, number>();
+  arreteRestrictionUsages.value.forEach((usage) => {
+    occurrencesByName.set(usage.nom, (occurrencesByName.get(usage.nom) ?? 0) + 1);
+  });
+
+  return arreteRestrictionUsages.value.map((usage) => {
+    if ((occurrencesByName.get(usage.nom) ?? 0) < 2) {
+      return usage.nom;
+    }
+
+    const frameworkNumbers = new Set(
+      props.arreteRestriction.restrictions
+        .filter((restriction) => restriction.usages.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage)))
+        .map((restriction) => props.arreteRestriction.arretesCadre.find((framework) => framework.id === restriction.arreteCadre?.id))
+        .filter(Boolean)
+        .map((framework) => framework!.numero),
+    );
+    const frameworkLabel = [...frameworkNumbers].join(', ') || 'arrêté-cadre non identifié';
+    const crisisLabel = usage.descriptionCrise || 'sans consigne de crise';
+
+    return `${usage.nom} (AC ${frameworkLabel}; crise : ${crisisLabel})`;
+  });
 });
 
 const filterUsages = () => {
   let tmp: any[] = [];
   tmp = query.value
     ? refDataStore.usages.filter((u) => {
-        const nom = deburr(u.nom).replace(/[\-\_]/g, '');
+        const nom = deburr(u.nom).replace(/[-_]/g, '');
         const queryWords = deburr(query.value)
-          .replace(/[\-\_]/g, '')
+          .replace(/[-_]/g, '')
           .split(' ')
           .map((s) => s.replace(/^/, '(').replace(/$/, ')'))
           .join('*');
@@ -61,7 +91,7 @@ const filterUsages = () => {
       })
     : refDataStore.usages;
   tmp = tmp.filter((u) => {
-    return arreteRestrictionUsages.value.findIndex((uac) => uac.nom === u.nom) < 0;
+    return arreteRestrictionUsages.value.findIndex((uac) => haveSameRestrictionUsageDefinition(uac, u)) < 0;
   });
   usagesFiltered.value = tmp;
 };
@@ -75,39 +105,39 @@ const selectUsage = (usage: Usage | string) => {
     return;
   }
   componentKey.value += 1;
-  let usageRestriction = arreteRestrictionUsages.value.find((aru) => aru.nom === (<Usage>usage).nom);
+  let usageRestriction = arreteRestrictionUsages.value.find((aru) => haveSameRestrictionUsageDefinition(aru, usage));
   if (!usageRestriction) {
-    usageRestriction = new Usage(<Usage>usage);
+    usageRestriction = new Usage(usage);
   }
   askCreateEditUsage(null, usageRestriction);
 };
 
 const askCreateEditUsage = (index: number | null = null, usage?: Usage) => {
-  const u = index !== null ? JSON.parse(JSON.stringify(arreteRestrictionUsages.value[index])) : new Usage(usage);
+  const sourceUsage = index !== null ? arreteRestrictionUsages.value[index] : null;
+  const u = sourceUsage ? JSON.parse(JSON.stringify(sourceUsage)) : new Usage(usage);
   u.id = null;
   usageToEdit.value = u;
   canEditName.value = !u.nom;
-  usageNameEdited.value = index !== null ? u.nom : null;
+  usageDefinitionEdited.value = sourceUsage;
   setTimeout(() => {
     modalOpened.value = true;
   });
 };
 
 const createEditUsage = async (usage: Usage) => {
-  if (!usageNameEdited.value) {
-    props.arreteRestriction.restrictions.forEach((r) => {
-      r.usages.push(usage);
-    });
+  if (!usageDefinitionEdited.value) {
+    getUsageTargetAssignments(props.arreteRestriction.restrictions, props.arreteRestriction.arretesCadre, usage).forEach(
+      ({ restriction, usage: assignedUsage }) => {
+        restriction.usages.push({ ...assignedUsage, id: null });
+      },
+    );
     alertStore.addAlert({
       description: `L'usage "${usage.nom}" a bien été ajouté.`,
       type: 'success',
     });
   } else {
     props.arreteRestriction.restrictions.forEach((r) => {
-      const index = r.usages.findIndex((u) => u.nom === usageNameEdited.value);
-      if (index >= 0) {
-        r.usages[index] = usage;
-      }
+      r.usages = replaceRestrictionUsageDefinition(r.usages, usageDefinitionEdited.value!, usage);
     });
     alertStore.addAlert({
       description: `L'usage "${usage.nom}" a bien été modifié.`,
@@ -115,7 +145,7 @@ const createEditUsage = async (usage: Usage) => {
     });
   }
   componentKey.value += 1;
-  usageNameEdited.value = null;
+  usageDefinitionEdited.value = null;
   utils.closeModal(modalOpened);
 };
 
@@ -142,6 +172,7 @@ defineExpose({
         <ArreteCadreUsageList
           ref="arreteCadreUsageListRef"
           :usages="arreteRestrictionUsages"
+          :usage-labels="arreteRestrictionUsageLabels"
           :hideRemove="true"
           @usage-selected="askCreateEditUsage($event)"
           :key="componentKey"

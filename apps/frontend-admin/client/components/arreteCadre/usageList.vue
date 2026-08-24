@@ -6,6 +6,7 @@ import useVuelidate from '@vuelidate/core';
 const props = defineProps<{
   usages: any[];
   hideRemove?: boolean;
+  usageLabels?: string[];
 }>();
 
 const emit = defineEmits(['usageSelected', 'usageRemoved']);
@@ -70,13 +71,13 @@ const generateRows = () => {
       return [
         {
           component: 'span',
-          text: u.nom,
+          text: props.usageLabels?.[index] ?? u.nom,
           class: u.descriptionCrise ? '' : 'usage-error',
         },
         {
           component: 'DsfrButtonGroup',
           inlineLayoutWhen: 'always',
-          buttons: buttons,
+          buttons,
         },
       ];
     }),
@@ -98,20 +99,10 @@ defineExpose({
 
 <template>
   <h6 class="fr-mt-2w">Liste des usages présents dans l'arrêté</h6>
-  <DsfrTable v-if="usages.length > 0"
-             :headers="headers"
-             :rows="rows"
-             :no-caption="false"
-             :pagination="false"
-             :key="componentKey" />
-  <div v-else>
-    Aucun usage lié à l'arrêté cadre
-  </div>
+  <DsfrTable v-if="usages.length > 0" :headers="headers" :rows="rows" :no-caption="false" :pagination="false" :key="componentKey" />
+  <div v-else>Aucun usage lié à l'arrêté cadre</div>
 
-  <DsfrModal :opened="modalOpened"
-             :title="modalTitle"
-             :actions="modalActions"
-             @close="modalOpened = utils.closeModal(modalOpened)">
+  <DsfrModal :opened="modalOpened" :title="modalTitle" :actions="modalActions" @close="modalOpened = utils.closeModal(modalOpened)">
     <div v-html="modalDescription" />
   </DsfrModal>
 </template>

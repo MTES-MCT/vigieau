@@ -14,6 +14,7 @@
     "preview": "nuxt preview",
     "postinstall": "node -e \"if (process.env.NODE_ENV !== 'production') require('child_process').execSync('nuxt prepare', {stdio: 'inherit'})\"",
     "purgecss": "purgecss --config ./purgecss.config.js",
+    "test:unit": "node --test --experimental-strip-types test/*.test.mjs",
     "cypress:open": "cypress open",
     "cypress:run": "cypress run"
   },

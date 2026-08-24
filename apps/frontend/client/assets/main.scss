@@ -23,6 +23,10 @@ body {
   overflow-x: hidden;
 }
 
+[data-png-capture] .fr-input[type='date']::after {
+  content: none !important;
+}
+
 fieldset {
   border: none;
   padding: 0;
