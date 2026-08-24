@@ -279,6 +279,78 @@ describe('PMTiles generation integrity', () => {
     expect(decodeRunner).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts a non-renderable feature whether Tippecanoe keeps or drops it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    await writeFile(pmtilesPath, validPmtilesHeader());
+
+    for (const decodedIds of [['10', '33199621'], ['10']]) {
+      await assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          for (const id of decodedIds) {
+            onLine(JSON.stringify({ properties: { id } }));
+          }
+        },
+      });
+    }
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          onLine(JSON.stringify({ properties: { id: 10 } }));
+          onLine(JSON.stringify({ properties: { id: 99 } }));
+        },
+      }),
+    ).rejects.toThrow('missing=0 [], unexpected=1 [99]');
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          onLine(JSON.stringify({ properties: { id: 33199621 } }));
+        },
+      }),
+    ).rejects.toThrow('missing=1 [10], unexpected=0 []');
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['10'],
+      }),
+    ).rejects.toThrow('overlap or contain duplicates (1): 10');
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621', '33199621'],
+      }),
+    ).rejects.toThrow('overlap or contain duplicates (1): 33199621');
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['not-an-id'],
+      }),
+    ).rejects.toThrow(
+      'Optional PMTiles features contains an invalid feature id',
+    );
+  });
+
   it('rejects missing, unexpected, or invalid decoded ids', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
     const pmtilesPath = join(directory, 'zones.pmtiles');

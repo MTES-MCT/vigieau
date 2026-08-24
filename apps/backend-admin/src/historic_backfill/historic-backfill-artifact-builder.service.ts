@@ -140,6 +140,7 @@ export class HistoricBackfillArtifactBuilderService {
       features,
     };
     let expectedFeatureIds: string[];
+    let optionalFeatureIds: string[] = [];
     if (lease.validFrom < COMPUTED_HISTORIC_START_DATE) {
       const legacyFeatureIds = collectLegacyHistoricBackfillPmtilesFeatureIds(
         features,
@@ -160,6 +161,7 @@ export class HistoricBackfillArtifactBuilderService {
       const computedFeatureIds =
         collectComputedHistoricPmtilesFeatureIds(features);
       expectedFeatureIds = computedFeatureIds.expectedFeatureIds;
+      optionalFeatureIds = computedFeatureIds.excludedNonRenderableGeometryIds;
       if (computedFeatureIds.excludedNonRenderableGeometryIds.length > 0) {
         this.logger.warn(
           JSON.stringify({
@@ -194,6 +196,7 @@ export class HistoricBackfillArtifactBuilderService {
           inputPath: geojsonPath,
           outputPath: pmtilesPath,
           expectedFeatureIds,
+          optionalFeatureIds,
           maximumZoom:
             lease.validFrom >= COMPUTED_HISTORIC_START_DATE
               ? COMPUTED_HISTORIC_PMTILES_MAX_ZOOM

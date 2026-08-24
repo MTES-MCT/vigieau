@@ -45,6 +45,7 @@ export interface GeneratePmtilesOptions {
   inputPath: string;
   outputPath: string;
   expectedFeatureIds: readonly string[];
+  optionalFeatureIds?: readonly string[];
   maximumZoom?: number;
   commandRunner?: CommandRunner;
   decodeRunner?: DecodeRunner;
@@ -73,6 +74,7 @@ export interface AssertPmtilesIntegrityOptions {
   decoderPath: string;
   pmtilesPath: string;
   expectedFeatureIds: readonly string[];
+  optionalFeatureIds?: readonly string[];
   decodeRunner?: DecodeRunner;
 }
 
@@ -448,6 +450,7 @@ export async function assertPmtilesFeatureIntegrity({
   decoderPath,
   pmtilesPath,
   expectedFeatureIds,
+  optionalFeatureIds = [],
   decodeRunner = decodeLines,
 }: AssertPmtilesIntegrityOptions): Promise<void> {
   const expected = new Set<string>();
@@ -463,6 +466,21 @@ export async function assertPmtilesFeatureIntegrity({
     const values = [...duplicates].sort();
     throw new Error(
       `Expected PMTiles feature ids contain duplicates (${values.length}): ${formatIds(values)}`,
+    );
+  }
+
+  const optional = new Set<string>();
+  for (const rawId of optionalFeatureIds) {
+    const id = normalizeFeatureId(rawId, 'Optional PMTiles features');
+    if (expected.has(id) || optional.has(id)) {
+      duplicates.add(id);
+    }
+    optional.add(id);
+  }
+  if (duplicates.size > 0) {
+    const values = [...duplicates].sort();
+    throw new Error(
+      `PMTiles feature ids overlap or contain duplicates (${values.length}): ${formatIds(values)}`,
     );
   }
 
@@ -493,7 +511,9 @@ export async function assertPmtilesFeatureIntegrity({
   );
 
   const missing = [...expected].filter((id) => !actual.has(id)).sort();
-  const unexpected = [...actual].filter((id) => !expected.has(id)).sort();
+  const unexpected = [...actual]
+    .filter((id) => !expected.has(id) && !optional.has(id))
+    .sort();
   if (missing.length > 0 || unexpected.length > 0) {
     throw new Error(
       `PMTiles feature integrity check failed: missing=${missing.length} [${formatIds(missing)}], unexpected=${unexpected.length} [${formatIds(unexpected)}]`,
@@ -507,6 +527,7 @@ export async function generatePmtiles({
   inputPath,
   outputPath,
   expectedFeatureIds,
+  optionalFeatureIds,
   maximumZoom,
   commandRunner = runCommand,
   decodeRunner = decodeLines,
@@ -526,6 +547,7 @@ export async function generatePmtiles({
       decoderPath,
       pmtilesPath: outputPath,
       expectedFeatureIds,
+      optionalFeatureIds,
       decodeRunner,
     });
   } catch (error) {

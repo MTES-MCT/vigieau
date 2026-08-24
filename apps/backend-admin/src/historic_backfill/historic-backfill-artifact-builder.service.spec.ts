@@ -227,7 +227,7 @@ describe('HistoricBackfillArtifactBuilderService', () => {
     expect(result.pmtilesChecksum).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('keeps collapsed computed features in GeoJSON and excludes them from PMTiles', async () => {
+  it('keeps collapsed computed features in GeoJSON and writes an empty PMTiles', async () => {
     const harness = await createHarness();
     jest.mocked(collectComputedHistoricPmtilesFeatureIds).mockReturnValueOnce({
       expectedFeatureIds: [],
@@ -261,6 +261,26 @@ describe('HistoricBackfillArtifactBuilderService', () => {
         runId,
         validFrom: lease.validFrom,
         zoneIds: ['42'],
+      }),
+    );
+  });
+
+  it('passes collapsed computed feature ids as optional when renderable features remain', async () => {
+    const harness = await createHarness();
+    jest.mocked(collectComputedHistoricPmtilesFeatureIds).mockReturnValueOnce({
+      expectedFeatureIds: ['42'],
+      excludedNonRenderableGeometryIds: ['33199621'],
+    });
+    jest
+      .spyOn(RegleauLogger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    await harness.service.build(lease, new AbortController().signal);
+
+    expect(generatePmtiles).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedFeatureIds: ['42'],
+        optionalFeatureIds: ['33199621'],
       }),
     );
   });

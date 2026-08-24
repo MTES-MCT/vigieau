@@ -5090,6 +5090,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
           'zones_arretes_en_vigueur_2026-08-20.pmtiles',
         ),
         expectedFeatureIds: ['30'],
+        optionalFeatureIds: ['10'],
         maximumZoom: 12,
       });
       const geojsonUpload = uploadFile.mock.calls.find(

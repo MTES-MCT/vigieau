@@ -2167,6 +2167,8 @@ DELETE FROM zone_alerte_computed_historic
             inputPath: geojsonPath,
             outputPath: pmtilesPath,
             expectedFeatureIds: expectedPmtilesFeatureIds,
+            optionalFeatureIds:
+              computedPmtilesFeatureIds.excludedNonRenderableGeometryIds,
             maximumZoom: COMPUTED_HISTORIC_PMTILES_MAX_ZOOM,
           });
         }
