@@ -24,6 +24,9 @@ export const HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY_MAX = 32;
 export const HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT = 60_000;
 export const HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_MIN = 1_000;
 export const HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_MAX = 600_000;
+export const HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT = 5_000;
+export const HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MIN = 1_000;
+export const HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MAX = 15_000;
 
 export function readHistoricBackfillArtifactHeadConcurrency(
   environment: NodeJS.ProcessEnv = process.env,
@@ -58,6 +61,26 @@ export function readHistoricBackfillManifestUploadTimeout(
   ) {
     throw new Error(
       'HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS must be between 1000 and 600000',
+    );
+  }
+  return timeoutMs;
+}
+
+export function readHistoricBackfillFencedManifestUploadTimeout(
+  environment: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw =
+    environment.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS?.trim();
+  const timeoutMs = raw
+    ? Number(raw)
+    : HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT;
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MIN ||
+    timeoutMs > HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MAX
+  ) {
+    throw new Error(
+      'HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS must be between 1000 and 15000',
     );
   }
   return timeoutMs;
@@ -809,7 +832,7 @@ export class HistoricBackfillMapFinalizerService {
 
   private async switchPublicManifest(manifestBody: string): Promise<void> {
     const abortSignal = AbortSignal.timeout(
-      readHistoricBackfillManifestUploadTimeout(),
+      readHistoricBackfillFencedManifestUploadTimeout(),
     );
     await this.s3Service.uploadFile(
       {

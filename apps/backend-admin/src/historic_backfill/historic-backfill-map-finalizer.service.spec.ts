@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
 import {
   HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY_DEFAULT,
+  HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT,
+  HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MAX,
+  HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MIN,
   HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT,
   HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_MAX,
   HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_MIN,
   HistoricBackfillMapFinalizerService,
   readHistoricBackfillArtifactHeadConcurrency,
+  readHistoricBackfillFencedManifestUploadTimeout,
   readHistoricBackfillManifestUploadTimeout,
 } from './historic-backfill-map-finalizer.service';
 
@@ -14,6 +18,8 @@ describe('HistoricBackfillMapFinalizerService', () => {
     process.env.HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY;
   const originalManifestUploadTimeout =
     process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS;
+  const originalFencedManifestUploadTimeout =
+    process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS;
   const runId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const context = {
     id: runId,
@@ -261,6 +267,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
     jest.clearAllMocks();
     delete process.env.HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY;
     delete process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS;
+    delete process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS;
   });
 
   afterAll(() => {
@@ -275,6 +282,12 @@ describe('HistoricBackfillMapFinalizerService', () => {
     } else {
       process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS =
         originalManifestUploadTimeout;
+    }
+    if (originalFencedManifestUploadTimeout === undefined) {
+      delete process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS;
+    } else {
+      process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS =
+        originalFencedManifestUploadTimeout;
     }
   });
 
@@ -801,6 +814,39 @@ describe('HistoricBackfillMapFinalizerService', () => {
     },
   );
 
+  it('defaults and bounds the fenced manifest upload timeout', () => {
+    expect(readHistoricBackfillFencedManifestUploadTimeout({})).toBe(
+      HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT,
+    );
+    expect(
+      readHistoricBackfillFencedManifestUploadTimeout({
+        HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS: String(
+          HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MIN,
+        ),
+      }),
+    ).toBe(HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MIN);
+    expect(
+      readHistoricBackfillFencedManifestUploadTimeout({
+        HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS: String(
+          HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MAX,
+        ),
+      }),
+    ).toBe(HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS_MAX);
+  });
+
+  it.each(['999', '15001', '1.5', 'invalid'])(
+    'rejects invalid fenced manifest upload timeout %s',
+    (value) => {
+      expect(() =>
+        readHistoricBackfillFencedManifestUploadTimeout({
+          HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS: value,
+        }),
+      ).toThrow(
+        'HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS must be between 1000 and 15000',
+      );
+    },
+  );
+
   it.each([
     {
       label: 'a due current queue',
@@ -899,7 +945,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
   });
 
   it('aborts a timed-out manifest upload and preserves the pending outbox', async () => {
-    process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS = '1000';
+    process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS = '1000';
     const { getOutbox, runners, s3Service, service } = createHarness();
     const controller = new AbortController();
     const timeoutError = new DOMException(
@@ -935,7 +981,11 @@ describe('HistoricBackfillMapFinalizerService', () => {
     try {
       const publishing = service.apply(runId);
       await started;
-      expect(timeout).toHaveBeenCalledWith(1000);
+      expect(timeout).toHaveBeenNthCalledWith(
+        1,
+        HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS_DEFAULT,
+      );
+      expect(timeout).toHaveBeenNthCalledWith(2, 1000);
       controller.abort(timeoutError);
       await expect(publishing).rejects.toBe(timeoutError);
     } finally {

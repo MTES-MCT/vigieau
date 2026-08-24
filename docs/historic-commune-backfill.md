@@ -890,7 +890,7 @@ scalingo --region osc-fr1 --app "$APP" destroy --force
    `HISTORIC_BACKFILL_ARTIFACT_CACHE_MAX_BYTES` borne le cache local des fragments
    (256 Mio par defaut, 1 Gio maximum), et
    `HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY` borne les controles S3 (16 par
-   defaut, 32 maximum). L'upload du manifeste expire apres
+   defaut, 32 maximum). La lecture de reprise du manifeste expire apres
    `HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS=60000`.
 7. Executer `POST /historic-backfill/:runId/maps/finalize` en dry-run, puis avec
    `{ "apply": true }`. Apres une promotion statistics-first, le finalizer
@@ -899,7 +899,13 @@ scalingo --region osc-fr1 --app "$APP" destroy --force
    `historicPublishedThrough`. La transaction avance le curseur et la generation
    cartographiques puis cree l'outbox; le manifeste public unique n'est remplace
    qu'apres ce commit. Un nouvel apply reprend une outbox `pending` sans rejouer
-   la reduction.
+   la reduction. Le remplacement S3 et son ACK sont proteges par un fence qui
+   laisse les ecritures deja engagees prioritaires et met les nouvelles en
+   attente, sans reponse 503. Fixer
+   `HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS=5000`; la valeur est
+   bornee entre 1000 et 15000 ms. Le fence exclusif est donc conserve au plus ce
+   budget d'upload, augmente seulement des requetes PostgreSQL courtes et de la
+   liberation des verrous.
 8. Attendre la publication du manifeste et son ACK. Seul cet ACK cartographique
    passe le run a `completed`. L'avance de `historicMapCursor` declenche ensuite
    une nouvelle materialisation statcache `current-replace`: elle relit le jour
