@@ -17,6 +17,9 @@ describe('ZonePublicationOperatorService', () => {
     let separated = false;
     const manager = {
       query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('pg_advisory_xact_lock_shared')) {
+          return [];
+        }
         if (sql.includes('FROM "zone_publication_source_state"')) {
           return [
             {
@@ -67,11 +70,23 @@ describe('ZonePublicationOperatorService', () => {
       expect.stringContaining('INSERT INTO "current_zone_recompute_request"'),
       [[1, 49, 79], '166500', 'SEPARATION REVISION PUBLIQUE', null],
     );
+    const applyQueries = manager.query.mock.calls
+      .map(([sql]) => String(sql))
+      .slice(2);
+    expect(applyQueries[0]).toContain('pg_advisory_xact_lock_shared');
+    expect(
+      applyQueries.findIndex((sql) =>
+        sql.includes('UPDATE "zone_publication_source_state"'),
+      ),
+    ).toBeGreaterThan(0);
   });
 
   it('realigns public revision before returning to rolling compatibility', async () => {
     const manager = {
       query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('pg_advisory_xact_lock_shared')) {
+          return [];
+        }
         if (sql.includes('FROM "zone_publication_source_state"')) {
           return [
             {
@@ -115,6 +130,9 @@ describe('ZonePublicationOperatorService', () => {
   it('realigns both revisions when compatibility is already enabled but drifted', async () => {
     const manager = {
       query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('pg_advisory_xact_lock_shared')) {
+          return [];
+        }
         if (sql.includes('FROM "zone_publication_source_state"')) {
           return [
             {

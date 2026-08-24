@@ -4,7 +4,21 @@ import { unwrapTypeOrmDmlReturningRows } from './typeorm-query-result';
 export type PublicZoneType = 'AEP' | 'SOU' | 'SUP';
 export type CertifiedZoneTypeAvailability = 'available' | 'confirmed_none';
 
+export const HISTORIC_MAP_PUBLICATION_FENCE_LOCK =
+  'historic-map-publication-fence';
+
 export class ZoneAvailabilityCertificationSupersededError extends Error {}
+
+export async function acquireHistoricMapPublicationSharedFence(
+  manager: Pick<EntityManager, 'query'>,
+): Promise<void> {
+  await manager.query(
+    `SELECT pg_advisory_xact_lock_shared(
+      hashtext('vigieau'), hashtext($1)
+    )`,
+    [HISTORIC_MAP_PUBLICATION_FENCE_LOCK],
+  );
+}
 
 export async function enqueueCurrentZoneRecomputeTarget(
   manager: EntityManager,
@@ -17,6 +31,7 @@ export async function enqueueCurrentZoneRecomputeTarget(
   if (ids.length === 0) {
     return;
   }
+  await acquireHistoricMapPublicationSharedFence(manager);
   await manager.query(
     `
       INSERT INTO "current_zone_recompute_request" (
@@ -147,6 +162,7 @@ export async function recordPublicMutation(
   if (ids.length === 0) {
     throw new Error('A public mutation must target at least one department');
   }
+  await acquireHistoricMapPublicationSharedFence(manager);
   const result = await manager.query(`
     UPDATE "zone_publication_source_state"
     SET

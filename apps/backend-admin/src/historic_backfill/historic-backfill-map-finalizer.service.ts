@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
 import { S3Service } from '../shared/services/s3.service';
+import { HISTORIC_MAP_PUBLICATION_FENCE_LOCK } from '../zone_publication/public-mutation';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import { HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT } from './historic-backfill-queue.service';
 
@@ -183,6 +184,7 @@ interface HistoricBackfillMapPublication {
 }
 
 interface CurrentPriorityRow {
+  currentSourceRevision: string | number | null;
   currentQueueCount: string | number;
   runningSnapshotCount: string | number;
   runningDailyCount: string | number;
@@ -1041,6 +1043,9 @@ export class HistoricBackfillMapFinalizerService {
 
     const queryRunner = this.dataSource.createQueryRunner();
     let publicationLockAcquired = false;
+    let zoneLockAcquired = false;
+    let statisticLockAcquired = false;
+    let transactionStarted = false;
     let primaryError: unknown = null;
     await queryRunner.connect();
     try {
@@ -1050,36 +1055,23 @@ export class HistoricBackfillMapFinalizerService {
         throw new Error('Historic map manifest publication is already running');
       }
 
-      const publication = await this.revalidatePendingPublicationBeforeUpload(
-        queryRunner,
-        expected,
-      );
-      if (publication.status === 'published') {
-        return this.toResult(publication, 'applied');
+      const manifestAlreadyPublic = await this.isPublicManifestExact(expected);
+
+      zoneLockAcquired = await this.tryAcquireZoneLock(queryRunner);
+      if (!zoneLockAcquired) {
+        throw new Error('Current zone computation has priority');
+      }
+      statisticLockAcquired = await this.tryAcquireStatisticLock(queryRunner);
+      if (!statisticLockAcquired) {
+        throw new Error('Current commune statistic computation has priority');
       }
 
-      await this.switchPublicManifest(publication.manifestBody);
-      return await this.acknowledgePendingPublication(queryRunner, publication);
-    } catch (error) {
-      primaryError = error;
-      throw error;
-    } finally {
-      await this.cleanupManifestPublicationLock(
-        queryRunner,
-        publicationLockAcquired,
-        primaryError,
-      );
-    }
-  }
-
-  private async revalidatePendingPublicationBeforeUpload(
-    queryRunner: QueryRunner,
-    expected: HistoricBackfillMapPublication,
-  ): Promise<HistoricBackfillMapPublication> {
-    let transactionStarted = false;
-    try {
       await queryRunner.startTransaction('READ COMMITTED');
       transactionStarted = true;
+      if (!(await this.tryAcquirePublicMutationFence(queryRunner))) {
+        throw new Error('Current public mutation has priority');
+      }
+
       const lockedRow = await this.findPublication(
         queryRunner,
         expected.runId,
@@ -1088,30 +1080,79 @@ export class HistoricBackfillMapFinalizerService {
       if (!lockedRow) {
         throw new Error('Historic map publication outbox row disappeared');
       }
-      const actual = this.normalizePublication(lockedRow);
-      this.assertSamePublication(expected, actual);
-      if (actual.status === 'pending') {
-        await this.assertPendingPublicationContext(queryRunner, actual.runId);
+      const publication = this.normalizePublication(lockedRow);
+      this.assertSamePublication(expected, publication);
+      if (publication.status === 'published') {
+        await queryRunner.commitTransaction();
+        transactionStarted = false;
+        return this.toResult(publication, 'applied');
       }
 
+      if (!manifestAlreadyPublic) {
+        await this.assertPendingPublicationContext(
+          queryRunner,
+          publication.runId,
+          publication.sourceRevision,
+        );
+        await this.switchPublicManifest(publication.manifestBody);
+      }
+      const result = await this.acknowledgePendingPublication(
+        queryRunner,
+        publication,
+      );
       await queryRunner.commitTransaction();
       transactionStarted = false;
-      return actual;
+      return result;
     } catch (error) {
+      primaryError = error;
       if (transactionStarted) {
         await queryRunner.rollbackTransaction();
+        transactionStarted = false;
       }
       throw error;
+    } finally {
+      await this.cleanupPublicationLocks(
+        queryRunner,
+        publicationLockAcquired,
+        zoneLockAcquired,
+        statisticLockAcquired,
+        primaryError,
+      );
+    }
+  }
+
+  private async isPublicManifestExact(
+    expected: HistoricBackfillMapPublication,
+  ): Promise<boolean> {
+    try {
+      const body = await this.s3Service.downloadFile(
+        expected.manifestObjectKey,
+        '',
+        {
+          abortSignal: AbortSignal.timeout(
+            readHistoricBackfillManifestUploadTimeout(),
+          ),
+        },
+      );
+      return sha256(body) === expected.manifestChecksum;
+    } catch {
+      return false;
     }
   }
 
   private async assertPendingPublicationContext(
     queryable: Queryable,
     runId: string,
+    expectedSourceRevision: string,
   ): Promise<void> {
     const [priority] = (await queryable.query(
       `
         SELECT
+          (
+            SELECT source."publicRevision"::text
+            FROM "zone_publication_source_state" source
+            WHERE source."id" = 1
+          ) AS "currentSourceRevision",
           (
             SELECT COUNT(*)::integer
             FROM "current_zone_recompute_request" request
@@ -1148,6 +1189,14 @@ export class HistoricBackfillMapFinalizerService {
       throw new Error('Current computation priority state is missing');
     }
     if (
+      String(priority.currentSourceRevision ?? 'missing') !==
+      expectedSourceRevision
+    ) {
+      throw new Error(
+        'Historic source revision changed before map publication',
+      );
+    }
+    if (
       count(priority.currentQueueCount, 'current queue count') !== 0 ||
       count(priority.runningSnapshotCount, 'running snapshot count') !== 0 ||
       count(priority.runningDailyCount, 'running daily count') !== 0
@@ -1168,31 +1217,11 @@ export class HistoricBackfillMapFinalizerService {
 
   private async acknowledgePendingPublication(
     queryRunner: QueryRunner,
-    expected: HistoricBackfillMapPublication,
+    actual: HistoricBackfillMapPublication,
   ): Promise<HistoricBackfillMapFinalizationResult> {
-    let transactionStarted = false;
-    try {
-      await queryRunner.startTransaction('READ COMMITTED');
-      transactionStarted = true;
-      const lockedRow = await this.findPublication(
-        queryRunner,
-        expected.runId,
-        true,
-      );
-      if (!lockedRow) {
-        throw new Error('Historic map publication outbox row disappeared');
-      }
-      const actual = this.normalizePublication(lockedRow);
-      this.assertSamePublication(expected, actual);
-      if (actual.status === 'published') {
-        await queryRunner.commitTransaction();
-        transactionStarted = false;
-        return this.toResult(actual, 'applied');
-      }
-
-      const publishedRows = unwrapTypeOrmDmlReturningRows<{ id: string }>(
-        await queryRunner.query(
-          `
+    const publishedRows = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await queryRunner.query(
+        `
             UPDATE "historic_backfill_map_manifest_outbox"
             SET
               "status" = 'published',
@@ -1204,18 +1233,16 @@ export class HistoricBackfillMapFinalizerService {
               AND "manifestChecksum" = $2
             RETURNING "runId" AS "id"
           `,
-          [actual.runId, actual.manifestChecksum],
-        ),
-      );
-      if (publishedRows.length !== 1) {
-        throw new Error(
-          'Historic map publication outbox acknowledgement failed',
-        );
-      }
+        [actual.runId, actual.manifestChecksum],
+      ),
+    );
+    if (publishedRows.length !== 1) {
+      throw new Error('Historic map publication outbox acknowledgement failed');
+    }
 
-      const runRows = unwrapTypeOrmDmlReturningRows<{ id: string }>(
-        await queryRunner.query(
-          `
+    const runRows = unwrapTypeOrmDmlReturningRows<{ id: string }>(
+      await queryRunner.query(
+        `
             UPDATE "historic_backfill_run"
             SET
               "status" = 'completed',
@@ -1228,25 +1255,17 @@ export class HistoricBackfillMapFinalizerService {
               AND "historicComputeEpoch" = $3::bigint
             RETURNING "id"
           `,
-          [actual.runId, actual.sourceRevision, actual.historicComputeEpoch],
-        ),
-      );
-      if (runRows.length !== 1) {
-        throw new Error('Historic backfill run completion failed');
-      }
-
-      await queryRunner.commitTransaction();
-      transactionStarted = false;
-      return this.toResult(
-        { ...actual, status: 'published', publishedAt: new Date() },
-        'applied',
-      );
-    } catch (error) {
-      if (transactionStarted) {
-        await queryRunner.rollbackTransaction();
-      }
-      throw error;
+        [actual.runId, actual.sourceRevision, actual.historicComputeEpoch],
+      ),
+    );
+    if (runRows.length !== 1) {
+      throw new Error('Historic backfill run completion failed');
     }
+
+    return this.toResult(
+      { ...actual, status: 'published', publishedAt: new Date() },
+      'applied',
+    );
   }
 
   private assertSamePublication(
@@ -1327,13 +1346,52 @@ export class HistoricBackfillMapFinalizerService {
     return result?.locked === true;
   }
 
-  private async cleanupManifestPublicationLock(
+  private async tryAcquirePublicMutationFence(
     queryRunner: QueryRunner,
-    lockAcquired: boolean,
+  ): Promise<boolean> {
+    const [result] = await queryRunner.query(
+      `SELECT pg_try_advisory_xact_lock(
+        hashtext('vigieau'), hashtext($1)
+      ) AS locked`,
+      [HISTORIC_MAP_PUBLICATION_FENCE_LOCK],
+    );
+    return result?.locked === true;
+  }
+
+  private async cleanupPublicationLocks(
+    queryRunner: QueryRunner,
+    publicationLockAcquired: boolean,
+    zoneLockAcquired: boolean,
+    statisticLockAcquired: boolean,
     primaryError: unknown,
   ): Promise<void> {
     const cleanupErrors: unknown[] = [];
-    if (lockAcquired) {
+    if (statisticLockAcquired) {
+      try {
+        const [result] = await queryRunner.query(
+          'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
+          [STATISTIC_COMMUNE_LOCK],
+        );
+        if (result?.unlocked !== true) {
+          throw new Error('Statistic commune lock was not released');
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (zoneLockAcquired) {
+      try {
+        const [result] = await queryRunner.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-global')) AS unlocked",
+        );
+        if (result?.unlocked !== true) {
+          throw new Error('Zone compute lock was not released');
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (publicationLockAcquired) {
       try {
         const [result] = await queryRunner.query(
           'SELECT pg_advisory_unlock(hashtext($1)) AS unlocked',
@@ -1356,7 +1414,7 @@ export class HistoricBackfillMapFinalizerService {
     if (cleanupErrors.length > 0 && primaryError === null) {
       throw new AggregateError(
         cleanupErrors,
-        'Historic map manifest publication cleanup failed',
+        'Historic map publication cleanup failed',
       );
     }
   }

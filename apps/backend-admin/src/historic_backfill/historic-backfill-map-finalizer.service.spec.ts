@@ -68,19 +68,42 @@ describe('HistoricBackfillMapFinalizerService', () => {
       pmtilesObjectKey: `${immutablePrefix}2026-08-03-${'d'.repeat(64)}.pmtiles`,
     },
   ];
-  function createHarness(options: { failPublishCommitOnce?: boolean } = {}) {
+  function createHarness(
+    options: {
+      failPublishCommitOnce?: boolean;
+      publicMutationFenceAcquired?: boolean;
+    } = {},
+  ) {
     let outbox: Record<string, any> | null = null;
     let failPublishCommit = options.failPublishCommitOnce === true;
     let publishCurrentQueueCount = 0;
     let publishRunningSnapshotCount = 0;
     let publishRunningDailyCount = 0;
     let manifestPublicationLocked = false;
+    let publicManifestBody: Buffer | null = null;
     const s3Service = {
       headFile: jest.fn().mockResolvedValue({ ContentLength: 128 }),
       getPublicFileUrl: jest.fn(
         (key: string) => `https://objects.example.test/${key}`,
       ),
-      uploadFile: jest.fn().mockResolvedValue({}),
+      downloadFile: jest.fn(async () => {
+        if (publicManifestBody === null) {
+          throw new Error('Public manifest is missing');
+        }
+        return Buffer.from(publicManifestBody);
+      }),
+      uploadFile: jest.fn(
+        async (
+          file: Express.Multer.File,
+          prefix: string,
+          options: { abortSignal?: AbortSignal },
+        ): Promise<unknown> => {
+          void prefix;
+          void options;
+          publicManifestBody = Buffer.from(file.buffer);
+          return {};
+        },
+      ),
     };
     const runners: any[] = [];
     const createRunner = () => {
@@ -115,6 +138,9 @@ describe('HistoricBackfillMapFinalizerService', () => {
             }
             return [{ locked: true }];
           }
+          if (sql.includes('pg_try_advisory_xact_lock')) {
+            return [{ locked: options.publicMutationFenceAcquired ?? true }];
+          }
           if (sql.includes('pg_advisory_unlock')) {
             if (
               parameters?.[0] === 'historic-backfill-map-manifest-publication'
@@ -126,6 +152,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
           if (sql.includes('AS "statisticsPromotedCount"')) {
             return [
               {
+                currentSourceRevision: context.currentSourceRevision,
                 currentQueueCount: publishCurrentQueueCount,
                 runningSnapshotCount: publishRunningSnapshotCount,
                 runningDailyCount: publishRunningDailyCount,
@@ -407,7 +434,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
     expect(s3Service.uploadFile).not.toHaveBeenCalled();
   });
 
-  it('commits a durable pending outbox before publishing and ACKing it', async () => {
+  it('commits the pending outbox before one fenced publish and ACK transaction', async () => {
     const { dataSource, getOutbox, runners, s3Service, service } =
       createHarness();
 
@@ -427,21 +454,14 @@ describe('HistoricBackfillMapFinalizerService', () => {
 
     expect(runners).toHaveLength(2);
     expect(runners[0].commitTransaction).toHaveBeenCalledTimes(1);
-    expect(runners[1].commitTransaction).toHaveBeenCalledTimes(2);
-    expect(runners[1].startTransaction).toHaveBeenNthCalledWith(
-      1,
-      'READ COMMITTED',
-    );
-    expect(runners[1].startTransaction).toHaveBeenNthCalledWith(
-      2,
-      'READ COMMITTED',
-    );
+    expect(runners[1].commitTransaction).toHaveBeenCalledTimes(1);
+    expect(runners[1].startTransaction).toHaveBeenCalledWith('READ COMMITTED');
     expect(
       runners[0].commitTransaction.mock.invocationCallOrder[0],
     ).toBeLessThan(s3Service.uploadFile.mock.invocationCallOrder[0]);
-    expect(
+    expect(s3Service.uploadFile.mock.invocationCallOrder[0]).toBeLessThan(
       runners[1].commitTransaction.mock.invocationCallOrder[0],
-    ).toBeLessThan(s3Service.uploadFile.mock.invocationCallOrder[0]);
+    );
     expect(s3Service.uploadFile.mock.invocationCallOrder[0]).toBeLessThan(
       runners[1].release.mock.invocationCallOrder[0],
     );
@@ -456,15 +476,43 @@ describe('HistoricBackfillMapFinalizerService', () => {
       runners[1].query.mock.calls.some(([sql]) =>
         String(sql).includes('zone-compute-global'),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       runners[1].query.mock.calls.some(
         ([sql, parameters]) =>
           String(sql).includes('pg_try_advisory_lock') &&
           parameters?.[0] === 'vigieau:statistic-commune:snapshot-computation',
       ),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      runners[1].query.mock.calls.some(
+        ([sql, parameters]) =>
+          String(sql).includes('pg_try_advisory_xact_lock') &&
+          parameters?.[0] === 'historic-map-publication-fence',
+      ),
+    ).toBe(true);
     const publishQueries = runners[1].query.mock.calls;
+    const manifestLockIndex = publishQueries.findIndex(
+      ([sql, parameters]) =>
+        String(sql).includes('pg_try_advisory_lock') &&
+        parameters?.[0] === 'historic-backfill-map-manifest-publication',
+    );
+    const zoneLockIndex = publishQueries.findIndex(
+      ([sql]) =>
+        String(sql).includes('pg_try_advisory_lock') &&
+        String(sql).includes('zone-compute-global'),
+    );
+    const statisticLockIndex = publishQueries.findIndex(
+      ([sql, parameters]) =>
+        String(sql).includes('pg_try_advisory_lock') &&
+        parameters?.[0] === 'vigieau:statistic-commune:snapshot-computation',
+    );
+    const mutationFenceIndex = publishQueries.findIndex(([sql]) =>
+      String(sql).includes('pg_try_advisory_xact_lock'),
+    );
+    const outboxLockIndex = publishQueries.findIndex(([sql]) =>
+      String(sql).includes('FROM "historic_backfill_map_manifest_outbox"'),
+    );
     const ackCall = publishQueries.find(([sql]) =>
       String(sql).includes('UPDATE "historic_backfill_map_manifest_outbox"'),
     );
@@ -482,6 +530,10 @@ describe('HistoricBackfillMapFinalizerService', () => {
     expect(ackIndex).toBeGreaterThanOrEqual(0);
     expect(runCompletionIndex).toBeGreaterThanOrEqual(0);
     expect(unlockIndex).toBeGreaterThanOrEqual(0);
+    expect(manifestLockIndex).toBeLessThan(zoneLockIndex);
+    expect(zoneLockIndex).toBeLessThan(statisticLockIndex);
+    expect(statisticLockIndex).toBeLessThan(mutationFenceIndex);
+    expect(mutationFenceIndex).toBeLessThan(outboxLockIndex);
     expect(s3Service.uploadFile.mock.invocationCallOrder[0]).toBeLessThan(
       runners[1].query.mock.invocationCallOrder[ackIndex],
     );
@@ -492,10 +544,10 @@ describe('HistoricBackfillMapFinalizerService', () => {
       runners[1].query.mock.invocationCallOrder[runCompletionIndex],
     ).toBeLessThan(runners[1].query.mock.invocationCallOrder[unlockIndex]);
     expect(
-      runners[1].commitTransaction.mock.invocationCallOrder[1],
+      runners[1].commitTransaction.mock.invocationCallOrder[0],
     ).toBeLessThan(runners[1].query.mock.invocationCallOrder[unlockIndex]);
     expect(
-      runners[1].commitTransaction.mock.invocationCallOrder[1],
+      runners[1].commitTransaction.mock.invocationCallOrder[0],
     ).toBeLessThan(runners[1].release.mock.invocationCallOrder[0]);
     expect(getOutbox()).toEqual(
       expect.objectContaining({
@@ -799,6 +851,53 @@ describe('HistoricBackfillMapFinalizerService', () => {
     },
   );
 
+  it('leaves writes in priority when the public mutation fence is busy', async () => {
+    const { getOutbox, runners, s3Service, service } = createHarness({
+      publicMutationFenceAcquired: false,
+    });
+
+    await expect(service.apply(runId)).rejects.toThrow(
+      'Current public mutation has priority',
+    );
+
+    expect(getOutbox()).toEqual(expect.objectContaining({ status: 'pending' }));
+    expect(s3Service.uploadFile).not.toHaveBeenCalled();
+    expect(runners).toHaveLength(2);
+    expect(runners[1].rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      runners[1].query.mock.calls.some(
+        ([sql, parameters]) =>
+          String(sql).includes('pg_try_advisory_xact_lock') &&
+          parameters?.[0] === 'historic-map-publication-fence',
+      ),
+    ).toBe(true);
+    expect(
+      runners[1].query.mock.calls.some(([sql]) =>
+        String(sql).includes('UPDATE "historic_backfill_map_manifest_outbox"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not switch an unpublished pending body after source drift', async () => {
+    const { getOutbox, runners, s3Service, service } = createHarness();
+    const previousSourceRevision = context.currentSourceRevision;
+    s3Service.uploadFile.mockRejectedValueOnce(new Error('initial failure'));
+    await expect(service.apply(runId)).rejects.toThrow('initial failure');
+    context.currentSourceRevision = '43';
+
+    try {
+      await expect(service.apply(runId)).rejects.toThrow(
+        'Historic source revision changed before map publication',
+      );
+    } finally {
+      context.currentSourceRevision = previousSourceRevision;
+    }
+
+    expect(s3Service.uploadFile).toHaveBeenCalledTimes(1);
+    expect(getOutbox()).toEqual(expect.objectContaining({ status: 'pending' }));
+    expect(runners.at(-1)?.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
   it('aborts a timed-out manifest upload and preserves the pending outbox', async () => {
     process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS = '1000';
     const { getOutbox, runners, s3Service, service } = createHarness();
@@ -845,7 +944,8 @@ describe('HistoricBackfillMapFinalizerService', () => {
 
     expect(getOutbox()).toEqual(expect.objectContaining({ status: 'pending' }));
     expect(runners).toHaveLength(2);
-    expect(runners[1].commitTransaction).toHaveBeenCalledTimes(1);
+    expect(runners[1].commitTransaction).not.toHaveBeenCalled();
+    expect(runners[1].rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(runners[1].release).toHaveBeenCalledTimes(1);
     expect(s3Service.uploadFile.mock.calls[0][2].abortSignal).toBe(
       controller.signal,
@@ -862,7 +962,8 @@ describe('HistoricBackfillMapFinalizerService', () => {
     expect(getOutbox()).toEqual(expect.objectContaining({ status: 'pending' }));
     expect(runners).toHaveLength(2);
     expect(runners[0].commitTransaction).toHaveBeenCalledTimes(1);
-    expect(runners[1].commitTransaction).toHaveBeenCalledTimes(1);
+    expect(runners[1].commitTransaction).not.toHaveBeenCalled();
+    expect(runners[1].rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(
       runners[1].query.mock.calls.some(([sql]) =>
         String(sql).includes('UPDATE "historic_backfill_run"'),
@@ -874,6 +975,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
     );
     expect(runners).toHaveLength(3);
     expect(s3Service.uploadFile).toHaveBeenCalledTimes(2);
+    expect(s3Service.downloadFile).toHaveBeenCalledTimes(2);
     expect(s3Service.headFile).toHaveBeenCalledTimes(4);
     expect(
       runners
@@ -932,6 +1034,10 @@ describe('HistoricBackfillMapFinalizerService', () => {
       'Historic map manifest publication is already running',
     );
     expect(s3Service.uploadFile).toHaveBeenCalledTimes(2);
+    expect(s3Service.downloadFile).toHaveBeenCalledTimes(2);
+    expect(runners[2].startTransaction).toHaveBeenCalledWith('READ COMMITTED');
+    expect(runners[2].commitTransaction).not.toHaveBeenCalled();
+    expect(runners[2].rollbackTransaction).not.toHaveBeenCalled();
 
     releaseSlowUpload();
     await expect(firstRetry).resolves.toEqual(
@@ -1076,26 +1182,22 @@ describe('HistoricBackfillMapFinalizerService', () => {
       Object.assign(context, originalContext);
     }
 
-    expect(s3Service.uploadFile).toHaveBeenCalledTimes(2);
+    expect(s3Service.uploadFile).toHaveBeenCalledTimes(1);
+    expect(s3Service.downloadFile).toHaveBeenCalledTimes(2);
     expect(getOutbox()).toEqual(
       expect.objectContaining({ status: 'published' }),
     );
     const retryRunQueries = runners[2].query.mock.calls
       .map(([sql]) => String(sql))
       .filter((sql) => sql.includes('FROM "historic_backfill_run" run'));
-    expect(retryRunQueries).toHaveLength(1);
-    expect(retryRunQueries[0]).toContain(
-      'run."statisticsPromotedAt" IS NOT NULL',
-    );
-    expect(retryRunQueries[0]).not.toContain(
-      'CROSS JOIN "zone_publication_source_state"',
-    );
+    expect(retryRunQueries).toHaveLength(0);
     const retrySql = runners[2].query.mock.calls
       .map(([sql]) => String(sql))
       .join('\n');
     expect(retrySql).not.toContain('UPDATE "config"');
     expect(retrySql).not.toContain('UPDATE "statistic_publication_state"');
     expect(retrySql).not.toContain('UPDATE "zone_publication_source_state"');
+    expect(retrySql).not.toContain('AS "statisticsPromotedCount"');
   });
 
   it('returns an already published outbox without republishing', async () => {

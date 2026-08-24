@@ -14,6 +14,7 @@ import {
 import type { ZonePublicationRollbackResult } from './zone_publication.service';
 import { unwrapTypeOrmDmlReturningRows } from './typeorm-query-result';
 import {
+  acquireHistoricMapPublicationSharedFence,
   certifyZoneTypeAvailability,
   enqueueCurrentZoneRecomputeTarget,
   type PublicZoneType,
@@ -38,6 +39,9 @@ export class ZonePublicationOperatorService {
     queuedDepartmentCount: number;
   }> {
     return this.dataSource.transaction('SERIALIZABLE', async (manager) => {
+      if (input.apply) {
+        await acquireHistoricMapPublicationSharedFence(manager);
+      }
       const [state] = await manager.query(`
         SELECT
           "revision"::text AS "revision",
