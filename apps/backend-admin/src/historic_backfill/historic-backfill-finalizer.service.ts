@@ -82,6 +82,7 @@ export interface HistoricBackfillFinalizationInspection {
   currentQueueCount: number;
   runningDailyPublicationCount: number;
   runningSnapshotCount: number;
+  incompleteSnapshotCount: number;
   pendingMapPublicationCount: number;
   expectedDateCount: number;
   gates: string[];
@@ -114,6 +115,7 @@ interface RebaseStateRow {
   currentHistoricBackfillGlobalEpoch: string;
   baseStatisticRevision: string;
   currentStatisticRevision: string;
+  statisticsPromotedAt: Date | string | null;
   historicPublishedThrough: string | null;
   historicDirtyFrom: string | null;
   historicDirtyThrough: string | null;
@@ -126,7 +128,7 @@ interface RebaseStateRow {
   validTaskCount: number | string;
   currentQueueCount: number | string;
   runningDailyPublicationCount: number | string;
-  runningSnapshotCount: number | string;
+  incompleteSnapshotCount: number | string;
   pendingMapPublicationCount: number | string;
 }
 
@@ -190,6 +192,7 @@ interface InspectionRow {
   currentQueueCount: number | string;
   runningDailyPublicationCount: number | string;
   runningSnapshotCount: number | string;
+  incompleteSnapshotCount: number | string;
   pendingMapPublicationCount: number | string;
   expectedDateCount: number | string;
 }
@@ -366,6 +369,13 @@ export class HistoricBackfillFinalizerService {
           ON shadow."departementId" = task."departementId"
         WHERE task."runId" = $1::uuid
           AND run."status" = 'running'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM "statistic_commune_snapshot" snapshot
+            WHERE snapshot."status" <> 'completed'
+               OR snapshot."processedCommuneCount" <>
+                  snapshot."expectedCommuneCount"
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM "historic_backfill_map_manifest_outbox" outbox
@@ -830,6 +840,7 @@ export class HistoricBackfillFinalizerService {
               run."baseStatisticRevision"::text
                 AS "baseStatisticRevision",
               publication."revision"::text AS "currentStatisticRevision",
+              run."statisticsPromotedAt",
               publication."historicPublishedThrough"::text
                 AS "historicPublishedThrough",
               publication."historicDirtyFrom"::text AS "historicDirtyFrom",
@@ -902,9 +913,11 @@ export class HistoricBackfillFinalizerService {
             ) AS "runningDailyPublicationCount",
             (
               SELECT COUNT(*)::integer
-              FROM "statistic_commune_snapshot"
-              WHERE "status" = 'running'
-            ) AS "runningSnapshotCount",
+              FROM "statistic_commune_snapshot" snapshot
+              WHERE snapshot."status" <> 'completed'
+                 OR snapshot."processedCommuneCount" <>
+                    snapshot."expectedCommuneCount"
+            ) AS "incompleteSnapshotCount",
             (
               SELECT COUNT(*)::integer
               FROM "historic_backfill_map_manifest_outbox" outbox
@@ -917,6 +930,10 @@ export class HistoricBackfillFinalizerService {
         [runId],
       )) as RebaseStateRow[];
       this.assertRebaseState(row);
+
+      if (this.isClosedInvalidatedStatisticPublication(row)) {
+        return this.reopenInvalidatedStatisticPublication(manager, row);
+      }
 
       const currentStatisticRevision = String(row.currentStatisticRevision);
       const previousStatisticRevision = String(row.baseStatisticRevision);
@@ -972,6 +989,121 @@ export class HistoricBackfillFinalizerService {
     });
   }
 
+  private isClosedInvalidatedStatisticPublication(
+    row: RebaseStateRow,
+  ): boolean {
+    return (
+      row.statisticsPromotedAt === null &&
+      row.historicDirtyFrom === null &&
+      row.historicDirtyThrough === null &&
+      row.historicPublishedThrough !== null &&
+      row.historicPublishedThrough === row.dateThrough &&
+      row.computeStatsDate !== null &&
+      row.mapDateFrom <= row.computeStatsDate &&
+      row.computeStatsDate >= row.statisticDateFrom &&
+      row.computeStatsDate < row.dateThrough &&
+      row.currentPublishedDate !== null &&
+      row.currentPublishedDate > row.dateThrough
+    );
+  }
+
+  private async reopenInvalidatedStatisticPublication(
+    manager: SqlExecutor,
+    row: RebaseStateRow,
+  ): Promise<{
+    baseStatisticRevision: string;
+    currentStatisticRevision: string;
+    rebased: boolean;
+    purgedShadowCount: number;
+  }> {
+    const baseStatisticRevision = String(row.baseStatisticRevision);
+    const currentStatisticRevision = String(row.currentStatisticRevision);
+    const preserveShadows = baseStatisticRevision === currentStatisticRevision;
+    const [recovered] = (await manager.query(
+      `
+        WITH publication_update AS MATERIALIZED (
+          UPDATE "statistic_publication_state" publication
+          SET
+            "revision" = publication."revision" + 1,
+            "historicDirtyFrom" = $3::date,
+            "historicDirtyThrough" = $4::date,
+            "updatedAt" = now()
+          WHERE publication."id" = 1
+            AND publication."revision" = $2::bigint
+            AND publication."historicDirtyFrom" IS NULL
+            AND publication."historicDirtyThrough" IS NULL
+            AND publication."historicPublishedThrough" = $4::date
+            AND publication."currentPublishedDate" > $4::date
+            AND $10::date <= $3::date
+          RETURNING publication."revision"
+        ), purged AS (
+          DELETE FROM "historic_backfill_commune_shadow" shadow
+          USING publication_update
+          WHERE shadow."runId" = $1::uuid
+            AND NOT $9::boolean
+          RETURNING 1
+        ), run_update AS (
+          UPDATE "historic_backfill_run" run
+          SET
+            "baseStatisticRevision" = publication_update."revision",
+            "statisticsPromotedAt" = NULL,
+            "updatedAt" = now()
+          FROM publication_update
+          WHERE run."id" = $1::uuid
+            AND run."status" = 'running'
+            AND run."sourceRevision" = $5::bigint
+            AND run."historicComputeEpoch" = $6::bigint
+            AND run."historicBackfillGlobalEpoch" = $7::bigint
+            AND run."baseStatisticRevision" = $8::bigint
+            AND run."statisticsPromotedAt" IS NULL
+            AND (SELECT COUNT(*) FROM purged) >= 0
+          RETURNING run."baseStatisticRevision"
+        )
+        SELECT
+          (SELECT "baseStatisticRevision"::text FROM run_update)
+            AS "currentStatisticRevision",
+          (SELECT COUNT(*)::integer FROM purged) AS "purgedShadowCount",
+          (SELECT COUNT(*)::integer FROM run_update) AS "updatedCount"
+      `,
+      [
+        row.runId,
+        currentStatisticRevision,
+        row.computeStatsDate,
+        row.dateThrough,
+        row.sourceRevision,
+        row.historicComputeEpoch,
+        row.historicBackfillGlobalEpoch,
+        baseStatisticRevision,
+        preserveShadows,
+        row.mapDateFrom,
+      ],
+    )) as Array<{
+      currentStatisticRevision: string | null;
+      purgedShadowCount: number | string;
+      updatedCount: number | string;
+    }>;
+    const recoveredRevision = normalizeRevision(
+      recovered?.currentStatisticRevision,
+    );
+    if (
+      databaseCount(recovered?.updatedCount, 'recovered run count') !== 1 ||
+      recoveredRevision === null
+    ) {
+      throw new HistoricBackfillFinalizerStateError(
+        'Historic invalidated statistic publication recovery lost its context',
+      );
+    }
+    return {
+      baseStatisticRevision: recoveredRevision,
+      currentStatisticRevision: recoveredRevision,
+      rebased: true,
+      purgedShadowCount: databaseCount(
+        recovered.purgedShadowCount,
+        'recovered shadow count',
+      ),
+    };
+  }
+
   private assertRebaseState(row: RebaseStateRow | undefined): asserts row {
     if (!row) {
       throw new HistoricBackfillFinalizerStateError(
@@ -991,14 +1123,18 @@ export class HistoricBackfillFinalizerService {
     ) {
       failures.push('historic backfill global epoch changed');
     }
+    const dirtyRangeCovered = Boolean(
+      row.historicDirtyFrom &&
+      row.historicDirtyThrough &&
+      row.mapDateFrom <= row.historicDirtyFrom &&
+      row.statisticDateFrom <= row.historicDirtyFrom &&
+      row.dateThrough >= row.historicDirtyThrough &&
+      (row.historicPublishedThrough === null ||
+        row.historicPublishedThrough <= row.dateThrough),
+    );
     if (
-      !row.historicDirtyFrom ||
-      !row.historicDirtyThrough ||
-      row.mapDateFrom > row.historicDirtyFrom ||
-      row.statisticDateFrom > row.historicDirtyFrom ||
-      row.dateThrough < row.historicDirtyThrough ||
-      (row.historicPublishedThrough !== null &&
-        row.historicPublishedThrough > row.dateThrough)
+      !dirtyRangeCovered &&
+      !this.isClosedInvalidatedStatisticPublication(row)
     ) {
       failures.push('run does not cover the dirty range');
     }
@@ -1043,9 +1179,12 @@ export class HistoricBackfillFinalizerService {
       failures.push('a current daily publication is running');
     }
     if (
-      databaseCount(row.runningSnapshotCount, 'running snapshot count') !== 0
+      databaseCount(
+        row.incompleteSnapshotCount,
+        'incomplete snapshot count',
+      ) !== 0
     ) {
-      failures.push('a commune statistic snapshot is running');
+      failures.push('a commune statistic snapshot is incomplete');
     }
     if (
       databaseCount(
@@ -1177,6 +1316,10 @@ export class HistoricBackfillFinalizerService {
         row.runningSnapshotCount,
         'running snapshot count',
       ),
+      incompleteSnapshotCount: databaseCount(
+        row.incompleteSnapshotCount,
+        'incomplete snapshot count',
+      ),
       pendingMapPublicationCount: databaseCount(
         row.pendingMapPublicationCount,
         'pending map publication count',
@@ -1271,8 +1414,12 @@ export class HistoricBackfillFinalizerService {
     if (inspection.runningDailyPublicationCount !== 0) {
       failures.push('running-daily-publication');
     }
-    if (inspection.runningSnapshotCount !== 0) {
-      failures.push('running-snapshot');
+    if (inspection.incompleteSnapshotCount !== 0) {
+      failures.push(
+        inspection.runningSnapshotCount !== 0
+          ? 'running-snapshot'
+          : 'incomplete-snapshot',
+      );
     }
     if (inspection.pendingMapPublicationCount !== 0) {
       failures.push('pending-map-publication');
@@ -1989,7 +2136,8 @@ export class HistoricBackfillFinalizerService {
           )
           AND NOT EXISTS (
             SELECT 1 FROM "statistic_commune_snapshot"
-            WHERE "status" = 'running'
+            WHERE "status" <> 'completed'
+               OR "processedCommuneCount" <> "expectedCommuneCount"
           )
           AND NOT EXISTS (
             SELECT 1
@@ -2281,10 +2429,12 @@ export class HistoricBackfillFinalizerService {
             SELECT COUNT(DISTINCT ("departementId", date))::bigint
             FROM expanded_department
           ) AS "distinctDepartmentPointCount"
-      ), running_snapshots AS MATERIALIZED (
-        SELECT snapshot."snapshotDate", snapshot."scope"
+      ), incomplete_snapshots AS MATERIALIZED (
+        SELECT snapshot."snapshotDate", snapshot."scope", snapshot."status"
         FROM "statistic_commune_snapshot" snapshot
-        WHERE snapshot."status" = 'running'
+        WHERE snapshot."status" <> 'completed'
+           OR snapshot."processedCommuneCount" <>
+              snapshot."expectedCommuneCount"
         ${snapshotLock}
       )
       SELECT
@@ -2399,8 +2549,13 @@ export class HistoricBackfillFinalizerService {
           WHERE daily_run."jobKey" = 'compute:national-daily'
             AND daily_run."status" = 'running'
         ) AS "runningDailyPublicationCount",
-        (SELECT COUNT(*)::integer FROM running_snapshots)
-          AS "runningSnapshotCount",
+        (SELECT COUNT(*)::integer FROM incomplete_snapshots)
+          AS "incompleteSnapshotCount",
+        (
+          SELECT COUNT(*)::integer
+          FROM incomplete_snapshots
+          WHERE "status" = 'running'
+        ) AS "runningSnapshotCount",
         (
           SELECT COUNT(*)::integer
           FROM "historic_backfill_map_manifest_outbox" outbox

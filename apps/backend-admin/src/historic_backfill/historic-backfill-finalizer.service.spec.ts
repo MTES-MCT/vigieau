@@ -41,7 +41,7 @@ function rebaseRow(overrides: Record<string, unknown> = {}) {
     validTaskCount: '101',
     currentQueueCount: '0',
     runningDailyPublicationCount: '0',
-    runningSnapshotCount: '0',
+    incompleteSnapshotCount: '0',
     pendingMapPublicationCount: '0',
     ...overrides,
   };
@@ -87,6 +87,7 @@ function inspectionRow(overrides: Record<string, unknown> = {}) {
     currentQueueCount: '0',
     runningDailyPublicationCount: '0',
     runningSnapshotCount: '0',
+    incompleteSnapshotCount: '0',
     pendingMapPublicationCount: '0',
     expectedDateCount: '3',
     ...overrides,
@@ -315,6 +316,8 @@ describe('HistoricBackfillFinalizerService shadow construction', () => {
       'daily_run."jobKey" = \'compute:national-daily\'',
     );
     expect(rebaseSql).toContain('daily_run."status" = \'running\'');
+    expect(rebaseSql).toContain('snapshot."status" <> \'completed\'');
+    expect(rebaseSql).toContain('snapshot."processedCommuneCount" <>');
     expect(rebaseSql).toContain('run."mapDateFrom"::text AS "mapDateFrom"');
     expect(rebaseSql).toContain(
       'DELETE FROM "historic_backfill_commune_shadow"',
@@ -352,6 +355,10 @@ describe('HistoricBackfillFinalizerService shadow construction', () => {
       'daily_run."jobKey" = \'compute:national-daily\'',
     );
     expect(commitContextSql).toContain('daily_run."status" = \'running\'');
+    expect(commitContextSql).toContain('"status" <> \'completed\'');
+    expect(commitContextSql).toContain(
+      '"processedCommuneCount" <> "expectedCommuneCount"',
+    );
     expect(commitContextSql).toContain(
       'FROM "historic_backfill_map_manifest_outbox" outbox',
     );
@@ -437,6 +444,234 @@ describe('HistoricBackfillFinalizerService shadow construction', () => {
         rebaseRow({ computeStatsDate: '2026-08-20' }),
       ),
     ).not.toThrow();
+  });
+
+  it('reopens invalidated closed statistics once and preserves current shadows', async () => {
+    let recovered = false;
+    const manager = {
+      query: jest.fn(async (sql: string, _parameters?: unknown[]) => {
+        void _parameters;
+        if (sql.includes('WITH run_context AS MATERIALIZED')) {
+          return [
+            rebaseRow(
+              recovered
+                ? {
+                    baseStatisticRevision: '13',
+                    currentStatisticRevision: '13',
+                    historicDirtyFrom: '2026-08-16',
+                    historicDirtyThrough: '2026-08-18',
+                  }
+                : {
+                    statisticsPromotedAt: null,
+                    historicPublishedThrough: '2026-08-18',
+                    historicDirtyFrom: null,
+                    historicDirtyThrough: null,
+                    computeStatsDate: '2026-08-16',
+                    currentPublishedDate: '2026-08-20',
+                  },
+            ),
+          ];
+        }
+        if (sql.includes('WITH publication_update AS MATERIALIZED')) {
+          recovered = true;
+          return [
+            {
+              currentStatisticRevision: '13',
+              purgedShadowCount: '0',
+              updatedCount: '1',
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn(
+        async (_isolation: string, operation: (value: any) => unknown) =>
+          operation(manager),
+      ),
+    };
+    const service = new HistoricBackfillFinalizerService(dataSource as any);
+
+    await expect(
+      (service as any).rebaseStatisticRevision(RUN_ID),
+    ).resolves.toEqual({
+      baseStatisticRevision: '13',
+      currentStatisticRevision: '13',
+      rebased: true,
+      purgedShadowCount: 0,
+    });
+    await expect(
+      (service as any).rebaseStatisticRevision(RUN_ID),
+    ).resolves.toEqual({
+      baseStatisticRevision: '13',
+      currentStatisticRevision: '13',
+      rebased: false,
+      purgedShadowCount: 0,
+    });
+
+    const recoveryCalls = manager.query.mock.calls.filter(([sql]) =>
+      String(sql).includes('WITH publication_update AS MATERIALIZED'),
+    );
+    expect(recoveryCalls).toHaveLength(1);
+    expect(recoveryCalls[0][0]).toContain(
+      'publication."historicPublishedThrough" = $4::date',
+    );
+    expect(recoveryCalls[0][0]).toContain(
+      'publication."currentPublishedDate" > $4::date',
+    );
+    expect(recoveryCalls[0][0]).toContain('AND $10::date <= $3::date');
+    expect(recoveryCalls[0][0]).toContain('run."statisticsPromotedAt" IS NULL');
+    expect(recoveryCalls[0][0]).toContain('AND NOT $9::boolean');
+    expect(recoveryCalls[0][1]).toEqual([
+      RUN_ID,
+      '12',
+      '2026-08-16',
+      '2026-08-18',
+      '42',
+      '7',
+      '4',
+      '12',
+      true,
+      '2026-08-15',
+    ]);
+  });
+
+  it('purges shadows when recovering across an intervening statistic revision', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string, _parameters?: unknown[]) => {
+        void _parameters;
+        if (sql.includes('WITH run_context AS MATERIALIZED')) {
+          return [
+            rebaseRow({
+              baseStatisticRevision: '11',
+              currentStatisticRevision: '12',
+              statisticsPromotedAt: null,
+              historicPublishedThrough: '2026-08-18',
+              historicDirtyFrom: null,
+              historicDirtyThrough: null,
+              computeStatsDate: '2026-08-16',
+            }),
+          ];
+        }
+        if (sql.includes('WITH publication_update AS MATERIALIZED')) {
+          return [
+            {
+              currentStatisticRevision: '13',
+              purgedShadowCount: '34943',
+              updatedCount: '1',
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn(
+        async (_isolation: string, operation: (value: any) => unknown) =>
+          operation(manager),
+      ),
+    };
+
+    await expect(
+      (
+        new HistoricBackfillFinalizerService(dataSource as any) as any
+      ).rebaseStatisticRevision(RUN_ID),
+    ).resolves.toEqual({
+      baseStatisticRevision: '13',
+      currentStatisticRevision: '13',
+      rebased: true,
+      purgedShadowCount: 34943,
+    });
+    const recoveryCall = manager.query.mock.calls.find(([sql]) =>
+      String(sql).includes('WITH publication_update AS MATERIALIZED'),
+    );
+    expect(recoveryCall?.[1]).toEqual([
+      RUN_ID,
+      '12',
+      '2026-08-16',
+      '2026-08-18',
+      '42',
+      '7',
+      '4',
+      '11',
+      false,
+      '2026-08-15',
+    ]);
+  });
+
+  it.each([
+    ['cursor before run', { computeStatsDate: '2026-08-15' }],
+    ['cursor at completed boundary', { computeStatsDate: '2026-08-18' }],
+    ['published range behind run', { historicPublishedThrough: '2026-08-17' }],
+    [
+      'published range ahead of run',
+      { historicPublishedThrough: '2026-08-19' },
+    ],
+    ['map range starts after cursor', { mapDateFrom: '2026-08-17' }],
+    ['half-open dirty range', { historicDirtyFrom: '2026-08-16' }],
+  ])('refuses closed statistic recovery with %s', async (_, overrides) => {
+    const manager = {
+      query: jest.fn().mockResolvedValue([
+        rebaseRow({
+          statisticsPromotedAt: null,
+          historicPublishedThrough: '2026-08-18',
+          historicDirtyFrom: null,
+          historicDirtyThrough: null,
+          computeStatsDate: '2026-08-16',
+          ...overrides,
+        }),
+      ]),
+    };
+    const dataSource = {
+      transaction: jest.fn(
+        async (_isolation: string, operation: (value: any) => unknown) =>
+          operation(manager),
+      ),
+    };
+
+    await expect(
+      (
+        new HistoricBackfillFinalizerService(dataSource as any) as any
+      ).rebaseStatisticRevision(RUN_ID),
+    ).rejects.toThrow('run does not cover the dirty range');
+    expect(
+      manager.query.mock.calls.some(([sql]) =>
+        String(sql).includes('WITH publication_update AS MATERIALIZED'),
+      ),
+    ).toBe(false);
+  });
+
+  it('refuses closed recovery for a ready incomplete snapshot', async () => {
+    const manager = {
+      query: jest.fn().mockResolvedValue([
+        rebaseRow({
+          statisticsPromotedAt: null,
+          historicPublishedThrough: '2026-08-18',
+          historicDirtyFrom: null,
+          historicDirtyThrough: null,
+          computeStatsDate: '2026-08-16',
+          incompleteSnapshotCount: '1',
+        }),
+      ]),
+    };
+    const dataSource = {
+      transaction: jest.fn(
+        async (_isolation: string, operation: (value: any) => unknown) =>
+          operation(manager),
+      ),
+    };
+
+    await expect(
+      (
+        new HistoricBackfillFinalizerService(dataSource as any) as any
+      ).rebaseStatisticRevision(RUN_ID),
+    ).rejects.toThrow('a commune statistic snapshot is incomplete');
+    expect(manager.query).toHaveBeenCalledTimes(1);
+    const sql = manager.query.mock.calls[0][0] as string;
+    expect(sql).toContain('snapshot."status" <> \'completed\'');
+    expect(sql).toContain('snapshot."processedCommuneCount" <>');
+    expect(sql).not.toContain('WITH publication_update AS MATERIALIZED');
   });
 
   it('refuses shadow rebase while the current daily publication is running', async () => {
@@ -549,6 +784,10 @@ describe('HistoricBackfillFinalizerService shadow construction', () => {
       'daily_run."jobKey" = \'compute:national-daily\'',
     );
     expect(commitContextSql).toContain('daily_run."status" = \'running\'');
+    expect(commitContextSql).toContain('"status" <> \'completed\'');
+    expect(commitContextSql).toContain(
+      '"processedCommuneCount" <> "expectedCommuneCount"',
+    );
   });
 
   it('locks then freezes a department when an outbox appears after rebase', async () => {
@@ -711,6 +950,8 @@ describe('HistoricBackfillFinalizerService shadow construction', () => {
     expect(planSql).toContain(
       'commune."departementId" = shadow."departementId"',
     );
+    expect(planSql).toContain('snapshot."status" <> \'completed\'');
+    expect(planSql).toContain('snapshot."processedCommuneCount" <>');
   });
 
   it('resumes a partial build without rematerializing complete departments', async () => {
@@ -835,7 +1076,8 @@ describe('HistoricBackfillFinalizerService inspection', () => {
     expect(sql).toContain('FROM "current_zone_recompute_request"');
     expect(sql).toContain('FROM "external_publication_run" daily_run');
     expect(sql).toContain('daily_run."jobKey" = \'compute:national-daily\'');
-    expect(sql).toContain('WHERE snapshot."status" = \'running\'');
+    expect(sql).toContain('WHERE snapshot."status" <> \'completed\'');
+    expect(sql).toContain('snapshot."processedCommuneCount" <>');
     expect(sql).toContain(
       'FROM "historic_backfill_map_manifest_outbox" outbox',
     );
@@ -884,7 +1126,7 @@ describe('HistoricBackfillFinalizerService inspection', () => {
         validShadowCommuneCount: '34934',
         currentQueueCount: '1',
         runningDailyPublicationCount: '1',
-        runningSnapshotCount: '1',
+        incompleteSnapshotCount: '1',
         pendingMapPublicationCount: '1',
       }),
     ]);
@@ -898,7 +1140,7 @@ describe('HistoricBackfillFinalizerService inspection', () => {
         'shadow-generation',
         'current-queue',
         'running-daily-publication',
-        'running-snapshot',
+        'incomplete-snapshot',
         'pending-map-publication',
       ]),
     });
@@ -1490,8 +1732,8 @@ describeWithPostgres(
         "snapshotDate", "scope", "status", "expectedCommuneCount",
         "processedCommuneCount", "sourceRevision"
       ) VALUES
-        (date '1970-01-01', 'bootstrap', 'failed', 0, 0, NULL),
-        (date '2026-08-16', 'departements:001', 'partial', 1, 0, 41);
+        (date '1970-01-01', 'bootstrap', 'completed', 0, 0, NULL),
+        (date '2026-08-16', 'departements:001', 'completed', 1, 1, 41);
     `);
     }, 30_000);
 
@@ -1634,6 +1876,199 @@ describeWithPostgres(
           SET "baseStatisticRevision" = 12, "statisticsPromotedAt" = NULL
           WHERE "id" = '${RUN_ID}'
         `);
+      }
+    }, 30_000);
+
+    it('recovers a closed invalidated publication and preserves valid shadows', async () => {
+      const [before] = await dataSource.query(`
+        SELECT
+          config."computeStatsDate"::text AS "computeStatsDate",
+          publication."revision"::text AS "revision",
+          publication."historicPublishedThrough"::text
+            AS "historicPublishedThrough",
+          publication."historicDirtyFrom"::text AS "historicDirtyFrom",
+          publication."historicDirtyThrough"::text AS "historicDirtyThrough",
+          run."baseStatisticRevision"::text AS "baseStatisticRevision",
+          run."statisticsPromotedAt"
+        FROM "config" config
+        CROSS JOIN "statistic_publication_state" publication
+        CROSS JOIN "historic_backfill_run" run
+        WHERE config."id" = 1
+          AND publication."id" = 1
+          AND run."id" = '${RUN_ID}'
+      `);
+      const [beforeShadow] = await dataSource.query(`
+        SELECT COUNT(*)::integer AS count
+        FROM "historic_backfill_commune_shadow"
+        WHERE "runId" = '${RUN_ID}'
+      `);
+      expect(beforeShadow.count).toBe(0);
+
+      try {
+        await dataSource.query(`
+          INSERT INTO "historic_backfill_commune_shadow" (
+            "runId", "communeId", "departementId", "sourceGeneration",
+            "restrictions", "restrictionsByMonth"
+          )
+          SELECT
+            '${RUN_ID}', value, value, 3,
+            jsonb_build_array(jsonb_build_object('sentinel', value)),
+            jsonb_build_array(jsonb_build_object('month', value))
+          FROM generate_series(1, 101) value;
+
+          UPDATE "config"
+          SET "computeStatsDate" = date '2026-08-16'
+          WHERE "id" = 1;
+
+          UPDATE "statistic_publication_state"
+          SET
+            "revision" = 13,
+            "historicPublishedThrough" = date '2026-08-18',
+            "historicDirtyFrom" = NULL,
+            "historicDirtyThrough" = NULL
+          WHERE "id" = 1;
+
+          UPDATE "historic_backfill_run"
+          SET
+            "baseStatisticRevision" = 13,
+            "statisticsPromotedAt" = NULL
+          WHERE "id" = '${RUN_ID}';
+        `);
+        const [shadowBeforeRecovery] = await dataSource.query(`
+          SELECT
+            COUNT(*)::integer AS count,
+            md5(string_agg(
+              "communeId"::text || ':' || "restrictions"::text || ':' ||
+              "restrictionsByMonth"::text || ':' || "createdAt"::text || ':' ||
+              "updatedAt"::text,
+              '|' ORDER BY "communeId"
+            )) AS fingerprint
+          FROM "historic_backfill_commune_shadow"
+          WHERE "runId" = '${RUN_ID}'
+        `);
+
+        await expect(service.buildShadow(RUN_ID)).resolves.toMatchObject({
+          departmentCount: 101,
+          skippedDepartmentCount: 101,
+          communeCount: 101,
+          upsertedCount: 0,
+          purgedShadowCount: 0,
+          rebased: true,
+          baseStatisticRevision: '14',
+        });
+
+        const [recovered] = await dataSource.query(`
+          SELECT
+            publication."revision"::text AS "revision",
+            publication."historicPublishedThrough"::text
+              AS "historicPublishedThrough",
+            publication."historicDirtyFrom"::text AS "historicDirtyFrom",
+            publication."historicDirtyThrough"::text AS "historicDirtyThrough",
+            run."baseStatisticRevision"::text AS "baseStatisticRevision",
+            run."statisticsPromotedAt",
+            COUNT(shadow.*)::integer AS "shadowCount",
+            md5(string_agg(
+              shadow."communeId"::text || ':' ||
+              shadow."restrictions"::text || ':' ||
+              shadow."restrictionsByMonth"::text || ':' ||
+              shadow."createdAt"::text || ':' || shadow."updatedAt"::text,
+              '|' ORDER BY shadow."communeId"
+            )) AS fingerprint
+          FROM "statistic_publication_state" publication
+          CROSS JOIN "historic_backfill_run" run
+          LEFT JOIN "historic_backfill_commune_shadow" shadow
+            ON shadow."runId" = run."id"
+          WHERE publication."id" = 1 AND run."id" = '${RUN_ID}'
+          GROUP BY publication."revision",
+                   publication."historicPublishedThrough",
+                   publication."historicDirtyFrom",
+                   publication."historicDirtyThrough",
+                   run."baseStatisticRevision", run."statisticsPromotedAt"
+        `);
+        expect(recovered).toMatchObject({
+          revision: '14',
+          historicPublishedThrough: '2026-08-18',
+          historicDirtyFrom: '2026-08-16',
+          historicDirtyThrough: '2026-08-18',
+          baseStatisticRevision: '14',
+          statisticsPromotedAt: null,
+          shadowCount: 101,
+          fingerprint: shadowBeforeRecovery.fingerprint,
+        });
+
+        await expect(service.buildShadow(RUN_ID)).resolves.toMatchObject({
+          departmentCount: 101,
+          skippedDepartmentCount: 101,
+          communeCount: 101,
+          upsertedCount: 0,
+          purgedShadowCount: 0,
+          rebased: false,
+          baseStatisticRevision: '14',
+        });
+        const [afterRetry] = await dataSource.query(`
+          SELECT
+            publication."revision"::text AS "revision",
+            publication."historicDirtyFrom"::text AS "historicDirtyFrom",
+            publication."historicDirtyThrough"::text AS "historicDirtyThrough",
+            run."baseStatisticRevision"::text AS "baseStatisticRevision",
+            COUNT(shadow.*)::integer AS "shadowCount",
+            md5(string_agg(
+              shadow."communeId"::text || ':' ||
+              shadow."restrictions"::text || ':' ||
+              shadow."restrictionsByMonth"::text || ':' ||
+              shadow."createdAt"::text || ':' || shadow."updatedAt"::text,
+              '|' ORDER BY shadow."communeId"
+            )) AS fingerprint
+          FROM "statistic_publication_state" publication
+          CROSS JOIN "historic_backfill_run" run
+          LEFT JOIN "historic_backfill_commune_shadow" shadow
+            ON shadow."runId" = run."id"
+          WHERE publication."id" = 1 AND run."id" = '${RUN_ID}'
+          GROUP BY publication."revision",
+                   publication."historicDirtyFrom",
+                   publication."historicDirtyThrough",
+                   run."baseStatisticRevision"
+        `);
+        expect(afterRetry).toMatchObject({
+          revision: '14',
+          historicDirtyFrom: '2026-08-16',
+          historicDirtyThrough: '2026-08-18',
+          baseStatisticRevision: '14',
+          shadowCount: 101,
+          fingerprint: shadowBeforeRecovery.fingerprint,
+        });
+      } finally {
+        await dataSource.query(`
+          DELETE FROM "historic_backfill_commune_shadow"
+          WHERE "runId" = '${RUN_ID}'
+        `);
+        await dataSource.query(
+          `UPDATE "config"
+           SET "computeStatsDate" = $1::date
+           WHERE "id" = 1`,
+          [before.computeStatsDate],
+        );
+        await dataSource.query(
+          `UPDATE "statistic_publication_state"
+           SET "revision" = $1::bigint,
+               "historicPublishedThrough" = $2::date,
+               "historicDirtyFrom" = $3::date,
+               "historicDirtyThrough" = $4::date
+           WHERE "id" = 1`,
+          [
+            before.revision,
+            before.historicPublishedThrough,
+            before.historicDirtyFrom,
+            before.historicDirtyThrough,
+          ],
+        );
+        await dataSource.query(
+          `UPDATE "historic_backfill_run"
+           SET "baseStatisticRevision" = $1::bigint,
+               "statisticsPromotedAt" = $2::timestamptz
+           WHERE "id" = '${RUN_ID}'`,
+          [before.baseStatisticRevision, before.statisticsPromotedAt],
+        );
       }
     }, 30_000);
 
@@ -1814,7 +2249,7 @@ describeWithPostgres(
         shadows: 101,
         national: 3,
         situations: 3,
-        bootstrap: 'failed',
+        bootstrap: 'completed',
         sibling: 'completed',
         communeDayCount: 5,
         weight: 6,
