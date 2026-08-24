@@ -204,6 +204,12 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
   const restrictionService = {
     updateAll: jest.fn().mockResolvedValue([]),
   };
+  const mailService = {
+    sendEmail: jest.fn().mockResolvedValue(undefined),
+  };
+  const configService = {
+    setConfig: jest.fn().mockResolvedValue(undefined),
+  };
   const service = new ArreteRestrictionService(
     repository as any,
     {} as any,
@@ -211,11 +217,11 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
     restrictionService as any,
     {} as any,
     {} as any,
+    mailService as any,
     {} as any,
     {} as any,
     {} as any,
-    {} as any,
-    { setConfig: jest.fn() } as any,
+    configService as any,
     { get: jest.fn() } as any,
   );
   const requestCurrentZoneRecompute = jest
@@ -254,12 +260,14 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
 
   return {
     checkModifications,
+    configService,
     departementRepository,
     get transactionRolledBack() {
       return transactionRolledBack;
     },
     lockQuery,
     manager,
+    mailService,
     invalidateComputationsFromWithManager,
     recordPublicMutation,
     repository,
@@ -296,6 +304,51 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
     expect(harness.transactionRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({ id: 300, numero: 'AR renommé' }),
+    );
+  });
+
+  it('notifies a published update without reopening historic cursors twice', async () => {
+    const harness = createHarness([createState(300)], 300);
+    harness.checkModifications.mockRestore();
+    const oldAr = toEntity(harness.states.get(300)!, harness.states);
+    const updatedAr = { ...oldAr, numero: 'AR-300-modified' };
+
+    await (harness.service as any).checkModifications(
+      oldAr,
+      updatedAr,
+      currentUser,
+    );
+
+    expect(harness.mailService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(harness.configService.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('keeps a committed published update when its notification fails', async () => {
+    const harness = createHarness([createState(300)], 300);
+    harness.checkModifications.mockRejectedValueOnce(
+      new Error('mail unavailable'),
+    );
+    const loggerError = jest
+      .spyOn((harness.service as any).logger, 'error')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      harness.service.update(
+        300,
+        { numero: 'AR-300-modified' } as any,
+        currentUser,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ id: 300 }));
+    await Promise.resolve();
+
+    expect(harness.recordPublicMutation).toHaveBeenCalledWith(
+      harness.manager,
+      [53, 53],
+      'MODIFICATION AR',
+    );
+    expect(loggerError).toHaveBeenCalledWith(
+      'ERREUR NOTIFICATION MODIFICATION AR',
+      expect.objectContaining({ message: 'mail unavailable' }),
     );
   });
 

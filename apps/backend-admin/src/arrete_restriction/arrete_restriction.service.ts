@@ -887,7 +887,10 @@ export class ArreteRestrictionService {
       ) as Departement[];
       this.requestCurrentZoneRecompute(departements, 'MODIFICATION AR');
     }
-    this.checkModifications(oldAr, arreteRestriction, currentUser);
+    void this.checkModifications(oldAr, arreteRestriction, currentUser).catch(
+      (error) =>
+        this.logger.error('ERREUR NOTIFICATION MODIFICATION AR', error),
+    );
     delete arreteRestriction.dateFinSaisie;
     delete arreteRestriction.dateFinCalculee;
     delete arreteRestriction.dateFinSaisieConnue;
@@ -3297,13 +3300,6 @@ export class ArreteRestrictionService {
           arreteLien: `https://${this.nestConfigService.get('DOMAIN_NAME')}/arrete-restriction/${oldAr.id}/edition`,
         },
       );
-      if (!publish) {
-        if (diff.restrictions && diff.restrictions.some((r) => r.id)) {
-          await this.configService.setConfig(oldAr.dateDebut, oldAr.dateDebut);
-        } else {
-          await this.configService.setConfig(oldAr.dateDebut, null);
-        }
-      }
     }
   }
 
