@@ -66,6 +66,7 @@ const props = defineProps<{
   hideTypeEau: boolean;
   typeEau: string;
   profil: string;
+  downloadLoading?: boolean;
   accessibleDescriptionId?: string;
 }>();
 
@@ -1507,7 +1508,11 @@ watch(
       data-html2canvas-ignore="true"
       class="text-align-right"
     >
-      <DsfrButton @click="downloadMap()">
+      <DsfrButton
+        :disabled="downloadLoading"
+        :aria-busy="downloadLoading ? 'true' : undefined"
+        @click="downloadMap()"
+      >
         Télécharger la carte en .png
       </DsfrButton>
     </div>

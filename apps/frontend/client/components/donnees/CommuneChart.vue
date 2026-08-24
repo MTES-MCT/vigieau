@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import api from '../../api';
 import moment from 'moment';
-import html2canvas from 'html2canvas';
 import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
+import { downloadElementAsPng } from '../../utils/png-download';
 
 const props = defineProps<{
   codeInsee: string,
@@ -34,6 +34,8 @@ const currentDate = ref(new Date().toISOString().split('T')[0]);
 const loading = ref(false);
 const restrictionsFiltered = ref([]);
 const screenshotZone = ref();
+const downloadingPng = ref(false);
+const pngDownloadError = ref(false);
 
 const typesEauOptions = [
   {
@@ -127,14 +129,23 @@ async function sortData() {
 }
 
 async function downloadGraph() {
-  html2canvas(screenshotZone.value, { scale: 2 }).then((canvas) => {
-    const content = canvas.toDataURL('image/png');
+  if (downloadingPng.value) {
+    return;
+  }
 
-    const a = document.createElement('a');
-    a.href = content.replace('image/png', 'image/octet-stream');
-    a.download = `commune_${props.codeInsee}_${formData.dateDebut}_${formData.dateFin}.png`;
-    a.click();
-  });
+  downloadingPng.value = true;
+  pngDownloadError.value = false;
+  try {
+    await downloadElementAsPng(
+      screenshotZone.value,
+      `commune_${props.codeInsee}_${formData.dateDebut}_${formData.dateFin}.png`,
+      { scale: 2 },
+    );
+  } catch {
+    pngDownloadError.value = true;
+  } finally {
+    downloadingPng.value = false;
+  }
 }
 </script>
 
@@ -210,10 +221,23 @@ async function downloadGraph() {
       </div>
 
       <div class="text-align-right fr-mt-1w">
-        <DsfrButton @click="downloadGraph()">
+        <DsfrButton
+          :disabled="downloadingPng"
+          :aria-busy="downloadingPng ? 'true' : undefined"
+          @click="downloadGraph()"
+        >
           Télécharger le graphique en .png
         </DsfrButton>
       </div>
+      <DsfrAlert
+        v-if="pngDownloadError"
+        title="Téléchargement impossible"
+        class="fr-mt-2w"
+        type="error"
+        :closeable="false"
+      >
+        La génération de l’image PNG a échoué. Veuillez réessayer.
+      </DsfrAlert>
 
       <DonneesCommuneTable class="fr-mt-4w"
                            :dataCommune="restrictionsFiltered"
