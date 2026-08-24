@@ -21,7 +21,8 @@ export interface HistoricBackfillWorkerConfig {
 const DEFAULT_CONFIG: HistoricBackfillWorkerConfig = {
   enabled: false,
   concurrency: 1,
-  leaseSeconds: 300,
+  // Spatial computation can block the Node.js heartbeat timer for several minutes.
+  leaseSeconds: 1_800,
   heartbeatMilliseconds: 30_000,
   pollMilliseconds: 2_000,
   errorPollMilliseconds: 10_000,

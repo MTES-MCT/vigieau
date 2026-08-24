@@ -12,7 +12,7 @@ describe('historic backfill worker config', () => {
     expect(readHistoricBackfillWorkerConfig({})).toMatchObject({
       enabled: false,
       concurrency: 1,
-      leaseSeconds: 300,
+      leaseSeconds: 1_800,
       heartbeatMilliseconds: 30_000,
       maxAttempts: 5,
     });

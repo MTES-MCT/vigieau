@@ -186,7 +186,7 @@ describe('HistoricBackfillWorkerLoop', () => {
     expect(queue.heartbeat).toHaveBeenCalledWith(
       expect.objectContaining({ leaseToken: LEASE_TOKEN }),
       progress,
-      300,
+      1_800,
     );
   });
 
