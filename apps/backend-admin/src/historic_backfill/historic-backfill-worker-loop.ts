@@ -295,6 +295,7 @@ export class HistoricBackfillWorkerLoop {
           workerId,
           config.leaseSeconds,
           config.maxAttempts,
+          config.duringCurrentConcurrency,
         );
       } catch (error) {
         summary.claimErrors += 1;

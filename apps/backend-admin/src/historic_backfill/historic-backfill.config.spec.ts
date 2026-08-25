@@ -1,5 +1,6 @@
 import {
   HISTORIC_BACKFILL_ARTIFACT_ACL_ENV,
+  HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV,
   HISTORIC_BACKFILL_ENABLED_ENV,
   isHistoricBackfillEnabled,
   readHistoricBackfillArtifactAcl,
@@ -12,6 +13,7 @@ describe('historic backfill worker config', () => {
     expect(readHistoricBackfillWorkerConfig({})).toMatchObject({
       enabled: false,
       concurrency: 1,
+      duringCurrentConcurrency: 0,
       leaseSeconds: 1_800,
       heartbeatMilliseconds: 30_000,
       maxAttempts: 5,
@@ -64,6 +66,7 @@ describe('historic backfill worker config', () => {
       readHistoricBackfillWorkerConfig({
         HISTORIC_BACKFILL_ENABLED: 'true',
         HISTORIC_BACKFILL_WORKER_CONCURRENCY: '8',
+        HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY: '3',
         DATABASE_POOL_MAX: '20',
         HISTORIC_BACKFILL_LEASE_SECONDS: '120',
         HISTORIC_BACKFILL_HEARTBEAT_MILLISECONDS: '10000',
@@ -77,6 +80,7 @@ describe('historic backfill worker config', () => {
     ).toEqual({
       enabled: true,
       concurrency: 8,
+      duringCurrentConcurrency: 3,
       leaseSeconds: 120,
       heartbeatMilliseconds: 10_000,
       pollMilliseconds: 500,
@@ -94,6 +98,18 @@ describe('historic backfill worker config', () => {
         HISTORIC_BACKFILL_WORKER_CONCURRENCY: '33',
       },
       message: 'HISTORIC_BACKFILL_WORKER_CONCURRENCY',
+    },
+    {
+      environment: {
+        [HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV]: '33',
+      },
+      message: HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV,
+    },
+    {
+      environment: {
+        [HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV]: '-1',
+      },
+      message: HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV,
     },
     {
       environment: {

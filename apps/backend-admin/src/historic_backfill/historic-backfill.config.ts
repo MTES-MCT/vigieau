@@ -3,11 +3,15 @@ import { parseDatabasePoolMax } from '../core/database-pool';
 export const HISTORIC_BACKFILL_ENABLED_ENV = 'HISTORIC_BACKFILL_ENABLED';
 export const HISTORIC_BACKFILL_ARTIFACT_ACL_ENV =
   'HISTORIC_BACKFILL_ARTIFACT_ACL';
+export const HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV =
+  'HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY';
+export const HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX = 32;
 export type HistoricBackfillArtifactAcl = 'private' | 'public-read';
 
 export interface HistoricBackfillWorkerConfig {
   enabled: boolean;
   concurrency: number;
+  duringCurrentConcurrency: number;
   leaseSeconds: number;
   heartbeatMilliseconds: number;
   pollMilliseconds: number;
@@ -21,6 +25,7 @@ export interface HistoricBackfillWorkerConfig {
 const DEFAULT_CONFIG: HistoricBackfillWorkerConfig = {
   enabled: false,
   concurrency: 1,
+  duringCurrentConcurrency: 0,
   // Spatial computation can block the Node.js heartbeat timer for several minutes.
   leaseSeconds: 1_800,
   heartbeatMilliseconds: 30_000,
@@ -91,6 +96,13 @@ export function readHistoricBackfillWorkerConfig(
       DEFAULT_CONFIG.concurrency,
       1,
       32,
+    ),
+    duringCurrentConcurrency: readInteger(
+      environment,
+      HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_ENV,
+      DEFAULT_CONFIG.duringCurrentConcurrency,
+      0,
+      HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX,
     ),
     leaseSeconds: readInteger(
       environment,

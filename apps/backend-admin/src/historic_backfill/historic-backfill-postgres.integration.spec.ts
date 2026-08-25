@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 import { HistoricBackfillControlPlane1787144400000 } from '../migrations/1787144400000-HistoricBackfillControlPlane';
 import { HistoricBackfillArtifactQueueService } from './historic-backfill-artifact-queue.service';
 import { HistoricBackfillQueueService } from './historic-backfill-queue.service';
+import { SqlHistoricBackfillCurrentPriority } from './historic-backfill-task-handler';
 import {
   HistoricBackfillLeaseIdentity,
   HistoricBackfillTaskClaim,
@@ -78,7 +79,8 @@ describePostgres('historic backfill PostgreSQL integration', () => {
       CREATE TABLE "current_zone_recompute_request" (
         "id" bigserial PRIMARY KEY,
         "currentPending" boolean NOT NULL DEFAULT false,
-        "pendingScheduledDates" date[] NOT NULL DEFAULT '{}'
+        "pendingScheduledDates" date[] NOT NULL DEFAULT '{}',
+        "nextAttemptAt" timestamptz NOT NULL DEFAULT now()
       )
     `);
     await dataSource.query(`
@@ -550,6 +552,49 @@ describePostgres('historic backfill PostgreSQL integration', () => {
     );
     expect(blockedTaskState.count).toBe(0);
     await dataSource.query(`DELETE FROM "external_publication_run"`);
+
+    const warmLeaseA = await queue.claim('budget-warm-a', 30, 5, 1);
+    const warmLeaseB = await queue.claim('budget-warm-b', 30, 5, 1);
+    if (!warmLeaseA || !warmLeaseB) {
+      throw new Error('Both budget test workers must obtain a warm lease');
+    }
+    await dataSource.query(`
+      INSERT INTO "current_zone_recompute_request" ("currentPending")
+      VALUES (true)
+    `);
+    const [oldestLease] = (await dataSource.query(
+      `SELECT "departementId"
+       FROM "historic_backfill_task"
+       WHERE "runId" = $1 AND "status" = 'leased'
+       ORDER BY "startedAt" ASC NULLS LAST, "runId", "departementId"
+       LIMIT 1`,
+      [run.id],
+    )) as Array<{ departementId: number }>;
+    const protectedClaim =
+      warmLeaseA.departementId === Number(oldestLease.departementId)
+        ? warmLeaseA
+        : warmLeaseB;
+    const excessClaim = protectedClaim === warmLeaseA ? warmLeaseB : warmLeaseA;
+    const priority = new SqlHistoricBackfillCurrentPriority(dataSource);
+    await expect(priority.shouldYield(protectedClaim)).resolves.toBe(false);
+    await expect(priority.shouldYield(excessClaim)).resolves.toBe(true);
+    await Promise.all([
+      queue.yieldTask(leaseIdentity(warmLeaseA)),
+      queue.yieldTask(leaseIdentity(warmLeaseB)),
+    ]);
+
+    const concurrentBudgetClaims = await Promise.all([
+      queue.claim('budget-worker-a', 30, 5, 1),
+      queue.claim('budget-worker-b', 30, 5, 1),
+    ]);
+    const grantedBudgetClaims = concurrentBudgetClaims.filter(
+      (claim): claim is HistoricBackfillTaskClaim => claim !== null,
+    );
+    expect(grantedBudgetClaims).toHaveLength(1);
+    await expect(
+      queue.yieldTask(leaseIdentity(grantedBudgetClaims[0])),
+    ).resolves.toBe(true);
+    await dataSource.query(`DELETE FROM "current_zone_recompute_request"`);
 
     const [claimA, claimB] = await Promise.all([
       queue.claim('department-worker-a', 30, 5),

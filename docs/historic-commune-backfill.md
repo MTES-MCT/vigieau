@@ -54,7 +54,13 @@ defaut et ne remplace pas le calcul quotidien.
    `HISTORIC_BACKFILL_DATABASE_POOL_MAX=3` par conteneur et
    `HISTORIC_BACKFILL_WORKER_CONCURRENCY=1`. Le code refuse une configuration
    ou `DATABASE_POOL_MAX < 2 * concurrency + 1`.
-7. Activer `HISTORIC_BACKFILL_ENABLED=true` seulement apres ces gates. Le flag
+7. Pour conserver un seul calcul historique pendant une file courante due,
+   positionner `HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY=1`. La valeur par
+   defaut `0` conserve le blocage historique complet.
+8. Pour la reduction du shadow en production, positionner
+   `HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB=128`. Verifier la memoire PostgreSQL et
+   conserver le parallelisme shadow mesure sur clone avant toute hausse.
+9. Activer `HISTORIC_BACKFILL_ENABLED=true` seulement apres ces gates. Le flag
    coupe les workers et tous les POST operateur; le GET de statut reste lisible.
 
 ## Clone de benchmark
@@ -488,6 +494,7 @@ scalingo --region osc-fr1 --app "$APP" env-set \
   ZONE_PUBLICATION_ENABLED=false ADMIN_WRITES_DISABLED=true \
   HISTORIC_BACKFILL_DATABASE_POOL_MAX=3 \
   HISTORIC_BACKFILL_WORKER_CONCURRENCY=1 \
+  HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB=128 \
   HISTORIC_BACKFILL_ARTIFACT_CONCURRENCY=1 \
   HISTORIC_BACKFILL_ARTIFACT_ACL=private \
   PATH_TO_WRITE_FILE=/tmp \
@@ -588,9 +595,23 @@ historiques survenues apres l'arret des workers departementaux. Si un departemen
 est redevenu `pending`, l'etape artefact refuse de continuer: relancer au moins
 un `historicbackfillworker`, revenir a 101/101, puis reprendre les artefacts.
 
+`HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY` est borne de 0 a 32. Quand une
+file courante devient due, les workers departementaux conservent uniquement les
+N leases actifs les plus anciens et les autres rendent leur lease sans consommer
+une tentative. Les calculs quotidiens nationaux et les snapshots statistiques
+restent des blocages absolus, quelle que soit cette valeur. Les finalizers et les
+workers artefacts conservent egalement leur blocage strict.
+
 La reduction du shadow utilise `HISTORIC_BACKFILL_SHADOW_CONCURRENCY=4` par
 defaut, bornee de 1 a 8. Ce parallelisme ne doit etre augmente qu'apres mesure
 sur le clone full-range; il ne change pas la concurrence interne des workers.
+`HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB` est desactive quand la variable est
+absente ou vaut `0`; PostgreSQL conserve alors son `work_mem` de session. Une
+valeur entiere de 1 a 512 applique un `SET LOCAL work_mem` uniquement dans chaque
+transaction de materialisation departementale. La cible de production est
+`128`, a valider au palier courant: `work_mem` est un budget par operation de tri
+ou de hash et peut donc etre consomme plusieurs fois par transaction et par
+departement concurrent.
 
 L'objectif de duree doit etre recalcule depuis le debit observe du benchmark et
 du premier palier. Aucune promesse inferieure a 12 heures ne doit etre faite

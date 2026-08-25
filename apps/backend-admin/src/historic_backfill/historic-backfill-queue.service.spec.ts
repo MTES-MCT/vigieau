@@ -630,6 +630,7 @@ describe('HistoricBackfillQueueService', () => {
       runId: RUN_ID,
       departementId: 75,
       workerId: 'worker-1',
+      duringCurrentConcurrency: 0,
       departementCode: '75',
       departmentGeneration: '3',
       attemptCount: 1,
@@ -711,12 +712,14 @@ describe('HistoricBackfillQueueService', () => {
     );
     expect(prioritySql).toContain('request."currentPending"');
     expect(prioritySql).toContain('request."pendingScheduledDates"');
+    expect(prioritySql).toContain('request."nextAttemptAt" <= now()');
     expect(prioritySql).toContain(
       'daily_run."jobKey" = \'compute:national-daily\'',
     );
     expect(prioritySql).toContain('daily_run."status" = \'running\'');
     expect(prioritySql).toContain('FROM "statistic_commune_snapshot" snapshot');
     expect(prioritySql).toContain('snapshot."status" = \'running\'');
+    expect(prioritySql).toContain('AS "activeHistoricLeaseCount"');
     const exhaustedCandidateSql = sql.slice(
       sql.indexOf('exhausted_candidate AS MATERIALIZED'),
       sql.indexOf('exhausted AS'),
@@ -736,8 +739,9 @@ describe('HistoricBackfillQueueService', () => {
       'task."departmentGeneration" <> revision."generation"',
     );
     expect(candidateSql).toContain(
-      'SELECT 1 FROM priority WHERE priority."currentWorkActive"',
+      'priority."activeHistoricLeaseCount" >= $5::integer',
     );
+    expect(candidateSql).toContain('priority."hardBlockActive"');
     expect(candidateSql).toContain(
       'FROM "historic_backfill_map_manifest_outbox" outbox',
     );
@@ -773,6 +777,7 @@ describe('HistoricBackfillQueueService', () => {
       expect.stringMatching(/^[0-9a-f-]{36}$/),
       300,
       5,
+      0,
     ]);
     const [cleanupSql, cleanupParameters] = query.mock.calls[4];
     expect(cleanupSql).toContain('WITH claimed_task AS MATERIALIZED');
@@ -850,6 +855,47 @@ describe('HistoricBackfillQueueService', () => {
     await expect(service.claim('worker-1', 300, 5)).resolves.toBeNull();
   });
 
+  it('serializes positive current-work budgets before counting active leases', async () => {
+    const query = jest.fn().mockResolvedValue([]);
+    const service = new HistoricBackfillQueueService(
+      transactionalDataSource(query) as any,
+    );
+
+    await expect(service.claim('worker-1', 300, 5, 2)).resolves.toBeNull();
+
+    const advisorySql = query.mock.calls.find(([sql]) =>
+      sql.includes('pg_advisory_xact_lock'),
+    )?.[0] as string;
+    expect(advisorySql).toContain('historic-backfill-current-budget');
+    const [claimSql, parameters] = query.mock.calls.find(([sql]) =>
+      sql.includes('WITH priority AS MATERIALIZED'),
+    ) as [string, unknown[]];
+    expect(claimSql).toContain('request."nextAttemptAt" <= now()');
+    expect(claimSql).toContain('priority."currentQueueDue"');
+    expect(claimSql).toContain(
+      'priority."activeHistoricLeaseCount" >= $5::integer',
+    );
+    expect(parameters).toEqual([
+      'worker-1',
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+      300,
+      5,
+      2,
+    ]);
+  });
+
+  it('rejects an out-of-range current-work budget before touching the queue', async () => {
+    const query = jest.fn();
+    const service = new HistoricBackfillQueueService(
+      transactionalDataSource(query) as any,
+    );
+
+    await expect(service.claim('worker-1', 300, 5, 33)).rejects.toThrow(
+      'duringCurrentConcurrency must not exceed 32',
+    );
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('makes every stale purge and rebase depend on a priority-gated candidate', async () => {
     const query = jest.fn().mockImplementation(async () => []);
     const service = new HistoricBackfillQueueService(
@@ -864,7 +910,7 @@ describe('HistoricBackfillQueueService', () => {
       sql.indexOf('purged_stale_commune_segments'),
     );
     expect(candidateSql).toContain(
-      'NOT EXISTS (\n                SELECT 1 FROM priority',
+      'NOT EXISTS (\n                SELECT 1\n                FROM priority',
     );
     for (const cte of [
       'purged_stale_commune_segments',

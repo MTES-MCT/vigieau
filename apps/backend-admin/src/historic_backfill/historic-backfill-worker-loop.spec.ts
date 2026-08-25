@@ -19,6 +19,7 @@ function claim(): HistoricBackfillTaskClaim {
     departementId: 75,
     workerId: 'worker:1',
     leaseToken: LEASE_TOKEN,
+    duringCurrentConcurrency: 0,
     departementCode: '75',
     departmentGeneration: '3',
     departmentLastPublicRevision: '42',
@@ -117,6 +118,7 @@ describe('HistoricBackfillWorkerLoop', () => {
       environment: {
         HISTORIC_BACKFILL_ENABLED: 'true',
         HISTORIC_BACKFILL_WORKER_CONCURRENCY: '2',
+        HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY: '1',
       },
       workerId: 'container-a',
       maxIdlePolls: 1,
@@ -124,9 +126,9 @@ describe('HistoricBackfillWorkerLoop', () => {
 
     expect(result.enabled).toBe(true);
     expect(queue.claim).toHaveBeenCalledTimes(2);
-    expect(queue.claim.mock.calls.map(([workerId]) => workerId)).toEqual([
-      'container-a:1',
-      'container-a:2',
+    expect(queue.claim.mock.calls).toEqual([
+      ['container-a:1', 1_800, 5, 1],
+      ['container-a:2', 1_800, 5, 1],
     ]);
   });
 

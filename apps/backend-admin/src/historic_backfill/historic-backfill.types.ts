@@ -83,6 +83,7 @@ export interface HistoricBackfillLeaseIdentity {
 }
 
 export interface HistoricBackfillTaskClaim extends HistoricBackfillLeaseIdentity {
+  duringCurrentConcurrency: number;
   departementCode: string;
   departmentGeneration: string;
   departmentLastPublicRevision: string;

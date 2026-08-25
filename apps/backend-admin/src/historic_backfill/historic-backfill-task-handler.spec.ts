@@ -23,6 +23,7 @@ const claim = (): HistoricBackfillTaskClaim => ({
   departementCode: '65',
   workerId: 'worker-1',
   leaseToken: '00000000-0000-4000-8000-000000000002',
+  duringCurrentConcurrency: 2,
   departmentGeneration: '7',
   departmentLastPublicRevision: '41',
   attemptCount: 1,
@@ -645,21 +646,38 @@ describe('HistoricBackfillTaskHandlerService', () => {
     ).toHaveBeenCalledTimes(1);
     expect(harness.payloadBuilder.build).not.toHaveBeenCalled();
     expect(harness.mapArtifactBuilder.buildAndUpload).not.toHaveBeenCalled();
+    expect(harness.priority.shouldYield).toHaveBeenCalledWith(claim());
   });
 
-  it('detects queued work, running snapshots or a running daily job', async () => {
+  it('keeps only the deterministic oldest leased tasks during due current work', async () => {
     const dataSource = {
       query: jest.fn().mockResolvedValue([{ shouldYield: true }]),
     } as unknown as DataSource;
     const priority = new SqlHistoricBackfillCurrentPriority(dataSource);
 
-    await expect(priority.shouldYield(65)).resolves.toBe(true);
-    const sql = jest.mocked(dataSource.query).mock.calls[0][0];
+    await expect(priority.shouldYield(claim())).resolves.toBe(true);
+    const [sql, parameters] = jest.mocked(dataSource.query).mock.calls[0];
+    expect(sql).toContain('request."nextAttemptAt" <= now()');
     expect(sql).toContain('request."currentPending"');
     expect(sql).toContain('pending_date <=');
     expect(sql).toContain('daily_run."jobKey" = \'compute:national-daily\'');
     expect(sql).toContain('daily_run."status" = \'running\'');
     expect(sql).toContain('FROM "statistic_commune_snapshot" snapshot');
     expect(sql).toContain('snapshot."status" = \'running\'');
+    expect(sql).toContain('protected_leases AS MATERIALIZED');
+    expect(sql).toContain('task."leaseExpiresAt" > now()');
+    expect(sql).toContain('task."startedAt" ASC NULLS LAST');
+    expect(sql).toContain('task."runId"');
+    expect(sql).toContain('task."departementId"');
+    expect(sql).toContain('LIMIT ($5::integer)');
+    expect(sql).toContain('protected."leaseOwner" = $3');
+    expect(sql).toContain('protected."leaseToken" = $4::uuid');
+    expect(parameters).toEqual([
+      claim().runId,
+      claim().departementId,
+      claim().workerId,
+      claim().leaseToken,
+      2,
+    ]);
   });
 });

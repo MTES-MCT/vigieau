@@ -1,12 +1,15 @@
 import {
   HISTORIC_BACKFILL_SHADOW_CONCURRENCY_DEFAULT,
   HISTORIC_BACKFILL_SHADOW_CONCURRENCY_MAX,
+  HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_DEFAULT,
+  HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_MAX,
   HistoricBackfillFinalizerService,
   HistoricBackfillFinalizerStateError,
   HistoricBackfillFinalizerValidationError,
   HistoricBackfillFinalizationInspection,
   HistoricDepartmentShadowResult,
   readHistoricBackfillShadowConcurrency,
+  readHistoricBackfillShadowWorkMemMb,
 } from './historic-backfill-finalizer.service';
 import { DataSource } from 'typeorm';
 
@@ -1016,6 +1019,54 @@ describe('HistoricBackfillFinalizerService shadow construction', () => {
     ).rejects.toThrow(HistoricBackfillFinalizerValidationError);
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
+
+  it('sets the configured local work_mem before each heavy materialization query', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        const materialization = materializationRows(sql);
+        if (materialization) return materialization;
+        if (sql.includes('WITH run_context AS MATERIALIZED')) {
+          return [rebaseRow()];
+        }
+        return [];
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn(
+        async (_isolation: string, operation: (value: any) => unknown) =>
+          operation(manager),
+      ),
+    };
+    const service = new HistoricBackfillFinalizerService(dataSource as any);
+    const previousWorkMem = process.env.HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB;
+    process.env.HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB = '128';
+
+    try {
+      await expect(
+        service.buildDepartmentShadow({
+          runId: RUN_ID,
+          departementId: 75,
+          departmentGeneration: '9',
+        }),
+      ).resolves.toMatchObject({ communeCount: 2, upsertedCount: 2 });
+    } finally {
+      if (previousWorkMem === undefined) {
+        delete process.env.HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB;
+      } else {
+        process.env.HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB = previousWorkMem;
+      }
+    }
+
+    const statements = manager.query.mock.calls.map(([sql]) => sql as string);
+    const workMemIndex = statements.findIndex((sql) =>
+      sql.includes("SET LOCAL work_mem = '128MB'"),
+    );
+    const materializationIndex = statements.findIndex((sql) =>
+      sql.includes('payload_barrier AS MATERIALIZED'),
+    );
+    expect(workMemIndex).toBeGreaterThanOrEqual(0);
+    expect(materializationIndex).toBeGreaterThan(workMemIndex);
+  });
 });
 
 describe('historic shadow concurrency configuration', () => {
@@ -1045,6 +1096,44 @@ describe('historic shadow concurrency configuration', () => {
           HISTORIC_BACKFILL_SHADOW_CONCURRENCY: value,
         }),
       ).toThrow('HISTORIC_BACKFILL_SHADOW_CONCURRENCY must be between 1 and 8');
+    },
+  );
+});
+
+describe('historic shadow work_mem configuration', () => {
+  it('defaults to disabled and accepts zero and the configured bounds', () => {
+    expect(readHistoricBackfillShadowWorkMemMb({})).toBe(
+      HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_DEFAULT,
+    );
+    expect(
+      readHistoricBackfillShadowWorkMemMb({
+        HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB: ' 0 ',
+      }),
+    ).toBe(0);
+    expect(
+      readHistoricBackfillShadowWorkMemMb({
+        HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB: '128',
+      }),
+    ).toBe(128);
+    expect(
+      readHistoricBackfillShadowWorkMemMb({
+        HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB: String(
+          HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_MAX,
+        ),
+      }),
+    ).toBe(HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_MAX);
+  });
+
+  it.each(['-1', '513', '1.5', '1e2', '0x80', 'invalid'])(
+    'rejects invalid work_mem %s',
+    (value) => {
+      expect(() =>
+        readHistoricBackfillShadowWorkMemMb({
+          HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB: value,
+        }),
+      ).toThrow(
+        'HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB must be an integer between 0 and 512',
+      );
     },
   );
 });

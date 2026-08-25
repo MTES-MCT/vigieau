@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { shiftCivilDate } from '../core/scheduling/daily-job-schedule';
 import { getCurrentParisCivilDate } from '../shared/arrete-date-continuity';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
+import { HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX } from './historic-backfill.config';
 import {
   HistoricBackfillFailureDisposition,
   HistoricBackfillLeaseIdentity,
@@ -658,15 +659,36 @@ export class HistoricBackfillQueueService {
     workerId: string,
     leaseSeconds: number,
     maxAttempts: number,
+    duringCurrentConcurrency = 0,
   ): Promise<HistoricBackfillTaskClaim | null> {
     const normalizedWorkerId = normalizeWorkerId(workerId);
     assertPositiveInteger('leaseSeconds', leaseSeconds);
     assertPositiveInteger('maxAttempts', maxAttempts);
+    assertNonNegativeInteger(
+      'duringCurrentConcurrency',
+      duringCurrentConcurrency,
+    );
+    if (
+      duringCurrentConcurrency >
+      HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX
+    ) {
+      throw new HistoricBackfillValidationError(
+        `duringCurrentConcurrency must not exceed ${HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX}`,
+      );
+    }
     const leaseToken = randomUUID();
     await this.reconcileStaleRuns();
     const row = await this.dataSource.transaction(
       'READ COMMITTED',
       async (manager) => {
+        if (duringCurrentConcurrency > 0) {
+          await manager.query(`
+            SELECT pg_advisory_xact_lock(
+              hashtext('vigieau'),
+              hashtext('historic-backfill-current-budget')
+            )
+          `);
+        }
         await manager.query(`
           SELECT run."id"
           FROM "historic_backfill_run" run
@@ -678,31 +700,55 @@ export class HistoricBackfillQueueService {
           await manager.query(
             `
           WITH priority AS MATERIALIZED (
-            SELECT (
+            SELECT
               EXISTS (
                 SELECT 1
                 FROM "current_zone_recompute_request" request
-                WHERE request."currentPending"
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(request."pendingScheduledDates")
-                      AS pending_dates(pending_date)
-                    WHERE pending_date <=
-                      (now() AT TIME ZONE 'Europe/Paris')::date
+                WHERE request."nextAttemptAt" <= now()
+                  AND (
+                    request."currentPending"
+                    OR EXISTS (
+                      SELECT 1
+                      FROM unnest(request."pendingScheduledDates")
+                        AS pending_dates(pending_date)
+                      WHERE pending_date <=
+                        (now() AT TIME ZONE 'Europe/Paris')::date
+                    )
                   )
-              )
-              OR EXISTS (
-                SELECT 1
-                FROM "external_publication_run" daily_run
-                WHERE daily_run."jobKey" = 'compute:national-daily'
-                  AND daily_run."status" = 'running'
-              )
-              OR EXISTS (
-                SELECT 1
-                FROM "statistic_commune_snapshot" snapshot
-                WHERE snapshot."status" = 'running'
-              )
-            ) AS "currentWorkActive"
+              ) AS "currentQueueDue",
+              (
+                EXISTS (
+                  SELECT 1
+                  FROM "external_publication_run" daily_run
+                  WHERE daily_run."jobKey" = 'compute:national-daily'
+                    AND daily_run."status" = 'running'
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM "statistic_commune_snapshot" snapshot
+                  WHERE snapshot."status" = 'running'
+                )
+              ) AS "hardBlockActive",
+              (
+                SELECT COUNT(*)::integer
+                FROM "historic_backfill_task" active_task
+                JOIN "historic_backfill_run" active_run
+                  ON active_run."id" = active_task."runId"
+                JOIN "historic_backfill_department_revision" active_revision
+                  ON active_revision."departementId" =
+                    active_task."departementId"
+                CROSS JOIN "config" active_config
+                WHERE active_task."status" = 'leased'
+                  AND active_task."leaseExpiresAt" > now()
+                  AND active_run."status" = 'running'
+                  AND active_config."id" = 1
+                  AND active_run."historicComputeEpoch" =
+                    active_config."historicComputeEpoch"
+                  AND active_run."historicBackfillGlobalEpoch" =
+                    active_config."historicBackfillGlobalEpoch"
+                  AND active_task."departmentGeneration" =
+                    active_revision."generation"
+              ) AS "activeHistoricLeaseCount"
           ), exhausted_candidate AS MATERIALIZED (
             SELECT task."runId", task."departementId"
             FROM "historic_backfill_task" task
@@ -716,7 +762,13 @@ export class HistoricBackfillQueueService {
               AND run."historicBackfillGlobalEpoch" =
                 config."historicBackfillGlobalEpoch"
               AND NOT EXISTS (
-                SELECT 1 FROM priority WHERE priority."currentWorkActive"
+                SELECT 1
+                FROM priority
+                WHERE priority."hardBlockActive"
+                  OR (
+                    priority."currentQueueDue"
+                    AND priority."activeHistoricLeaseCount" >= $5::integer
+                  )
               )
               AND NOT EXISTS (
                 SELECT 1
@@ -796,7 +848,13 @@ export class HistoricBackfillQueueService {
               AND run."historicBackfillGlobalEpoch" =
                 config."historicBackfillGlobalEpoch"
               AND NOT EXISTS (
-                SELECT 1 FROM priority WHERE priority."currentWorkActive"
+                SELECT 1
+                FROM priority
+                WHERE priority."hardBlockActive"
+                  OR (
+                    priority."currentQueueDue"
+                    AND priority."activeHistoricLeaseCount" >= $5::integer
+                  )
               )
               AND NOT EXISTS (
                 SELECT 1 FROM failed_runs WHERE failed_runs."id" = run."id"
@@ -966,7 +1024,13 @@ export class HistoricBackfillQueueService {
             ON revision."departementId" = claimed."departementId"
           LEFT JOIN rebased_run ON rebased_run."id" = claimed."runId"
         `,
-            [normalizedWorkerId, leaseToken, leaseSeconds, maxAttempts],
+            [
+              normalizedWorkerId,
+              leaseToken,
+              leaseSeconds,
+              maxAttempts,
+              duringCurrentConcurrency,
+            ],
           ),
         );
         const claimed = rows[0] ?? null;
@@ -1037,6 +1101,7 @@ export class HistoricBackfillQueueService {
       departementId: parseCount(row.departementId),
       workerId: row.workerId,
       leaseToken: row.leaseToken,
+      duringCurrentConcurrency,
       departementCode: row.departementCode,
       attemptCount: parseCount(row.attemptCount),
       leaseExpiresAt: row.leaseExpiresAt,

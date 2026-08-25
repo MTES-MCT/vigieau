@@ -10,6 +10,8 @@ const GENERATION_PATTERN = /^\d+$/;
 const STATISTIC_COMMUNE_LOCK = 'vigieau:statistic-commune:snapshot-computation';
 export const HISTORIC_BACKFILL_SHADOW_CONCURRENCY_DEFAULT = 4;
 export const HISTORIC_BACKFILL_SHADOW_CONCURRENCY_MAX = 8;
+export const HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_DEFAULT = 0;
+export const HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_MAX = 512;
 
 type SqlExecutor = Pick<DataSource, 'query'> | Pick<QueryRunner, 'query'>;
 
@@ -302,6 +304,26 @@ export function readHistoricBackfillShadowConcurrency(
   return concurrency;
 }
 
+export function readHistoricBackfillShadowWorkMemMb(
+  environment: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = environment.HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB?.trim();
+  if (!raw) return HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_DEFAULT;
+
+  const workMemMb = Number(raw);
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isSafeInteger(workMemMb) ||
+    workMemMb < 0 ||
+    workMemMb > HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_MAX
+  ) {
+    throw new Error(
+      'HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB must be an integer between 0 and 512',
+    );
+  }
+  return workMemMb;
+}
+
 @Injectable()
 export class HistoricBackfillFinalizerService {
   constructor(
@@ -511,7 +533,11 @@ export class HistoricBackfillFinalizerService {
       );
     }
 
+    const workMemMb = readHistoricBackfillShadowWorkMemMb();
     return this.dataSource.transaction('READ COMMITTED', async (manager) => {
+      if (workMemMb > 0) {
+        await manager.query(`SET LOCAL work_mem = '${workMemMb}MB'`);
+      }
       const lockedRuns = (await manager.query(
         `
           SELECT run."id"

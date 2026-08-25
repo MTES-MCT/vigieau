@@ -15,6 +15,7 @@ import {
   StatisticCommuneService,
 } from '../statistic_commune/statistic_commune.service';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
+import { HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX } from './historic-backfill.config';
 import {
   HistoricBackfillTaskClaim,
   HistoricBackfillTaskContext,
@@ -91,7 +92,7 @@ export interface HistoricBackfillMapArtifactBuilder {
 }
 
 export interface HistoricBackfillCurrentPriority {
-  shouldYield(departementId: number): Promise<boolean>;
+  shouldYield(claim: HistoricBackfillTaskClaim): Promise<boolean>;
 }
 
 export type HistoricBackfillDepartmentLockResult<T> =
@@ -309,34 +310,87 @@ export function createHistoricBackfillInputSignature(
 export class SqlHistoricBackfillCurrentPriority implements HistoricBackfillCurrentPriority {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
-  async shouldYield(departementId: number): Promise<boolean> {
-    void departementId;
-    const [row] = await this.dataSource.query(`
-      SELECT (
-        EXISTS (
-          SELECT 1
-          FROM "current_zone_recompute_request" request
-          WHERE request."currentPending"
-            OR EXISTS (
+  async shouldYield(claim: HistoricBackfillTaskClaim): Promise<boolean> {
+    const [row] = await this.dataSource.query(
+      `
+        WITH priority AS MATERIALIZED (
+          SELECT
+            EXISTS (
               SELECT 1
-              FROM unnest(request."pendingScheduledDates")
-                AS pending_dates(pending_date)
-              WHERE pending_date <= (now() AT TIME ZONE 'Europe/Paris')::date
+              FROM "current_zone_recompute_request" request
+              WHERE request."nextAttemptAt" <= now()
+                AND (
+                  request."currentPending"
+                  OR EXISTS (
+                    SELECT 1
+                    FROM unnest(request."pendingScheduledDates")
+                      AS pending_dates(pending_date)
+                    WHERE pending_date <=
+                      (now() AT TIME ZONE 'Europe/Paris')::date
+                  )
+                )
+            ) AS "currentQueueDue",
+            (
+              EXISTS (
+                SELECT 1
+                FROM "external_publication_run" daily_run
+                WHERE daily_run."jobKey" = 'compute:national-daily'
+                  AND daily_run."status" = 'running'
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM "statistic_commune_snapshot" snapshot
+                WHERE snapshot."status" = 'running'
+              )
+            ) AS "hardBlockActive"
+        ), protected_leases AS MATERIALIZED (
+          SELECT
+            task."runId", task."departementId",
+            task."leaseOwner", task."leaseToken"
+          FROM "historic_backfill_task" task
+          JOIN "historic_backfill_run" run ON run."id" = task."runId"
+          JOIN "historic_backfill_department_revision" revision
+            ON revision."departementId" = task."departementId"
+          CROSS JOIN "config" config
+          WHERE task."status" = 'leased'
+            AND task."leaseExpiresAt" > now()
+            AND (SELECT priority."currentQueueDue" FROM priority)
+            AND run."status" = 'running'
+            AND config."id" = 1
+            AND run."historicComputeEpoch" = config."historicComputeEpoch"
+            AND run."historicBackfillGlobalEpoch" =
+              config."historicBackfillGlobalEpoch"
+            AND task."departmentGeneration" = revision."generation"
+          ORDER BY
+            task."startedAt" ASC NULLS LAST,
+            task."runId",
+            task."departementId"
+          LIMIT ($5::integer)
+        )
+        SELECT (
+          priority."hardBlockActive"
+          OR (
+            priority."currentQueueDue"
+            AND NOT EXISTS (
+              SELECT 1
+              FROM protected_leases protected
+              WHERE protected."runId" = $1::uuid
+                AND protected."departementId" = $2::integer
+                AND protected."leaseOwner" = $3
+                AND protected."leaseToken" = $4::uuid
             )
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM "external_publication_run" daily_run
-          WHERE daily_run."jobKey" = 'compute:national-daily'
-            AND daily_run."status" = 'running'
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM "statistic_commune_snapshot" snapshot
-          WHERE snapshot."status" = 'running'
-        )
-      ) AS "shouldYield"
-    `);
+          )
+        ) AS "shouldYield"
+        FROM priority
+      `,
+      [
+        claim.runId,
+        claim.departementId,
+        claim.workerId,
+        claim.leaseToken,
+        claim.duringCurrentConcurrency,
+      ],
+    );
     return databaseBoolean(row?.shouldYield);
   }
 }
@@ -677,7 +731,11 @@ export class HistoricBackfillTaskHandlerService {
     if (
       !Number.isSafeInteger(claim.departementId) ||
       claim.departementId <= 0 ||
-      !/^\d+$/.test(claim.departmentGeneration)
+      !/^\d+$/.test(claim.departmentGeneration) ||
+      !Number.isSafeInteger(claim.duringCurrentConcurrency) ||
+      claim.duringCurrentConcurrency < 0 ||
+      claim.duringCurrentConcurrency >
+        HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY_MAX
     ) {
       throw new Error('Invalid historic backfill task department context');
     }
@@ -1011,7 +1069,7 @@ export class HistoricBackfillTaskHandlerService {
     signal: AbortSignal,
   ): Promise<void> {
     this.throwIfAborted(signal);
-    if (await this.currentPriority.shouldYield(claim.departementId)) {
+    if (await this.currentPriority.shouldYield(claim)) {
       throw new HistoricBackfillTaskInterruptedError(
         'current-priority',
         'Historic backfill yielded to current computation',
