@@ -68,6 +68,7 @@ describePostgres('historic backfill PostgreSQL integration', () => {
         "id" integer PRIMARY KEY,
         "revision" bigint NOT NULL,
         "currentPublishedDate" date,
+        "historicPublishedThrough" date,
         "historicDirtyFrom" date,
         "historicDirtyThrough" date,
         "updatedAt" timestamptz NOT NULL DEFAULT now()
@@ -113,8 +114,11 @@ describePostgres('historic backfill PostgreSQL integration', () => {
     await dataSource.query(`
       INSERT INTO "statistic_publication_state" (
         "id", "revision", "currentPublishedDate",
+        "historicPublishedThrough",
         "historicDirtyFrom", "historicDirtyThrough"
-      ) VALUES (1, 11, '2024-05-03', '2024-04-29', '2024-05-02')
+      ) VALUES (
+        1, 11, '2024-05-03', '2024-04-28', '2024-04-29', '2024-05-02'
+      )
     `);
 
     const queryRunner = dataSource.createQueryRunner();
@@ -1112,6 +1116,191 @@ describePostgres('historic backfill PostgreSQL integration', () => {
     expect(failedRun).toEqual({
       status: 'failed',
       lastError: 'At least one artifact exhausted its attempts',
+    });
+  }, 60_000);
+
+  it('preserves only a closed statistic promotion across local and epoch rebases', async () => {
+    await dataSource.query(`DELETE FROM "historic_backfill_run"`);
+    await dataSource.query(`DELETE FROM "current_zone_recompute_request"`);
+    await dataSource.query(`DELETE FROM "statistic_commune_snapshot"`);
+    await dataSource.query(`DELETE FROM "external_publication_run"`);
+    await dataSource.query(`
+      UPDATE "historic_backfill_department_revision"
+      SET "generation" = 0, "lastPublicRevision" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "config"
+      SET "computeMapDate" = '2024-04-29',
+          "computeStatsDate" = '2024-04-29',
+          "historicComputeEpoch" = 7,
+          "historicBackfillGlobalEpoch" = 0
+      WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "zone_publication_source_state"
+      SET "publicRevision" = 1, "legacyDualWrite" = false
+      WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "statistic_publication_state"
+      SET "revision" = 11,
+          "currentPublishedDate" = '2024-05-03',
+          "historicPublishedThrough" = '2024-04-28',
+          "historicDirtyFrom" = '2024-04-29',
+          "historicDirtyThrough" = '2024-05-02'
+      WHERE "id" = 1
+    `);
+
+    const queue = new HistoricBackfillQueueService(dataSource);
+    const run = await queue.prepare({
+      mapDateFrom: '2024-04-29',
+      statisticDateFrom: '2024-04-29',
+      dateThrough: '2024-05-02',
+    });
+    const promotedAt = new Date('2026-08-25T08:00:00.000Z');
+    const completeCurrentTasks = async () => {
+      await dataSource.query(
+        `UPDATE "historic_backfill_task" task
+         SET "status" = 'completed',
+             "departmentGeneration" = revision."generation",
+             "progressDate" = '2024-05-02',
+             "segmentCount" = 0, "communeCount" = 0,
+             "outputSignature" = $2, "artifactPrefix" = 'test',
+             "leaseOwner" = NULL, "leaseToken" = NULL,
+             "leaseExpiresAt" = NULL, "heartbeatAt" = NULL,
+             "completedAt" = now(), "lastError" = NULL,
+             "updatedAt" = now()
+         FROM "historic_backfill_department_revision" revision
+         WHERE task."runId" = $1
+           AND revision."departementId" = task."departementId"`,
+        [run.id, SHA256],
+      );
+    };
+    const readRun = async () => {
+      const [row] = await dataSource.query(
+        `SELECT "sourceRevision"::text AS "sourceRevision",
+                "historicComputeEpoch"::text AS "historicComputeEpoch",
+                "statisticsPromotedAt"
+         FROM "historic_backfill_run" WHERE "id" = $1`,
+        [run.id],
+      );
+      return row;
+    };
+
+    await dataSource.query(
+      `UPDATE "historic_backfill_run"
+       SET "statisticsPromotedAt" = $2 WHERE "id" = $1`,
+      [run.id, promotedAt],
+    );
+    await dataSource.query(`
+      UPDATE "statistic_publication_state"
+      SET "historicPublishedThrough" = '2024-05-02',
+          "historicDirtyFrom" = NULL,
+          "historicDirtyThrough" = NULL
+      WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "config" SET "computeStatsDate" = '2024-05-02' WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "zone_publication_source_state"
+      SET "publicRevision" = 2 WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "historic_backfill_department_revision"
+      SET "generation" = 1, "lastPublicRevision" = 2
+      WHERE "departementId" = 1
+    `);
+
+    const locallyRebased = await queue.claim('closed-local-rebase', 30, 5);
+    expect(locallyRebased).toMatchObject({
+      departementId: 1,
+      sourceRevision: '2',
+      departmentGeneration: '1',
+    });
+    await expect(readRun()).resolves.toMatchObject({
+      sourceRevision: '2',
+      historicComputeEpoch: '7',
+      statisticsPromotedAt: promotedAt,
+    });
+
+    await completeCurrentTasks();
+    await dataSource.query(`
+      UPDATE "config" SET "historicComputeEpoch" = 8 WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "zone_publication_source_state"
+      SET "publicRevision" = 3 WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "historic_backfill_department_revision"
+      SET "generation" = 1, "lastPublicRevision" = 3
+      WHERE "departementId" = 2
+    `);
+
+    await queue.reconcileStaleRuns();
+    await expect(readRun()).resolves.toMatchObject({
+      sourceRevision: '3',
+      historicComputeEpoch: '8',
+      statisticsPromotedAt: promotedAt,
+    });
+
+    await completeCurrentTasks();
+    await dataSource.query(`
+      UPDATE "statistic_publication_state"
+      SET "historicDirtyFrom" = '2024-04-29',
+          "historicDirtyThrough" = '2024-05-02'
+      WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "config" SET "computeStatsDate" = '2024-05-01' WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "zone_publication_source_state"
+      SET "publicRevision" = 4 WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "historic_backfill_department_revision"
+      SET "generation" = 1, "lastPublicRevision" = 4
+      WHERE "departementId" = 3
+    `);
+
+    const dirtyLocalRebase = await queue.claim('dirty-local-rebase', 30, 5);
+    expect(dirtyLocalRebase).toMatchObject({
+      departementId: 3,
+      sourceRevision: '4',
+      departmentGeneration: '1',
+    });
+    await expect(readRun()).resolves.toMatchObject({
+      sourceRevision: '4',
+      historicComputeEpoch: '8',
+      statisticsPromotedAt: null,
+    });
+
+    await completeCurrentTasks();
+    await dataSource.query(
+      `UPDATE "historic_backfill_run"
+       SET "statisticsPromotedAt" = $2 WHERE "id" = $1`,
+      [run.id, promotedAt],
+    );
+    await dataSource.query(`
+      UPDATE "config" SET "historicComputeEpoch" = 9 WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "zone_publication_source_state"
+      SET "publicRevision" = 5 WHERE "id" = 1
+    `);
+    await dataSource.query(`
+      UPDATE "historic_backfill_department_revision"
+      SET "generation" = 1, "lastPublicRevision" = 5
+      WHERE "departementId" = 4
+    `);
+
+    await queue.reconcileStaleRuns();
+    await expect(readRun()).resolves.toMatchObject({
+      sourceRevision: '5',
+      historicComputeEpoch: '9',
+      statisticsPromotedAt: null,
     });
   }, 60_000);
 });

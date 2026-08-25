@@ -663,6 +663,24 @@ describe('HistoricBackfillQueueService', () => {
     );
     expect(query.mock.calls[1][0]).toContain('rebased_runs AS');
     expect(query.mock.calls[1][0]).toContain(
+      'CROSS JOIN "statistic_publication_state" statistic_state',
+    );
+    expect(query.mock.calls[1][0]).toContain(
+      'statistic_state."historicPublishedThrough" >=',
+    );
+    expect(query.mock.calls[1][0]).toContain(
+      'config."computeStatsDate" >= run."dateThrough"',
+    );
+    const reconciledRunSql = query.mock.calls[1][0].slice(
+      query.mock.calls[1][0].indexOf('rebased_runs AS'),
+      query.mock.calls[1][0].indexOf('reset_departments AS MATERIALIZED'),
+    );
+    expect(reconciledRunSql).toContain(
+      'WHEN stale."statisticsPublicationClosed"',
+    );
+    expect(reconciledRunSql).toContain('THEN run."statisticsPromotedAt"');
+    expect(reconciledRunSql).toContain('ELSE NULL');
+    expect(query.mock.calls[1][0]).toContain(
       '"historicComputeEpoch" = stale."currentEpoch"',
     );
     expect(query.mock.calls[1][0]).toContain(
@@ -733,7 +751,18 @@ describe('HistoricBackfillQueueService', () => {
       sql.indexOf('rebased_run AS'),
       sql.indexOf('claimed AS'),
     );
-    expect(rebasedRunSql).toContain('"statisticsPromotedAt" = NULL');
+    expect(sql).toContain(
+      'CROSS JOIN "statistic_publication_state" statistic_state',
+    );
+    expect(sql).toContain('statistic_state."historicDirtyFrom" IS NULL');
+    expect(sql).toContain('statistic_state."historicDirtyThrough" IS NULL');
+    expect(sql).toContain('statistic_state."historicPublishedThrough" >=');
+    expect(sql).toContain('config."computeStatsDate" >= run."dateThrough"');
+    expect(rebasedRunSql).toContain(
+      'WHEN candidate."statisticsPublicationClosed"',
+    );
+    expect(rebasedRunSql).toContain('THEN run."statisticsPromotedAt"');
+    expect(rebasedRunSql).toContain('ELSE NULL');
     expect(sql).toContain('candidate."currentGeneration"');
     expect(sql).toContain(
       'run."historicComputeEpoch" = config."historicComputeEpoch"',

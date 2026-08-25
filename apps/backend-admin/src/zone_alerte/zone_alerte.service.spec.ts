@@ -1478,7 +1478,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     ).toBe(false);
   });
 
-  it('acquires the department session lock before starting the serializable transaction', async () => {
+  it('acquires the department session lock before the transaction and the shared publication fence before the public mutation', async () => {
     const harness = createHarness();
     const snapshot = createSandreZoneSnapshot(
       [rawFeature()],
@@ -1500,6 +1500,12 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const unlockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
       ([query]) => query.includes('SELECT pg_advisory_unlock('),
     );
+    const sharedFenceCallIndex = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('pg_advisory_xact_lock_shared'),
+    );
+    const publicRevisionCallIndex = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('UPDATE "zone_publication_source_state"'),
+    );
     expect(lockCallIndex).toBeGreaterThanOrEqual(0);
     expect(unlockCallIndex).toBeGreaterThanOrEqual(0);
     expect(harness.queryRunner.query.mock.calls[lockCallIndex][1]).toEqual([
@@ -1518,11 +1524,26 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(
       harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
     ).toBeLessThan(harness.queryRunner.release.mock.invocationCallOrder[0]);
+    expect(sharedFenceCallIndex).toBeGreaterThanOrEqual(0);
+    expect(publicRevisionCallIndex).toBeGreaterThanOrEqual(0);
+    expect(harness.manager.query.mock.calls[sharedFenceCallIndex][1]).toEqual([
+      'historic-map-publication-fence',
+    ]);
     expect(
-      harness.manager.query.mock.calls.some(([query]) =>
-        query.includes('pg_advisory_xact_lock'),
-      ),
-    ).toBe(false);
+      harness.queryRunner.startTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[sharedFenceCallIndex],
+    );
+    expect(
+      harness.manager.query.mock.invocationCallOrder[sharedFenceCallIndex],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    );
+    expect(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    ).toBeLessThan(
+      harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
+    );
   });
 
   it('rolls back before releasing the department session lock', async () => {

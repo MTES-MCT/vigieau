@@ -770,7 +770,15 @@ export class HistoricBackfillQueueService {
               task."runId", task."departementId",
               task."departmentGeneration" AS "previousGeneration",
               revision."generation" AS "currentGeneration",
-              source."publicRevision" AS "currentSourceRevision"
+              source."publicRevision" AS "currentSourceRevision",
+              (
+                run."statisticsPromotedAt" IS NOT NULL
+                AND statistic_state."historicDirtyFrom" IS NULL
+                AND statistic_state."historicDirtyThrough" IS NULL
+                AND statistic_state."historicPublishedThrough" >=
+                  run."dateThrough"
+                AND config."computeStatsDate" >= run."dateThrough"
+              ) AS "statisticsPublicationClosed"
             FROM "historic_backfill_task" task
             JOIN "historic_backfill_run" run ON run."id" = task."runId"
             JOIN "departement" departement
@@ -779,9 +787,11 @@ export class HistoricBackfillQueueService {
               ON revision."departementId" = task."departementId"
             CROSS JOIN "zone_publication_source_state" source
             CROSS JOIN "config" config
+            CROSS JOIN "statistic_publication_state" statistic_state
             WHERE run."status" = 'running'
               AND source."id" = 1
               AND config."id" = 1
+              AND statistic_state."id" = 1
               AND run."historicComputeEpoch" = config."historicComputeEpoch"
               AND run."historicBackfillGlobalEpoch" =
                 config."historicBackfillGlobalEpoch"
@@ -850,7 +860,11 @@ export class HistoricBackfillQueueService {
                 run."sourceRevision",
                 candidate."currentSourceRevision"
               ),
-              "statisticsPromotedAt" = NULL,
+              "statisticsPromotedAt" = CASE
+                WHEN candidate."statisticsPublicationClosed"
+                  THEN run."statisticsPromotedAt"
+                ELSE NULL
+              END,
               "updatedAt" = now()
             FROM candidate
             WHERE candidate."previousGeneration" <>
@@ -1564,6 +1578,14 @@ export class HistoricBackfillQueueService {
             config."historicBackfillGlobalEpoch" AS "currentGlobalEpoch",
             run."sourceRevision" AS "previousSourceRevision",
             source."publicRevision" AS "currentSourceRevision",
+            (
+              run."statisticsPromotedAt" IS NOT NULL
+              AND statistic_state."historicDirtyFrom" IS NULL
+              AND statistic_state."historicDirtyThrough" IS NULL
+              AND statistic_state."historicPublishedThrough" >=
+                run."dateThrough"
+              AND config."computeStatsDate" >= run."dateThrough"
+            ) AS "statisticsPublicationClosed",
             EXISTS (
               SELECT 1
               FROM "historic_backfill_task" task
@@ -1583,9 +1605,11 @@ export class HistoricBackfillQueueService {
           FROM "historic_backfill_run" run
           CROSS JOIN "config" config
           CROSS JOIN "zone_publication_source_state" source
+          CROSS JOIN "statistic_publication_state" statistic_state
           WHERE run."status" = 'running'
             AND config."id" = 1
             AND source."id" = 1
+            AND statistic_state."id" = 1
             AND (
               run."historicComputeEpoch" <> config."historicComputeEpoch"
               OR run."historicBackfillGlobalEpoch" <>
@@ -1656,7 +1680,11 @@ export class HistoricBackfillQueueService {
           SET
             "historicComputeEpoch" = stale."currentEpoch",
             "sourceRevision" = stale."currentSourceRevision",
-            "statisticsPromotedAt" = NULL,
+            "statisticsPromotedAt" = CASE
+              WHEN stale."statisticsPublicationClosed"
+                THEN run."statisticsPromotedAt"
+              ELSE NULL
+            END,
             "lastError" = NULL,
             "updatedAt" = now()
           FROM stale_epoch_runs stale

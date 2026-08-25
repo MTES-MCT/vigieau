@@ -38,6 +38,9 @@ const createService = (askCompute: jest.Mock) => {
   const manager = {
     getRepository: jest.fn(() => transactionRepository),
     query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('pg_advisory_xact_lock_shared')) {
+        return [];
+      }
       if (sql.includes('SELECT id FROM departement')) {
         return [{ id: 65 }];
       }
@@ -256,7 +259,18 @@ describe('ArreteRestrictionService scheduled status update', () => {
     const enqueueCall = manager.query.mock.calls.find(([sql]) =>
       sql.includes('current_zone_recompute_request'),
     );
+    const fenceCallIndex = manager.query.mock.calls.findIndex(([sql]) =>
+      sql.includes('pg_advisory_xact_lock_shared'),
+    );
+    const enqueueCallIndex = manager.query.mock.calls.findIndex(([sql]) =>
+      sql.includes('current_zone_recompute_request'),
+    );
     const enqueueParameters = enqueueCall?.[1];
+    expect(fenceCallIndex).toBeGreaterThanOrEqual(0);
+    expect(manager.query.mock.calls[fenceCallIndex][1]).toEqual([
+      'historic-map-publication-fence',
+    ]);
+    expect(fenceCallIndex).toBeLessThan(enqueueCallIndex);
     expect(enqueueParameters?.[0]).toEqual([65]);
     expect(enqueueParameters?.[1]).toBe('42');
     expect(enqueueParameters?.[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -415,6 +429,26 @@ describe('ArreteRestrictionService scheduled status update', () => {
         sql.includes('UPDATE "config"'),
       ),
     ).toEqual([expect.stringContaining('UPDATE "config"'), ['2026-07-01']]);
+    const publicMutationCalls = harness.manager.query.mock.calls;
+    const fenceCallIndexes = publicMutationCalls.flatMap(([sql], index) =>
+      sql.includes('pg_advisory_xact_lock_shared') ? [index] : [],
+    );
+    const sourceRevisionCallIndex = publicMutationCalls.findIndex(([sql]) =>
+      sql.includes('UPDATE "zone_publication_source_state"'),
+    );
+    const enqueueCallIndex = publicMutationCalls.findIndex(([sql]) =>
+      sql.includes('current_zone_recompute_request'),
+    );
+    expect(fenceCallIndexes).toHaveLength(2);
+    expect(
+      fenceCallIndexes.map((index) => publicMutationCalls[index][1]),
+    ).toEqual([
+      ['historic-map-publication-fence'],
+      ['historic-map-publication-fence'],
+    ]);
+    expect(fenceCallIndexes[0]).toBeLessThan(sourceRevisionCallIndex);
+    expect(sourceRevisionCallIndex).toBeLessThan(fenceCallIndexes[1]);
+    expect(fenceCallIndexes[1]).toBeLessThan(enqueueCallIndex);
   });
 
   it('reconciles a stale status without extending an unknown legacy end', async () => {
