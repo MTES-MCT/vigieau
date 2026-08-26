@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
+import { HISTORIC_MAP_PUBLICATION_FENCE_LOCK } from '../zone_publication/public-mutation';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import { HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT } from './historic-backfill-queue.service';
 
@@ -72,6 +73,7 @@ export interface HistoricBackfillFinalizationInspection {
   completedTaskCount: number;
   currentGenerationTaskCount: number;
   validTaskArtifactCount: number;
+  taskFingerprint: string | null;
   expectedCommuneCount: number;
   validCommuneSegmentCoverageCount: number;
   shadowCommuneCount: number;
@@ -182,6 +184,7 @@ interface InspectionRow {
   completedTaskCount: number | string;
   currentGenerationTaskCount: number | string;
   validTaskArtifactCount: number | string;
+  taskFingerprint: string | null;
   expectedCommuneCount: number | string;
   validCommuneSegmentCoverageCount: number | string;
   shadowCommuneCount: number | string;
@@ -215,13 +218,12 @@ interface SnapshotWriteRow {
   expectedDateCount: number | string;
   nationalSnapshotCount: number | string;
   siblingSnapshotCount: number | string;
-  cursorUpdateCount: number | string;
-  statsCursor: string | null;
 }
 
 interface StatisticPublicationWriteRow {
   statisticsPromotedAt: Date | string;
   statisticRevision: string | number;
+  statsCursor: string;
 }
 
 export class HistoricBackfillFinalizerValidationError extends Error {}
@@ -272,6 +274,11 @@ function normalizeDate(value: string | null | undefined): string | null {
 
 function normalizeRevision(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
+}
+
+function normalizeTaskFingerprint(value: unknown): string | null {
+  const fingerprint = normalizeRevision(value);
+  return fingerprint && /^[0-9a-f]{32}$/.test(fingerprint) ? fingerprint : null;
 }
 
 function normalizeTimestamp(value: unknown): string | null {
@@ -664,6 +671,37 @@ export class HistoricBackfillFinalizerService {
       );
     }
 
+    const inspection = await this.readInspection(this.dataSource, runId, false);
+    this.assertReady(inspection);
+
+    if (!apply) {
+      return {
+        runId,
+        applied: false,
+        alreadyApplied: inspection.statisticsPromotedAt !== null,
+        communeCount: inspection.expectedCommuneCount,
+        departmentCount: inspection.departmentCount,
+        dateCount: inspection.expectedDateCount,
+        siblingSnapshotCount: 0,
+        statsCursor: null,
+        inspection,
+      };
+    }
+
+    if (inspection.statisticsPromotedAt !== null) {
+      return {
+        runId,
+        applied: true,
+        alreadyApplied: true,
+        communeCount: inspection.expectedCommuneCount,
+        departmentCount: inspection.departmentCount,
+        dateCount: inspection.expectedDateCount,
+        siblingSnapshotCount: 0,
+        statsCursor: inspection.statsCursor,
+        inspection,
+      };
+    }
+
     const queryRunner = this.dataSource.createQueryRunner();
     let connected = false;
     let zoneLockAcquired = false;
@@ -699,87 +737,59 @@ export class HistoricBackfillFinalizerService {
       }
       statisticLockAcquired = true;
 
-      await queryRunner.startTransaction('SERIALIZABLE');
+      await queryRunner.startTransaction('READ COMMITTED');
       await queryRunner.query(`SET LOCAL lock_timeout = '3s'`);
       await queryRunner.query(`SET LOCAL statement_timeout = '30min'`);
 
-      const inspection = await this.readInspection(queryRunner, runId, true);
-      this.assertReady(inspection);
-
-      if (!apply) {
-        await queryRunner.commitTransaction();
-        result = {
-          runId,
-          applied: false,
-          alreadyApplied: inspection.statisticsPromotedAt !== null,
-          communeCount: inspection.expectedCommuneCount,
-          departmentCount: inspection.departmentCount,
-          dateCount: inspection.expectedDateCount,
-          siblingSnapshotCount: 0,
-          statsCursor: null,
-          inspection,
-        };
-      } else if (inspection.statisticsPromotedAt !== null) {
-        await queryRunner.commitTransaction();
-        result = {
-          runId,
-          applied: true,
-          alreadyApplied: true,
-          communeCount: inspection.expectedCommuneCount,
-          departmentCount: inspection.departmentCount,
-          dateCount: inspection.expectedDateCount,
-          siblingSnapshotCount: 0,
-          statsCursor: inspection.statsCursor,
-          inspection,
-        };
-      } else {
-        const communeWrite = await this.writeCommuneStatistics(
-          queryRunner,
-          runId,
-          inspection.expectedCommuneCount,
+      const communeWrite = await this.writeCommuneStatistics(
+        queryRunner,
+        runId,
+        inspection.expectedCommuneCount,
+      );
+      const departmentWrite = await this.writeDepartmentStatistics(
+        queryRunner,
+        runId,
+        inspection.departmentCount,
+        inspection.expectedDateCount,
+      );
+      const snapshotWrite = await this.writeSnapshots(
+        queryRunner,
+        runId,
+        inspection.expectedDateCount,
+      );
+      if (!(await this.tryAcquirePublicMutationFence(queryRunner))) {
+        throw new HistoricBackfillFinalizerStateError(
+          'Current public mutation has priority',
         );
-        const departmentWrite = await this.writeDepartmentStatistics(
-          queryRunner,
-          runId,
-          inspection.departmentCount,
-          inspection.expectedDateCount,
-        );
-        const snapshotWrite = await this.writeSnapshotsAndStatsCursor(
-          queryRunner,
-          runId,
-          inspection.expectedDateCount,
-          inspection.dateThrough!,
-        );
-        const statisticPublication = await this.publishStatistics(
-          queryRunner,
-          runId,
-          inspection.currentStatisticRevision!,
-          inspection.dateThrough!,
-        );
-        const appliedInspection = {
-          ...inspection,
-          statisticsPromotedAt: statisticPublication.statisticsPromotedAt,
-          baseStatisticRevision: statisticPublication.statisticRevision,
-          currentStatisticRevision: statisticPublication.statisticRevision,
-          baseStatisticRevisionMatches: true,
-          statisticsPublicationClosed: true,
-          dirtyRangeCovers: true,
-          statsCursor: snapshotWrite.statsCursor,
-        };
-
-        await queryRunner.commitTransaction();
-        result = {
-          runId,
-          applied: true,
-          alreadyApplied: false,
-          communeCount: communeWrite,
-          departmentCount: departmentWrite.departmentCount,
-          dateCount: departmentWrite.dateCount,
-          siblingSnapshotCount: snapshotWrite.siblingSnapshotCount,
-          statsCursor: snapshotWrite.statsCursor,
-          inspection: appliedInspection,
-        };
       }
+      const statisticPublication = await this.publishStatistics(
+        queryRunner,
+        runId,
+        inspection,
+      );
+      const appliedInspection = {
+        ...inspection,
+        statisticsPromotedAt: statisticPublication.statisticsPromotedAt,
+        baseStatisticRevision: statisticPublication.statisticRevision,
+        currentStatisticRevision: statisticPublication.statisticRevision,
+        baseStatisticRevisionMatches: true,
+        statisticsPublicationClosed: true,
+        dirtyRangeCovers: true,
+        statsCursor: statisticPublication.statsCursor,
+      };
+
+      await queryRunner.commitTransaction();
+      result = {
+        runId,
+        applied: true,
+        alreadyApplied: false,
+        communeCount: communeWrite,
+        departmentCount: departmentWrite.departmentCount,
+        dateCount: departmentWrite.dateCount,
+        siblingSnapshotCount: snapshotWrite.siblingSnapshotCount,
+        statsCursor: statisticPublication.statsCursor,
+        inspection: appliedInspection,
+      };
     } catch (error) {
       failure = error;
     } finally {
@@ -1294,6 +1304,7 @@ export class HistoricBackfillFinalizerService {
         row.validTaskArtifactCount,
         'valid task artifact count',
       ),
+      taskFingerprint: normalizeTaskFingerprint(row.taskFingerprint),
       expectedCommuneCount: databaseCount(
         row.expectedCommuneCount,
         'expected commune count',
@@ -1409,6 +1420,7 @@ export class HistoricBackfillFinalizerService {
     if (inspection.validTaskArtifactCount !== expectedDepartments) {
       failures.push('task-artifacts');
     }
+    if (inspection.taskFingerprint === null) failures.push('task-fingerprint');
     if (inspection.expectedCommuneCount === 0) failures.push('commune-count');
     if (
       inspection.validCommuneSegmentCoverageCount !==
@@ -1656,12 +1668,11 @@ export class HistoricBackfillFinalizerService {
     return { departmentCount: departmentWrite, dateCount: dateWrite };
   }
 
-  private async writeSnapshotsAndStatsCursor(
+  private async writeSnapshots(
     queryRunner: QueryRunner,
     runId: string,
     expectedDateCount: number,
-    expectedStatsCursor: string,
-  ): Promise<{ siblingSnapshotCount: number; statsCursor: string | null }> {
+  ): Promise<{ siblingSnapshotCount: number }> {
     const [row] = (await queryRunner.query(
       `
         WITH run_context AS MATERIALIZED (
@@ -1714,25 +1725,6 @@ export class HistoricBackfillFinalizerService {
                   AND run_context."dateThrough"
             AND snapshot."scope" NOT IN ('national', 'bootstrap')
           RETURNING 1
-        ), cursor_update AS (
-          UPDATE "config" config
-          SET "computeStatsDate" = GREATEST(
-                COALESCE(
-                  config."computeStatsDate",
-                  run_context."dateThrough"
-                ),
-                run_context."dateThrough"
-              ),
-              "computeStatsGeneration" =
-                config."computeStatsGeneration" + 1,
-              "computeStatsUpdatedAt" = now()
-          FROM run_context
-          WHERE config."id" = 1
-            AND (
-              config."computeStatsDate" IS NULL
-              OR config."computeStatsDate" < run_context."dateThrough"
-            )
-          RETURNING config."computeStatsDate"
         )
         SELECT
           (SELECT COUNT(*)::integer FROM target_dates)
@@ -1740,15 +1732,7 @@ export class HistoricBackfillFinalizerService {
           (SELECT COUNT(*)::integer FROM national_snapshots)
             AS "nationalSnapshotCount",
           (SELECT COUNT(*)::integer FROM sibling_snapshots)
-            AS "siblingSnapshotCount",
-          (SELECT COUNT(*)::integer FROM cursor_update)
-            AS "cursorUpdateCount",
-          COALESCE(
-            (SELECT "computeStatsDate"::text FROM cursor_update),
-            config."computeStatsDate"::text
-          ) AS "statsCursor"
-        FROM "config" config
-        WHERE config."id" = 1
+            AS "siblingSnapshotCount"
       `,
       [runId],
     )) as SnapshotWriteRow[];
@@ -1764,49 +1748,236 @@ export class HistoricBackfillFinalizerService {
       row?.siblingSnapshotCount,
       'sibling snapshot count',
     );
-    const cursorUpdateCount = databaseCount(
-      row?.cursorUpdateCount,
-      'statistic cursor update count',
-    );
-    const statsCursor = normalizeDate(row.statsCursor);
     if (
       dateTarget !== expectedDateCount ||
-      nationalCount !== expectedDateCount ||
-      cursorUpdateCount > 1 ||
-      statsCursor === null ||
-      statsCursor < expectedStatsCursor
+      nationalCount !== expectedDateCount
     ) {
       throw new HistoricBackfillFinalizerStateError(
         `Statistic snapshot write is incomplete: ${nationalCount}/${dateTarget}/${expectedDateCount}`,
       );
     }
-    return {
-      siblingSnapshotCount,
-      statsCursor,
-    };
+    return { siblingSnapshotCount };
+  }
+
+  private async tryAcquirePublicMutationFence(
+    queryRunner: QueryRunner,
+  ): Promise<boolean> {
+    const [row] = (await queryRunner.query(
+      `SELECT pg_try_advisory_xact_lock(
+        hashtext('vigieau'), hashtext($1)
+      ) AS locked`,
+      [HISTORIC_MAP_PUBLICATION_FENCE_LOCK],
+    )) as Array<{ locked: boolean | string }>;
+    return databaseBoolean(row?.locked);
   }
 
   private async publishStatistics(
     queryRunner: QueryRunner,
     runId: string,
-    expectedStatisticRevision: string,
-    dateThrough: string,
-  ): Promise<{ statisticsPromotedAt: string; statisticRevision: string }> {
+    inspection: HistoricBackfillFinalizationInspection,
+  ): Promise<{
+    statisticsPromotedAt: string;
+    statisticRevision: string;
+    statsCursor: string;
+  }> {
+    const expectedStatisticRevision = inspection.currentStatisticRevision!;
+    const dateThrough = inspection.dateThrough!;
     const [row] = unwrapTypeOrmDmlReturningRows<StatisticPublicationWriteRow>(
       await queryRunner.query(
         `
-        WITH publication_update AS MATERIALIZED (
+        WITH run_context AS MATERIALIZED (
+          SELECT
+            run."id", run."mapDateFrom", run."statisticDateFrom",
+            run."dateThrough"
+          FROM "historic_backfill_run" run
+          CROSS JOIN "zone_publication_source_state" source
+          CROSS JOIN "config" config
+          CROSS JOIN "statistic_publication_state" publication
+          WHERE run."id" = $1::uuid
+            AND run."status" = 'running'
+            AND run."statisticsPromotedAt" IS NULL
+            AND run."sourceRevision" = $2::bigint
+            AND source."id" = 1
+            AND source."publicRevision" = $2::bigint
+            AND run."historicComputeEpoch" = $3::bigint
+            AND config."id" = 1
+            AND config."historicComputeEpoch" = $3::bigint
+            AND run."historicBackfillGlobalEpoch" = $4::bigint
+            AND config."historicBackfillGlobalEpoch" = $4::bigint
+            AND run."baseStatisticRevision" = $5::bigint
+            AND publication."id" = 1
+            AND publication."revision" = $5::bigint
+            AND run."dateThrough" = $6::date
+            AND run."dateThrough" - run."statisticDateFrom" + 1 = $9::integer
+            AND run."mapDateFrom" <= publication."historicDirtyFrom"
+            AND run."statisticDateFrom" <= publication."historicDirtyFrom"
+            AND run."dateThrough" >= publication."historicDirtyThrough"
+            AND (
+              publication."historicPublishedThrough" IS NULL
+              OR publication."historicPublishedThrough" <= run."dateThrough"
+            )
+            AND publication."currentPublishedDate" > run."dateThrough"
+          FOR UPDATE OF run, source, config, publication NOWAIT
+        ), task_rows AS MATERIALIZED (
+          SELECT task.*, revision."generation" AS "currentGeneration"
+          FROM "historic_backfill_task" task
+          JOIN "historic_backfill_department_revision" revision
+            ON revision."departementId" = task."departementId"
+          CROSS JOIN run_context
+          WHERE task."runId" = $1::uuid
+          FOR UPDATE OF task, revision NOWAIT
+        ), task_state AS MATERIALIZED (
+          SELECT
+            COUNT(*)::integer AS count,
+            COUNT(*) FILTER (
+              WHERE task."status" = 'completed'
+                AND task."departmentGeneration" = task."currentGeneration"
+                AND task."progressDate" = run_context."dateThrough"
+                AND task."outputSignature" ~ '^[0-9a-f]{64}$'
+                AND length(task."artifactPrefix") > 0
+            )::integer AS "validCount",
+            md5(COALESCE(jsonb_agg(jsonb_build_array(
+              task."departementId", task."status",
+              task."departmentGeneration", task."currentGeneration",
+              task."progressDate", task."segmentCount", task."communeCount",
+              task."outputSignature", task."artifactPrefix"
+            ) ORDER BY task."departementId")::text, '[]')) AS "fingerprint"
+          FROM task_rows task
+          CROSS JOIN run_context
+        ), shadow_state AS MATERIALIZED (
+          SELECT
+            COUNT(*)::integer AS count,
+            COUNT(*) FILTER (
+              WHERE commune."departementId" = shadow."departementId"
+                AND shadow."sourceGeneration" = task."departmentGeneration"
+                AND shadow."sourceGeneration" = task."currentGeneration"
+            )::integer AS "validCount"
+          FROM "historic_backfill_commune_shadow" shadow
+          JOIN "commune" commune ON commune."id" = shadow."communeId"
+          JOIN task_rows task
+            ON task."departementId" = shadow."departementId"
+          WHERE shadow."runId" = $1::uuid
+        ), department_segment_state AS MATERIALIZED (
+          SELECT
+            COUNT(*)::integer AS count,
+            COUNT(*) FILTER (
+              WHERE segment."sourceGeneration" <> task."departmentGeneration"
+                 OR segment."sourceGeneration" <> task."currentGeneration"
+                 OR segment."validFrom" < run_context."mapDateFrom"
+                 OR segment."validThrough" > run_context."dateThrough"
+                 OR segment."validFrom" > segment."validThrough"
+            )::integer AS "invalidCount",
+            COALESCE(
+              SUM(
+                CASE
+                  WHEN segment."validThrough" >=
+                      run_context."statisticDateFrom"
+                    AND segment."validFrom" <= run_context."dateThrough"
+                  THEN LEAST(
+                    segment."validThrough", run_context."dateThrough"
+                  ) - GREATEST(
+                    segment."validFrom", run_context."statisticDateFrom"
+                  ) + 1
+                  ELSE 0
+                END
+              ),
+              0
+            )::bigint AS "pointCount"
+          FROM "historic_backfill_department_segment" segment
+          JOIN task_rows task
+            ON task."departementId" = segment."departementId"
+          CROSS JOIN run_context
+          WHERE segment."runId" = $1::uuid
+        ), commit_guard AS MATERIALIZED (
+          SELECT run_context."id", run_context."dateThrough"
+          FROM run_context
+          CROSS JOIN task_state
+          CROSS JOIN shadow_state
+          CROSS JOIN department_segment_state
+          WHERE (SELECT COUNT(*) FROM "departement") =
+              ${HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT}
+            AND task_state.count =
+              ${HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT}
+            AND task_state."validCount" =
+              ${HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT}
+            AND task_state."fingerprint" = $11::text
+            AND shadow_state.count = $7::integer
+            AND shadow_state."validCount" = $7::integer
+            AND department_segment_state.count = $8::integer
+            AND department_segment_state."invalidCount" = 0
+            AND department_segment_state."pointCount" = $10::bigint
+            AND NOT EXISTS (
+              SELECT 1
+              FROM "current_zone_recompute_request" request
+              WHERE request."currentPending"
+                OR EXISTS (
+                  SELECT 1
+                  FROM unnest(request."pendingScheduledDates")
+                    AS pending_dates(pending_date)
+                  WHERE pending_date <=
+                    (now() AT TIME ZONE 'Europe/Paris')::date
+                )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM "external_publication_run" daily_run
+              WHERE daily_run."jobKey" = 'compute:national-daily'
+                AND daily_run."status" = 'running'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM "statistic_commune_snapshot" snapshot
+              WHERE snapshot."status" <> 'completed'
+                 OR snapshot."processedCommuneCount" <>
+                    snapshot."expectedCommuneCount"
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM "historic_backfill_map_manifest_outbox" outbox
+              WHERE outbox."runId" = $1::uuid
+                AND outbox."status" = 'pending'
+            )
+        ), cursor_update AS (
+          UPDATE "config" config
+          SET "computeStatsDate" = GREATEST(
+                COALESCE(
+                  config."computeStatsDate", commit_guard."dateThrough"
+                ),
+                commit_guard."dateThrough"
+              ),
+              "computeStatsGeneration" =
+                config."computeStatsGeneration" + 1,
+              "computeStatsUpdatedAt" = now()
+          FROM commit_guard
+          WHERE config."id" = 1
+            AND (
+              config."computeStatsDate" IS NULL
+              OR config."computeStatsDate" < commit_guard."dateThrough"
+            )
+          RETURNING config."computeStatsDate"
+        ), cursor_state AS MATERIALIZED (
+          SELECT "computeStatsDate" FROM cursor_update
+          UNION ALL
+          SELECT config."computeStatsDate"
+          FROM "config" config
+          CROSS JOIN commit_guard
+          WHERE config."id" = 1
+            AND config."computeStatsDate" >= commit_guard."dateThrough"
+            AND NOT EXISTS (SELECT 1 FROM cursor_update)
+        ), publication_update AS MATERIALIZED (
           UPDATE "statistic_publication_state" publication
           SET "revision" = publication."revision" + 1,
-              "historicPublishedThrough" = $3::date,
+              "historicPublishedThrough" = commit_guard."dateThrough",
               "historicDirtyFrom" = NULL,
               "historicDirtyThrough" = NULL,
               "updatedAt" = now()
+          FROM commit_guard
+          CROSS JOIN cursor_state
           WHERE publication."id" = 1
-            AND publication."revision" = $2::bigint
+            AND publication."revision" = $5::bigint
             AND publication."historicDirtyFrom" IS NOT NULL
             AND publication."historicDirtyThrough" IS NOT NULL
-            AND publication."historicDirtyThrough" <= $3::date
+            AND publication."historicDirtyThrough" <=
+                commit_guard."dateThrough"
           RETURNING publication."revision"
         ), promoted_run AS (
           UPDATE "historic_backfill_run" run
@@ -1814,27 +1985,50 @@ export class HistoricBackfillFinalizerService {
               "baseStatisticRevision" = publication_update."revision",
               "updatedAt" = now()
           FROM publication_update
+          CROSS JOIN cursor_state
           WHERE run."id" = $1::uuid
             AND run."status" = 'running'
             AND run."statisticsPromotedAt" IS NULL
-            AND run."baseStatisticRevision" = $2::bigint
+            AND run."sourceRevision" = $2::bigint
+            AND run."historicComputeEpoch" = $3::bigint
+            AND run."historicBackfillGlobalEpoch" = $4::bigint
+            AND run."baseStatisticRevision" = $5::bigint
           RETURNING run."statisticsPromotedAt",
-                    run."baseStatisticRevision" AS "statisticRevision"
+                    run."baseStatisticRevision" AS "statisticRevision",
+                    cursor_state."computeStatsDate"::text AS "statsCursor"
         )
-        SELECT "statisticsPromotedAt", "statisticRevision"
+        SELECT "statisticsPromotedAt", "statisticRevision", "statsCursor"
         FROM promoted_run
       `,
-        [runId, expectedStatisticRevision, dateThrough],
+        [
+          runId,
+          inspection.sourceRevision,
+          inspection.historicComputeEpoch,
+          inspection.historicBackfillGlobalEpoch,
+          expectedStatisticRevision,
+          dateThrough,
+          inspection.expectedCommuneCount,
+          inspection.departmentSegmentCount,
+          inspection.expectedDateCount,
+          inspection.expectedDepartmentPointCount,
+          inspection.taskFingerprint,
+        ],
       ),
     );
     const promotedAt = normalizeTimestamp(row?.statisticsPromotedAt);
     const statisticRevision = normalizeRevision(row?.statisticRevision);
-    if (promotedAt === null || statisticRevision === null) {
+    const statsCursor = normalizeDate(row?.statsCursor);
+    if (
+      promotedAt === null ||
+      statisticRevision === null ||
+      statsCursor === null ||
+      statsCursor < dateThrough
+    ) {
       throw new HistoricBackfillFinalizerStateError(
-        'Historic statistic publication was not committed',
+        'Historic statistic publication lost its commit context',
       );
     }
-    return { statisticsPromotedAt: promotedAt, statisticRevision };
+    return { statisticsPromotedAt: promotedAt, statisticRevision, statsCursor };
   }
 
   private departmentShadowSql(): string {
@@ -2384,6 +2578,11 @@ export class HistoricBackfillFinalizerService {
               AND "actualCommuneCount" = "expectedCommuneCount"
               AND "validCoveredCommuneCount" = "expectedCommuneCount"
           )::integer AS "validTaskArtifactCount",
+          md5(COALESCE(jsonb_agg(jsonb_build_array(
+            "departementId", "status", "departmentGeneration",
+            "currentGeneration", "progressDate", "segmentCount",
+            "communeCount", "outputSignature", "artifactPrefix"
+          ) ORDER BY "departementId")::text, '[]')) AS "taskFingerprint",
           COALESCE(SUM("expectedCommuneCount"), 0)::integer
             AS "expectedCommuneCount",
           COALESCE(SUM("validCoveredCommuneCount"), 0)::integer
@@ -2538,6 +2737,7 @@ export class HistoricBackfillFinalizerService {
           AS "currentGenerationTaskCount",
         COALESCE(task_state."validTaskArtifactCount", 0)
           AS "validTaskArtifactCount",
+        task_state."taskFingerprint" AS "taskFingerprint",
         COALESCE(task_state."expectedCommuneCount", 0)
           AS "expectedCommuneCount",
         COALESCE(task_state."validCommuneSegmentCoverageCount", 0)

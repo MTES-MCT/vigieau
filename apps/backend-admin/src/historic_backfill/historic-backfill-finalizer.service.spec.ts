@@ -12,6 +12,7 @@ import {
   readHistoricBackfillShadowWorkMemMb,
 } from './historic-backfill-finalizer.service';
 import { DataSource } from 'typeorm';
+import { HISTORIC_MAP_PUBLICATION_FENCE_LOCK } from '../zone_publication/public-mutation';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const EXPECTED_DEPARTMENTS = 101;
@@ -78,6 +79,7 @@ function inspectionRow(overrides: Record<string, unknown> = {}) {
     completedTaskCount: '101',
     currentGenerationTaskCount: '101',
     validTaskArtifactCount: '101',
+    taskFingerprint: '0123456789abcdef0123456789abcdef',
     expectedCommuneCount: '34935',
     validCommuneSegmentCoverageCount: '34935',
     shadowCommuneCount: '34935',
@@ -156,9 +158,11 @@ function createRunner(options?: {
   inspection?: Record<string, unknown>;
   zoneLock?: boolean;
   statisticLock?: boolean;
+  publicMutationFence?: boolean;
   communeWrite?: Record<string, unknown>;
   departmentWrite?: Record<string, unknown>;
   snapshotWrite?: Record<string, unknown>;
+  publicationWrite?: Record<string, unknown>;
 }) {
   let statisticsPromotedAt = options?.inspection?.statisticsPromotedAt ?? null;
   const runner: any = {
@@ -186,6 +190,9 @@ function createRunner(options?: {
         sql.includes('snapshot-computation')
       ) {
         return [{ locked: options?.statisticLock ?? true }];
+      }
+      if (sql.includes('pg_try_advisory_xact_lock')) {
+        return [{ locked: options?.publicMutationFence ?? true }];
       }
       if (sql.includes('pg_advisory_unlock')) {
         return [{ unlocked: true }];
@@ -224,8 +231,6 @@ function createRunner(options?: {
             expectedDateCount: '3',
             nationalSnapshotCount: '3',
             siblingSnapshotCount: '6',
-            cursorUpdateCount: '1',
-            statsCursor: '2026-08-18',
             ...options?.snapshotWrite,
           },
         ];
@@ -233,25 +238,44 @@ function createRunner(options?: {
       if (sql.includes('SET "statisticsPromotedAt" = now()')) {
         if (statisticsPromotedAt !== null) return [[], 0];
         statisticsPromotedAt = '2026-08-20T09:30:00.000Z';
-        return [[{ statisticsPromotedAt, statisticRevision: '13' }], 1];
+        return [
+          [
+            {
+              statisticsPromotedAt,
+              statisticRevision: '13',
+              statsCursor: options?.inspection?.statsCursor ?? '2026-08-18',
+              ...options?.publicationWrite,
+            },
+          ],
+          1,
+        ];
       }
       return [];
     }),
   };
+  runner.readInspection = jest.fn(async () => [
+    inspectionRow({
+      ...options?.inspection,
+      statisticsPromotedAt,
+    }),
+  ]);
   return runner;
 }
 
 function createFinalizeHarness(options?: Parameters<typeof createRunner>[0]): {
   service: HistoricBackfillFinalizerService;
   runner: ReturnType<typeof createRunner>;
+  dataSource: { query: jest.Mock; createQueryRunner: jest.Mock };
 } {
   const runner = createRunner(options);
   const dataSource = {
+    query: jest.fn((...args: unknown[]) => runner.readInspection(...args)),
     createQueryRunner: jest.fn(() => runner),
   };
   return {
     service: new HistoricBackfillFinalizerService(dataSource as any),
     runner,
+    dataSource,
   };
 }
 
@@ -1247,7 +1271,7 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
       const operation =
         mode === 'dry-run' ? service.dryRun(RUN_ID) : service.apply(RUN_ID);
       await expect(operation).rejects.toThrow('pending-map-publication');
-      expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(runner.rollbackTransaction).not.toHaveBeenCalled();
       expect(
         runner.query.mock.calls.some(([sql]: [string]) =>
           sql.includes('upsertedCommuneCount'),
@@ -1256,8 +1280,8 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     },
   );
 
-  it('runs a write-free dry-run under serializable locks in the required order', async () => {
-    const { service, runner } = createFinalizeHarness();
+  it('runs a write-free dry-run without a transaction or advisory and row locks', async () => {
+    const { service, runner, dataSource } = createFinalizeHarness();
 
     await expect(service.dryRun(RUN_ID)).resolves.toMatchObject({
       runId: RUN_ID,
@@ -1268,43 +1292,24 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
       dateCount: 3,
     });
 
-    expect(runner.startTransaction).toHaveBeenCalledWith('SERIALIZABLE');
-    expect(runner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(runner.startTransaction).not.toHaveBeenCalled();
+    expect(runner.commitTransaction).not.toHaveBeenCalled();
     expect(runner.rollbackTransaction).not.toHaveBeenCalled();
-    const statements = runner.query.mock.calls.map(([sql]: [string]) => sql);
-    const zoneTry = statements.findIndex(
-      (sql) =>
-        sql.includes('pg_try_advisory_lock') &&
-        sql.includes('zone-compute-global'),
+    const statements = dataSource.query.mock.calls.map(
+      ([sql]: [string]) => sql,
     );
-    const statisticTry = statements.findIndex(
-      (sql) =>
-        sql.includes('pg_try_advisory_lock') &&
-        sql.includes('snapshot-computation'),
-    );
-    const statisticUnlock = statements.findIndex(
-      (sql) =>
-        sql.includes('pg_advisory_unlock') &&
-        sql.includes('snapshot-computation'),
-    );
-    const zoneUnlock = statements.findIndex(
-      (sql) =>
-        sql.includes('pg_advisory_unlock') &&
-        sql.includes('zone-compute-global'),
-    );
-    expect(zoneTry).toBeLessThan(statisticTry);
-    expect(statisticTry).toBeLessThan(statisticUnlock);
-    expect(statisticUnlock).toBeLessThan(zoneUnlock);
     expect(statements.join('\n')).not.toContain(
       'INSERT INTO "statistic_commune"',
     );
     const inspectionSql = statements.find((sql) =>
       sql.includes('WITH request AS MATERIALIZED'),
     );
-    expect(inspectionSql).toContain(
+    expect(inspectionSql).not.toContain(
       'FOR UPDATE OF run, source, config, publication',
     );
-    expect(inspectionSql).toContain('FOR SHARE OF shadow');
+    expect(inspectionSql).not.toContain('FOR SHARE OF shadow');
+    expect(inspectionSql).not.toContain('pg_try_advisory_lock');
     expect(inspectionSql).toContain('actual_by_department AS MATERIALIZED');
     expect(inspectionSql).toContain('GROUP BY segment."departementId"');
     expect(inspectionSql).toContain('LEFT JOIN actual_by_department actual');
@@ -1353,7 +1358,9 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     expect(sql).not.toContain('"computeMapGeneration" =');
     expect(sql).toContain('UPDATE "statistic_publication_state" publication');
     expect(sql).toContain('"revision" = publication."revision" + 1');
-    expect(sql).toContain('"historicPublishedThrough" = $3::date');
+    expect(sql).toContain(
+      '"historicPublishedThrough" = commit_guard."dateThrough"',
+    );
     expect(sql).toContain('"historicDirtyFrom" = NULL');
     expect(sql).toContain('"historicDirtyThrough" = NULL');
     expect(sql).toContain('UPDATE "historic_backfill_run" run');
@@ -1373,12 +1380,32 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     const snapshotWrite = statements.findIndex((statement) =>
       statement.includes('nationalSnapshotCount'),
     );
+    const publicMutationFence = statements.findIndex((statement) =>
+      statement.includes('pg_try_advisory_xact_lock'),
+    );
     const markerWrite = statements.findIndex((statement) =>
       statement.includes('SET "statisticsPromotedAt" = now()'),
     );
     expect(communeWrite).toBeLessThan(departmentWrite);
     expect(departmentWrite).toBeLessThan(snapshotWrite);
-    expect(snapshotWrite).toBeLessThan(markerWrite);
+    expect(snapshotWrite).toBeLessThan(publicMutationFence);
+    expect(publicMutationFence).toBeLessThan(markerWrite);
+    expect(runner.startTransaction).toHaveBeenCalledWith('READ COMMITTED');
+    expect(statements[snapshotWrite]).not.toContain('UPDATE "config"');
+    expect(statements[markerWrite]).toContain(
+      'source."publicRevision" = $2::bigint',
+    );
+    expect(statements[markerWrite]).toContain('task_state."validCount" =');
+    expect(statements[markerWrite]).toContain(
+      'task_state."fingerprint" = $11::text',
+    );
+    expect(statements[markerWrite]).toContain(
+      'FROM "current_zone_recompute_request" request',
+    );
+    expect(statements[markerWrite]).not.toContain('jsonb_typeof');
+    expect(statements[markerWrite]).not.toContain(
+      '"historic_backfill_commune_segment"',
+    );
     expect(statements[markerWrite]).not.toContain('SET "status" =');
     expect(statements[markerWrite]).not.toContain('"computeMapDate"');
     expect(statements[markerWrite]).not.toContain('"computeMapGeneration"');
@@ -1388,10 +1415,6 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
   it('keeps an already-ahead statistic cursor while applying the run', async () => {
     const { service, runner } = createFinalizeHarness({
       inspection: { statsCursor: '2026-08-20' },
-      snapshotWrite: {
-        cursorUpdateCount: '0',
-        statsCursor: '2026-08-20',
-      },
     });
 
     await expect(service.apply(RUN_ID)).resolves.toMatchObject({
@@ -1406,7 +1429,7 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
       .join('\n');
     expect(sql).toContain('"computeStatsDate" = GREATEST(');
     expect(sql).toContain(
-      'config."computeStatsDate" < run_context."dateThrough"',
+      'config."computeStatsDate" < commit_guard."dateThrough"',
     );
   });
 
@@ -1488,7 +1511,7 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
         sql.includes('SET "statisticsPromotedAt" = now()'),
       ),
     ).toHaveLength(1);
-    expect(runner.commitTransaction).toHaveBeenCalledTimes(2);
+    expect(runner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('still refuses stale context before the already-applied fast path', async () => {
@@ -1500,7 +1523,7 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     });
 
     await expect(service.apply(RUN_ID)).rejects.toThrow('source-revision');
-    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(runner.rollbackTransaction).not.toHaveBeenCalled();
     expect(
       runner.query.mock.calls.some(([sql]: [string]) =>
         sql.includes('upsertedCommuneCount'),
@@ -1537,7 +1560,7 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     await expect(service.apply(RUN_ID)).rejects.toThrow(
       'base-statistic-revision',
     );
-    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(runner.rollbackTransaction).not.toHaveBeenCalled();
     expect(runner.commitTransaction).not.toHaveBeenCalled();
     expect(
       runner.query.mock.calls.some(([sql]: [string]) =>
@@ -1566,7 +1589,7 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
   it('releases the first lock and never opens a transaction if the second is busy', async () => {
     const { service, runner } = createFinalizeHarness({ statisticLock: false });
 
-    await expect(service.dryRun(RUN_ID)).rejects.toThrow(
+    await expect(service.apply(RUN_ID)).rejects.toThrow(
       'Commune statistic computation is running',
     );
     expect(runner.startTransaction).not.toHaveBeenCalled();
@@ -1576,6 +1599,22 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     );
     expect(unlocks).toHaveLength(1);
     expect(unlocks[0][0]).toContain('zone-compute-global');
+  });
+
+  it('rolls back heavy writes when a public mutation already owns the shared fence', async () => {
+    const { service, runner } = createFinalizeHarness({
+      publicMutationFence: false,
+    });
+
+    await expect(service.apply(RUN_ID)).rejects.toThrow(
+      'Current public mutation has priority',
+    );
+    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      runner.query.mock.calls.some(([sql]: [string]) =>
+        sql.includes('SET "statisticsPromotedAt" = now()'),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -2161,7 +2200,7 @@ describeWithPostgres(
       }
     }, 30_000);
 
-    it('rebases, builds all shadows, dry-runs, and atomically applies statistics', async () => {
+    it('rebases, rolls back a public mutation race, and atomically applies statistics', async () => {
       const shadow = await service.buildShadow(RUN_ID);
       expect(shadow).toMatchObject({
         departmentCount: 101,
@@ -2221,6 +2260,81 @@ describeWithPostgres(
       await expect(service.inspect(RUN_ID)).resolves.toMatchObject({
         ready: true,
       });
+
+      const canonicalState = async () => {
+        const [row] = await dataSource.query(`
+          SELECT
+            config."computeStatsDate"::text AS "computeStatsDate",
+            config."computeStatsGeneration"::text AS "computeStatsGeneration",
+            publication."revision"::text AS "statisticRevision",
+            publication."historicDirtyFrom"::text AS "historicDirtyFrom",
+            publication."historicDirtyThrough"::text AS "historicDirtyThrough",
+            run."baseStatisticRevision"::text AS "baseStatisticRevision",
+            run."statisticsPromotedAt",
+            (SELECT COUNT(*)::integer
+             FROM "statistic_commune_snapshot") AS "snapshotCount",
+            (SELECT md5(COALESCE(string_agg(
+               statistic."communeId"::text || ':' ||
+               statistic."restrictions"::text || ':' ||
+               statistic."restrictionsByMonth"::text,
+               '|' ORDER BY statistic."communeId"
+             ), ''))
+             FROM "statistic_commune" statistic) AS "communeFingerprint"
+          FROM "config" config
+          CROSS JOIN "statistic_publication_state" publication
+          CROSS JOIN "historic_backfill_run" run
+          WHERE config."id" = 1
+            AND publication."id" = 1
+            AND run."id" = '${RUN_ID}'
+        `);
+        return row;
+      };
+      const beforeRace = await canonicalState();
+      const raceService = new HistoricBackfillFinalizerService(dataSource);
+      const originalWriteSnapshots = (
+        raceService as unknown as {
+          writeSnapshots: (...args: unknown[]) => Promise<unknown>;
+        }
+      ).writeSnapshots.bind(raceService);
+      let mutationDurationMs: number | null = null;
+      jest
+        .spyOn(raceService as any, 'writeSnapshots')
+        .mockImplementation(async (...args: unknown[]) => {
+          const result = await originalWriteSnapshots(...args);
+          const startedAt = Date.now();
+          await dataSource.transaction(async (manager) => {
+            await manager.query(`SET LOCAL lock_timeout = '1s'`);
+            await manager.query(
+              `SELECT pg_advisory_xact_lock_shared(
+                hashtext('vigieau'), hashtext($1)
+              )`,
+              [HISTORIC_MAP_PUBLICATION_FENCE_LOCK],
+            );
+            await manager.query(`
+              UPDATE "zone_publication_source_state"
+              SET "publicRevision" = "publicRevision" + 1
+              WHERE "id" = 1
+            `);
+          });
+          mutationDurationMs = Date.now() - startedAt;
+          return result;
+        });
+
+      try {
+        await expect(raceService.apply(RUN_ID)).rejects.toThrow(
+          'Historic statistic publication lost its commit context',
+        );
+        expect(mutationDurationMs).not.toBeNull();
+        expect(mutationDurationMs!).toBeLessThan(1_000);
+        await expect(canonicalState()).resolves.toEqual(beforeRace);
+      } finally {
+        await dataSource.query(`
+          UPDATE "zone_publication_source_state"
+          SET "publicRevision" = 42
+          WHERE "id" = 1
+        `);
+      }
+
       await expect(service.dryRun(RUN_ID)).resolves.toMatchObject({
         applied: false,
         alreadyApplied: false,
