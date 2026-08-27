@@ -48,6 +48,7 @@ describe('HistoricBackfillArtifactWorkerLoop', () => {
       complete: jest.fn().mockResolvedValue(true),
       fail: jest.fn(),
       yieldTask: jest.fn(),
+      reconcileStaleRunsIfDue: jest.fn().mockResolvedValue(undefined),
     };
     const builder = {
       build: jest.fn().mockResolvedValue({
@@ -74,6 +75,7 @@ describe('HistoricBackfillArtifactWorkerLoop', () => {
     );
     expect(queue.claim).toHaveBeenCalledWith(lease.runId, 'worker:1', 60, 5);
     expect(queue.complete).toHaveBeenCalledWith(lease, expect.any(Object));
+    expect(queue.reconcileStaleRunsIfDue).toHaveBeenCalledTimes(1);
   });
 
   it('yields priority interruptions without consuming an attempt', async () => {

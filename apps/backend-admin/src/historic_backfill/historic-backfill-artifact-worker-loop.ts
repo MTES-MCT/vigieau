@@ -83,6 +83,9 @@ export class HistoricBackfillArtifactWorkerLoop {
     while (!signal?.aborted) {
       try {
         const runId = await this.queue.findRunnableRunId();
+        if (!runId) {
+          await this.queue.reconcileStaleRunsIfDue();
+        }
         const claim = runId
           ? await this.queue.claim(
               runId,
