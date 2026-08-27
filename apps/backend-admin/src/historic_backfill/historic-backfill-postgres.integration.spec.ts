@@ -1074,10 +1074,46 @@ describePostgres('historic backfill PostgreSQL integration', () => {
     await expect(artifactQueue.prepare(run.id)).resolves.toEqual({
       taskCount: 2,
     });
+    const artifactRunLock = dataSource.createQueryRunner();
+    await artifactRunLock.connect();
+    let lockedArtifactClaim:
+      | ReturnType<HistoricBackfillArtifactQueueService['claim']>
+      | undefined;
+    let artifactClaimSettled = false;
+    let claimSettledWhileRunLocked = false;
+    try {
+      await artifactRunLock.startTransaction('READ COMMITTED');
+      await artifactRunLock.query(
+        `SELECT "id" FROM "historic_backfill_run"
+         WHERE "id" = $1 FOR UPDATE`,
+        [run.id],
+      );
+      lockedArtifactClaim = artifactQueue
+        .claim(run.id, 'artifact-worker-a', 30, 2)
+        .finally(() => {
+          artifactClaimSettled = true;
+        });
+      await Promise.race([
+        lockedArtifactClaim,
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, 1_000).unref();
+        }),
+      ]);
+      claimSettledWhileRunLocked = artifactClaimSettled;
+    } finally {
+      if (artifactRunLock.isTransactionActive) {
+        await artifactRunLock.rollbackTransaction();
+      }
+      await artifactRunLock.release();
+    }
+    if (!lockedArtifactClaim) {
+      throw new Error('The artifact claim was not started');
+    }
     const [artifactA, artifactB] = await Promise.all([
-      artifactQueue.claim(run.id, 'artifact-worker-a', 30, 2),
+      lockedArtifactClaim,
       artifactQueue.claim(run.id, 'artifact-worker-b', 30, 2),
     ]);
+    expect(claimSettledWhileRunLocked).toBe(true);
     if (!artifactA || !artifactB) {
       throw new Error('Both artifact workers must obtain a lease');
     }

@@ -200,7 +200,7 @@ describe('HistoricBackfillArtifactQueueService', () => {
       ),
     ).toHaveLength(2);
     expect(manager.query.mock.calls[0][1][4]).toBe(5);
-    expect(reconcileStaleRuns).toHaveBeenCalledTimes(1);
+    expect(reconcileStaleRuns).not.toHaveBeenCalled();
   });
 
   it('terminalizes an artifact and its run after repeated lease expirations', async () => {
@@ -261,7 +261,7 @@ describe('HistoricBackfillArtifactQueueService', () => {
     const service = createService({ query });
 
     await expect(service.findRunnableRunId()).resolves.toBe(runId);
-    expect(reconcileStaleRuns).toHaveBeenCalledTimes(1);
+    expect(reconcileStaleRuns).not.toHaveBeenCalled();
     await expect(service.heartbeat(lease, 300)).resolves.toBe(true);
     await expect(
       service.getOutputSegments({ query } as any, lease),
@@ -272,6 +272,32 @@ describe('HistoricBackfillArtifactQueueService', () => {
         /run\."historicBackfillGlobalEpoch"\s*=\s*config\."historicBackfillGlobalEpoch"/,
       );
     }
+  });
+
+  it('coalesces and throttles stale-run reconciliation while idle', async () => {
+    let releaseReconciliation: (() => void) | undefined;
+    reconcileStaleRuns.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseReconciliation = resolve;
+        }),
+    );
+    const now = jest.spyOn(Date, 'now').mockReturnValue(100_000);
+    const service = createService({});
+
+    const first = service.reconcileStaleRunsIfDue();
+    const second = service.reconcileStaleRunsIfDue();
+    expect(reconcileStaleRuns).toHaveBeenCalledTimes(1);
+    releaseReconciliation?.();
+    await Promise.all([first, second]);
+
+    await service.reconcileStaleRunsIfDue();
+    expect(reconcileStaleRuns).toHaveBeenCalledTimes(1);
+
+    now.mockReturnValue(130_000);
+    await service.reconcileStaleRunsIfDue();
+    expect(reconcileStaleRuns).toHaveBeenCalledTimes(2);
+    now.mockRestore();
   });
 
   it('yields without consuming an attempt', async () => {

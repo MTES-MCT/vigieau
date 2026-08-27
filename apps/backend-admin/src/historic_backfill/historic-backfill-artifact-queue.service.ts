@@ -11,6 +11,7 @@ import {
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const IDLE_RECONCILIATION_INTERVAL_MILLISECONDS = 30_000;
 
 export interface HistoricBackfillArtifactLease {
   runId: string;
@@ -92,6 +93,9 @@ function assertOutput(output: HistoricBackfillArtifactOutput): void {
 
 @Injectable()
 export class HistoricBackfillArtifactQueueService {
+  private idleReconciliation: Promise<void> | null = null;
+  private lastIdleReconciliationAt: number | null = null;
+
   constructor(
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -99,7 +103,6 @@ export class HistoricBackfillArtifactQueueService {
   ) {}
 
   async findRunnableRunId(): Promise<string | null> {
-    await this.historicBackfillQueue.reconcileStaleRuns();
     const [row] = (await this.dataSource.query(`
       SELECT DISTINCT task."runId"
       FROM "historic_backfill_artifact_task" task
@@ -118,6 +121,30 @@ export class HistoricBackfillArtifactQueueService {
       LIMIT 1
     `)) as Array<{ runId: string }>;
     return row?.runId ?? null;
+  }
+
+  async reconcileStaleRunsIfDue(): Promise<void> {
+    if (this.idleReconciliation) {
+      return this.idleReconciliation;
+    }
+    const now = Date.now();
+    if (
+      this.lastIdleReconciliationAt !== null &&
+      now - this.lastIdleReconciliationAt <
+        IDLE_RECONCILIATION_INTERVAL_MILLISECONDS
+    ) {
+      return;
+    }
+    const reconciliation = this.historicBackfillQueue.reconcileStaleRuns();
+    this.idleReconciliation = reconciliation;
+    try {
+      await reconciliation;
+      this.lastIdleReconciliationAt = Date.now();
+    } finally {
+      if (this.idleReconciliation === reconciliation) {
+        this.idleReconciliation = null;
+      }
+    }
   }
 
   async prepare(runId: string): Promise<{ taskCount: number }> {
@@ -378,7 +405,6 @@ export class HistoricBackfillArtifactQueueService {
     if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
       throw new Error('maxAttempts must be a positive integer');
     }
-    await this.historicBackfillQueue.reconcileStaleRuns();
     return this.dataSource.transaction('READ COMMITTED', async (manager) => {
       const leaseToken = randomUUID();
       const rows = unwrapTypeOrmDmlReturningRows<ArtifactClaimRow>(
