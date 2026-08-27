@@ -34,7 +34,8 @@ describe('ZonePublicationHealthService', () => {
       latestCandidateHeartbeatAt: null,
       currentRunUpdatedAt: null,
       historicCursorProgressAt: null,
-      certifiedRun: true,
+      certifiedCurrentRun: true,
+      certifiedHistoricRun: true,
       ...overrides,
     };
   }
@@ -83,6 +84,7 @@ describe('ZonePublicationHealthService', () => {
 
     expect(result).toEqual({
       status: 'healthy',
+      historicStatus: 'complete',
       serving: true,
       businessDate: '2026-08-03',
       requiredHistoricThrough: '2026-08-02',
@@ -100,6 +102,7 @@ describe('ZonePublicationHealthService', () => {
         historicClean: true,
         historicCursors: true,
         certifiedRun: true,
+        historicRun: true,
         snapshotsComplete: true,
         recentProgress: true,
       },
@@ -125,6 +128,8 @@ describe('ZonePublicationHealthService', () => {
     expect(sql).toContain("'historicStatsGeneration'");
     expect(sql).toContain('config."computeMapGeneration"::text');
     expect(sql).toContain('config."computeStatsGeneration"::text');
+    expect(sql).toContain('AS "certifiedCurrentRun"');
+    expect(sql).toContain('AS "certifiedHistoricRun"');
     expect(sql).toContain(
       'snapshot."sourceRevision" = source_state."revision"',
     );
@@ -185,10 +190,6 @@ describe('ZonePublicationHealthService', () => {
       overrides: { legacyPromotedAt: null },
     },
     {
-      label: 'legacy promotion failed',
-      overrides: { promotionError: 'private failure' },
-    },
-    {
       label: 'current statistics stale',
       overrides: { currentPublishedDate: '2026-08-02' },
     },
@@ -197,27 +198,9 @@ describe('ZonePublicationHealthService', () => {
       overrides: { currentSnapshot: false },
     },
     {
-      label: 'historic statistics stale',
-      overrides: { historicPublishedThrough: '2026-08-01' },
+      label: 'certified current run missing',
+      overrides: { certifiedCurrentRun: false },
     },
-    {
-      label: 'historic range dirty',
-      overrides: { historicDirtyFrom: '2026-01-01' },
-    },
-    { label: 'map cursor stale', overrides: { computeMapDate: '2026-08-01' } },
-    {
-      label: 'statistics cursor stale',
-      overrides: { computeStatsDate: '2026-08-01' },
-    },
-    {
-      label: 'certified run missing',
-      overrides: { certifiedRun: false },
-    },
-    {
-      label: 'historic run generation mismatch',
-      overrides: { certifiedRun: false },
-    },
-    { label: 'snapshot incomplete', overrides: { incompleteSnapshotCount: 1 } },
   ])('does not report healthy when $label', async (testCase) => {
     const { service, clock } = createHarness(healthyRow(testCase.overrides));
     if (testCase.disable) {
@@ -233,6 +216,65 @@ describe('ZonePublicationHealthService', () => {
       status: 'healthy',
     });
   });
+
+  it('keeps current health healthy after stable promotion when data.gouv failed', async () => {
+    const { service } = createHarness(
+      healthyRow({ promotionError: 'private data.gouv failure' }),
+    );
+
+    await expect(service.getHealthStatus(now)).resolves.toMatchObject({
+      status: 'healthy',
+      checks: { legacyPromotion: true },
+    });
+  });
+
+  it.each([
+    {
+      label: 'historic statistics stale',
+      overrides: { historicPublishedThrough: '2026-08-01' },
+      failedCheck: 'historicStatistics',
+    },
+    {
+      label: 'historic range dirty',
+      overrides: { historicDirtyFrom: '2026-01-01' },
+      failedCheck: 'historicClean',
+    },
+    {
+      label: 'map cursor stale',
+      overrides: { computeMapDate: '2026-08-01' },
+      failedCheck: 'historicCursors',
+    },
+    {
+      label: 'statistics cursor stale',
+      overrides: { computeStatsDate: '2026-08-01' },
+      failedCheck: 'historicCursors',
+    },
+    {
+      label: 'historic run missing',
+      overrides: { certifiedHistoricRun: false },
+      failedCheck: 'historicRun',
+    },
+    {
+      label: 'historic snapshot incomplete',
+      overrides: { incompleteSnapshotCount: 1 },
+      failedCheck: 'snapshotsComplete',
+    },
+  ])(
+    'keeps current health healthy while $label',
+    async ({ overrides, failedCheck }) => {
+      const { service } = createHarness(healthyRow(overrides));
+
+      const result = await service.getHealthStatus(now);
+
+      expect(result).toMatchObject({
+        status: 'healthy',
+        historicStatus: 'incomplete',
+        serving: true,
+      });
+      expect(result.checks?.certifiedRun).toBe(true);
+      expect(result.checks?.[failedCheck]).toBe(false);
+    },
+  );
 
   it('returns updating only while an old active is served and progress is recent', async () => {
     const { service } = createHarness(
@@ -334,6 +376,7 @@ describe('ZonePublicationHealthService', () => {
 
     expect(result).toEqual({
       status: 'unavailable',
+      historicStatus: 'unknown',
       serving: false,
       businessDate: '2026-08-03',
       requiredHistoricThrough: '2026-08-02',

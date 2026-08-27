@@ -47,6 +47,7 @@ interface SandreSynchronizationHealth {
     blockedDepartments: number;
     failedBatches: number;
     blockedBatches: number;
+    retainedLkgZones: number;
   };
 }
 
@@ -211,7 +212,7 @@ export class HealthController {
         `
           WITH latest_batches AS (
             SELECT DISTINCT ON (batch."departementId")
-              batch."departementId", batch.status
+              batch.id, batch."departementId", batch.status
             FROM sandre_zone_sync_batch batch
             WHERE batch.kind = 'snapshot'
             ORDER BY batch."departementId", batch."startedAt" DESC, batch.id DESC
@@ -265,6 +266,8 @@ export class HealthController {
             count(DISTINCT latest_batches."departementId") FILTER (
               WHERE latest_batches.status = 'blocked'
             )::integer AS "blockedBatches",
+            count(DISTINCT retained_lkg."zoneAlerteId")::integer
+              AS "retainedLkgZones",
             min(state."lastObservedAt") AS "oldestObservationAt",
             max(state."lastObservedAt") AS "latestObservationAt"
           FROM departement
@@ -272,6 +275,10 @@ export class HealthController {
             ON state."departementId" = departement.id
           LEFT JOIN latest_batches
             ON latest_batches."departementId" = departement.id
+          LEFT JOIN sandre_zone_sync_decision retained_lkg
+            ON retained_lkg."batchId" = latest_batches.id
+            AND retained_lkg.action = 'RETAIN_APPROVED_LKG'
+            AND retained_lkg.outcome IN ('observed', 'applied')
           LEFT JOIN completed_forced_audits
             ON completed_forced_audits."departementId" = departement.id
         `,
@@ -298,6 +305,7 @@ export class HealthController {
         blockedDepartments: Number(row?.blockedDepartments ?? 0),
         failedBatches: Number(row?.failedBatches ?? 0),
         blockedBatches: Number(row?.blockedBatches ?? 0),
+        retainedLkgZones: Number(row?.retainedLkgZones ?? 0),
       };
       let status: SandreSynchronizationStatus = 'healthy';
       if (!mode) {

@@ -28,6 +28,33 @@ export interface SandreApprovedReferenceEvidence {
   fingerprint: string;
 }
 
+export function fingerprintSandreApprovedPostApplyEvidence(
+  evidence: SandreApprovedReferenceEvidence,
+): string {
+  const targetState = evidence.targetState.map((target) => ({
+    ...target,
+    restrictions: target.restrictions.map(
+      ({ computedIds, historicIds, ...restriction }) => ({
+        ...restriction,
+        computedCount: computedIds.length,
+        historicCount: historicIds.length,
+      }),
+    ),
+  }));
+  return fingerprint({
+    sourceZoneId: evidence.sourceZoneId,
+    lifecycle: evidence.lifecycle,
+    sourceOperationalEmpty: evidence.sourceOperationalEmpty,
+    arreteCadreLinks: evidence.arreteCadreLinks,
+    restrictions: evidence.restrictions,
+    customizationCount: evidence.customizationCount,
+    aliasCount: evidence.aliasCount,
+    targetCollisionFingerprint: evidence.targetCollisionFingerprint,
+    targetStateFingerprint: fingerprint(targetState),
+    targetState,
+  });
+}
+
 interface RestrictionPayloadRow extends SandreApprovedRestrictionEvidence {
   zoneAlerteId: number;
   payload: Record<string, unknown>;
@@ -422,7 +449,9 @@ export async function applySandreApprovedPartitionReferences(
   if (current.lifecycle === 'post_apply') {
     if (
       expected.lifecycle === 'post_apply' &&
-      current.fingerprint !== expected.fingerprint
+      current.fingerprint !== expected.fingerprint &&
+      fingerprintSandreApprovedPostApplyEvidence(current) !==
+        fingerprintSandreApprovedPostApplyEvidence(expected)
     ) {
       throw new Error(
         `Approved Sandre partition post-apply state changed for zone ${expected.sourceZoneId}`,
@@ -831,9 +860,9 @@ async function assertPostApplyLineage(
   for (const [targetIndex, targetZoneId] of targetZoneIds.entries()) {
     const requiredState =
       lineage.lifecycle === 'post_apply'
-        ? lineage.targetState.find(
+        ? (lineage.targetState.find(
             (target) => target.targetIndex === targetIndex,
-          )
+          ) ?? null)
         : null;
     const requiredLinks = requiredState
       ? requiredState.arreteCadreIds
@@ -862,7 +891,8 @@ async function assertPostApplyLineage(
             : targetIndex === 0
               ? row.restrictionId === required.restrictionId
               : row.arreteRestrictionId === required.arreteRestrictionId) &&
-          row.payloadFingerprint === required.payloadFingerprint,
+          (requiredState !== null ||
+            row.payloadFingerprint === required.payloadFingerprint),
       );
       if (parentRows.length !== 1 || matches.length !== 1) {
         throw new Error('Approved Sandre restriction lineage is incomplete');

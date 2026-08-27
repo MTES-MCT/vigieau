@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateEmptyPmtiles } from './empty-pmtiles';
@@ -10,12 +17,23 @@ function validEmptyPmtilesHeader(): Buffer {
   return header;
 }
 
+async function createTileJoinExecutable(binDirectory: string): Promise<string> {
+  await mkdir(binDirectory, { recursive: true });
+  const executable = join(binDirectory, 'tile-join');
+  await writeFile(executable, '#!/bin/sh\nexit 0\n');
+  await chmod(executable, 0o700);
+  return executable;
+}
+
 describe('generateEmptyPmtiles', () => {
   it('uses tile-join with a source that contains no tiles', async () => {
     const workingDirectory = await mkdtemp(
       join(tmpdir(), 'vigieau-empty-pmtiles-test-'),
     );
     const outputPath = join(workingDirectory, 'zones.pmtiles');
+    await createTileJoinExecutable(
+      join(workingDirectory, 'tippecanoe_program/bin'),
+    );
     let sourceDirectory: string | undefined;
 
     await generateEmptyPmtiles({
@@ -53,6 +71,9 @@ describe('generateEmptyPmtiles', () => {
       join(tmpdir(), 'vigieau-empty-pmtiles-test-'),
     );
     const outputPath = join(workingDirectory, 'zones.pmtiles');
+    await createTileJoinExecutable(
+      join(workingDirectory, 'tippecanoe_program/bin'),
+    );
     let sourceDirectory: string | undefined;
 
     await expect(
@@ -77,6 +98,9 @@ describe('generateEmptyPmtiles', () => {
       join(tmpdir(), 'vigieau-empty-pmtiles-test-'),
     );
     const outputPath = join(workingDirectory, 'zones.pmtiles');
+    await createTileJoinExecutable(
+      join(workingDirectory, 'tippecanoe_program/bin'),
+    );
 
     await expect(
       generateEmptyPmtiles({
@@ -89,5 +113,60 @@ describe('generateEmptyPmtiles', () => {
         },
       }),
     ).rejects.toThrow('non-empty PMTiles archive');
+  });
+
+  it('uses an explicit slug bin directory outside the temporary workspace', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-empty-pmtiles-test-'),
+    );
+    const workingDirectory = join(directory, 'tmp');
+    const tippecanoeBinDirectory = join(
+      directory,
+      'apps/backend-admin/tippecanoe_program/bin',
+    );
+    await mkdir(workingDirectory);
+    const tileJoinPath = await createTileJoinExecutable(tippecanoeBinDirectory);
+    const outputPath = join(workingDirectory, 'zones.pmtiles');
+    const commandRunner = jest.fn(async (executable: string) => {
+      expect(executable).toBe(tileJoinPath);
+      await writeFile(outputPath, validEmptyPmtilesHeader());
+    });
+
+    await generateEmptyPmtiles({
+      workingDirectory,
+      tippecanoeBinDirectory,
+      outputPath,
+      commandRunner,
+    });
+
+    expect(commandRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails before creating temporary input when tile-join is unavailable', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-empty-pmtiles-test-'),
+    );
+    const workingDirectory = join(directory, 'tmp');
+    const tippecanoeBinDirectory = join(directory, 'missing-bin');
+    await mkdir(workingDirectory);
+    const outputPath = join(workingDirectory, 'zones.pmtiles');
+    await writeFile(outputPath, Buffer.from('stale'));
+    const commandRunner = jest.fn();
+
+    await expect(
+      generateEmptyPmtiles({
+        workingDirectory,
+        tippecanoeBinDirectory,
+        outputPath,
+        commandRunner,
+      }),
+    ).rejects.toThrow(
+      `Required Tippecanoe executable is not executable: ${join(
+        tippecanoeBinDirectory,
+        'tile-join',
+      )}`,
+    );
+    expect(commandRunner).not.toHaveBeenCalled();
+    await expect(stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

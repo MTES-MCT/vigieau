@@ -41,14 +41,21 @@ import {
   DailyZonePublicationReuseContext,
   ZonePublicationService,
 } from '../zone_publication/zone_publication.service';
-import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import {
+  isZonePublicationEnabled,
+  sourceRevisionColumn,
+  zoneGeojsonContentDisposition,
+} from '../zone_publication/zone_publication.config';
 import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import {
   collectPmtilesFeatureIds,
   generatePmtiles,
 } from './pmtiles-generation';
-import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
+import {
+  isCurrentZoneRecomputeWorkerEnabled,
+  shouldRunWebScheduledJobs,
+} from '../core/scheduling/business-cron';
 import {
   getCivilDateAtUtcNoon,
   getScheduledCivilDate,
@@ -518,6 +525,9 @@ export class ZoneAlerteComputedService {
       ) {
         return;
       }
+      if (isCurrentZoneRecomputeWorkerEnabled()) {
+        return;
+      }
       if (await this.zonePublicationService.isRecomputeRequired()) {
         await this.askCompute([], false, false, true);
       }
@@ -598,6 +608,10 @@ export class ZoneAlerteComputedService {
         }
       }
       await this.computeCommunesIntersected(departement);
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
+    if (departements.length === 0) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
     }
     // On récupère toutes les restrictions en cours
     this.logger.log(`COMPUTING ZONES D'ALERTES - END`);
@@ -1342,6 +1356,9 @@ DELETE FROM zone_alerte_computed
     const geojsonChecksum = createHash('sha256')
       .update(dataGeojson)
       .digest('hex');
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
     let pmtilesChecksum: string | undefined;
     let fileToTransferPmtiles:
       | { originalname: string; buffer: Buffer }
@@ -1371,6 +1388,9 @@ DELETE FROM zone_alerte_computed
       throw e;
     }
 
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
     let immutableArtifacts: { geojsonUrl?: string; pmtilesUrl?: string } = {};
     if (publicationEnabled) {
       immutableArtifacts = await this.publishGeneratedZoneArtifacts({
@@ -1380,6 +1400,9 @@ DELETE FROM zone_alerte_computed
         pmtilesFile: fileToTransferPmtiles,
         pmtilesChecksum,
       });
+    }
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
     }
     await this.zoneAlerteComputedRepository
       .createQueryBuilder()
@@ -1424,6 +1447,9 @@ DELETE FROM zone_alerte_computed
         );
       }
     }
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
     const publicationId = await this.buildVersionedPublicationIfNational({
       sourceRevision: isNationalCompute ? sourceRevision : undefined,
       sourceComputedAt: date,
@@ -1434,6 +1460,21 @@ DELETE FROM zone_alerte_computed
       pmtilesChecksum,
     });
     return { publicationId, sourceRevision };
+  }
+
+  private async assertSourceRevisionUnchanged(
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (expectedSourceRevision === undefined) {
+      return;
+    }
+    const currentSourceRevision =
+      await this.zonePublicationService.getSourceRevision();
+    if (currentSourceRevision !== expectedSourceRevision) {
+      throw new Error(
+        `Zone source revision changed during computation (${expectedSourceRevision} -> ${currentSourceRevision})`,
+      );
+    }
   }
 
   private async computePublicationStatistics(
@@ -1565,6 +1606,13 @@ DELETE FROM zone_alerte_computed
       {
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl: 'public, max-age=0, must-revalidate',
+        ...(kind === 'geojson'
+          ? {
+              contentDisposition: zoneGeojsonContentDisposition(
+                file.originalname,
+              ),
+            }
+          : {}),
         contentType:
           kind === 'geojson'
             ? 'application/geo+json'
@@ -1620,6 +1668,12 @@ DELETE FROM zone_alerte_computed
             this.getZonePublicationS3TimeoutMs(),
           ),
           cacheControl: 'public, max-age=0, must-revalidate',
+          ...(kind === 'geojson'
+            ? {
+                contentDisposition:
+                  zoneGeojsonContentDisposition(datedFileName),
+              }
+            : {}),
           contentType:
             kind === 'geojson'
               ? 'application/geo+json'
@@ -1663,6 +1717,13 @@ DELETE FROM zone_alerte_computed
       {
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl: 'public, max-age=31536000, immutable',
+        ...(kind === 'geojson'
+          ? {
+              contentDisposition: zoneGeojsonContentDisposition(
+                'zones_arretes_en_vigueur.geojson',
+              ),
+            }
+          : {}),
         contentType:
           kind === 'geojson'
             ? 'application/geo+json'
@@ -2028,7 +2089,7 @@ DELETE FROM zone_alerte_computed
       }
       await queryRunner.startTransaction('SERIALIZABLE');
       const [source] = await queryRunner.query(`
-        SELECT "revision"::text AS "revision"
+        SELECT ${sourceRevisionColumn()}::text AS "revision"
         FROM "zone_publication_source_state"
         WHERE "id" = 1
         FOR UPDATE
@@ -2274,7 +2335,7 @@ DELETE FROM zone_alerte_computed
         const [context] = await queryRunner.query(
           `
             SELECT
-              source_state."revision"::text AS "sourceRevision",
+              ${sourceRevisionColumn('source_state')}::text AS "sourceRevision",
               config."computeMapDate"::text AS "mapCursor",
               config."computeStatsDate"::text AS "statsCursor",
               config."computeMapGeneration"::text AS "mapGeneration",
@@ -2348,7 +2409,7 @@ DELETE FROM zone_alerte_computed
             const [cleared] = await queryRunner.query(
               `
                 WITH source_guard AS MATERIALIZED (
-                  SELECT "revision"::text AS "sourceRevision"
+                  SELECT ${sourceRevisionColumn()}::text AS "sourceRevision"
                   FROM "zone_publication_source_state"
                   WHERE "id" = 1
                 ), config_guard AS MATERIALIZED (
@@ -2674,7 +2735,7 @@ DELETE FROM zone_alerte_computed
     const [result] = await this.dataSource.query(
       `
         WITH source_guard AS MATERIALIZED (
-          SELECT source_state."revision"::text AS revision
+          SELECT ${sourceRevisionColumn('source_state')}::text AS revision
           FROM "zone_publication_source_state" source_state
           WHERE source_state."id" = 1
           FOR UPDATE
@@ -2735,11 +2796,11 @@ DELETE FROM zone_alerte_computed
             AND publication_state."historicDirtyThrough" IS NOT NULL
             AND (
               $3::bigint IS NULL
-              OR publication_state."revision" = $3::bigint
+              OR publication_state."revision" = ($3::bigint)::text
             )
             AND (
               $4::date IS NULL
-              OR publication_state."currentPublishedDate" = $4::date
+              OR publication_state."currentPublishedDate" = ($4::date)::text
             )
             AND EXISTS (
               SELECT 1
@@ -3042,8 +3103,8 @@ DELETE FROM zone_alerte_computed
           LEFT JOIN LATERAL jsonb_array_elements(
             COALESCE(statistic."restrictions", '[]'::jsonb)
           ) restriction(value)
-            ON restriction.value ->> 'date' >= $1
-           AND restriction.value ->> 'date' <= $2
+            ON restriction.value ->> 'date' >= ($1::date)::text
+           AND restriction.value ->> 'date' <= ($2::date)::text
           GROUP BY commune."id"
         )
         SELECT

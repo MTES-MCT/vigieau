@@ -1,17 +1,14 @@
 import path from 'path';
+import * as dotenv from 'dotenv';
 import * as Sentry from '@sentry/nestjs';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
-try {
-  const dotenv = require('dotenv');
-
-  [
-    path.resolve(process.cwd(), '.env'),
-    path.resolve(process.cwd(), 'apps/backend/.env'),
-  ].forEach((envFile) => {
-    dotenv.config({ path: envFile, override: false });
-  });
-} catch {}
+[
+  path.resolve(process.cwd(), '.env'),
+  path.resolve(process.cwd(), 'apps/backend/.env'),
+].forEach((envFile) => {
+  dotenv.config({ path: envFile, override: false });
+});
 
 const sentryDsn = process.env.SENTRY_DSN?.trim();
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -32,6 +29,10 @@ const profilesSampleRate = toNumber(process.env.SENTRY_PROFILES_SAMPLE_RATE, 0);
 if (sentryDsn) {
   Sentry.init({
     dsn: sentryDsn,
+    release:
+      process.env.SENTRY_RELEASE?.trim() ||
+      process.env.CONTAINER_VERSION?.trim() ||
+      undefined,
     environment:
       process.env.SENTRY_ENV?.trim() || process.env.NODE_ENV || 'local',
     integrations:

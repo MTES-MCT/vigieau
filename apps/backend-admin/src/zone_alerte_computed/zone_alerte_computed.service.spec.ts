@@ -22,6 +22,8 @@ import {
   ZoneAlerteComputedHistoricService,
 } from './zone_alerte_computed_historic.service';
 import * as emptyPmtiles from './empty-pmtiles';
+import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from './legacy-historic-empty-geometries';
+import * as pmtilesGeneration from './pmtiles-generation';
 
 jest.mock('worker_threads', () => ({
   ...jest.requireActual('worker_threads'),
@@ -1357,6 +1359,12 @@ describe('ZoneAlerteComputedService', () => {
     expect(publicationSql).toContain(
       '$1::date >= publication_state."historicDirtyThrough"',
     );
+    expect(publicationSql).toContain(
+      'publication_state."revision" = ($3::bigint)::text',
+    );
+    expect(publicationSql).toContain(
+      'publication_state."currentPublishedDate" = ($4::date)::text',
+    );
     expect(publicationSql).not.toContain(
       'snapshot."snapshotDate" >= state."historicDirtyFrom"',
     );
@@ -2228,6 +2236,24 @@ describe('ZoneAlerteComputedService', () => {
     expect(askCompute).not.toHaveBeenCalled();
   });
 
+  it('keeps web watchdog promotion-only while the dedicated worker is enabled', async () => {
+    process.env.CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED = 'true';
+    zonePublicationService.isRecomputeRequired.mockResolvedValue(true);
+    const askCompute = jest.spyOn(service, 'askCompute');
+
+    try {
+      await service.ensureFreshZonePublication();
+    } finally {
+      delete process.env.CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED;
+    }
+
+    expect(
+      zonePublicationService.promoteCertifiedPublicationIfAvailable,
+    ).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.isRecomputeRequired).not.toHaveBeenCalled();
+    expect(askCompute).not.toHaveBeenCalled();
+  });
+
   it('does not run the publication watchdog while the feature is disabled', async () => {
     delete process.env.ZONE_PUBLICATION_ENABLED;
     const askCompute = jest.spyOn(service, 'askCompute');
@@ -2695,7 +2721,7 @@ describe('ZoneAlerteComputedService', () => {
     await service.computeAll([], false);
 
     expect(computeRegleAr).toHaveBeenCalledTimes(2);
-    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(3);
     expect(computeGeoJson).toHaveBeenCalledWith(
       false,
       '1',
@@ -2703,6 +2729,94 @@ describe('ZoneAlerteComputedService', () => {
       '7',
       true,
     );
+  });
+
+  it('abandons a national compute at the first department boundary after its source revision changes', async () => {
+    configService.getConfig.mockResolvedValue({ historicComputeEpoch: '7' });
+    zonePublicationService.getSourceRevision
+      .mockResolvedValueOnce('1')
+      .mockResolvedValueOnce('2');
+    const departments = [
+      {
+        id: 65,
+        code: '65',
+        nom: 'Hautes-Pyrenees',
+        parametres: [{ disabled: false, superpositionCommune: 'no' }],
+      },
+      {
+        id: 31,
+        code: '31',
+        nom: 'Haute-Garonne',
+        parametres: [{ disabled: false, superpositionCommune: 'no' }],
+      },
+    ];
+    (service as any).departementService = {
+      findAllLight: jest.fn().mockResolvedValue(departments),
+    };
+    const computeRegleAr = jest
+      .spyOn(service, 'computeRegleAr')
+      .mockResolvedValue([]);
+    const computeCommunesIntersected = jest
+      .spyOn(service, 'computeCommunesIntersected')
+      .mockResolvedValue(undefined);
+    const computeGeoJson = jest
+      .spyOn(service, 'computeGeoJson')
+      .mockResolvedValue(undefined);
+
+    await expect(service.computeAll([], false)).rejects.toThrow(
+      'Zone source revision changed during computation (1 -> 2)',
+    );
+
+    expect(computeRegleAr).toHaveBeenCalledTimes(1);
+    expect(computeCommunesIntersected).toHaveBeenCalledTimes(1);
+    expect(computeGeoJson).not.toHaveBeenCalled();
+  });
+
+  it('checks the source revision around every expensive publication stage', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-current-versioned-'),
+    );
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const enableQueryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const computePublicationStatistics = jest
+      .spyOn(service as any, 'computePublicationStatistics')
+      .mockResolvedValue(undefined);
+    const publishGeneratedZoneArtifacts = jest
+      .spyOn(service as any, 'publishGeneratedZoneArtifacts')
+      .mockResolvedValue({
+        geojsonUrl: 'https://immutable.test/zones.geojson',
+        pmtilesUrl: 'https://immutable.test/zones.pmtiles',
+      });
+    (service as any).zoneAlerteComputedRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn().mockReturnValue(enableQueryBuilder),
+    };
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+
+    try {
+      await service.computeGeoJson(false, '1', '2026-08-11', '9', true);
+
+      expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(4);
+      expect(publishGeneratedZoneArtifacts).toHaveBeenCalledTimes(1);
+      expect(computePublicationStatistics).toHaveBeenCalledTimes(1);
+      expect(
+        zonePublicationService.buildCandidateFromCurrentComputed,
+      ).toHaveBeenCalledTimes(1);
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('keeps the captured business date when a national compute crosses 02:00 in Paris', async () => {
@@ -2762,7 +2876,7 @@ describe('ZoneAlerteComputedService', () => {
 
     await service.computeAll([], false);
 
-    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(2);
     expect(computeGeoJson).toHaveBeenCalledWith(
       false,
       '1',
@@ -2795,7 +2909,7 @@ describe('ZoneAlerteComputedService', () => {
 
     await service.computeAll([65], false);
 
-    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(2);
     expect(computeGeoJson).toHaveBeenCalledWith(
       false,
       '1',
@@ -3070,6 +3184,8 @@ describe('ZoneAlerteComputedService', () => {
       {
         abortSignal: expect.any(AbortSignal),
         cacheControl: 'public, max-age=31536000, immutable',
+        contentDisposition:
+          'attachment; filename="zones_arretes_en_vigueur.geojson"',
         contentType: 'application/geo+json',
       },
       {
@@ -3123,6 +3239,7 @@ describe('ZoneAlerteComputedService', () => {
           _options: {
             abortSignal: AbortSignal;
             cacheControl: string;
+            contentDisposition?: string;
             contentType: string;
           },
         ) => {
@@ -3167,6 +3284,7 @@ describe('ZoneAlerteComputedService', () => {
         file: file.originalname,
         prefix,
         cacheControl: options.cacheControl,
+        contentDisposition: options.contentDisposition,
         contentType: options.contentType,
         hasAbortSignal: options.abortSignal instanceof AbortSignal,
       })),
@@ -3175,6 +3293,8 @@ describe('ZoneAlerteComputedService', () => {
         file: 'zones_arretes_en_vigueur.geojson',
         prefix: 'geojson/',
         cacheControl: 'public, max-age=0, must-revalidate',
+        contentDisposition:
+          'attachment; filename="zones_arretes_en_vigueur.geojson"',
         contentType: 'application/geo+json',
         hasAbortSignal: true,
       },
@@ -3182,6 +3302,7 @@ describe('ZoneAlerteComputedService', () => {
         file: 'zones_arretes_en_vigueur.pmtiles',
         prefix: 'pmtiles/',
         cacheControl: 'public, max-age=0, must-revalidate',
+        contentDisposition: undefined,
         contentType: 'application/vnd.pmtiles',
         hasAbortSignal: true,
       },
@@ -3206,6 +3327,8 @@ describe('ZoneAlerteComputedService', () => {
         {
           abortSignal: expect.any(AbortSignal),
           cacheControl: 'public, max-age=0, must-revalidate',
+          contentDisposition:
+            'attachment; filename="zones_arretes_en_vigueur_2026-07-31.geojson"',
           contentType: 'application/geo+json',
         },
       ],
@@ -3596,6 +3719,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   let zoneAlerteService: {
     findByArreteRestriction: jest.Mock;
     findGeometriesByIds: jest.Mock;
+    findLegacyHistoricGeometriesByIds: jest.Mock;
     findOne: jest.Mock;
   };
   let dataSource: { query: jest.Mock };
@@ -3702,6 +3826,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
     zoneAlerteService = {
       findByArreteRestriction: jest.fn().mockResolvedValue([]),
       findGeometriesByIds: jest.fn(),
+      findLegacyHistoricGeometriesByIds: jest.fn(),
       findOne: jest.fn(),
     };
     dataSource = { query: jest.fn().mockResolvedValue([]) };
@@ -3822,6 +3947,65 @@ describe('ZoneAlerteComputedHistoricService', () => {
     expect(() => isHistoricEmptyStatisticsRangeEnabled('1')).toThrow(
       'must be true or false',
     );
+  });
+
+  it('loads legacy historic zones with a department-scoped source query', async () => {
+    const arrete = {
+      id: 42,
+      numero: 'DDT-42',
+      dateDebut: '2024-04-01',
+      dateFin: '2024-04-30',
+      dateSignature: '2024-03-31',
+    };
+    const restriction = {
+      id: 420,
+      niveauGravite: 'alerte',
+      arreteRestriction: arrete,
+      usages: [],
+    };
+    const zone = {
+      id: 101,
+      type: 'SUP',
+      departement: { code: '01' },
+      restrictions: [restriction],
+    };
+    arreteRestrictionService.findByDepartementAndDate.mockResolvedValue([
+      arrete,
+    ]);
+    arreteRestrictionService.findByDate.mockRejectedValue(
+      new Error('national source query must not run'),
+    );
+    zoneAlerteService.findByArreteRestriction.mockResolvedValue([zone]);
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
+      new Map([[101, '{"type":"Polygon","coordinates":[]}']]),
+    );
+
+    await expect(
+      service.findLegacyHistoricDepartmentZones('01', '2024-04-15'),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: 101,
+        departement: { code: '01' },
+        restrictions: [restriction],
+        restriction,
+        niveauGravite: 'alerte',
+        geom: { type: 'Polygon', coordinates: [] },
+      }),
+    ]);
+
+    expect(
+      arreteRestrictionService.findByDepartementAndDate,
+    ).toHaveBeenCalledWith(
+      '01',
+      expect.objectContaining({ _isAMomentObject: true }),
+    );
+    const [, queriedDate] =
+      arreteRestrictionService.findByDepartementAndDate.mock.calls[0];
+    expect(queriedDate.format('YYYY-MM-DD')).toBe('2024-04-15');
+    expect(arreteRestrictionService.findByDate).not.toHaveBeenCalled();
+    expect(zoneAlerteService.findByArreteRestriction).toHaveBeenCalledWith([
+      42,
+    ]);
   });
 
   it('uses the reference zone geometry when a historic restriction has no framework order', async () => {
@@ -4162,7 +4346,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
       .mockImplementation(async ({ outputPath }) => {
         await writeFile(outputPath, Buffer.from('PMTiles-empty'));
       });
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(new Map());
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
+      new Map(),
+    );
     arreteRestrictionService.findByDate.mockResolvedValue([{ id: 20958 }]);
     dataSource.query.mockImplementation(async (sql: string) =>
       sql.includes('zone_publication_source_state')
@@ -4280,6 +4466,214 @@ describe('ZoneAlerteComputedHistoricService', () => {
     }
   });
 
+  it('keeps the certified empty feature in a mixed legacy GeoJSON while excluding it from PMTiles', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-legacy-historic-mixed-empty-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest.spyOn(
+      emptyPmtiles,
+      'generateEmptyPmtiles',
+    );
+    const generatePmtiles = jest
+      .spyOn(pmtilesGeneration, 'generatePmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-mixed'));
+      });
+    const emptyGeometry = { type: 'MultiPolygon', coordinates: [] };
+    const renderedGeometry = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [0, 0],
+          [1, 0],
+          [1, 1],
+          [0, 0],
+        ],
+      ],
+    };
+    const zones = [
+      {
+        id: 7626,
+        type: 'SUP',
+        departement: { code: '18' },
+        restrictions: [{ niveauGravite: 'crise' }],
+        geom: emptyGeometry,
+      },
+      {
+        id: 10,
+        type: 'SUP',
+        departement: { code: '18' },
+        restrictions: [{ niveauGravite: 'alerte' }],
+        geom: renderedGeometry,
+      },
+    ] as any;
+    const features = [
+      {
+        type: 'Feature',
+        geometry: emptyGeometry,
+        properties: { id: 7626 },
+      },
+      {
+        type: 'Feature',
+        geometry: renderedGeometry,
+        properties: { id: 10 },
+      },
+    ];
+    const formatLegacyHistoricZones = jest
+      .spyOn(service as any, 'formatLegacyHistoricZones')
+      .mockResolvedValue({ features, zones });
+    const assertHistoricSourceCoverage = jest
+      .spyOn(service as any, 'assertHistoricSourceCoverage')
+      .mockResolvedValue(undefined);
+    const warn = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+
+    try {
+      await service.computeHistoricMaps(
+        moment('2022-06-18', 'YYYY-MM-DD'),
+        moment('2022-06-18', 'YYYY-MM-DD'),
+        '2022-06-17',
+        '2022-06-17',
+        '12',
+        '4',
+        '42',
+        '2022-06-18',
+        '9',
+      );
+
+      expect(generatePmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        inputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2022-06-18.geojson',
+        ),
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2022-06-18.pmtiles',
+        ),
+        expectedFeatureIds: ['10'],
+      });
+      expect(generateEmptyPmtiles).not.toHaveBeenCalled();
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString())).toEqual({
+        type: 'FeatureCollection',
+        features,
+      });
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions.mock.calls[0][0].map(
+          (zone) => zone.id,
+        ),
+      ).toEqual([7626, 10]);
+      expect(warn).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: 'legacy_historic_pmtiles_empty_geometries_excluded',
+          computedFor: '2022-06-18',
+          zoneIds: ['7626'],
+        }),
+      );
+    } finally {
+      warn.mockRestore();
+      assertHistoricSourceCoverage.mockRestore();
+      formatLegacyHistoricZones.mockRestore();
+      generatePmtiles.mockRestore();
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('generates empty PMTiles when the certified empty feature is the only legacy feature', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-legacy-historic-only-empty-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const generatePmtiles = jest.spyOn(pmtilesGeneration, 'generatePmtiles');
+    const emptyGeometry = { type: 'MultiPolygon', coordinates: [] };
+    const zone = {
+      id: 7626,
+      type: 'SUP',
+      departement: { code: '18' },
+      restrictions: [{ niveauGravite: 'crise' }],
+      geom: emptyGeometry,
+    } as any;
+    const feature = {
+      type: 'Feature',
+      geometry: emptyGeometry,
+      properties: { id: 7626 },
+    };
+    const formatLegacyHistoricZones = jest
+      .spyOn(service as any, 'formatLegacyHistoricZones')
+      .mockResolvedValue({ features: [feature], zones: [zone] });
+    const assertHistoricSourceCoverage = jest
+      .spyOn(service as any, 'assertHistoricSourceCoverage')
+      .mockResolvedValue(undefined);
+    dataSource.query.mockImplementation(async (sql: string) =>
+      sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
+    );
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+
+    try {
+      await service.computeHistoricMaps(
+        moment('2022-06-18', 'YYYY-MM-DD'),
+        moment('2022-06-18', 'YYYY-MM-DD'),
+        '2022-06-17',
+        '2022-06-17',
+        '12',
+        '4',
+        '42',
+        '2022-06-18',
+        '9',
+      );
+
+      expect(generateEmptyPmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2022-06-18.pmtiles',
+        ),
+      });
+      expect(generatePmtiles).not.toHaveBeenCalled();
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString())).toEqual({
+        type: 'FeatureCollection',
+        features: [feature],
+      });
+      expect(
+        statisticCommuneService.computeCommuneStatisticsRestrictions.mock.calls[0][0].map(
+          (candidate) => candidate.id,
+        ),
+      ).toEqual([7626]);
+    } finally {
+      assertHistoricSourceCoverage.mockRestore();
+      formatLegacyHistoricZones.mockRestore();
+      generatePmtiles.mockRestore();
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('batches certified empty legacy days only when the dedicated flag is enabled', async () => {
     process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED = 'true';
     process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS = '2';
@@ -4292,7 +4686,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
       .mockImplementation(async ({ outputPath }) => {
         await writeFile(outputPath, Buffer.from('PMTiles-empty'));
       });
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(new Map());
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
+      new Map(),
+    );
     arreteRestrictionService.findByDate.mockResolvedValue([]);
     dataSource.query.mockImplementation(async (sql: string) =>
       sql.includes('zone_publication_source_state') ? [{ revision: '42' }] : [],
@@ -4710,6 +5106,164 @@ describe('ZoneAlerteComputedHistoricService', () => {
       ]);
     } finally {
       generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('excludes non-renderable computed historic polygons from PMTiles integrity', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-historic-non-renderable-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generatePmtiles = jest
+      .spyOn(pmtilesGeneration, 'generatePmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-computed'));
+      });
+    const warning = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const collapsedFeature = {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.000001, 47],
+            [2, 47.000001],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 10 },
+    };
+    const renderableFeature = {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.01, 47],
+            [2, 47.01],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 30 },
+    };
+    zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).formatComputedHistoricZones = jest
+      .fn()
+      .mockResolvedValue([collapsedFeature, renderableFeature]);
+    (service as any).computeGeoJson =
+      ZoneAlerteComputedHistoricService.prototype.computeGeoJson.bind(service);
+
+    try {
+      await service.computeGeoJson(moment('2026-08-20', 'YYYY-MM-DD'), []);
+
+      expect(generatePmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        inputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2026-08-20.geojson',
+        ),
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2026-08-20.pmtiles',
+        ),
+        expectedFeatureIds: ['30'],
+        optionalFeatureIds: ['10'],
+        maximumZoom: 12,
+      });
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString()).features).toEqual(
+        [collapsedFeature, renderableFeature],
+      );
+      expect(warning).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: 'computed_historic_pmtiles_non_renderable_geometries_excluded',
+          computedFor: '2026-08-20',
+          zoneIds: ['10'],
+        }),
+      );
+    } finally {
+      warning.mockRestore();
+      generatePmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('generates empty PMTiles when every computed historic polygon is non-renderable', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-historic-all-non-renderable-'),
+    );
+    const uploadFile = jest.fn().mockResolvedValue(undefined);
+    const generatePmtiles = jest.spyOn(pmtilesGeneration, 'generatePmtiles');
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const warning = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const collapsedFeature = {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.000001, 47],
+            [2, 47.000001],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 10 },
+    };
+    zoneAlerteComputedHistoricRepository.find.mockResolvedValue([]);
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+    (service as any).s3Service = { uploadFile };
+    (service as any).formatComputedHistoricZones = jest
+      .fn()
+      .mockResolvedValue([collapsedFeature]);
+    (service as any).computeGeoJson =
+      ZoneAlerteComputedHistoricService.prototype.computeGeoJson.bind(service);
+
+    try {
+      await service.computeGeoJson(moment('2026-08-20', 'YYYY-MM-DD'), []);
+
+      expect(generatePmtiles).not.toHaveBeenCalled();
+      expect(generateEmptyPmtiles).toHaveBeenCalledWith({
+        workingDirectory: directory,
+        outputPath: join(
+          directory,
+          'zones_arretes_en_vigueur_2026-08-20.pmtiles',
+        ),
+      });
+      const geojsonUpload = uploadFile.mock.calls.find(
+        ([file, prefix]) =>
+          prefix === 'geojson/' && file.originalname.endsWith('.geojson'),
+      );
+      expect(JSON.parse(geojsonUpload?.[0].buffer.toString()).features).toEqual(
+        [collapsedFeature],
+      );
+    } finally {
+      warning.mockRestore();
+      generateEmptyPmtiles.mockRestore();
+      generatePmtiles.mockRestore();
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -5210,7 +5764,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   });
 
   it('formats legacy zones with one geometry batch and the applicable restriction', async () => {
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
       new Map([[12, '{"type":"Polygon","coordinates":[[[0,0],[1,0],[0,0]]]}']]),
     );
     const inactiveRestriction = {
@@ -5255,7 +5809,9 @@ describe('ZoneAlerteComputedHistoricService', () => {
       moment('2023-06-01'),
     );
 
-    expect(zoneAlerteService.findGeometriesByIds).toHaveBeenCalledWith([12]);
+    expect(
+      zoneAlerteService.findLegacyHistoricGeometriesByIds,
+    ).toHaveBeenCalledWith([12], LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS);
     expect(zoneAlerteService.findOne).not.toHaveBeenCalled();
     expect(result.zones[0].restrictions).toEqual([applicableRestriction]);
     expect(result.features[0]).toEqual(
@@ -5276,8 +5832,35 @@ describe('ZoneAlerteComputedHistoricService', () => {
     );
   });
 
+  it('preserves the certified empty MultiPolygon in legacy history', async () => {
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
+      new Map([[7626, '{"type":"MultiPolygon","coordinates":[]}']]),
+    );
+    const restriction = {
+      id: 2,
+      niveauGravite: 'alerte',
+      arreteRestriction: { id: 99 },
+      usages: [],
+    };
+
+    const result = await (service as any).formatLegacyHistoricZones(
+      [{ id: 7626, restrictions: [restriction] }],
+      [99],
+      moment('2022-06-18'),
+    );
+
+    expect(
+      zoneAlerteService.findLegacyHistoricGeometriesByIds,
+    ).toHaveBeenCalledWith([7626], LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS);
+    expect(result.features[0].geometry).toEqual({
+      type: 'MultiPolygon',
+      coordinates: [],
+    });
+    expect(result.zones[0].geom).toEqual(result.features[0].geometry);
+  });
+
   it('selects the newest active restriction regardless of input order or severity', async () => {
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
       new Map([
         [12, '{"type":"Polygon","coordinates":[]}'],
         [13, '{"type":"Polygon","coordinates":[]}'],
@@ -5325,7 +5908,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   });
 
   it('uses the signature date to choose between restrictions with the same start date', async () => {
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
       new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
     );
     const result = await (service as any).formatLegacyHistoricZones(
@@ -5364,7 +5947,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   });
 
   it('uses the decree ID to break equal start and signature dates', async () => {
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
       new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
     );
     const result = await (service as any).formatLegacyHistoricZones(
@@ -5403,7 +5986,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   });
 
   it('accepts a loaded empty usage list in legacy history', async () => {
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
       new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
     );
     const zone = {
@@ -5428,7 +6011,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
   });
 
   it('treats an omitted legacy usage relation as an empty list', async () => {
-    zoneAlerteService.findGeometriesByIds.mockResolvedValue(
+    zoneAlerteService.findLegacyHistoricGeometriesByIds.mockResolvedValue(
       new Map([[12, '{"type":"Polygon","coordinates":[]}']]),
     );
     const zone = {

@@ -17,11 +17,11 @@ import { useRefDataStore } from '../../store/refData';
 import { BassinVersant } from '../../dto/bassinVersant.dto';
 import { Region } from '../..//dto/region.dto';
 import { Departement } from '../..//dto/departement.dto';
-import html2canvas from 'html2canvas';
 import moment from 'moment/moment';
 import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
+import { downloadElementAsPng } from '../../utils/png-download';
 
 ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, LineController, TimeScale, ArcElement, Colors, Filler);
 
@@ -30,6 +30,8 @@ const loading = ref(false);
 const chartLineData = ref(null);
 const dataArea = ref(null);
 const computeDisabled = ref(true);
+const downloadingPng = ref(false);
+const pngDownloadError = ref(false);
 
 const dateMin = ref('2013-01-01');
 const tmp = new Date();
@@ -222,14 +224,23 @@ const chartLineOptions: ChartOptions = {
 };
 
 async function downloadGraph() {
-  html2canvas(screenshotZone.value, { scale: 2 }).then((canvas) => {
-    const content = canvas.toDataURL('image/png');
+  if (downloadingPng.value) {
+    return;
+  }
 
-    const a = document.createElement('a');
-    a.href = content.replace('image/png', 'image/octet-stream');
-    a.download = `graphique_surface_${territoire.value.text}_${formData.dateDebut}_${formData.dateFin}_${formData.typeEau}.png`;
-    a.click();
-  });
+  downloadingPng.value = true;
+  pngDownloadError.value = false;
+  try {
+    await downloadElementAsPng(
+      screenshotZone.value,
+      `graphique_surface_${territoire.value.text}_${formData.dateDebut}_${formData.dateFin}_${formData.typeEau}.png`,
+      { scale: 2 },
+    );
+  } catch {
+    pngDownloadError.value = true;
+  } finally {
+    downloadingPng.value = false;
+  }
 }
 
 watch(() => refDataStore.departements, () => {
@@ -353,10 +364,23 @@ watch(() => refDataStore.departements, () => {
   </div>
   <template v-if="!loading">
     <div class="text-align-right fr-mt-1w">
-      <DsfrButton @click="downloadGraph()">
+      <DsfrButton
+        :disabled="downloadingPng"
+        :aria-busy="downloadingPng ? 'true' : undefined"
+        @click="downloadGraph()"
+      >
         Télécharger le graphique en .png
       </DsfrButton>
     </div>
+    <DsfrAlert
+      v-if="pngDownloadError"
+      title="Téléchargement impossible"
+      class="fr-mt-2w"
+      type="error"
+      :closeable="false"
+    >
+      La génération de l’image PNG a échoué. Veuillez réessayer.
+    </DsfrAlert>
 
     <DonneesAreaTable class="fr-mt-4w"
                       :dataArea="dataArea"

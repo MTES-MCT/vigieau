@@ -8,7 +8,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { FindManyOptions, Repository } from 'typeorm';
 import { Departement } from '@shared/entities/departement.entity';
 import { VigieauLogger } from '../logger/vigieau.logger';
-import { DepartementDto } from './dto/departement.dto';
+import {
+  DepartementDto,
+  type DepartementAvailabilityStatus,
+  type DepartementZoneAvailabilityDto,
+} from './dto/departement.dto';
 import { Statistic } from '@shared/entities/statistic.entity';
 import { Utils } from '../core/utils';
 import { max } from 'lodash';
@@ -18,6 +22,40 @@ import { ZonePublication } from '@shared/entities/zone_publication.entity';
 import { ZonePublicationAggregate } from '@shared/entities/zone_publication_aggregate.entity';
 import { type ZonePublicationAggregatePayload } from '@shared/zone_publication_materialization';
 import { isUUID } from 'class-validator';
+import { getStatisticPublicationExpectation } from '../data/statistic-publication-freshness';
+
+type DepartementAvailabilityRow = {
+  sourcePublicRevision: string | null;
+  departmentCode: string | null;
+  zoneType: string | null;
+  status: DepartementAvailabilityStatus | null;
+  asOf: Date | string | null;
+  availabilityPublicRevision: string | null;
+  officialUrl: string | null;
+};
+
+type DepartementAvailabilityContext = {
+  sourcePublicRevision: string | null;
+  certifications: Map<string, DepartementAvailabilityRow>;
+};
+
+const OFFICIAL_AEP_URLS: Readonly<Record<string, string>> = Object.freeze({
+  '49': 'https://www.maine-et-loire.gouv.fr/Actions-de-l-Etat/Eau-et-Environnement/Eau-et-milieux-aquatiques/Les-restrictions-en-eau-liees-a-la-secheresse',
+  '79': 'https://www.deux-sevres.gouv.fr/Publications/Annonces-et-avis/Arretes-de-restriction-d-eau-prelevee-a-partir-du-reseau-d-eau-potable',
+});
+
+const RESTRICTION_LEVELS = new Set([
+  'vigilance',
+  'alerte',
+  'alerte_renforcee',
+  'crise',
+]);
+
+export const getCurrentDepartementDateKeys = (now = new Date()): Set<string> =>
+  new Set([
+    now.toISOString().slice(0, 10),
+    getStatisticPublicationExpectation(now).today,
+  ]);
 
 @Injectable()
 export class DepartementsService {
@@ -104,6 +142,37 @@ export class DepartementsService {
       region,
       departement,
     );
+  }
+
+  async situationByDepartementWithAvailability(
+    date?: string,
+    bassinVersant?: string,
+    region?: string,
+    departement?: string,
+    publicationId?: string,
+  ): Promise<DepartementDto[]> {
+    const situation = await this.situationByDepartement(
+      date,
+      bassinVersant,
+      region,
+      departement,
+      publicationId,
+    );
+    if (!publicationId && date && !getCurrentDepartementDateKeys().has(date)) {
+      return situation;
+    }
+
+    const context = await this.loadDepartementAvailability(publicationId);
+    return situation.map((department) => ({
+      ...department,
+      availability: {
+        AEP: this.buildDepartementAepAvailability(
+          department,
+          context.sourcePublicRevision,
+          context.certifications.get(`${department.code}:AEP`),
+        ),
+      },
+    }));
   }
 
   private filterSituation(
@@ -388,6 +457,120 @@ export class DepartementsService {
         niveauGraviteAepMax: situation?.aep ?? null,
       };
     });
+  }
+
+  private async loadDepartementAvailability(
+    publicationId?: string,
+  ): Promise<DepartementAvailabilityContext> {
+    if (!this.zonePublicationRepository) {
+      return { sourcePublicRevision: null, certifications: new Map() };
+    }
+    try {
+      const rows = (await this.zonePublicationRepository.query(
+        `
+          SELECT
+            CASE
+              WHEN $1::uuid IS NULL THEN source."publicRevision"::text
+              ELSE publication."sourceRevision"::text
+            END AS "sourcePublicRevision",
+            availability."departmentCode",
+            availability."zoneType",
+            availability."status",
+            availability."asOf",
+            availability."publicRevision"::text AS "availabilityPublicRevision",
+            availability."officialUrl"
+          FROM "zone_publication_source_state" source
+          LEFT JOIN "zone_type_availability" availability ON true
+          LEFT JOIN "zone_publication" publication
+            ON publication."id" = $1::uuid
+          WHERE source."id" = 1
+        `,
+        [publicationId ?? null],
+      )) as DepartementAvailabilityRow[];
+      return {
+        sourcePublicRevision: rows[0]?.sourcePublicRevision ?? null,
+        certifications: new Map(
+          rows
+            .filter((row) => row.departmentCode && row.zoneType)
+            .map((row) => [`${row.departmentCode}:${row.zoneType}`, row]),
+        ),
+      };
+    } catch (error) {
+      this.logger.warn(
+        `DEPARTMENT DATA AVAILABILITY UNAVAILABLE: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { sourcePublicRevision: null, certifications: new Map() };
+    }
+  }
+
+  private buildDepartementAepAvailability(
+    department: DepartementDto,
+    sourcePublicRevision: string | null,
+    certification?: DepartementAvailabilityRow,
+  ): DepartementZoneAvailabilityDto {
+    const officialUrl =
+      certification?.officialUrl ?? OFFICIAL_AEP_URLS[department.code] ?? null;
+    const certificationAsOf = this.toIsoString(certification?.asOf);
+    const unavailable = (): DepartementZoneAvailabilityDto => ({
+      status: 'unavailable',
+      asOf: certificationAsOf,
+      sourceRevision: sourcePublicRevision,
+      officialUrl,
+    });
+
+    if (!sourcePublicRevision) {
+      return unavailable();
+    }
+    const certificationApplies = this.publicRevisionIsAtOrBefore(
+      certification?.availabilityPublicRevision,
+      sourcePublicRevision,
+    );
+    if (certification && !certificationApplies) {
+      return unavailable();
+    }
+    if (certificationApplies && certification?.status === 'confirmed_none') {
+      return {
+        status: 'confirmed_none',
+        asOf: certificationAsOf,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+      };
+    }
+    if (certificationApplies && certification?.status !== 'available') {
+      return unavailable();
+    }
+    if (RESTRICTION_LEVELS.has(department.niveauGraviteAepMax)) {
+      return {
+        status: 'available',
+        asOf: certificationAsOf,
+        sourceRevision: sourcePublicRevision,
+        officialUrl,
+      };
+    }
+    return unavailable();
+  }
+
+  private publicRevisionIsAtOrBefore(
+    certificationRevision?: string | null,
+    sourceRevision?: string | null,
+  ): boolean {
+    if (
+      !certificationRevision ||
+      !sourceRevision ||
+      !/^\d+$/.test(certificationRevision) ||
+      !/^\d+$/.test(sourceRevision)
+    ) {
+      return false;
+    }
+    return BigInt(certificationRevision) <= BigInt(sourceRevision);
+  }
+
+  private toIsoString(value?: Date | string | null): string | null {
+    if (!value) {
+      return null;
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
   }
 
   /**

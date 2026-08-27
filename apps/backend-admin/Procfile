@@ -1,2 +1,5 @@
 web: npm run start:prod
 clock: npm run start:clock
+currentzoneworker: npm run start:current-zone-worker
+historicbackfillworker: npm run start:historic-backfill-worker
+historicartifactworker: npm run start:historic-artifact-worker

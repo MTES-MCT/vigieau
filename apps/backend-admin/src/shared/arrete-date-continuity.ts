@@ -28,6 +28,9 @@ export interface ArreteComputationState {
   statut: StatutArreteCadre;
 }
 
+export interface ArretePublicationState
+  extends ArreteComputationState, ArreteEndDateState {}
+
 export interface ArreteMutationVersion {
   updated_at?: Date | number | string | null;
 }
@@ -162,6 +165,19 @@ export function hasArreteComputationStateChanged(
     (before.dateFin ? normalizeCivilDate(before.dateFin) : null) !==
       (after.dateFin ? normalizeCivilDate(after.dateFin) : null) ||
     before.statut !== after.statut
+  );
+}
+
+export function hasArretePublicationStateChanged(
+  before: ArretePublicationState,
+  after: ArretePublicationState,
+): boolean {
+  return (
+    hasArreteComputationStateChanged(before, after) ||
+    !areCivilDatesEqual(before.dateFinSaisie, after.dateFinSaisie) ||
+    (before.dateFinCalculee === true) !== (after.dateFinCalculee === true) ||
+    (before.dateFinSaisieConnue !== false) !==
+      (after.dateFinSaisieConnue !== false)
   );
 }
 

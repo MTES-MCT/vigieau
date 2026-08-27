@@ -13,6 +13,7 @@ import {
   createFullCommunePopupContent,
   createRestrictionsPopupContent,
 } from './map-popup-content';
+import type { RestrictionPopupEmptyState } from './map-popup-content';
 import { openAccessibleTallyPopup } from './tally-popup';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
@@ -280,6 +281,7 @@ const index = {
     showRestrictionsBtn: boolean,
     address?: Address,
     geo?: Geo,
+    emptyState?: RestrictionPopupEmptyState,
   ): HTMLElement {
     let addressName = '';
     if (address?.properties?.label) {
@@ -303,6 +305,8 @@ const index = {
       entries,
       Boolean(showRestrictionsBtn && pmtilesData),
       addressName,
+      undefined,
+      emptyState,
     );
   },
 

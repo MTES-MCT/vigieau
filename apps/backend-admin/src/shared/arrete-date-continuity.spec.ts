@@ -5,6 +5,7 @@ import {
   getPublicationEndDateProvenance,
   getReconciledArreteLifecycleStatus,
   hasArreteComputationStateChanged,
+  hasArretePublicationStateChanged,
   normalizeCivilDate,
   resolveArreteEndDate,
   UnknownArreteEndDateProvenanceError,
@@ -305,6 +306,29 @@ describe('arrete date continuity', () => {
         hasArreteComputationStateChanged(
           { dateDebut: null, dateFin: null, statut: 'a_valider' },
           { dateDebut: '2026-08-05', dateFin: null, statut: 'a_venir' },
+        ),
+      ).toBe(true);
+    });
+
+    it('detects a provenance-only public change', () => {
+      expect(
+        hasArretePublicationStateChanged(
+          {
+            dateDebut: '2026-08-01',
+            dateFin: '2026-08-04',
+            dateFinSaisie: '2026-08-10',
+            dateFinCalculee: true,
+            dateFinSaisieConnue: true,
+            statut: 'publie',
+          },
+          {
+            dateDebut: '2026-08-01',
+            dateFin: '2026-08-04',
+            dateFinSaisie: '2026-08-12',
+            dateFinCalculee: true,
+            dateFinSaisieConnue: true,
+            statut: 'publie',
+          },
         ),
       ).toBe(true);
     });

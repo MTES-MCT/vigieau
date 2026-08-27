@@ -138,6 +138,8 @@ async function runSmoke({
     }
     if (url.pathname === "/legacy.geojson") {
       response.writeHead(206, {
+        "content-disposition":
+          'attachment; filename="zones_arretes_en_vigueur.geojson"',
         "content-type": "application/geo+json",
         "last-modified": new Date(artifactLastModified).toUTCString(),
       });

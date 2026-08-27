@@ -20,6 +20,9 @@ export interface RetryScheduler {
 interface RetrySchedulerOptions {
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
+  maxDelayMs?: number;
+  jitterRatio?: number;
+  randomFn?: () => number;
 }
 
 export const createAbortError = (): Error => {
@@ -38,23 +41,33 @@ export const createRetryScheduler = (
 ): RetryScheduler => {
   const setTimeoutFn = options.setTimeoutFn ?? setTimeout;
   const clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout;
+  const maxDelayMs = options.maxDelayMs ?? delayMs;
+  const jitterRatio = options.jitterRatio ?? 0;
+  const randomFn = options.randomFn ?? Math.random;
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  let retryAttempt = 0;
 
   const clear = (): void => {
     if (timeout !== null) {
       clearTimeoutFn(timeout);
       timeout = null;
     }
+    retryAttempt = 0;
   };
 
   const schedule = (): void => {
     if (timeout !== null) {
       return;
     }
+    const backoffDelayMs = Math.min(maxDelayMs, delayMs * 2 ** retryAttempt);
+    const scheduledDelayMs = Math.round(
+      backoffDelayMs * (1 - jitterRatio + randomFn() * jitterRatio),
+    );
+    retryAttempt += 1;
     timeout = setTimeoutFn(() => {
       timeout = null;
       task();
-    }, delayMs);
+    }, scheduledDelayMs);
   };
 
   return { clear, schedule };

@@ -1,12 +1,25 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import {
   isZonePublicationEnabled,
+  sourceRevisionColumn,
   ZONE_PUBLICATION_MATERIALIZATION_VERSION,
 } from './zone_publication.config';
 import type { ZonePublicationRollbackResult } from './zone_publication.service';
 import { unwrapTypeOrmDmlReturningRows } from './typeorm-query-result';
+import {
+  acquireHistoricMapPublicationSharedFence,
+  certifyZoneTypeAvailability,
+  enqueueCurrentZoneRecomputeTarget,
+  type PublicZoneType,
+  ZoneAvailabilityCertificationSupersededError,
+} from './public-mutation';
 
 @Injectable()
 export class ZonePublicationOperatorService {
@@ -14,6 +27,188 @@ export class ZonePublicationOperatorService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
   ) {}
+
+  async setPublicRevisionMode(input: {
+    mode: 'compatibility' | 'separated';
+    apply?: boolean;
+  }): Promise<{
+    status: 'already_configured' | 'applied' | 'dry_run';
+    mode: 'compatibility' | 'separated';
+    revision: string;
+    publicRevision: string;
+    queuedDepartmentCount: number;
+  }> {
+    return this.dataSource.transaction('SERIALIZABLE', async (manager) => {
+      if (input.apply) {
+        await acquireHistoricMapPublicationSharedFence(manager);
+      }
+      const [state] = await manager.query(`
+        SELECT
+          "revision"::text AS "revision",
+          "publicRevision"::text AS "publicRevision",
+          "legacyDualWrite"
+        FROM "zone_publication_source_state"
+        WHERE "id" = 1
+        ${input.apply ? 'FOR UPDATE' : ''}
+      `);
+      if (!state) {
+        throw new NotFoundException(
+          "L'état de révision de la publication est introuvable.",
+        );
+      }
+      const currentMode =
+        state.legacyDualWrite === true ? 'compatibility' : 'separated';
+      const revisionsAligned =
+        String(state.revision) === String(state.publicRevision);
+      const [departments] = (await manager.query(
+        `SELECT array_agg("id" ORDER BY "id") AS ids FROM "departement"`,
+      )) as Array<{ ids: number[] | null }>;
+      const departmentIds = (departments?.ids ?? []).map(Number);
+      const base = {
+        mode: input.mode,
+        revision: String(state.revision),
+        publicRevision: String(state.publicRevision),
+        queuedDepartmentCount: 0,
+      };
+      if (
+        currentMode === input.mode &&
+        (input.mode !== 'compatibility' || revisionsAligned)
+      ) {
+        return { ...base, status: 'already_configured' as const };
+      }
+      if (!input.apply) {
+        return { ...base, status: 'dry_run' as const };
+      }
+
+      const enableCompatibility = input.mode === 'compatibility';
+      const [updated] = unwrapTypeOrmDmlReturningRows<{
+        revision: string;
+        publicRevision: string;
+      }>(
+        await manager.query(
+          `
+          UPDATE "zone_publication_source_state"
+          SET
+            "legacyDualWrite" = $1,
+            "revision" = CASE
+              WHEN $1 THEN GREATEST("publicRevision", "revision")
+              ELSE "revision"
+            END,
+            "publicRevision" = CASE
+              WHEN $1 THEN GREATEST("publicRevision", "revision")
+              ELSE "publicRevision"
+            END,
+            "updatedAt" = now()
+          WHERE "id" = 1
+            AND (
+              "legacyDualWrite" IS DISTINCT FROM $1
+              OR ($1 AND "publicRevision" IS DISTINCT FROM "revision")
+            )
+          RETURNING
+            "revision"::text AS "revision",
+            "publicRevision"::text AS "publicRevision"
+          `,
+          [enableCompatibility],
+        ),
+      );
+      if (!updated) {
+        throw new ConflictException(
+          'Le mode de révision publique a changé pendant la bascule.',
+        );
+      }
+      await enqueueCurrentZoneRecomputeTarget(
+        manager,
+        departmentIds,
+        String(updated.publicRevision),
+        enableCompatibility
+          ? 'ROLLBACK COMPATIBILITE REVISION PUBLIQUE'
+          : 'SEPARATION REVISION PUBLIQUE',
+      );
+      return {
+        status: 'applied',
+        mode: input.mode,
+        revision: String(updated.revision),
+        publicRevision: String(updated.publicRevision),
+        queuedDepartmentCount: departmentIds.length,
+      };
+    });
+  }
+
+  async confirmNoAvailableZone(input: {
+    departmentCode: string;
+    zoneType: PublicZoneType;
+    publicRevision: string;
+    officialUrl?: string;
+    asOf?: string;
+  }): Promise<{
+    departmentCode: string;
+    zoneType: PublicZoneType;
+    status: 'confirmed_none';
+    publicRevision: string;
+  }> {
+    const departmentCode = input.departmentCode.trim().toUpperCase();
+    if (!/^(?:2A|2B|\d{2,3})$/.test(departmentCode)) {
+      throw new BadRequestException('Code département invalide.');
+    }
+    const officialUrl = input.officialUrl?.trim();
+    if (officialUrl) {
+      let parsedOfficialUrl: URL;
+      try {
+        parsedOfficialUrl = new URL(officialUrl);
+      } catch {
+        throw new BadRequestException('URL officielle invalide.');
+      }
+      if (parsedOfficialUrl.protocol !== 'https:') {
+        throw new BadRequestException(
+          "L'URL officielle doit utiliser le protocole HTTPS.",
+        );
+      }
+    }
+    const asOf = input.asOf ? new Date(input.asOf) : new Date();
+    if (Number.isNaN(asOf.getTime())) {
+      throw new BadRequestException('Date de certification invalide.');
+    }
+    return this.dataSource.transaction('SERIALIZABLE', async (manager) => {
+      const [departement] = await manager.query(
+        `
+          SELECT "id", "code"
+          FROM "departement"
+          WHERE "code" = $1
+          FOR SHARE
+        `,
+        [departmentCode],
+      );
+      if (!departement) {
+        throw new NotFoundException(
+          `Département ${departmentCode} introuvable.`,
+        );
+      }
+      try {
+        await certifyZoneTypeAvailability(
+          manager,
+          Number(departement.id),
+          input.zoneType,
+          'confirmed_none',
+          input.publicRevision,
+          officialUrl,
+          asOf,
+        );
+      } catch (error) {
+        if (error instanceof ZoneAvailabilityCertificationSupersededError) {
+          throw new ConflictException(
+            `La révision publique ${input.publicRevision} a été remplacée.`,
+          );
+        }
+        throw error;
+      }
+      return {
+        departmentCode: departement.code,
+        zoneType: input.zoneType,
+        status: 'confirmed_none',
+        publicRevision: input.publicRevision,
+      };
+    });
+  }
 
   async getOperationalState(): Promise<Record<string, unknown>> {
     const leaseSeconds = this.readPositiveInteger(
@@ -27,7 +222,7 @@ export class ZonePublicationOperatorService {
     const [state] = await this.dataSource.query(
       `
         SELECT
-          source."revision" AS "sourceRevision",
+          ${sourceRevisionColumn('source')} AS "sourceRevision",
           state."updatedAt" AS "stateUpdatedAt",
           state."candidateRequestedAt" AS "candidateRequestedAt",
           state."automaticPublishingPaused" AS "automaticPublishingPaused",
@@ -255,7 +450,7 @@ export class ZonePublicationOperatorService {
       const [state] = await manager.query(`
         SELECT
           publication_state.*,
-          source_state."revision" AS "currentSourceRevision",
+          ${sourceRevisionColumn('source_state')} AS "currentSourceRevision",
           statistic_state."historicDirtyFrom"::text AS "historicDirtyFrom",
           statistic_state."historicDirtyThrough"::text AS "historicDirtyThrough"
         FROM "zone_publication_state" publication_state

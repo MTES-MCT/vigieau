@@ -1,5 +1,4 @@
 import { DataSource } from 'typeorm';
-import { Config } from '@shared/entities/config.entity';
 import { HistoricCursorGeneration1786032000000 } from '../../../backend-admin/src/migrations/1786032000000-HistoricCursorGeneration';
 import { HistoricCursorProgress1786132800000 } from '../../../backend-admin/src/migrations/1786132800000-HistoricCursorProgress';
 import { HistoricDepartmentCheckpoint1786219200000 } from '../../../backend-admin/src/migrations/1786219200000-HistoricDepartmentCheckpoint';
@@ -10,6 +9,17 @@ import { StatisticCacheArtifactService } from './statistic-cache-artifact.servic
 
 const postgresUrl = process.env.STATISTIC_CACHE_ARTIFACT_POSTGRES_URL;
 const describeWithPostgres = postgresUrl ? describe : describe.skip;
+
+type HistoricConfigRepairProjection = {
+  id: number;
+  computeMapDate: string | null;
+  computeMapGeneration: string;
+  computeMapUpdatedAt: Date | null;
+  computeStatsDate: string | null;
+  computeStatsGeneration: string;
+  computeStatsUpdatedAt: Date | null;
+  historicComputeEpoch: string;
+};
 
 describeWithPostgres(
   'Historic config schema drift recovery on PostgreSQL',
@@ -129,6 +139,12 @@ describeWithPostgres(
         'StatisticCachePublication1786744800000',
       ]);
       await legacyDataSource.query(`
+        ALTER TABLE "statistic_cache_publication"
+          ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1;
+        ALTER TABLE "statistic_cache_state"
+          ADD COLUMN "candidatePublicationId" uuid
+      `);
+      await legacyDataSource.query(`
       INSERT INTO "historic_department_checkpoint" (
         "computedFor", "departementId", "historicComputeEpoch",
         "sourceRevision", "materializationVersion", "inputSignature",
@@ -155,7 +171,7 @@ describeWithPostgres(
 
       dataSource = await new DataSource({
         ...dataSourceOptions,
-        entities: [Config],
+        entities: [],
         migrations: [
           ...historicMigrations,
           HistoricConfigSchemaRepair1786831200000,
@@ -173,9 +189,29 @@ describeWithPostgres(
         artifactService,
       );
 
-      await expect(
-        dataSource.getRepository(Config).findOneBy({ id: 1 }),
-      ).rejects.toThrow(/computeMapGeneration/);
+      const readHistoricConfig = async () => {
+        const rows: HistoricConfigRepairProjection[] = await dataSource.query(`
+          SELECT
+            "id",
+            "computeMapDate"::text AS "computeMapDate",
+            "computeMapGeneration"::text AS "computeMapGeneration",
+            "computeMapUpdatedAt",
+            "computeStatsDate"::text AS "computeStatsDate",
+            "computeStatsGeneration"::text AS "computeStatsGeneration",
+            "computeStatsUpdatedAt",
+            "historicComputeEpoch"::text AS "historicComputeEpoch"
+          FROM "config"
+          WHERE "id" = 1
+        `);
+        if (rows.length !== 1) {
+          throw new Error('Historic config singleton is unavailable');
+        }
+        return rows[0];
+      };
+
+      await expect(readHistoricConfig()).rejects.toThrow(
+        /computeMapGeneration/,
+      );
       await expect(
         (runtimeService as any).readPublicationState(dataSource),
       ).rejects.toThrow(/historicComputeEpoch/);
@@ -235,9 +271,7 @@ describeWithPostgres(
           columnDefault: '0',
         },
       ]);
-      await expect(
-        dataSource.getRepository(Config).findOneByOrFail({ id: 1 }),
-      ).resolves.toMatchObject({
+      await expect(readHistoricConfig()).resolves.toMatchObject({
         computeMapDate: '2011-11-14',
         computeStatsDate: '2011-11-14',
         computeMapGeneration: '0',
@@ -287,9 +321,7 @@ describeWithPostgres(
           WHERE "id" = 1
       `);
       await runRepair();
-      await expect(
-        dataSource.getRepository(Config).findOneByOrFail({ id: 1 }),
-      ).resolves.toMatchObject({
+      await expect(readHistoricConfig()).resolves.toMatchObject({
         computeMapGeneration: '0',
         computeStatsGeneration: '0',
         historicComputeEpoch: '41',
@@ -304,9 +336,9 @@ describeWithPostgres(
         WHERE "id" = 1
       `);
       await runRepair();
-      await expect(
-        dataSource.getRepository(Config).findOneByOrFail({ id: 1 }),
-      ).resolves.toMatchObject({ historicComputeEpoch: '2' });
+      await expect(readHistoricConfig()).resolves.toMatchObject({
+        historicComputeEpoch: '2',
+      });
       const [partialRepairColumn] = await dataSource.query(`
         SELECT
           "is_nullable" AS "isNullable",
@@ -323,9 +355,7 @@ describeWithPostgres(
 
       await dataSource.query('DELETE FROM "config"');
       await runRepair();
-      await expect(
-        dataSource.getRepository(Config).findOneByOrFail({ id: 1 }),
-      ).resolves.toMatchObject({
+      await expect(readHistoricConfig()).resolves.toMatchObject({
         id: 1,
         computeMapGeneration: '0',
         computeStatsGeneration: '0',

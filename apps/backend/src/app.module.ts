@@ -6,7 +6,6 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { LoggerInterceptor } from './core/interceptor/logger.interceptor';
-import { DataSource } from 'typeorm';
 import { TypeOrmModule, TypeOrmModuleAsyncOptions } from '@nestjs/typeorm';
 import { ZonesModule } from './zones/zones.module';
 import { DepartementsModule } from './departements/departements.module';
@@ -20,6 +19,10 @@ import { DataModule } from './data/data.module';
 import path from 'path';
 import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { HealthModule } from './health/health.module';
+import {
+  createDatabaseDataSource,
+  createDatabaseOptions,
+} from './database-options';
 
 const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 
@@ -33,41 +36,8 @@ const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
     TypeOrmModule.forRootAsync(<TypeOrmModuleAsyncOptions>{
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => {
-        const user = configService.get<string>('DATABASE_USER');
-        const password = configService.get<string>('DATABASE_PASSWORD');
-        const host = configService.get<string>('DATABASE_HOST');
-        const port = configService.get<string>('DATABASE_PORT');
-        const dbName = configService.get<string>('DATABASE_NAME');
-        const sslCert = configService.get('DATABASE_SSL_CERT'); // Peut être undefined
-        const queryParam = sslCert ? 'sslmode=require' : '';
-        const url = `postgres://${user}:${password}@${host}:${port}/${dbName}${queryParam ? '?' + queryParam : ''}`;
-
-        return {
-          type: 'postgres',
-          url,
-          entities: [`${__dirname}/../../../**/*.entity{.ts,.js}`],
-          logging: ['error', 'schema'],
-          migrations: [`${__dirname}/migrations/**/*{.ts,.js}`],
-          cli: {
-            migrationsDir: 'src/migrations',
-          },
-          synchronize: false,
-          maxQueryExecutionTime: 1000,
-          ssl: configService.get('NODE_ENV') !== 'local',
-          extra:
-            configService.get('NODE_ENV') !== 'local'
-              ? {
-                  ssl: {
-                    rejectUnauthorized: false,
-                  },
-                }
-              : {},
-        };
-      },
-      dataSourceFactory: (options) => {
-        return new DataSource(options).initialize();
-      },
+      useFactory: createDatabaseOptions,
+      dataSourceFactory: createDatabaseDataSource,
     }),
     // Rate limit, 300 requêtes maximum toutes les 15min par IP
     ThrottlerModule.forRoot([

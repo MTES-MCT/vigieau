@@ -2,7 +2,6 @@ import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Parametres } from '@shared/entities/parametres.entity';
 import { User } from '@shared/entities/user.entity';
-import moment from 'moment/moment';
 import {
   FindManyOptions,
   FindOneOptions,
@@ -11,6 +10,8 @@ import {
   Repository,
 } from 'typeorm';
 import { DepartementService } from '../departement/departement.service';
+import { getCurrentParisCivilDate } from '../shared/arrete-date-continuity';
+import { recordPublicMutation } from '../zone_publication/public-mutation';
 
 @Injectable()
 export class ParametresService {
@@ -86,36 +87,40 @@ export class ParametresService {
       );
     }
     const dep = await this.departementService.findByCode(depCode);
-    const existingParam = await this.parametresRepository.findOne(<
-      FindOneOptions
-    >{
-      where: {
-        disabled: false,
-        departement: {
-          id: dep.id,
+    return this.parametresRepository.manager.transaction(async (manager) => {
+      const businessDate = getCurrentParisCivilDate();
+      const repository = manager.getRepository(Parametres);
+      const existingParam = await repository.findOne(<FindOneOptions>{
+        where: {
+          disabled: false,
+          departement: {
+            id: dep.id,
+          },
         },
-      },
-    });
-    // Si c'est la même règle que le paramètre en cours, on ne fait rien
-    if (
-      existingParam &&
-      existingParam.superpositionCommune ===
-        parametresToCreate.superpositionCommune
-    ) {
-      return existingParam;
-    }
-    if (existingParam) {
-      existingParam.dateFin = moment().format('YYYY-MM-DD');
-      existingParam.disabled = true;
-      // Si le paramètre a été actif moins d'un jour, on le supprime.
-      if (existingParam.dateDebut === existingParam.dateFin) {
-        await this.parametresRepository.delete({ id: existingParam.id });
-      } else {
-        await this.parametresRepository.save(existingParam);
+      });
+      // Si c'est la même règle que le paramètre en cours, on ne fait rien
+      if (
+        existingParam &&
+        existingParam.superpositionCommune ===
+          parametresToCreate.superpositionCommune
+      ) {
+        return existingParam;
       }
-    }
-    parametresToCreate.departement = dep;
-    parametresToCreate.dateDebut = moment().format('YYYY-MM-DD');
-    return this.parametresRepository.save(parametresToCreate);
+      if (existingParam) {
+        existingParam.dateFin = businessDate;
+        existingParam.disabled = true;
+        // Si le paramètre a été actif moins d'un jour, on le supprime.
+        if (existingParam.dateDebut === existingParam.dateFin) {
+          await repository.delete({ id: existingParam.id });
+        } else {
+          await repository.save(existingParam);
+        }
+      }
+      parametresToCreate.departement = dep;
+      parametresToCreate.dateDebut = businessDate;
+      const saved = await repository.save(parametresToCreate);
+      await recordPublicMutation(manager, [dep.id], 'PARAMETRES DE CALCUL');
+      return saved;
+    });
   }
 }

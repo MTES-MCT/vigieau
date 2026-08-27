@@ -146,6 +146,7 @@ function createHarness(
       .mockResolvedValueOnce([[{ id: 1 }], 1]),
   };
   const repository = {
+    find: jest.fn().mockResolvedValue([]),
     manager: {
       transaction: jest.fn(async (_isolation, callback) => callback(manager)),
     },
@@ -155,11 +156,16 @@ function createHarness(
     createImmutable: jest.fn(),
     deleteById: jest.fn().mockResolvedValue(undefined),
   };
+  const restrictionService = {
+    getPublicationValidationErrors: jest.fn().mockReturnValue([]),
+    getZoneAlerteRelationValidationErrors: jest.fn().mockResolvedValue([]),
+    updateAll: jest.fn().mockResolvedValue([]),
+  };
   const service = new ArreteRestrictionService(
     repository as any,
     {} as any,
     {} as any,
-    {} as any,
+    restrictionService as any,
     fichierService as any,
     {} as any,
     {} as any,
@@ -175,6 +181,9 @@ function createHarness(
   jest
     .spyOn(service, 'enqueueCurrentZoneRecomputeWithManager')
     .mockResolvedValue(undefined);
+  const recordPublicMutation = jest
+    .spyOn(service, 'recordPublicMutation')
+    .mockResolvedValue('43');
   jest.spyOn(service as any, 'checkModifications').mockResolvedValue(undefined);
   jest.spyOn(service, 'canUpdateArreteRestriction').mockResolvedValue(true);
   const checkBeforePublish = jest
@@ -190,6 +199,8 @@ function createHarness(
     manager,
     repository,
     requestCurrentZoneRecompute,
+    recordPublicMutation,
+    restrictionService,
     service,
     transactionRepository,
   };
@@ -376,6 +387,59 @@ describe('ArreteRestrictionService.publish', () => {
       }),
     );
     expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
+  it('records a changed legal end without invalidating an unchanged effective period', async () => {
+    const framework = {
+      id: 30697,
+      dateFin: '2026-08-10',
+      statut: 'publie',
+    };
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-10',
+        dateFinSaisie: '2026-08-20',
+        dateFinCalculee: true,
+        dateFinSaisieConnue: true,
+        statut: 'a_venir',
+        arretesCadre: [framework],
+      },
+      currentOverrides: {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-31',
+        dateFinSaisie: null,
+        dateFinCalculee: false,
+        dateFinSaisieConnue: true,
+        statut: 'a_venir',
+        arretesCadre: [framework],
+      },
+    });
+
+    await harness.service.publish(
+      37577,
+      null,
+      {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-31',
+        dateSignature: null,
+      },
+      currentUser,
+    );
+
+    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).toHaveBeenCalledWith(
+      harness.manager,
+      [53],
+      'PUBLICATION AR',
+    );
+    expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledWith(
+      [harness.initial.departement],
+      'PUBLICATION AR',
+    );
   });
 
   it('replaces a PDF through an immutable key without breaking old snapshots', async () => {
@@ -419,6 +483,74 @@ describe('ArreteRestrictionService.publish', () => {
 
     expect(harness.transactionRepository.save).not.toHaveBeenCalled();
     expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.transactionRepository.findOneOrFail.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          expect.objectContaining({
+            select: expect.objectContaining({
+              restrictions: expect.objectContaining({
+                nomGroupementAep: true,
+                niveauGravite: true,
+                arreteCadre: { id: true },
+                communes: { id: true },
+              }),
+            }),
+            relations: expect.arrayContaining(['restrictions.arreteCadre']),
+          }),
+        ],
+      ]),
+    );
+  });
+
+  it('includes legacy restriction validation in the publication graph check', async () => {
+    const framework = {
+      id: 30697,
+      numero: 'AC-30697',
+      dateDebut: '2026-01-01',
+      dateFin: null,
+      statut: 'publie',
+      zonesAlerte: [],
+    };
+    const invalidRestriction = {
+      id: 99,
+      zoneAlerte: null,
+      arreteCadre: null,
+      nomGroupementAep: '',
+      communes: null,
+      niveauGravite: null,
+    };
+    const harness = createHarness({
+      initialOverrides: {
+        restrictions: [invalidRestriction],
+        arretesCadre: [framework],
+      },
+    });
+    harness.checkBeforePublish.mockRestore();
+    harness.restrictionService.getPublicationValidationErrors.mockReturnValue([
+      `Chaque groupement d'eau potable doit contenir au moins une commune.`,
+    ]);
+
+    const result = await harness.service.checkBeforePublish(
+      createArrete({
+        restrictions: [invalidRestriction],
+        arretesCadre: [framework],
+      }),
+    );
+
+    expect(
+      harness.restrictionService.getPublicationValidationErrors,
+    ).toHaveBeenCalledWith([invalidRestriction], [30697]);
+    expect(
+      harness.restrictionService.getZoneAlerteRelationValidationErrors,
+    ).toHaveBeenCalledWith(
+      [invalidRestriction],
+      53,
+      harness.repository.manager,
+    );
+    expect(result.errors).toContain(
+      `Chaque groupement d'eau potable doit contenir au moins une commune.`,
+    );
+    expect(harness.repository.find).not.toHaveBeenCalled();
   });
 
   it('rejects a republication that would overtake an existing successor', async () => {

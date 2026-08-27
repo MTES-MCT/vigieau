@@ -130,6 +130,19 @@ export class ZonePublicationDto {
   @ApiProperty({ example: '42' })
   revision: string;
 
+  @ApiProperty({
+    example: '41',
+    description: 'Revision publique des donnees source de la publication',
+  })
+  sourceRevision: string;
+
+  @ApiProperty({
+    example: '9',
+    description: 'Epoch courant des calculs historiques',
+    required: false,
+  })
+  historicComputeEpoch?: string;
+
   @ApiProperty({ nullable: true })
   geojsonUrl: string | null;
 
@@ -147,4 +160,50 @@ export class ZonePublicationDto {
 
   @ApiProperty({ example: 123 })
   zoneCount: number;
+}
+
+export type ZoneAvailabilityStatus =
+  | 'available'
+  | 'confirmed_none'
+  | 'unavailable';
+
+export type ZoneAvailabilityFreshness = 'current' | 'updating';
+
+export class ZoneTypeAvailabilityDto {
+  @ApiProperty({
+    enum: ['available', 'confirmed_none', 'unavailable'],
+    example: 'available',
+  })
+  status: ZoneAvailabilityStatus;
+
+  @ApiProperty({ nullable: true, required: false })
+  asOf?: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  sourceRevision?: string | null;
+
+  @ApiProperty({
+    enum: ['current', 'updating'],
+    required: false,
+    example: 'updating',
+  })
+  freshness?: ZoneAvailabilityFreshness;
+
+  @ApiProperty({ nullable: true, required: false })
+  pendingSince?: string | null;
+
+  @ApiProperty({ nullable: true, required: false })
+  officialUrl?: string | null;
+}
+
+export class ZonesWithAvailabilityDto {
+  @ApiProperty({ type: [ZoneDto] })
+  zones: ZoneDto[];
+
+  @ApiProperty({
+    additionalProperties: {
+      $ref: '#/components/schemas/ZoneTypeAvailabilityDto',
+    },
+  })
+  availability: Record<'AEP' | 'SUP' | 'SOU', ZoneTypeAvailabilityDto>;
 }

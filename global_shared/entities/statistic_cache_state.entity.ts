@@ -10,6 +10,16 @@ import { BaseEntity, Check, Column, Entity, PrimaryColumn } from "typeorm";
     OR "activePublicationId" <> "previousPublicationId"
   `,
 )
+@Check(
+  "CHK_statistic_cache_state_candidate_distinct",
+  `
+    ("candidatePublicationId" IS NULL OR "activePublicationId" IS NULL
+      OR "candidatePublicationId" <> "activePublicationId")
+    AND
+    ("candidatePublicationId" IS NULL OR "previousPublicationId" IS NULL
+      OR "candidatePublicationId" <> "previousPublicationId")
+  `,
+)
 export class StatisticCacheState extends BaseEntity {
   @PrimaryColumn({ type: "integer", default: 1 })
   id: number;
@@ -19,6 +29,9 @@ export class StatisticCacheState extends BaseEntity {
 
   @Column({ type: "uuid", nullable: true })
   previousPublicationId: string | null;
+
+  @Column({ type: "uuid", nullable: true })
+  candidatePublicationId: string | null;
 
   @Column({ type: "date", nullable: true })
   historicRecoveryMonthlyFrom: string | null;

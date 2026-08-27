@@ -1,6 +1,11 @@
 import VueMatomo from 'vue-matomo';
 
 export default defineNuxtPlugin((nuxtApp) => {
+  const runtimeConfig = useRuntimeConfig();
+  if (runtimeConfig.public.appEnv !== 'prod') {
+    return;
+  }
+
   nuxtApp.vueApp.use(VueMatomo, {
     host: 'https://stats.beta.gouv.fr',
     siteId: 70,

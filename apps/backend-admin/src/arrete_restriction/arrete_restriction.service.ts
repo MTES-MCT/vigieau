@@ -7,8 +7,17 @@ import {
 } from '@nestjs/common';
 import { ConfigService as NestConfigService } from '@nestjs/config';
 import { CronExpression } from '@nestjs/schedule';
-import { BusinessCron } from '../core/scheduling/business-cron';
-import { shiftCivilDate } from '../core/scheduling/daily-job-schedule';
+import {
+  BusinessCron,
+  CurrentZoneRecomputeCron,
+  isCurrentZoneRecomputeWorkerEnabled,
+  isCurrentZoneRecomputeWorkerProcess,
+} from '../core/scheduling/business-cron';
+import {
+  getScheduledCivilDate,
+  NATIONAL_COMPUTE_START_HOUR,
+  shiftCivilDate,
+} from '../core/scheduling/daily-job-schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 import { ArreteCadre } from '@shared/entities/arrete_cadre.entity';
@@ -31,6 +40,7 @@ import {
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { ConfigService } from '../config/config.service';
+import { invalidateHistoricComputationsFromWithManager } from '../config/historic-computation-invalidation';
 import { DepartementService } from '../departement/departement.service';
 import { FichierService } from '../fichier/fichier.service';
 import { RegleauLogger } from '../logger/regleau.logger';
@@ -44,22 +54,42 @@ import {
   getPublicationEndDateProvenance,
   hasArreteComputationStateChanged,
   hasArreteMutationVersionChanged,
+  hasArretePublicationStateChanged,
   normalizeCivilDate,
   resolveArreteEndDate,
   UnknownArreteEndDateProvenanceError,
 } from '../shared/arrete-date-continuity';
+import { hasArreteRestrictionPublicUpdate } from '../shared/arrete-public-update';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { UserService } from '../user/user.service';
 import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
 import type { DailyZonePublicationReuseContext } from '../zone_publication/zone_publication.service';
-import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
-import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
+import {
+  isPublicSourceRevisionEnabled,
+  isZonePublicationEnabled,
+  sourceRevisionColumn,
+} from '../zone_publication/zone_publication.config';
+import {
+  certifyAvailableZoneTypes,
+  certifyZoneTypeAvailability as persistZoneTypeAvailabilityCertification,
+  type CertifiedZoneTypeAvailability,
+  enqueueCurrentZoneRecomputeTarget,
+  type PublicZoneType,
+  recordPublicMutation as persistPublicMutation,
+} from '../zone_publication/public-mutation';
 import { arreteRestrictionPaginateConfig } from './dto/arrete_restriction.dto';
 import { CreateUpdateArreteRestrictionDto } from './dto/create_update_arrete_restriction.dto';
 import { PublishArreteRestrictionDto } from './dto/publish_arrete_restriction.dto';
 import { RepealArreteRestrictionDto } from './dto/repeal_arrete_restriction.dto';
 
-export type CurrentZoneRecomputeResult = 'busy' | 'empty' | 'processed';
+export type CurrentZoneRecomputeResult =
+  | 'busy'
+  | 'deferred'
+  | 'empty'
+  | 'processed'
+  | 'superseded';
+
+class CurrentZoneRecomputeSupersededError extends Error {}
 
 @Injectable()
 export class ArreteRestrictionService {
@@ -545,10 +575,14 @@ export class ArreteRestrictionService {
     createArreteRestrictionDto: CreateUpdateArreteRestrictionDto,
     currentUser?: User,
   ): Promise<ArreteRestriction> {
-    void currentUser;
     return this.arreteRestrictionRepository.manager.transaction(
       'SERIALIZABLE',
       async (manager) => {
+        await this.assertCanWriteDepartement(
+          manager,
+          createArreteRestrictionDto.departement?.id,
+          currentUser,
+        );
         await this.lockArreteCadresForMutation(
           manager,
           (createArreteRestrictionDto.arretesCadre ?? []).map(({ id }) => id),
@@ -557,12 +591,16 @@ export class ArreteRestrictionService {
         const arreteRestriction = (await repository.save(
           createArreteRestrictionDto,
         )) as ArreteRestriction;
-        arreteRestriction.restrictions =
-          await this.restrictionService.updateAll(
-            createArreteRestrictionDto,
-            arreteRestriction.id,
-            manager,
-          );
+        arreteRestriction.restrictions = Object.prototype.hasOwnProperty.call(
+          createArreteRestrictionDto,
+          'restrictions',
+        )
+          ? await this.restrictionService.updateAll(
+              createArreteRestrictionDto,
+              arreteRestriction.id,
+              manager,
+            )
+          : [];
         return arreteRestriction;
       },
     );
@@ -581,6 +619,15 @@ export class ArreteRestrictionService {
       );
     }
     // await this.checkAci(updateArreteRestrictionDto, true, currentUser);
+    const hasRestrictionsUpdate = Object.prototype.hasOwnProperty.call(
+      updateArreteRestrictionDto,
+      'restrictions',
+    );
+    const changesPublicContent = hasArreteRestrictionPublicUpdate(
+      oldAr,
+      updateArreteRestrictionDto,
+    );
+    let publicMutationRecorded = false;
     let arreteRestriction: ArreteRestriction;
     if (oldAr.statut === 'a_valider') {
       const initialArreteCadreIds = oldAr.arretesCadre.map(({ id }) => id);
@@ -591,15 +638,21 @@ export class ArreteRestrictionService {
         await this.arreteRestrictionRepository.manager.transaction(
           'SERIALIZABLE',
           async (manager) => {
-            await this.lockArreteCadresForMutation(manager, [
-              ...initialArreteCadreIds,
-              ...nextArreteCadreIds,
-            ]);
+            const lockedArretesCadre = await this.lockArreteCadresForMutation(
+              manager,
+              [...initialArreteCadreIds, ...nextArreteCadreIds],
+            );
             const repository = manager.getRepository(ArreteRestriction);
             await this.lockArreteRestrictionGraph(repository, [id]);
             const current = await this.findOneForContinuity(repository, id);
             const authorizationState =
               await this.findOneForMutationAuthorization(repository, id);
+            await this.assertCanWriteDepartement(
+              manager,
+              updateArreteRestrictionDto.departement?.id ??
+                authorizationState.departement.id,
+              currentUser,
+            );
             if (
               current.statut !== 'a_valider' ||
               hasArreteMutationVersionChanged(oldAr, current) ||
@@ -618,11 +671,23 @@ export class ArreteRestrictionService {
               updatedByHuman: new Date(),
               ...updateArreteRestrictionDto,
             })) as ArreteRestriction;
-            saved.restrictions = await this.restrictionService.updateAll(
-              updateArreteRestrictionDto,
-              saved.id,
-              manager,
-            );
+            saved.restrictions = hasRestrictionsUpdate
+              ? await this.restrictionService.updateAll(
+                  {
+                    ...updateArreteRestrictionDto,
+                    departement:
+                      updateArreteRestrictionDto.departement ??
+                      authorizationState.departement,
+                    arretesCadre: nextArreteCadreIds.map((arreteCadreId) =>
+                      lockedArretesCadre.find(
+                        ({ id: candidateId }) => candidateId === arreteCadreId,
+                      ),
+                    ),
+                  } as CreateUpdateArreteRestrictionDto,
+                  saved.id,
+                  manager,
+                )
+              : authorizationState.restrictions;
             return saved;
           },
         );
@@ -689,6 +754,12 @@ export class ArreteRestrictionService {
               }
               const authorizationState =
                 await this.findOneForMutationAuthorization(repository, id);
+              await this.assertCanWriteDepartement(
+                manager,
+                updateArreteRestrictionDto.departement?.id ??
+                  authorizationState.departement.id,
+                currentUser,
+              );
               if (
                 !(await this.canUpdateArreteRestriction(
                   authorizationState,
@@ -717,7 +788,12 @@ export class ArreteRestrictionService {
               const transactionCheck = await this.checkBeforePublish(
                 {
                   ...authorizationState,
-                  restrictions: updateArreteRestrictionDto.restrictions,
+                  departement:
+                    updateArreteRestrictionDto.departement ??
+                    authorizationState.departement,
+                  restrictions: hasRestrictionsUpdate
+                    ? (updateArreteRestrictionDto.restrictions ?? [])
+                    : authorizationState.restrictions,
                   arretesCadre: proposedArretesCadre,
                   arreteRestrictionAbroge: nextPredecessorId
                     ? before.find((arrete) => arrete.id === nextPredecessorId)
@@ -731,11 +807,13 @@ export class ArreteRestrictionService {
                   HttpStatus.CONFLICT,
                 );
               }
-              const saved = await repository.save({
-                id,
-                updatedByHuman: new Date(),
-                ...updateArreteRestrictionDto,
-              });
+              const saved = changesPublicContent
+                ? await repository.save({
+                    id,
+                    updatedByHuman: new Date(),
+                    ...updateArreteRestrictionDto,
+                  })
+                : ({ ...oldAr } as ArreteRestriction);
               const savedCurrent = await this.findOneForContinuity(
                 repository,
                 id,
@@ -758,35 +836,70 @@ export class ArreteRestrictionService {
                   HttpStatus.CONFLICT,
                 );
               }
+              const continuityDirtyDates: string[] = [];
               for (const affectedId of affectedIds) {
+                const previous = before.find(
+                  (arrete) => arrete.id === affectedId,
+                );
                 const synchronized =
                   await this.synchronizeArreteRestrictionEndDate(
                     repository,
                     affectedId,
                     businessDate,
                   );
+                if (
+                  previous?.dateDebut &&
+                  hasArreteComputationStateChanged(previous, {
+                    dateDebut: previous.dateDebut,
+                    dateFin: synchronized.dateFin,
+                    statut: synchronized.statut ?? previous.statut,
+                  })
+                ) {
+                  continuityDirtyDates.push(
+                    normalizeCivilDate(previous.dateDebut),
+                  );
+                }
                 if (affectedId === id) {
                   Object.assign(saved, synchronized);
                 }
               }
               Object.assign(saved, {
-                restrictions: await this.restrictionService.updateAll(
-                  updateArreteRestrictionDto,
-                  saved.id,
-                  manager,
-                ),
+                restrictions:
+                  changesPublicContent && hasRestrictionsUpdate
+                    ? await this.restrictionService.updateAll(
+                        {
+                          ...updateArreteRestrictionDto,
+                          departement:
+                            updateArreteRestrictionDto.departement ??
+                            authorizationState.departement,
+                          arretesCadre: proposedArretesCadre,
+                        } as CreateUpdateArreteRestrictionDto,
+                        saved.id,
+                        manager,
+                      )
+                    : oldAr.restrictions,
               });
-              await this.invalidateComputationsFromWithManager(
-                manager,
-                before
-                  .map(({ dateDebut }) => normalizeCivilDate(dateDebut))
-                  .sort()[0],
-              );
-              await this.enqueueCurrentZoneRecomputeWithManager(manager, [
-                oldAr.departement.id,
-                updateArreteRestrictionDto.departement?.id ??
-                  oldAr.departement.id,
-              ]);
+              const dirtyDates = changesPublicContent
+                ? before.map(({ dateDebut }) => normalizeCivilDate(dateDebut))
+                : continuityDirtyDates;
+              if (dirtyDates.length > 0) {
+                await this.invalidateComputationsFromWithManager(
+                  manager,
+                  dirtyDates.sort()[0],
+                );
+              }
+              if (changesPublicContent || continuityDirtyDates.length > 0) {
+                await this.recordPublicMutation(
+                  manager,
+                  [
+                    oldAr.departement.id,
+                    updateArreteRestrictionDto.departement?.id ??
+                      oldAr.departement.id,
+                  ],
+                  'MODIFICATION AR',
+                );
+                publicMutationRecorded = true;
+              }
               return saved;
             },
           );
@@ -804,9 +917,14 @@ export class ArreteRestrictionService {
           !!departement &&
           all.findIndex(({ id }) => id === departement.id) === index,
       ) as Departement[];
-      this.requestCurrentZoneRecompute(departements, 'MODIFICATION AR');
+      if (publicMutationRecorded) {
+        this.requestCurrentZoneRecompute(departements, 'MODIFICATION AR');
+      }
     }
-    this.checkModifications(oldAr, arreteRestriction, currentUser);
+    void this.checkModifications(oldAr, arreteRestriction, currentUser).catch(
+      (error) =>
+        this.logger.error('ERREUR NOTIFICATION MODIFICATION AR', error),
+    );
     delete arreteRestriction.dateFinSaisie;
     delete arreteRestriction.dateFinCalculee;
     delete arreteRestriction.dateFinSaisieConnue;
@@ -898,6 +1016,7 @@ export class ArreteRestrictionService {
       statut: getArreteLifecycleStatus(dateDebut, dateFin, businessDate),
     };
     let toReturn: ArreteRestriction;
+    let publicMutationRecorded = false;
     try {
       toReturn = await this.arreteRestrictionRepository.manager.transaction(
         'SERIALIZABLE',
@@ -970,6 +1089,17 @@ export class ArreteRestrictionService {
             businessDate,
           );
           Object.assign(saved, synchronized);
+          const publicationContentChanged =
+            !!newFile ||
+            !areCivilDatesEqual(current.dateSignature, dateSignature) ||
+            hasArretePublicationStateChanged(current, {
+              dateDebut,
+              dateFin: synchronized.dateFin,
+              dateFinSaisie: synchronized.dateFinSaisie,
+              dateFinCalculee: synchronized.dateFinCalculee,
+              dateFinSaisieConnue: synchronized.dateFinSaisieConnue,
+              statut: synchronized.statut ?? toSave.statut,
+            });
           const dirtyDates: string[] = [];
           if (
             hasArreteComputationStateChanged(current, {
@@ -1018,9 +1148,14 @@ export class ArreteRestrictionService {
               dirtyDates.sort()[0],
             );
           }
-          await this.enqueueCurrentZoneRecomputeWithManager(manager, [
-            ar.departement.id,
-          ]);
+          if (publicationContentChanged || dirtyDates.length > 0) {
+            await this.recordPublicMutation(
+              manager,
+              [ar.departement.id],
+              'PUBLICATION AR',
+            );
+            publicMutationRecorded = true;
+          }
           return saved;
         },
       );
@@ -1043,7 +1178,9 @@ export class ArreteRestrictionService {
     if (!arreteRestrictionPdf) {
       toReturn.fichier = ar.fichier;
     }
-    this.requestCurrentZoneRecompute([ar.departement], 'PUBLICATION AR');
+    if (publicMutationRecorded) {
+      this.requestCurrentZoneRecompute([ar.departement], 'PUBLICATION AR');
+    }
     void this.checkModifications(ar, toReturn, currentUser, true).catch(
       (error) =>
         this.logger.error('ERREUR NOTIFICATION MODIFICATION AR', error),
@@ -1141,6 +1278,35 @@ export class ArreteRestrictionService {
       relations: ['zonesAlerte'],
       where: { id: In(ids) },
     });
+  }
+
+  private async assertCanWriteDepartement(
+    manager: EntityManager,
+    departementId: number | null | undefined,
+    currentUser?: User,
+  ): Promise<void> {
+    if (!currentUser || currentUser.role === 'mte') {
+      return;
+    }
+    if (!Number.isInteger(departementId) || departementId <= 0) {
+      throw new HttpException(
+        `Vous ne pouvez enregistrer un arrêté de restriction que sur un département autorisé.`,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+    const departement = await manager.getRepository(Departement).findOne({
+      select: { id: true, code: true },
+      where: { id: departementId },
+    });
+    if (
+      !departement ||
+      !currentUser.role_departements.includes(departement.code)
+    ) {
+      throw new HttpException(
+        `Vous ne pouvez enregistrer un arrêté de restriction que sur un département autorisé.`,
+        HttpStatus.FORBIDDEN,
+      );
+    }
   }
 
   private async loadPredecessorChain(
@@ -1316,7 +1482,10 @@ export class ArreteRestrictionService {
         departement: { id: true, code: true },
         restrictions: {
           id: true,
+          nomGroupementAep: true,
+          niveauGravite: true,
           zoneAlerte: { id: true, disabled: true },
+          arreteCadre: { id: true },
           communes: { id: true },
         },
         arretesCadre: {
@@ -1334,6 +1503,7 @@ export class ArreteRestrictionService {
         'departement',
         'restrictions',
         'restrictions.zoneAlerte',
+        'restrictions.arreteCadre',
         'restrictions.communes',
         'arretesCadre',
         'arretesCadre.zonesAlerte',
@@ -1520,28 +1690,7 @@ export class ArreteRestrictionService {
     manager: EntityManager,
     date: string,
   ): Promise<void> {
-    const [historicEpochColumn] = await manager.query(
-      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'config' AND column_name = 'historicComputeEpoch'`,
-    );
-    const updated = unwrapTypeOrmDmlReturningRows<{ id: number }>(
-      await manager.query(
-        `
-        UPDATE config
-        SET
-          "computeMapDate" = LEAST(COALESCE("computeMapDate", $1::date), $1::date),
-          "computeMapGeneration" = "computeMapGeneration" + 1,
-          "computeStatsDate" = LEAST(COALESCE("computeStatsDate", $1::date), $1::date),
-          "computeStatsGeneration" = "computeStatsGeneration" + 1
-          ${historicEpochColumn ? ', "historicComputeEpoch" = "historicComputeEpoch" + 1' : ''}
-        WHERE id = 1
-        RETURNING id
-        `,
-        [date],
-      ),
-    );
-    if (updated.length !== 1) {
-      throw new Error('Unable to invalidate zone computations');
-    }
+    await invalidateHistoricComputationsFromWithManager(manager, date);
   }
 
   async repeal(
@@ -1618,9 +1767,11 @@ export class ArreteRestrictionService {
           manager,
           normalizeCivilDate(current.dateDebut),
         );
-        await this.enqueueCurrentZoneRecomputeWithManager(manager, [
-          ar.departement.id,
-        ]);
+        await this.recordPublicMutation(
+          manager,
+          [ar.departement.id],
+          'ABROGATION AR',
+        );
         return saved;
       },
     );
@@ -1637,6 +1788,19 @@ export class ArreteRestrictionService {
   ) {
     const errors = [];
     const warnings = [];
+    errors.push(
+      ...this.restrictionService.getPublicationValidationErrors(
+        ar.restrictions ?? [],
+        (ar.arretesCadre ?? []).map(({ id }) => id),
+      ),
+    );
+    errors.push(
+      ...(await this.restrictionService.getZoneAlerteRelationValidationErrors(
+        ar.restrictions ?? [],
+        ar.departement?.id,
+        repository.manager,
+      )),
+    );
     /**
      * Check des arrêtés cadre, si un des ACs n'est pas publié, on ne peut pas publier l'AR
      */
@@ -1741,32 +1905,37 @@ export class ArreteRestrictionService {
       .filter((r) => !!r.zoneAlerte)
       .map((r) => r.zoneAlerte.id);
     const communesId = ar.restrictions
-      .filter((r) => !r.zoneAlerte)
-      .map((r) => r.communes)
-      .flat()
+      .flatMap((restriction) => restriction.communes ?? [])
       .map((c) => c.id);
     const idsExcluded = [ar.id];
     if (ar.arreteRestrictionAbroge) {
       idsExcluded.push(ar.arreteRestrictionAbroge.id);
     }
-    const arsWithSameZonesOrCommunes = await repository.find(<FindManyOptions>{
-      select: {
-        id: true,
-        numero: true,
-        dateDebut: true,
-        dateFin: true,
-        statut: true,
-      },
-      where: {
-        restrictions: [
-          { zoneAlerte: { id: In(zonesId) } },
-          { communes: { id: In(communesId) } },
-        ],
-        statut: In(['a_venir', 'publie']),
-        id: Not(In(idsExcluded)),
-      },
-      relations: [],
-    });
+    const overlappingRestrictionWhere = [];
+    if (zonesId.length > 0) {
+      overlappingRestrictionWhere.push({ zoneAlerte: { id: In(zonesId) } });
+    }
+    if (communesId.length > 0) {
+      overlappingRestrictionWhere.push({ communes: { id: In(communesId) } });
+    }
+    const arsWithSameZonesOrCommunes =
+      overlappingRestrictionWhere.length === 0
+        ? []
+        : await repository.find(<FindManyOptions>{
+            select: {
+              id: true,
+              numero: true,
+              dateDebut: true,
+              dateFin: true,
+              statut: true,
+            },
+            where: {
+              restrictions: overlappingRestrictionWhere,
+              statut: In(['a_venir', 'publie']),
+              id: Not(In(idsExcluded)),
+            },
+            relations: [],
+          });
     const minDateDebut = arsWithSameZonesOrCommunes.some((ar) => ar.dateDebut)
       ? new Date(
           Math.min.apply(
@@ -1865,10 +2034,12 @@ export class ArreteRestrictionService {
               HttpStatus.CONFLICT,
             );
           }
-          const dirtyFrom = current.dateDebut
-            ? [normalizeCivilDate(current.dateDebut)]
-            : [];
-          if (predecessorId) {
+          const affectsPublicComputations = current.statut !== 'a_valider';
+          const dirtyFrom =
+            affectsPublicComputations && current.dateDebut
+              ? [normalizeCivilDate(current.dateDebut)]
+              : [];
+          if (affectsPublicComputations && predecessorId) {
             const predecessor = await this.findOneForContinuity(
               repository,
               predecessorId,
@@ -1885,23 +2056,25 @@ export class ArreteRestrictionService {
           if (deleted.affected !== 1) {
             throw new Error(`Unable to delete restriction order ${id}`);
           }
-          if (predecessorId) {
+          if (affectsPublicComputations && predecessorId) {
             await this.synchronizeArreteRestrictionEndDate(
               repository,
               predecessorId,
               businessDate,
             );
           }
-          if (dirtyFrom.length > 0) {
-            await this.invalidateComputationsFromWithManager(
+          if (affectsPublicComputations) {
+            if (dirtyFrom.length > 0) {
+              await this.invalidateComputationsFromWithManager(
+                manager,
+                dirtyFrom.sort()[0],
+              );
+            }
+            await this.recordPublicMutation(
               manager,
-              dirtyFrom.sort()[0],
+              [arrete.departement.id],
+              'SUPPRESSION AR',
             );
-          }
-          if (current.statut !== 'a_valider') {
-            await this.enqueueCurrentZoneRecomputeWithManager(manager, [
-              arrete.departement.id,
-            ]);
           }
         },
       );
@@ -2050,7 +2223,7 @@ export class ArreteRestrictionService {
     departements: Array<Pick<Departement, 'id'>>,
     reason: string,
   ): void {
-    if (departements.length === 0) {
+    if (departements.length === 0 || isCurrentZoneRecomputeWorkerEnabled()) {
       return;
     }
     void this.processPendingCurrentZoneRecomputes().catch((error) =>
@@ -2061,35 +2234,65 @@ export class ArreteRestrictionService {
   async enqueueCurrentZoneRecomputeWithManager(
     manager: EntityManager,
     departementIds: number[],
+    reason = 'LEGACY',
+    scheduledFor?: string,
   ): Promise<void> {
-    const ids = [...new Set(departementIds)].sort(
-      (left, right) => left - right,
-    );
-    if (ids.length === 0) {
+    if (departementIds.length === 0) {
       return;
     }
-    await manager.query(
-      `
-        INSERT INTO "current_zone_recompute_request" (
-          "departementId", "generation", "requestedAt",
-          "lastAttemptAt", "attemptCount", "lastError"
-        )
-        SELECT departement_id, 1, now(), NULL, 0, NULL
-        FROM unnest($1::integer[]) AS departement_id
-        ON CONFLICT ("departementId") DO UPDATE
-        SET
-          "generation" = "current_zone_recompute_request"."generation" + 1,
-          "requestedAt" = now(),
-          "lastError" = NULL
-      `,
-      [ids],
+    const [sourceState] = await manager.query(
+      `SELECT "publicRevision" FROM "zone_publication_source_state" WHERE "id" = 1`,
+    );
+    if (!sourceState) {
+      throw new Error('Zone publication source state is missing');
+    }
+    await enqueueCurrentZoneRecomputeTarget(
+      manager,
+      departementIds,
+      String(sourceState.publicRevision),
+      reason,
+      scheduledFor,
     );
   }
 
-  @BusinessCron(CronExpression.EVERY_5_MINUTES)
+  async recordPublicMutation(
+    manager: EntityManager,
+    departementIds: number[],
+    reason: string,
+  ): Promise<string> {
+    return persistPublicMutation(manager, departementIds, reason);
+  }
+
+  async certifyZoneTypeAvailability(
+    manager: EntityManager,
+    departementId: number,
+    zoneType: PublicZoneType,
+    status: CertifiedZoneTypeAvailability,
+    publicRevision: string,
+    officialUrl?: string,
+    asOf = new Date(),
+  ): Promise<void> {
+    return persistZoneTypeAvailabilityCertification(
+      manager,
+      departementId,
+      zoneType,
+      status,
+      publicRevision,
+      officialUrl,
+      asOf,
+    );
+  }
+
+  @CurrentZoneRecomputeCron(CronExpression.EVERY_5_MINUTES)
   async processPendingCurrentZoneRecomputes(
     scheduledFor?: string,
   ): Promise<CurrentZoneRecomputeResult> {
+    if (
+      isCurrentZoneRecomputeWorkerEnabled() &&
+      !isCurrentZoneRecomputeWorkerProcess()
+    ) {
+      return 'deferred';
+    }
     if (this.currentZoneRecomputeInFlight) {
       return this.currentZoneRecomputeInFlight;
     }
@@ -2110,37 +2313,159 @@ export class ArreteRestrictionService {
     const queryRunner =
       this.arreteRestrictionRepository.manager.connection.createQueryRunner();
     await queryRunner.connect();
-    let locked = false;
+    let currentZoneLockAcquired = false;
+    let sandreGlobalLockAcquired = false;
+    let operationError: unknown;
     try {
       const [lockResult] = await queryRunner.query(
         `SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('current-zone-recompute')) AS locked`,
       );
-      locked = lockResult?.locked === true;
-      if (!locked) {
+      currentZoneLockAcquired = lockResult?.locked === true;
+      if (!currentZoneLockAcquired) {
         return 'busy';
+      }
+      if (isZonePublicationEnabled()) {
+        const [sandreLockResult] = await queryRunner.query(
+          `SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS locked`,
+        );
+        sandreGlobalLockAcquired = sandreLockResult?.locked === true;
+        if (!sandreGlobalLockAcquired) {
+          return 'busy';
+        }
       }
 
       let processed = false;
-      for (let cycle = 0; cycle < 3; cycle += 1) {
+      let superseded = false;
+      const scheduledBusinessDate = getScheduledCivilDate(
+        new Date(),
+        NATIONAL_COMPUTE_START_HOUR,
+      );
+      const businessDate =
+        scheduledFor === scheduledBusinessDate
+          ? scheduledFor
+          : scheduledBusinessDate;
+      for (let cycle = 0; cycle < 100; cycle += 1) {
         const requests = (await queryRunner.query(
           `
-            SELECT "departementId", "generation"
-            FROM "current_zone_recompute_request"
-            ORDER BY "requestedAt", "departementId"
+            WITH due_context AS (
+              SELECT EXISTS (
+                SELECT 1
+                FROM "current_zone_recompute_request" due_request
+                WHERE due_request."nextAttemptAt" <= now()
+                  AND (
+                    due_request."currentPending"
+                    OR EXISTS (
+                      SELECT 1
+                      FROM unnest(due_request."pendingScheduledDates")
+                        AS dates(pending_date)
+                      WHERE pending_date <= $1::date
+                    )
+                  )
+              ) AS due
+            )
+            SELECT
+              request."departementId", request."generation",
+              request."targetPublicRevision",
+              request."scheduledFor"::text AS "scheduledFor",
+              request."pendingScheduledDates"::text[]
+                AS "pendingScheduledDates",
+              request."currentPending"
+            FROM "current_zone_recompute_request" request
+            CROSS JOIN due_context
+            WHERE due_context.due
+              AND (
+                request."currentPending"
+                OR EXISTS (
+                  SELECT 1
+                  FROM unnest(request."pendingScheduledDates")
+                    AS dates(pending_date)
+                  WHERE pending_date <= $1::date
+                )
+              )
+            ORDER BY request."requestedAt", request."departementId"
           `,
-        )) as Array<{ departementId: number; generation: string }>;
+          [businessDate],
+        )) as Array<{
+          departementId: number;
+          generation: string;
+          targetPublicRevision: string;
+          scheduledFor: string | null;
+          pendingScheduledDates: string[];
+          currentPending: boolean;
+        }>;
         if (requests.length === 0) {
-          return processed ? 'processed' : 'empty';
+          await queryRunner.query(`
+            DELETE FROM "current_zone_recompute_request"
+            WHERE NOT "currentPending"
+              AND cardinality("pendingScheduledDates") = 0
+          `);
+          return processed ? 'processed' : superseded ? 'superseded' : 'empty';
         }
-        const departementIds = requests.map(({ departementId }) =>
+        const contextRequests = requests;
+        const departementIds = contextRequests.map(({ departementId }) =>
           Number(departementId),
         );
-        const generations = requests.map(({ generation }) => generation);
+        const generations = contextRequests.map(({ generation }) => generation);
+        const targetPublicRevisions = contextRequests.map(
+          ({ targetPublicRevision }) => targetPublicRevision,
+        );
+        const targetPublicRevision = targetPublicRevisions.reduce(
+          (latest, revision) =>
+            BigInt(revision) > BigInt(latest) ? revision : latest,
+          '0',
+        );
+        const computeScheduledFor = contextRequests.some((request) =>
+          request.pendingScheduledDates.some((date) => date <= businessDate),
+        )
+          ? businessDate
+          : undefined;
+
+        const currentPublicRevision = isPublicSourceRevisionEnabled()
+          ? await this.getPublicSourceRevision(queryRunner)
+          : targetPublicRevision;
+        const requestsToRebase = isPublicSourceRevisionEnabled()
+          ? contextRequests.filter(
+              (request) =>
+                request.targetPublicRevision !== currentPublicRevision,
+            )
+          : [];
+        if (requestsToRebase.length > 0) {
+          const rebaseDepartementIds = requestsToRebase.map(
+            ({ departementId }) => Number(departementId),
+          );
+          const rebaseGenerations = requestsToRebase.map(
+            ({ generation }) => generation,
+          );
+          await queryRunner.query(
+            `
+              UPDATE "current_zone_recompute_request" request
+              SET
+                "generation" = request."generation" + 1,
+                "requestedAt" = now(),
+                "lastAttemptAt" = NULL,
+                "attemptCount" = 0,
+                "lastError" = NULL,
+                "targetPublicRevision" = $3::bigint,
+                "nextAttemptAt" = now(),
+                "supersededCount" = "supersededCount" + 1
+              FROM unnest($1::integer[], $2::bigint[])
+                AS observed("departementId", "generation")
+              WHERE request."departementId" = observed."departementId"
+                AND request."generation" = observed."generation"
+            `,
+            [rebaseDepartementIds, rebaseGenerations, currentPublicRevision],
+          );
+          this.logger.log(
+            `CURRENT ZONE RECOMPUTE ${requestsToRebase.length} request(s) rebased to revision ${currentPublicRevision} before start`,
+          );
+          superseded = true;
+          continue;
+        }
         try {
           const computeDepartementIds = isZonePublicationEnabled()
             ? []
             : departementIds;
-          const result = (await (scheduledFor === undefined
+          const result = (await (computeScheduledFor === undefined
             ? this.zoneAlerteComputedService.askCompute(
                 computeDepartementIds,
                 false,
@@ -2152,60 +2477,344 @@ export class ArreteRestrictionService {
                 false,
                 false,
                 undefined,
-                scheduledFor,
+                computeScheduledFor,
               ))) as { skipped?: boolean } | undefined;
           if (result?.skipped) {
             throw new Error('Current zone recompute was skipped');
           }
           await this.statisticDepartementService.computeDepartementStatistics();
+          if (
+            await this.hasCurrentZoneRequestBeenSuperseded(
+              queryRunner,
+              departementIds,
+              generations,
+              targetPublicRevision,
+            )
+          ) {
+            throw new CurrentZoneRecomputeSupersededError(
+              `Current zone recompute revision ${targetPublicRevision} was superseded after compute`,
+            );
+          }
+          const nextGenerations = generations.map((generation) =>
+            (BigInt(generation) + 1n).toString(),
+          );
+          const requestsWithFutureDates = contextRequests.filter((request) =>
+            request.pendingScheduledDates.some((date) => date > businessDate),
+          );
           await queryRunner.query(
             `
-              DELETE FROM "current_zone_recompute_request" request
-              USING unnest($1::integer[], $2::bigint[])
+              UPDATE "current_zone_recompute_request" request
+              SET
+                "generation" = request."generation" + 1,
+                "requestedAt" = now(),
+                "lastAttemptAt" = NULL,
+                "attemptCount" = 0,
+                "lastError" = NULL,
+                "pendingScheduledDates" = ARRAY(
+                  SELECT pending_date
+                  FROM unnest(request."pendingScheduledDates")
+                    AS dates(pending_date)
+                  WHERE pending_date > $3::date
+                  ORDER BY pending_date
+                ),
+                "currentPending" = true,
+                "scheduledFor" = (
+                  SELECT MIN(pending_date)
+                  FROM unnest(request."pendingScheduledDates")
+                    AS dates(pending_date)
+                  WHERE pending_date > $3::date
+                ),
+                "nextAttemptAt" = now()
+              FROM unnest($1::integer[], $2::bigint[])
                 AS completed("departementId", "generation")
               WHERE request."departementId" = completed."departementId"
                 AND request."generation" = completed."generation"
             `,
-            [departementIds, generations],
+            [departementIds, generations, businessDate],
           );
+          if (
+            await this.hasCurrentZoneRequestBeenSuperseded(
+              queryRunner,
+              departementIds,
+              nextGenerations,
+              targetPublicRevision,
+            )
+          ) {
+            throw new CurrentZoneRecomputeSupersededError(
+              `Current zone recompute revision ${targetPublicRevision} was superseded before certification`,
+            );
+          }
+          await certifyAvailableZoneTypes(
+            queryRunner,
+            departementIds,
+            targetPublicRevision,
+          );
+          if (
+            await this.hasCurrentZoneRequestBeenSuperseded(
+              queryRunner,
+              departementIds,
+              nextGenerations,
+              targetPublicRevision,
+            )
+          ) {
+            throw new CurrentZoneRecomputeSupersededError(
+              `Current zone recompute revision ${targetPublicRevision} was superseded during certification`,
+            );
+          }
+          if (requestsWithFutureDates.length > 0) {
+            const futureDepartementIds = requestsWithFutureDates.map(
+              ({ departementId }) => Number(departementId),
+            );
+            const futureGenerations = requestsWithFutureDates.map(
+              ({ generation }) => (BigInt(generation) + 1n).toString(),
+            );
+            await queryRunner.query(
+              `
+                UPDATE "current_zone_recompute_request" request
+                SET
+                  "generation" = request."generation" + 1,
+                  "currentPending" = false
+                FROM unnest($1::integer[], $2::bigint[])
+                  AS completed("departementId", "generation")
+                WHERE request."departementId" = completed."departementId"
+                  AND request."generation" = completed."generation"
+                  AND request."currentPending"
+                  AND cardinality(request."pendingScheduledDates") > 0
+              `,
+              [futureDepartementIds, futureGenerations],
+            );
+          }
+          const completedRequests = contextRequests.filter(
+            (request) =>
+              !request.pendingScheduledDates.some(
+                (date) => date > businessDate,
+              ),
+          );
+          if (completedRequests.length > 0) {
+            const completedDepartementIds = completedRequests.map(
+              ({ departementId }) => Number(departementId),
+            );
+            const acknowledgedGenerations = completedRequests.map(
+              ({ generation }) => (BigInt(generation) + 1n).toString(),
+            );
+            await queryRunner.query(
+              `
+                UPDATE "current_zone_recompute_request" request
+                SET
+                  "generation" = request."generation" + 1,
+                  "currentPending" = false
+                FROM unnest($1::integer[], $2::bigint[])
+                  AS completed("departementId", "generation")
+                WHERE request."departementId" = completed."departementId"
+                  AND request."generation" = completed."generation"
+                  AND request."currentPending"
+                  AND cardinality(request."pendingScheduledDates") = 0
+              `,
+              [completedDepartementIds, acknowledgedGenerations],
+            );
+            const completedGenerations = acknowledgedGenerations.map(
+              (generation) => (BigInt(generation) + 1n).toString(),
+            );
+            await queryRunner.query(
+              `
+                DELETE FROM "current_zone_recompute_request" request
+                USING unnest($1::integer[], $2::bigint[])
+                  AS completed("departementId", "generation")
+                WHERE request."departementId" = completed."departementId"
+                  AND request."generation" = completed."generation"
+                  AND NOT request."currentPending"
+                  AND cardinality(request."pendingScheduledDates") = 0
+              `,
+              [completedDepartementIds, completedGenerations],
+            );
+          }
           processed = true;
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
+          const requestWasSuperseded =
+            error instanceof CurrentZoneRecomputeSupersededError ||
+            (await this.hasCurrentZoneRequestBeenSuperseded(
+              queryRunner,
+              departementIds,
+              generations,
+              targetPublicRevision,
+            ));
+          if (requestWasSuperseded) {
+            await queryRunner.query(
+              `
+                UPDATE "current_zone_recompute_request" request
+                SET
+                  "lastAttemptAt" = now(),
+                  "supersededCount" = "supersededCount" + 1,
+                  "lastError" = NULL,
+                  "nextAttemptAt" = now()
+                FROM unnest($1::integer[], $2::bigint[])
+                  AS attempted("departementId", "generation")
+                WHERE request."departementId" = attempted."departementId"
+                  AND request."generation" = attempted."generation"
+              `,
+              [departementIds, generations],
+            );
+            this.logger.log(
+              `CURRENT ZONE RECOMPUTE revision ${targetPublicRevision} superseded during compute`,
+            );
+            superseded = true;
+            continue;
+          }
           await queryRunner.query(
             `
               UPDATE "current_zone_recompute_request" request
               SET
                 "lastAttemptAt" = now(),
                 "attemptCount" = "attemptCount" + 1,
-                "lastError" = left($2, 4000)
+                "lastError" = left($2, 4000),
+                "nextAttemptAt" = now() + make_interval(secs => LEAST(
+                  $4::integer * power(2, LEAST("attemptCount", 10))::integer,
+                  $5::integer
+                ))
               FROM unnest($1::integer[], $3::bigint[])
                 AS attempted("departementId", "generation")
               WHERE request."departementId" = attempted."departementId"
                 AND request."generation" = attempted."generation"
             `,
-            [departementIds, message, generations],
+            [
+              departementIds,
+              message,
+              generations,
+              this.readPositiveInteger(
+                'CURRENT_ZONE_RECOMPUTE_RETRY_BASE_SECONDS',
+                300,
+              ),
+              this.readPositiveInteger(
+                'CURRENT_ZONE_RECOMPUTE_RETRY_MAX_SECONDS',
+                21_600,
+              ),
+            ],
           );
           throw error;
         }
       }
-      return processed ? 'processed' : 'empty';
+      return processed ? 'processed' : superseded ? 'superseded' : 'empty';
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
+      let cleanupError: unknown;
+      let connectionDestroyed = false;
       try {
-        if (locked) {
+        if (sandreGlobalLockAcquired) {
           const [unlockResult] = await queryRunner.query(
-            `SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('current-zone-recompute'))`,
+            `SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('sandre-zone-sync')) AS unlocked`,
           );
-          if (unlockResult?.pg_advisory_unlock !== true) {
+          if (unlockResult?.unlocked !== true) {
+            throw new Error('Unable to release the global Sandre lock');
+          }
+        }
+      } catch (error) {
+        cleanupError = error;
+      }
+      try {
+        if (currentZoneLockAcquired) {
+          const [unlockResult] = await queryRunner.query(
+            `SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('current-zone-recompute')) AS unlocked`,
+          );
+          if (unlockResult?.unlocked !== true) {
             throw new Error(
               'Unable to release the current zone recompute lock',
             );
           }
         }
-      } finally {
-        await queryRunner.release();
+      } catch (error) {
+        cleanupError ??= error;
+      }
+      if (cleanupError) {
+        try {
+          await queryRunner.query('SELECT pg_advisory_unlock_all()');
+        } catch (error) {
+          const connectionError =
+            error instanceof Error ? error : new Error(String(error));
+          connectionDestroyed = true;
+          try {
+            // TypeORM keeps this pool-destroying release private to PostgresQueryRunner.
+            await (
+              queryRunner as typeof queryRunner & {
+                releasePostgresConnection: (error: Error) => Promise<void>;
+              }
+            ).releasePostgresConnection(connectionError);
+          } catch (destroyError) {
+            cleanupError ??= destroyError;
+          }
+        }
+      }
+      if (!connectionDestroyed) {
+        try {
+          await queryRunner.release();
+        } catch (error) {
+          cleanupError ??= error;
+        }
+      }
+      if (cleanupError) {
+        if (operationError) {
+          this.logger.error(
+            'ERREUR LORS DE LA LIBERATION DES VERROUS DE RECALCUL COURANT',
+            cleanupError instanceof Error
+              ? cleanupError.toString()
+              : String(cleanupError),
+          );
+        } else {
+          throw cleanupError;
+        }
       }
     }
+  }
+
+  private async getPublicSourceRevision(queryRunner: {
+    query: (sql: string, parameters?: unknown[]) => Promise<unknown>;
+  }): Promise<string> {
+    const rows = (await queryRunner.query(
+      `SELECT "publicRevision" FROM "zone_publication_source_state" WHERE "id" = 1`,
+    )) as Array<{ publicRevision: string }>;
+    const [state] = rows;
+    return String(state?.publicRevision ?? 'missing');
+  }
+
+  private async hasCurrentZoneRequestBeenSuperseded(
+    queryRunner: {
+      query: (sql: string, parameters?: unknown[]) => Promise<unknown>;
+    },
+    departementIds: number[],
+    generations: string[],
+    targetPublicRevision: string,
+  ): Promise<boolean> {
+    const [state] = (await queryRunner.query(
+      `
+        SELECT
+          source."publicRevision"::text AS "publicRevision",
+          EXISTS (
+            SELECT 1
+            FROM unnest($1::integer[], $2::bigint[])
+              AS attempted("departementId", "generation")
+            LEFT JOIN "current_zone_recompute_request" request
+              ON attempted."departementId" = request."departementId"
+              AND attempted."generation" = request."generation"
+            WHERE request."departementId" IS NULL
+          ) AS "generationAdvanced"
+        FROM "zone_publication_source_state" source
+        WHERE source."id" = 1
+      `,
+      [departementIds, generations],
+    )) as Array<{ publicRevision: string; generationAdvanced: boolean }>;
+    return (
+      state?.generationAdvanced === true ||
+      (isPublicSourceRevisionEnabled() &&
+        String(state?.publicRevision) !== targetPublicRevision)
+    );
+  }
+
+  private readPositiveInteger(name: string, fallback: number): number {
+    const value = Number(process.env[name] ?? fallback);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
   }
 
   /**
@@ -2234,6 +2843,7 @@ export class ArreteRestrictionService {
           `
             SELECT
               restriction_order.id,
+              restriction_order."departementId",
               restriction_order."dateDebut"::text AS "dateDebut",
               restriction_order."dateFin"::text AS "dateFin",
               restriction_order.statut::text AS statut
@@ -2304,7 +2914,9 @@ export class ArreteRestrictionService {
           `,
           [businessDate, departementFilter],
         )) as Array<
-          Pick<ArreteRestriction, 'id' | 'dateDebut' | 'dateFin' | 'statut'>
+          Pick<ArreteRestriction, 'id' | 'dateDebut' | 'dateFin' | 'statut'> & {
+            departementId: number;
+          }
         >;
         if (candidates.length > 0) {
           const ids = candidates.map(({ id }) => id);
@@ -2342,6 +2954,11 @@ export class ArreteRestrictionService {
               dirtyFrom.sort()[0],
             );
           }
+          await this.recordPublicMutation(
+            manager,
+            candidates.map(({ departementId }) => Number(departementId)),
+            'TRANSITION AUTOMATIQUE AR',
+          );
         }
         if (!dailyPublicationReuse) {
           const requestedDepartementIds = departementFilter?.length
@@ -2354,6 +2971,8 @@ export class ArreteRestrictionService {
           await this.enqueueCurrentZoneRecomputeWithManager(
             manager,
             requestedDepartementIds,
+            `CALCUL QUOTIDIEN ${businessDate}`,
+            businessDate,
           );
         }
       },
@@ -2421,7 +3040,7 @@ export class ArreteRestrictionService {
           snapshot."expectedCommuneCount",
           snapshot."processedCommuneCount",
           snapshot."sourceRevision"::text AS "snapshotSourceRevision",
-          source_state."revision"::text AS "currentSourceRevision",
+          ${sourceRevisionColumn('source_state')}::text AS "currentSourceRevision",
           publication_state."currentPublishedDate"::text
             AS "currentPublishedDate",
           (SELECT COUNT(*)::integer FROM "commune") AS "communeCount",
@@ -2732,13 +3351,6 @@ export class ArreteRestrictionService {
           arreteLien: `https://${this.nestConfigService.get('DOMAIN_NAME')}/arrete-restriction/${oldAr.id}/edition`,
         },
       );
-      if (!publish) {
-        if (diff.restrictions && diff.restrictions.some((r) => r.id)) {
-          await this.configService.setConfig(oldAr.dateDebut, oldAr.dateDebut);
-        } else {
-          await this.configService.setConfig(oldAr.dateDebut, null);
-        }
-      }
     }
   }
 

@@ -2,6 +2,9 @@ import {
   areScheduledJobsDisabled,
   BusinessCron,
   BUSINESS_SCHEDULER_PROCESS_ENV,
+  CurrentZoneRecomputeCron,
+  CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV,
+  CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS_ENV,
   DISABLE_SCHEDULED_JOBS_ENV,
   isBusinessSchedulerProcess,
   shouldRunWebScheduledJobs,
@@ -10,6 +13,10 @@ import {
 describe('business scheduling process role', () => {
   const previousRole = process.env[BUSINESS_SCHEDULER_PROCESS_ENV];
   const previousDisabled = process.env[DISABLE_SCHEDULED_JOBS_ENV];
+  const previousWorkerEnabled =
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
+  const previousWorkerProcess =
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS_ENV];
 
   afterEach(() => {
     if (previousRole === undefined) {
@@ -21,6 +28,18 @@ describe('business scheduling process role', () => {
       delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
     } else {
       process.env[DISABLE_SCHEDULED_JOBS_ENV] = previousDisabled;
+    }
+    if (previousWorkerEnabled === undefined) {
+      delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
+    } else {
+      process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV] =
+        previousWorkerEnabled;
+    }
+    if (previousWorkerProcess === undefined) {
+      delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS_ENV];
+    } else {
+      process.env[CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS_ENV] =
+        previousWorkerProcess;
     }
   });
 
@@ -61,5 +80,33 @@ describe('business scheduling process role', () => {
         ScheduledService.prototype.run,
       ),
     ).toMatchObject({ disabled: true, waitForCompletion: true });
+  });
+
+  it('gives the dedicated current-zone process exclusive queue ownership', () => {
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV] = 'true';
+    delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS_ENV];
+
+    class ClockService {
+      @CurrentZoneRecomputeCron('* * * * * *')
+      run(): void {}
+    }
+
+    expect(
+      Reflect.getMetadata('SCHEDULE_CRON_OPTIONS', ClockService.prototype.run),
+    ).toMatchObject({ disabled: true });
+
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'false';
+    process.env[CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS_ENV] = 'true';
+
+    class WorkerService {
+      @CurrentZoneRecomputeCron('* * * * * *')
+      run(): void {}
+    }
+
+    expect(
+      Reflect.getMetadata('SCHEDULE_CRON_OPTIONS', WorkerService.prototype.run),
+    ).toMatchObject({ disabled: false });
+    expect(shouldRunWebScheduledJobs()).toBe(false);
   });
 });

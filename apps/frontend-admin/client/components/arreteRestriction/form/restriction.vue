@@ -7,12 +7,17 @@ import type { Ref } from 'vue';
 import type { UsageArreteCadre } from '~/dto/usage_arrete_cadre.dto';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { Parametres } from '~/dto/parametres.dto';
+import {
+  canReuseRestrictionUsages,
+  concernsAnyWaterType,
+  type RestrictionWaterType,
+} from '~/utils/restriction-usage';
 
 const props = defineProps<{
   restriction: Restriction;
   arreteCadre: ArreteCadre;
   arreteRestriction: ArreteRestriction;
-  type: 'SUP' | 'SOU' | 'AEP';
+  type: RestrictionWaterType;
   multipleZones: boolean;
   departementParametres: Parametres;
 }>();
@@ -32,7 +37,7 @@ const rules = computed(() => {
   };
 });
 
-const typesToShow = computed(() => {
+const typesToShow = computed<RestrictionWaterType[]>(() => {
   switch (props.departementParametres?.superpositionCommune) {
     case 'no':
     case 'no_all':
@@ -75,7 +80,6 @@ const typesToShow = computed(() => {
 });
 const usagesSelected: Ref<string[]> = ref(props.restriction.usages.map((u) => u.nom));
 const allUsages: Ref<any[]> = ref([]);
-const api = useApi();
 const utils = useUtils();
 
 const v$ = useVuelidate(rules, props.restriction);
@@ -156,13 +160,16 @@ const computeAllUsages = () => {
   let restrictionUsages =
     props.restriction.usages.concat(
       props.arreteRestriction.restrictions
-        .filter(r => r.id !== props.restriction.id)
+        .filter((restriction) =>
+          canReuseRestrictionUsages(
+            restriction,
+            props.restriction.id,
+            props.arreteCadre?.id,
+          ),
+        )
         .map(r => r.usages
           .filter(u => !props.restriction.usages.some(ru => ru.nom === u.nom))
-          .map((u) => {
-            u.id = null;
-            return u;
-          }))
+          .map((u) => ({ ...u, id: null })))
         .flat(),
     ).filter((value, index, self) =>
         index === self.findIndex((u) => (
@@ -181,21 +188,8 @@ const computeAllUsages = () => {
     );
     allUsages.value = restrictionUsages.concat(usagesAc
       .filter((u) => !restrictionUsages.some(ru => ru.nom === u.nom))
-      .map((u) => {
-        u.id = null;
-        return u;
-      }),
-    ).filter(u => {
-      let bool = false;
-      if (typesToShow.value.includes('SUP')) {
-        bool = bool || u.concerneEsu;
-      } else if (typesToShow.value.includes('SOU')) {
-        bool = bool || u.concerneEso;
-      } else if (typesToShow.value.includes('AEP')) {
-        bool = bool || u.concerneAep;
-      }
-      return bool;
-    });
+      .map((u) => ({ ...u, id: null })),
+    ).filter(u => concernsAnyWaterType(u, typesToShow.value));
   }
   allUsages.value = allUsages.value.sort((a, b) => {
     if (a.nom < b.nom) {
@@ -214,6 +208,9 @@ const filterUsages = () => {
   props.restriction.usages = props.restriction.usages.filter(u => getNiveauGravite(u) !== null && getNiveauGravite(u) !== '');
   usagesSelected.value = props.restriction.usages.map((u) => u.nom);
 };
+
+const getUsageCheckboxId = (usage: UsageArreteCadre) =>
+  `${props.restriction.zoneAlerte?.id ?? ''}${props.restriction.nomGroupementAep ?? ''}${usage.nom}`;
 
 computeAllUsages();
 
@@ -273,10 +270,9 @@ watch(() => props.restriction.niveauGravite, (newValue, oldValue) => {
                          :expanded-id="expandedId"
                          @expand="expandedId = $event"
                          class="fr-accordion--no-shadow">
-            <div v-for="usageArreteCadre in allUsages">
+            <div v-for="usageArreteCadre in allUsages" :key="getUsageCheckboxId(usageArreteCadre)">
               <DsfrCheckbox
-                :id="'' + restriction.zoneAlerte?.id + restriction.nomGroupementAep + usageArreteCadre.nom"
-                :key="'' + restriction.zoneAlerte?.id + restriction.nomGroupementAep + usageArreteCadre.nom"
+                :id="getUsageCheckboxId(usageArreteCadre)"
                 :name="usageArreteCadre.nom"
                 :model-value="usagesSelected.includes(usageArreteCadre.nom)"
                 :small="false"

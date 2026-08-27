@@ -28,7 +28,7 @@ type GravityLevel = (typeof GRAVITY_LEVELS)[number];
 type RestrictionArea = number | string | undefined;
 type RestrictionAreas = Record<GravityLevel, RestrictionArea>;
 
-interface DepartementRestriction {
+export interface DepartementRestriction {
   date: string;
   SOU: RestrictionAreas;
   SUP: RestrictionAreas;
@@ -49,6 +49,13 @@ interface ZoneAreaRow {
   area: number | null;
   requestedZoneCount: number | string;
   foundZoneCount: number | string;
+}
+
+export interface HistoricDepartmentRestrictionInput {
+  departementId: number;
+  departementCode: string;
+  date: string;
+  historicNotComputed: boolean;
 }
 
 @Injectable()
@@ -233,64 +240,13 @@ export class StatisticDepartementService {
         requestedCodes.has(departement.code),
       );
     }
-    const areaRequests = this.buildZoneAreaRequests(zones);
-    const areaRows = await this.computeZoneAreas(
-      areaRequests,
-      historic,
-      historicNotComputed,
+    const updates = await this.buildDepartmentRestrictionUpdates(
+      zones,
+      dateString,
+      departements,
+      Boolean(historic),
+      Boolean(historicNotComputed),
     );
-    const expectedAreaGroups = new Set(
-      areaRequests.map((request) =>
-        this.getZoneAreaKey(
-          request.departementCode,
-          request.zoneType,
-          request.gravityLevel,
-        ),
-      ),
-    );
-    const areaByGroup = new Map<string, RestrictionArea>();
-    for (const row of areaRows) {
-      const key = this.getZoneAreaKey(
-        row.departementCode,
-        row.zoneType,
-        row.gravityLevel,
-      );
-      if (
-        !expectedAreaGroups.has(key) ||
-        Number(row.requestedZoneCount) < 1 ||
-        Number(row.foundZoneCount) !== Number(row.requestedZoneCount) ||
-        row.area == null
-      ) {
-        throw new Error(`Zones statistiques departementales invalides: ${key}`);
-      }
-      areaByGroup.set(key, Number(row.area).toFixed(2));
-    }
-    if (areaByGroup.size !== expectedAreaGroups.size) {
-      throw new Error(
-        `Groupes statistiques departementaux incomplets: ${areaByGroup.size}/${expectedAreaGroups.size}`,
-      );
-    }
-
-    const updates = departements.map((departement) => {
-      const restriction = this.createEmptyRestriction(dateString);
-      for (const zoneType of ZONE_TYPES) {
-        for (const gravityLevel of GRAVITY_LEVELS) {
-          const key = this.getZoneAreaKey(
-            departement.code,
-            zoneType,
-            gravityLevel,
-          );
-          if (areaByGroup.has(key)) {
-            restriction[zoneType][gravityLevel] = areaByGroup.get(key);
-          }
-        }
-      }
-      return {
-        departementId: departement.id,
-        date: dateString,
-        restriction,
-      };
-    });
     if (updates.length === 0) {
       return;
     }
@@ -406,6 +362,103 @@ export class StatisticDepartementService {
         `Statistiques departementales incompletes: ${Number(result?.affected ?? 0)}/${Number(result?.expected ?? 0)} mises a jour`,
       );
     }
+  }
+
+  async buildHistoricDepartmentRestriction(
+    zones: ZoneAlerteComputed[],
+    input: HistoricDepartmentRestrictionInput,
+  ): Promise<DepartementRestriction> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
+      throw new Error(
+        `Date statistique departementale invalide: ${input.date}`,
+      );
+    }
+    const [update] = await this.buildDepartmentRestrictionUpdates(
+      zones,
+      input.date,
+      [{ id: input.departementId, code: input.departementCode }],
+      true,
+      input.historicNotComputed,
+    );
+    if (!update) {
+      throw new Error(
+        `Statistique departementale absente pour ${input.departementCode}`,
+      );
+    }
+    return update.restriction;
+  }
+
+  private async buildDepartmentRestrictionUpdates(
+    zones: ZoneAlerteComputed[],
+    dateString: string,
+    departements: Array<{ id: number; code: string }>,
+    historic: boolean,
+    historicNotComputed: boolean,
+  ): Promise<
+    Array<{
+      departementId: number;
+      date: string;
+      restriction: DepartementRestriction;
+    }>
+  > {
+    const areaRequests = this.buildZoneAreaRequests(zones);
+    const areaRows = await this.computeZoneAreas(
+      areaRequests,
+      historic,
+      historicNotComputed,
+    );
+    const expectedAreaGroups = new Set(
+      areaRequests.map((request) =>
+        this.getZoneAreaKey(
+          request.departementCode,
+          request.zoneType,
+          request.gravityLevel,
+        ),
+      ),
+    );
+    const areaByGroup = new Map<string, RestrictionArea>();
+    for (const row of areaRows) {
+      const key = this.getZoneAreaKey(
+        row.departementCode,
+        row.zoneType,
+        row.gravityLevel,
+      );
+      if (
+        !expectedAreaGroups.has(key) ||
+        Number(row.requestedZoneCount) < 1 ||
+        Number(row.foundZoneCount) !== Number(row.requestedZoneCount) ||
+        row.area == null
+      ) {
+        throw new Error(`Zones statistiques departementales invalides: ${key}`);
+      }
+      areaByGroup.set(key, Number(row.area).toFixed(2));
+    }
+    if (areaByGroup.size !== expectedAreaGroups.size) {
+      throw new Error(
+        `Groupes statistiques departementaux incomplets: ${areaByGroup.size}/${expectedAreaGroups.size}`,
+      );
+    }
+
+    return departements.map((departement) => {
+      const restriction = this.createEmptyRestriction(dateString);
+      for (const zoneType of ZONE_TYPES) {
+        for (const gravityLevel of GRAVITY_LEVELS) {
+          const key = this.getZoneAreaKey(
+            departement.code,
+            zoneType,
+            gravityLevel,
+          );
+          if (areaByGroup.has(key)) {
+            restriction[zoneType][gravityLevel] = areaByGroup.get(key);
+          }
+        }
+      }
+      return {
+        departementId: departement.id,
+        date: dateString,
+        restriction,
+      };
+    });
   }
 
   private buildZoneAreaRequests(

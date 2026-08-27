@@ -17,8 +17,13 @@
     "start:debug": "nest start --debug --watch --max-old-space-size=4096",
     "start:prod": "node dist/apps/backend-admin/src/main --max-old-space-size=4096",
     "start:clock": "RUN_BUSINESS_SCHEDULED_JOBS=true node --max-old-space-size=4096 dist/apps/backend-admin/src/clock",
+    "start:current-zone-worker": "RUN_BUSINESS_SCHEDULED_JOBS=false CURRENT_ZONE_RECOMPUTE_WORKER_PROCESS=true node --max-old-space-size=4096 dist/apps/backend-admin/src/current-zone-worker",
+    "start:historic-backfill-worker": "RUN_BUSINESS_SCHEDULED_JOBS=false DATABASE_POOL_MAX=${HISTORIC_BACKFILL_DATABASE_POOL_MAX:-3} node --max-old-space-size=6144 dist/apps/backend-admin/src/historic-backfill-worker",
+    "start:historic-artifact-worker": "RUN_BUSINESS_SCHEDULED_JOBS=false DATABASE_POOL_MAX=${HISTORIC_BACKFILL_DATABASE_POOL_MAX:-3} node --max-old-space-size=6144 dist/apps/backend-admin/src/historic-artifact-worker",
     "datagouv:publish-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-communes.js",
     "datagouv:publish-historique-communes": "node dist/apps/backend-admin/src/scripts/publish-datagouv-historique-communes.js",
+    "benchmark:historic-backfill": "node dist/apps/backend-admin/src/scripts/benchmark-historic-backfill.js",
+    "operator:historic-backfill": "node dist/apps/backend-admin/src/scripts/historic-backfill-operator.js",
     "recompute:commune-statistics": "node dist/apps/backend-admin/src/scripts/recompute-commune-statistics.js",
     "zones:sandre:reconcile": "node dist/apps/backend-admin/src/scripts/reconcile-sandre-zones.js",
     "arretes:confirm-open-ended-predecessor": "node dist/apps/backend-admin/src/scripts/confirm-open-ended-predecessor.js",
@@ -140,6 +145,10 @@
       "js-yaml": "4.3.1"
     },
     "preview-email": {
+      "mailparser": {
+        ".": "3.9.8",
+        "linkify-it": "5.0.2"
+      },
       "nodemailer": "$nodemailer",
       "uuid": "11.1.1"
     }

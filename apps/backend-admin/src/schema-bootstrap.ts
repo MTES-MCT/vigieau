@@ -38,7 +38,7 @@ export async function bootstrapSchema(dataSource: DataSource): Promise<void> {
     if (schemaState?.baselineExists !== true) {
       await dataSource.synchronize();
     }
-    await dataSource.runMigrations();
+    await dataSource.runMigrations({ transaction: 'each' });
   } finally {
     try {
       const [unlockResult] = await queryRunner.query(

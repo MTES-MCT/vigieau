@@ -1,9 +1,11 @@
-import { mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertPmtilesFeatureIntegrity,
   buildTippecanoeArguments,
+  collectComputedHistoricPmtilesFeatureIds,
+  collectLegacyHistoricBackfillPmtilesFeatureIds,
   collectPmtilesFeatureIds,
   generatePmtiles,
 } from './pmtiles-generation';
@@ -14,6 +16,17 @@ function validPmtilesHeader(maxZoom = 12): Buffer {
   header[7] = 3;
   header[101] = maxZoom;
   return header;
+}
+
+async function createExecutable(
+  binDirectory: string,
+  name: string,
+): Promise<string> {
+  await mkdir(binDirectory, { recursive: true });
+  const executable = join(binDirectory, name);
+  await writeFile(executable, '#!/bin/sh\nexit 0\n');
+  await chmod(executable, 0o700);
+  return executable;
 }
 
 describe('PMTiles generation integrity', () => {
@@ -29,6 +42,17 @@ describe('PMTiles generation integrity', () => {
       ]),
     );
     expect(args.join(' ')).not.toMatch(/drop|coalesce/);
+    expect(args).not.toContain('--read-parallel');
+  });
+
+  it('can pin the historic archive maximum zoom', () => {
+    const args = buildTippecanoeArguments('zones.geojson', 'zones.pmtiles', 12);
+
+    expect(args).toContain('-z12');
+    expect(args).not.toContain('-zg');
+    expect(() =>
+      buildTippecanoeArguments('zones.geojson', 'zones.pmtiles', 25),
+    ).toThrow('maximum zoom must be between 0 and 24');
   });
 
   it('rejects duplicate ids and empty source geometries', () => {
@@ -49,6 +73,186 @@ describe('PMTiles generation integrity', () => {
         { geometry: { coordinates: [] }, properties: { id: 9 } },
       ]),
     ).toThrow('empty feature geometries (1): 9');
+    expect(() =>
+      collectPmtilesFeatureIds([
+        {
+          geometry: { type: 'MultiPolygon', coordinates: [] },
+          properties: { id: 7626 },
+        },
+      ]),
+    ).toThrow('empty feature geometries (1): 7626');
+  });
+
+  it('excludes only the allowlisted legacy backfill MultiPolygon empty', () => {
+    expect(
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+          {
+            geometry: { type: 'Polygon', coordinates: [[[1, 2]]] },
+            properties: { id: 10 },
+          },
+        ],
+        [7626],
+      ),
+    ).toEqual({
+      expectedFeatureIds: ['10'],
+      excludedEmptyGeometryIds: ['7626'],
+    });
+
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 9 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('empty feature geometries (1): 9');
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'Polygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('empty feature geometries (1): 7626');
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [[]] },
+            properties: { id: 7626 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('empty feature geometries (1): 7626');
+  });
+
+  it('keeps duplicate-id validation strict across excluded legacy features', () => {
+    expect(() =>
+      collectLegacyHistoricBackfillPmtilesFeatureIds(
+        [
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [] },
+            properties: { id: 7626 },
+          },
+          {
+            geometry: { type: 'MultiPolygon', coordinates: [[[1, 2]]] },
+            properties: { id: 7626 },
+          },
+        ],
+        [7626],
+      ),
+    ).toThrow('duplicate feature ids (1): 7626');
+  });
+
+  it('excludes only polygons that collapse on the historic PMTiles grid', () => {
+    const collapsedPolygon = {
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.000001, 47],
+            [2, 47.000001],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 10 },
+    };
+    const collapsedMultiPolygon = {
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: [
+          [
+            [
+              [-2, 48],
+              [-2, 48],
+              [-2, 48],
+              [-2, 48],
+            ],
+          ],
+        ],
+      },
+      properties: { id: 20 },
+    };
+    const renderablePolygon = {
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [2, 47],
+            [2.01, 47],
+            [2, 47.01],
+            [2, 47],
+          ],
+        ],
+      },
+      properties: { id: 30 },
+    };
+    const partlyRenderableMultiPolygon = {
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: [
+          collapsedMultiPolygon.geometry.coordinates[0],
+          [renderablePolygon.geometry.coordinates[0]],
+        ],
+      },
+      properties: { id: 40 },
+    };
+
+    expect(
+      collectComputedHistoricPmtilesFeatureIds([
+        collapsedPolygon,
+        collapsedMultiPolygon,
+        renderablePolygon,
+        partlyRenderableMultiPolygon,
+      ]),
+    ).toEqual({
+      expectedFeatureIds: ['30', '40'],
+      excludedNonRenderableGeometryIds: ['10', '20'],
+    });
+    expect(collectPmtilesFeatureIds([collapsedPolygon])).toEqual(['10']);
+    expect(
+      collectLegacyHistoricBackfillPmtilesFeatureIds([collapsedPolygon], []),
+    ).toEqual({
+      expectedFeatureIds: ['10'],
+      excludedEmptyGeometryIds: [],
+    });
+  });
+
+  it('keeps empty and duplicate validation strict for computed backfills', () => {
+    expect(() =>
+      collectComputedHistoricPmtilesFeatureIds([
+        {
+          geometry: { type: 'Polygon', coordinates: [] },
+          properties: { id: 9 },
+        },
+      ]),
+    ).toThrow('empty feature geometries (1): 9');
+    expect(() =>
+      collectComputedHistoricPmtilesFeatureIds([
+        {
+          geometry: { type: 'Polygon', coordinates: [[[1, 2]]] },
+          properties: { id: 7 },
+        },
+        {
+          geometry: { type: 'Polygon', coordinates: [[[3, 4]]] },
+          properties: { id: 7 },
+        },
+      ]),
+    ).toThrow('duplicate feature ids (1): 7');
   });
 
   it('accepts every expected id at the archive maximum zoom', async () => {
@@ -73,6 +277,78 @@ describe('PMTiles generation integrity', () => {
     });
 
     expect(decodeRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a non-renderable feature whether Tippecanoe keeps or drops it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const pmtilesPath = join(directory, 'zones.pmtiles');
+    await writeFile(pmtilesPath, validPmtilesHeader());
+
+    for (const decodedIds of [['10', '33199621'], ['10']]) {
+      await assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          for (const id of decodedIds) {
+            onLine(JSON.stringify({ properties: { id } }));
+          }
+        },
+      });
+    }
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          onLine(JSON.stringify({ properties: { id: 10 } }));
+          onLine(JSON.stringify({ properties: { id: 99 } }));
+        },
+      }),
+    ).rejects.toThrow('missing=0 [], unexpected=1 [99]');
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621'],
+        decodeRunner: async (_executable, _args, onLine) => {
+          onLine(JSON.stringify({ properties: { id: 33199621 } }));
+        },
+      }),
+    ).rejects.toThrow('missing=1 [10], unexpected=0 []');
+
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['10'],
+      }),
+    ).rejects.toThrow('overlap or contain duplicates (1): 10');
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['33199621', '33199621'],
+      }),
+    ).rejects.toThrow('overlap or contain duplicates (1): 33199621');
+    await expect(
+      assertPmtilesFeatureIntegrity({
+        decoderPath: '/tippecanoe-decode',
+        pmtilesPath,
+        expectedFeatureIds: ['10'],
+        optionalFeatureIds: ['not-an-id'],
+      }),
+    ).rejects.toThrow(
+      'Optional PMTiles features contains an invalid feature id',
+    );
   });
 
   it('rejects missing, unexpected, or invalid decoded ids', async () => {
@@ -105,6 +381,9 @@ describe('PMTiles generation integrity', () => {
   it('removes an output that fails validation', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
     const outputPath = join(directory, 'zones.pmtiles');
+    const binDirectory = join(directory, 'tippecanoe_program/bin');
+    await createExecutable(binDirectory, 'tippecanoe');
+    await createExecutable(binDirectory, 'tippecanoe-decode');
 
     await expect(
       generatePmtiles({
@@ -118,6 +397,75 @@ describe('PMTiles generation integrity', () => {
         decodeRunner: async () => undefined,
       }),
     ).rejects.toThrow('missing=1 [10]');
+    await expect(stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the temporary workspace separate from an explicit slug bin directory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const workingDirectory = join(directory, 'tmp');
+    const tippecanoeBinDirectory = join(
+      directory,
+      'apps/backend-admin/tippecanoe_program/bin',
+    );
+    const tippecanoePath = await createExecutable(
+      tippecanoeBinDirectory,
+      'tippecanoe',
+    );
+    const decoderPath = await createExecutable(
+      tippecanoeBinDirectory,
+      'tippecanoe-decode',
+    );
+    await mkdir(workingDirectory);
+    const outputPath = join(workingDirectory, 'zones.pmtiles');
+    const commandRunner = jest.fn(async (executable: string) => {
+      expect(executable).toBe(tippecanoePath);
+      await writeFile(outputPath, validPmtilesHeader());
+    });
+    const decodeRunner = jest.fn(async (executable, _args, onLine) => {
+      expect(executable).toBe(decoderPath);
+      onLine(JSON.stringify({ properties: { id: 10 } }));
+    });
+
+    await generatePmtiles({
+      workingDirectory,
+      tippecanoeBinDirectory,
+      inputPath: join(workingDirectory, 'zones.geojson'),
+      outputPath,
+      expectedFeatureIds: ['10'],
+      commandRunner,
+      decodeRunner,
+    });
+
+    expect(commandRunner).toHaveBeenCalledTimes(1);
+    expect(decodeRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails before generation when a required slug executable is missing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-pmtiles-test-'));
+    const workingDirectory = join(directory, 'tmp');
+    const tippecanoeBinDirectory = join(directory, 'tippecanoe_program/bin');
+    await mkdir(workingDirectory);
+    await createExecutable(tippecanoeBinDirectory, 'tippecanoe');
+    const outputPath = join(workingDirectory, 'zones.pmtiles');
+    await writeFile(outputPath, Buffer.from('stale'));
+    const commandRunner = jest.fn();
+
+    await expect(
+      generatePmtiles({
+        workingDirectory,
+        tippecanoeBinDirectory,
+        inputPath: join(workingDirectory, 'zones.geojson'),
+        outputPath,
+        expectedFeatureIds: [],
+        commandRunner,
+      }),
+    ).rejects.toThrow(
+      `Required Tippecanoe executable is not executable: ${join(
+        tippecanoeBinDirectory,
+        'tippecanoe-decode',
+      )}`,
+    );
+    expect(commandRunner).not.toHaveBeenCalled();
     await expect(stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

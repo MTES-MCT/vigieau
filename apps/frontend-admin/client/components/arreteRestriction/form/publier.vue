@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import useVuelidate from '@vuelidate/core';
-import { requiredIf, helpers, required } from "@vuelidate/validators";
-import type { ArreteRestriction } from "~/dto/arrete_restriction.dto";
+import { helpers, required, requiredIf } from '@vuelidate/validators';
+import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -12,8 +12,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   publier: any;
 }>();
-const utils = useUtils()
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const utils = useUtils();
+const MAX_FILE_SIZE = 10_000_000;
 
 const rules = computed(() => {
   return {
@@ -28,16 +28,21 @@ const rules = computed(() => {
         return true;
       }),
     },
-    dateSignature: {
-    },
+    dateSignature: {},
     file: {
-      required: helpers.withMessage("Le PDF de l'arrêté doit être ajouté", requiredIf(() => !props.arreteRestriction.fichier)),
-      maxSize: helpers.withMessage("La taille du PDF ne doit pas dépasser 10Mo", (value: any) => {
-        return !value || value?.size < MAX_FILE_SIZE
+      required: helpers.withMessage(
+        "Le PDF de l'arrêté doit être ajouté",
+        requiredIf(() => !props.arreteRestriction.fichier),
+      ),
+      maxSize: helpers.withMessage('La taille du PDF ne doit pas dépasser 10Mo', (value: any) => {
+        return !value || value?.size < MAX_FILE_SIZE;
       }),
-      maxLength: helpers.withMessage("Le nom du fichier ne doit pas dépasser 100 caractères. Évitez les espaces et caractères spéciaux.", (value: any) => {
-        return !value || encodeURIComponent(value?.name).length <= 100
-      }),
+      maxLength: helpers.withMessage(
+        'Le nom du fichier ne doit pas dépasser 100 caractères. Évitez les espaces et caractères spéciaux.',
+        (value: any) => {
+          return !value || encodeURIComponent(value?.name).length <= 100;
+        },
+      ),
     },
   };
 });
@@ -58,13 +63,12 @@ defineExpose({
 
 <template>
   <form @submit.prevent="">
-    <DsfrAlert
-      v-if="errors && errors.length > 0"
-      type="error"
-      class="fr-mb-2w">
-      <div v-html="errors.join('<br/>')" />
+    <DsfrAlert v-if="errors && errors.length > 0" type="error" class="fr-mb-2w">
+      <ul class="fr-m-0">
+        <li v-for="error in errors" :key="error">{{ error }}</li>
+      </ul>
     </DsfrAlert>
-    
+
     <p>Choisissez la date d’entrée en vigueur de l’arrêté et sa date de fin (optionnel)</p>
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 fr-col-lg-6">
@@ -83,28 +87,32 @@ defineExpose({
       </div>
       <div class="fr-col-12 fr-col-lg-6">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'dateFin')">
-          <DsfrInput id="dateFin"
-                     v-model="arreteRestriction.dateFin"
-                     label="Date de fin"
-                     label-visible
-                     type="date"
-                     name="dateFin"
-                     data-cy="PublishFormDateFinInput" />
+          <DsfrInput
+            id="dateFin"
+            v-model="arreteRestriction.dateFin"
+            label="Date de fin"
+            label-visible
+            type="date"
+            name="dateFin"
+            data-cy="PublishFormDateFinInput"
+          />
         </DsfrInputGroup>
       </div>
       <div class="fr-col-12 fr-col-lg-6">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'dateSignature')">
-          <DsfrInput id="dateSignature"
-                     v-model="arreteRestriction.dateSignature"
-                     label="Date de signature"
-                     label-visible
-                     type="date"
-                     name="dateSignature"
-                     data-cy="PublishFormDateSignatureInput" />
+          <DsfrInput
+            id="dateSignature"
+            v-model="arreteRestriction.dateSignature"
+            label="Date de signature"
+            label-visible
+            type="date"
+            name="dateSignature"
+            data-cy="PublishFormDateSignatureInput"
+          />
         </DsfrInputGroup>
       </div>
     </div>
-    
+
     <div class="fr-mt-4w" v-if="arreteRestriction.fichier">
       <DsfrFileDownload
         format="PDF"
@@ -117,12 +125,14 @@ defineExpose({
 
     <div class="fr-mt-4w">
       <DsfrInputGroup :error-message="utils.showInputError(v$, 'file')">
-        <DsfrFileUpload :required="!arreteRestriction.fichier"
-                        :label="arreteRestriction.fichier ? 'Modifier le PDF de l\'arrêté' : 'Importer le PDF de l\'arrêté'"
-                        hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
-                        :arreteCadrecept="['application/pdf']"
-                        data-cy="PublishFormFileInput"
-                        @change="arreteRestriction.file = $event[0]" />
+        <DsfrFileUpload
+          :required="!arreteRestriction.fichier"
+          :label="arreteRestriction.fichier ? 'Modifier le PDF de l\'arrêté' : 'Importer le PDF de l\'arrêté'"
+          hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
+          :accept="['application/pdf']"
+          data-cy="PublishFormFileInput"
+          @change="arreteRestriction.file = $event[0]"
+        />
       </DsfrInputGroup>
     </div>
   </form>

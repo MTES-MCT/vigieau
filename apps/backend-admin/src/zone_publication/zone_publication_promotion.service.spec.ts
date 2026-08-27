@@ -99,6 +99,9 @@ function createHarness(options?: {
           ContentType: fileName.endsWith('.geojson')
             ? 'application/geo+json'
             : 'application/vnd.pmtiles',
+          ContentDisposition: fileName.endsWith('.geojson')
+            ? `attachment; filename="${fileName}"`
+            : undefined,
           CacheControl: fileName.match(
             /zones_arretes_en_vigueur_(?:[a-f0-9]{64})\./,
           )
@@ -209,6 +212,8 @@ describe('ZonePublicationPromotionService', () => {
         {
           abortSignal: expect.any(AbortSignal),
           cacheControl: 'public, max-age=0, must-revalidate',
+          contentDisposition:
+            'attachment; filename="zones_arretes_en_vigueur_2026-07-31.geojson"',
           contentType: 'application/geo+json',
         },
       ],
@@ -229,6 +234,8 @@ describe('ZonePublicationPromotionService', () => {
         {
           abortSignal: expect.any(AbortSignal),
           cacheControl: 'public, max-age=0, must-revalidate',
+          contentDisposition:
+            'attachment; filename="zones_arretes_en_vigueur.geojson"',
           contentType: 'application/geo+json',
         },
       ],
@@ -282,6 +289,35 @@ describe('ZonePublicationPromotionService', () => {
       harness.manager.query.mock.invocationCallOrder[completionIndex],
     );
     expect(harness.datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
+  });
+
+  it('rejects a GeoJSON copy without the download disposition', async () => {
+    const harness = createHarness();
+    harness.s3Service.headFile
+      .mockResolvedValueOnce({
+        ContentLength: 100,
+        ContentType: 'application/geo+json',
+        ContentDisposition: undefined,
+        CacheControl: 'public, max-age=31536000, immutable',
+      })
+      .mockResolvedValueOnce({
+        ContentLength: 100,
+        ContentType: 'application/geo+json',
+        ContentDisposition: undefined,
+        CacheControl: 'public, max-age=0, must-revalidate',
+      });
+
+    await expect(harness.service.promoteStableArtifacts()).resolves.toBe(
+      'failed',
+    );
+    expect(harness.s3Service.copyFile).toHaveBeenCalledTimes(1);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('"promotionLastAttemptAt" = now()'),
+      [
+        'publication-1',
+        expect.stringContaining('content-disposition inattendu'),
+      ],
+    );
   });
 
   it('retries all stable copies after a partial S3 failure', async () => {
@@ -492,15 +528,15 @@ describe('ZonePublicationPromotionService', () => {
     expect(harness.datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
   });
 
-  it('persists an incomplete data.gouv configuration as a retryable error', async () => {
+  it('disables data.gouv promotion before taking locks when upload is not configured', async () => {
     const harness = createHarness();
     harness.datagouvService.canUploadToDataGouv.mockReturnValue(false);
 
-    await expect(harness.service.promoteDataGouv()).resolves.toBe('failed');
+    await expect(harness.service.promoteDataGouv()).resolves.toBe('disabled');
+    expect(harness.dataSource.transaction).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.dataSource.query).not.toHaveBeenCalled();
     expect(harness.datagouvService.uploadToDatagouv).not.toHaveBeenCalled();
-    expect(harness.dataSource.query.mock.calls[0][1]).toEqual([
-      'publication-1',
-      'data.gouv.fr upload configuration is incomplete',
-    ]);
+    expect(harness.getTransactionRollbackCount()).toBe(0);
   });
 });

@@ -3,6 +3,7 @@ import { RegleauLogger } from '../../logger/regleau.logger';
 import {
   DeleteObjectCommand,
   CopyObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   S3,
   type CopyObjectCommandInput,
@@ -10,8 +11,12 @@ import {
 import { Upload } from '@aws-sdk/lib-storage';
 import { ConfigService } from '@nestjs/config';
 
+export type S3ObjectAcl = 'private' | 'public-read';
+
 export interface S3WriteOptions {
+  acl?: S3ObjectAcl;
   cacheControl?: string;
+  contentDisposition?: string;
   contentType?: string;
 }
 
@@ -133,11 +138,16 @@ export class S3Service {
       Bucket: this.configService.get('S3_BUCKET'),
       CopySource: encodeURI(oldFileUrl),
       Key: String(newFileUrl),
-      ACL: 'public-read',
-      ...(options?.cacheControl || options?.contentType
+      ACL: options?.acl ?? 'public-read',
+      ...(options?.cacheControl ||
+      options?.contentDisposition ||
+      options?.contentType
         ? {
             ...(options.cacheControl
               ? { CacheControl: options.cacheControl }
+              : {}),
+            ...(options.contentDisposition
+              ? { ContentDisposition: options.contentDisposition }
               : {}),
             ...(options.contentType
               ? { ContentType: options.contentType }
@@ -181,6 +191,25 @@ export class S3Service {
     );
   }
 
+  async downloadFile(
+    fileName: string,
+    prefix: string = '',
+    options?: Pick<S3OperationOptions, 'abortSignal'>,
+  ): Promise<Buffer> {
+    const key = `${this.configService.get('S3_PREFIX') || ''}${prefix}${fileName}`;
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.configService.get('S3_BUCKET'),
+        Key: key,
+      }),
+      { abortSignal: options?.abortSignal },
+    );
+    if (!response.Body) {
+      throw new Error(`S3 object ${key} has no body`);
+    }
+    return Buffer.from(await response.Body.transformToByteArray());
+  }
+
   async s3_upload(
     file,
     bucket,
@@ -195,9 +224,12 @@ export class S3Service {
         Bucket: bucket,
         Key: String(name),
         Body: file,
-        ACL: 'public-read',
+        ACL: options.acl ?? 'public-read',
         ContentType: mimetype,
         ...(options.cacheControl ? { CacheControl: options.cacheControl } : {}),
+        ...(options.contentDisposition
+          ? { ContentDisposition: options.contentDisposition }
+          : {}),
       },
     });
 

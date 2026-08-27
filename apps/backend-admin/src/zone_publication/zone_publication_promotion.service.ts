@@ -8,6 +8,7 @@ import { shouldRunWebScheduledJobs } from '../core/scheduling/business-cron';
 import { S3Service } from '../shared/services/s3.service';
 import {
   isZonePublicationEnabled,
+  zoneGeojsonContentDisposition,
   ZONE_PUBLICATION_DATAGOUV_PROMOTION_LOCK,
   ZONE_PUBLICATION_STABLE_PROMOTION_LOCK,
 } from './zone_publication.config';
@@ -172,7 +173,10 @@ export class ZonePublicationPromotionService {
   }
 
   async promoteDataGouv(): Promise<ZonePublicationPromotionResult> {
-    if (!isZonePublicationEnabled()) {
+    if (
+      !isZonePublicationEnabled() ||
+      !this.datagouvService.canUploadToDataGouv()
+    ) {
       return 'disabled';
     }
     const retrySeconds = this.readPositiveInteger(
@@ -209,9 +213,6 @@ export class ZonePublicationPromotionService {
         }
         publicationId = publication.id;
         await this.recordPromotionAttempt(manager, publication.id);
-        if (!this.datagouvService.canUploadToDataGouv()) {
-          throw new Error('data.gouv.fr upload configuration is incomplete');
-        }
         if (!publication.geojsonUrl || !publication.pmtilesUrl) {
           throw new Error(
             `Zone publication ${publication.id} has incomplete immutable artifact URLs`,
@@ -405,12 +406,14 @@ export class ZonePublicationPromotionService {
       prefix: string,
       cacheControl: string,
       contentType: string,
+      contentDisposition?: string,
     ) =>
       this.copyAndValidateArtifact(source, destination, prefix, {
         // A copy must get its own deadline: the four sequential copies can
         // legitimately take longer than the timeout of one S3 operation.
         abortSignal: AbortSignal.timeout(timeoutMs),
         cacheControl,
+        ...(contentDisposition ? { contentDisposition } : {}),
         contentType,
       });
 
@@ -422,6 +425,7 @@ export class ZonePublicationPromotionService {
       'geojson/',
       stableCache,
       'application/geo+json',
+      zoneGeojsonContentDisposition(`zones_arretes_en_vigueur_${day}.geojson`),
     );
     await copyFile(
       immutablePmtiles,
@@ -436,6 +440,7 @@ export class ZonePublicationPromotionService {
       'geojson/',
       stableCache,
       'application/geo+json',
+      zoneGeojsonContentDisposition('zones_arretes_en_vigueur.geojson'),
     );
     await copyFile(
       immutablePmtiles,
@@ -453,6 +458,7 @@ export class ZonePublicationPromotionService {
     options: {
       abortSignal: AbortSignal;
       cacheControl: string;
+      contentDisposition?: string;
       contentType: string;
     },
   ): Promise<void> {
@@ -479,6 +485,11 @@ export class ZonePublicationPromotionService {
     if (destinationHead.ContentType !== options.contentType) {
       throw new Error(
         `Copie S3 invalide: content-type inattendu pour ${prefix}${destination}`,
+      );
+    }
+    if (destinationHead.ContentDisposition !== options.contentDisposition) {
+      throw new Error(
+        `Copie S3 invalide: content-disposition inattendu pour ${prefix}${destination}`,
       );
     }
   }

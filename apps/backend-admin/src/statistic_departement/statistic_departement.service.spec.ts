@@ -473,6 +473,52 @@ describe('StatisticDepartementService restriction computation', () => {
     ]);
   });
 
+  it('builds a historic department payload without updating canonical statistics', async () => {
+    const harness = createHarness({
+      departements: [departements[0]],
+      areaRows: [
+        {
+          departementCode: '65',
+          zoneType: 'SUP',
+          gravityLevel: 'alerte_renforcee',
+          area: 7.125,
+        },
+      ],
+    });
+
+    const payload = await harness.service.buildHistoricDepartmentRestriction(
+      [
+        {
+          id: 42,
+          type: 'SUP',
+          departement: { code: '65' },
+          restriction: { niveauGravite: 'alerte_renforcee' },
+        },
+      ] as any,
+      {
+        departementId: 65,
+        departementCode: '65',
+        date: '2023-06-01',
+        historicNotComputed: false,
+      },
+    );
+
+    expect(payload).toEqual(
+      expect.objectContaining({
+        date: '2023-06-01',
+        SUP: expect.objectContaining({ alerte_renforcee: '7.13' }),
+      }),
+    );
+    expect(harness.statisticDepartementRepository.query).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(
+      harness.statisticDepartementRepository.query.mock.calls.some(([sql]) =>
+        String(sql).includes('WITH updates AS'),
+      ),
+    ).toBe(false);
+  });
+
   it('sorts legacy restrictions without casting malformed dates', async () => {
     const queryBuilder = {
       update: jest.fn().mockReturnThis(),

@@ -11,10 +11,18 @@ import {
 export type StatisticCacheMode = "legacy-bootstrap" | "versioned";
 
 export type StatisticCacheMaterializationStrategy =
-  "full-clean" | "legacy-safe-boundary" | "daily-delta" | "current-replace";
+  | "full-clean"
+  | "legacy-safe-boundary"
+  | "daily-delta"
+  | "current-replace"
+  | "sparse-current";
 
 export type StatisticCachePublicationStatus =
-  "building" | "ready" | "active" | "retired" | "failed";
+  | "building"
+  | "ready"
+  | "active"
+  | "retired"
+  | "failed";
 
 @Entity({ name: "statistic_cache_publication" })
 @Unique("UQ_statistic_cache_publication_instance_identity", [
@@ -35,12 +43,17 @@ export type StatisticCachePublicationStatus =
   "CHK_statistic_cache_publication_strategy",
   `
     "materializationStrategy" IN (
-      'full-clean', 'legacy-safe-boundary', 'daily-delta', 'current-replace'
+      'full-clean', 'legacy-safe-boundary', 'daily-delta', 'current-replace',
+      'sparse-current'
     )
   `,
 )
 @Check("CHK_statistic_cache_publication_revision", `"statisticRevision" >= 0`)
 @Check("CHK_statistic_cache_publication_schema_version", `"schemaVersion" > 0`)
+@Check(
+  "CHK_statistic_cache_publication_protocol_version",
+  `"protocolVersion" > 0`,
+)
 @Check(
   "CHK_statistic_cache_publication_date_range",
   `"firstDate" <= "latestDate" AND "latestDate" <= "currentPublishedDate"`,
@@ -136,6 +149,9 @@ export class StatisticCachePublication extends BaseEntity {
 
   @Column({ type: "integer", default: 1 })
   schemaVersion: number;
+
+  @Column({ type: "integer", default: 1 })
+  protocolVersion: number;
 
   @Column({ type: "varchar", length: 20 })
   mode: StatisticCacheMode;

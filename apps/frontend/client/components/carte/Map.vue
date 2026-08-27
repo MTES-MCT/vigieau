@@ -4,6 +4,11 @@ import { PMTiles } from 'pmtiles';
 import { Ref } from 'vue';
 import api from '../../api';
 import type { ZonePublicationPin } from '../../api';
+import type { Address } from '../../dto/address.dto';
+import type {
+  WaterType,
+  ZoneSearchResponse,
+} from '../../dto/zone-availability.dto';
 import { useRefDataStore } from '../../store/refData';
 import { useZonePublicationStore } from '../../store/zonePublication';
 import {
@@ -39,6 +44,18 @@ import {
   getZoneSourceLoadAction,
   shouldResetZoneSourceRetryCycle,
 } from '../../utils/zone-source-transition';
+import type { RestrictionPopupEmptyState } from '../../utils/map-popup-content';
+import {
+  getDepartmentCodeFromCommune,
+  getOfficialDepartmentUrl,
+  normalizeZoneSearchResponse,
+} from '../../utils/zone-availability';
+import {
+  deriveHistoricMapManifestUrl,
+  loadHistoricMapManifest,
+  resolveHistoricMapSourceUrl,
+} from '../../utils/historic-map-manifest';
+import type { HistoricMapManifest } from '../../utils/historic-map-manifest';
 
 const props = defineProps<{
   embedded: any;
@@ -49,6 +66,7 @@ const props = defineProps<{
   hideTypeEau: boolean;
   typeEau: string;
   profil: string;
+  downloadLoading?: boolean;
   accessibleDescriptionId?: string;
 }>();
 
@@ -88,6 +106,10 @@ const CONFIGURED_PMTILES_URL = String(
   runtimeConfig.public.pmtilesUrl || DEFAULT_PMTILES_URL,
 ).trim();
 const PMTILES_URL_TRUNC = CONFIGURED_PMTILES_URL.replace(/\.pmtiles$/, '');
+const HISTORIC_MAP_MANIFEST_URL = String(
+  runtimeConfig.public.historicMapManifestUrl ||
+    deriveHistoricMapManifestUrl(CONFIGURED_PMTILES_URL),
+).trim();
 const PMTILES_PREFLIGHT_ATTEMPTS = 3;
 const PMTILES_PREFLIGHT_RETRY_MS = 500;
 const PMTILES_TILE_RETRY_LIMIT = 2;
@@ -115,6 +137,11 @@ interface RequestedZoneSource {
 interface PendingZoneSourceTransition {
   candidate: ZoneSourceState;
   previous: ZoneSourceState | null;
+}
+
+interface ResolvedRestrictionPopup {
+  properties: any[];
+  emptyState: RestrictionPopupEmptyState;
 }
 
 interface CypressMapWindow extends Window {
@@ -154,7 +181,18 @@ const getRequestedZoneSource = (
   const restrictionsAvailable = isCurrentMapDate(dateValue);
   const pmtilesUrl = restrictionsAvailable
     ? zonePublicationStore.pmtilesUrl
-    : `${PMTILES_URL_TRUNC}_${dateValue}.pmtiles`;
+    : dateValue
+      ? resolveHistoricMapSourceUrl(
+          historicMapManifest,
+          dateValue,
+          PMTILES_URL_TRUNC,
+          {
+            sourceRevision: zonePublicationStore.activeSourceRevision,
+            historicComputeEpoch:
+              zonePublicationStore.activeHistoricComputeEpoch,
+          },
+        )
+      : null;
   if (!pmtilesUrl) {
     return null;
   }
@@ -183,9 +221,25 @@ let exhaustedZoneSourceKey: string | null = null;
 let zoneTileRetryCount = 0;
 let handledSuccessfulRefreshVersion =
   zonePublicationStore.successfulRefreshVersion;
+let historicMapManifest: HistoricMapManifest | null | undefined;
+let historicMapManifestRequest: Promise<HistoricMapManifest | null> | null =
+  null;
 let localDateRollover: LocalDateRollover | null = null;
 let unsubscribePmtilesStatus: (() => void) | null = null;
 const zoneLayerTaskRunner = createLatestTaskRunner();
+const refreshHistoricMapManifest = async (): Promise<void> => {
+  const request =
+    historicMapManifestRequest ??
+    loadHistoricMapManifest(HISTORIC_MAP_MANIFEST_URL);
+  historicMapManifestRequest = request;
+  try {
+    historicMapManifest = await request;
+  } finally {
+    if (historicMapManifestRequest === request) {
+      historicMapManifestRequest = null;
+    }
+  }
+};
 const zoneTileRetry = createRetryScheduler(() => {
   const retrySourceKey = scheduledZoneSourceKey;
   scheduledZoneSourceKey = null;
@@ -330,6 +384,102 @@ popup.on('close', () => {
   });
 });
 
+const createSelectedMapAddress = (
+  coordinates: { lng: number; lat: number },
+  address?: any,
+  geo?: any,
+): Address => ({
+  geometry: {
+    coordinates: [coordinates.lng, coordinates.lat],
+  },
+  properties: {
+    postcode: address?.properties?.postcode || '',
+    label:
+      geo?.nom && geo?.codeDepartement
+        ? `${geo.nom}, ${geo.codeDepartement}`
+        : address?.properties?.label || 'Point sélectionné sur la carte',
+    type: 'coordinates',
+    citycode: address?.properties?.citycode || geo?.code || '',
+    context: address?.properties?.context || '',
+  },
+});
+
+const unavailableRestrictionPopup = (
+  communeCode?: string,
+  officialUrl?: string | null,
+): ResolvedRestrictionPopup => ({
+  properties: [],
+  emptyState: {
+    status: 'unavailable',
+    officialUrl:
+      officialUrl ??
+      getOfficialDepartmentUrl(getDepartmentCodeFromCommune(communeCode)),
+  },
+});
+
+const resolveCurrentRestrictionPopup = async (
+  coordinates: { lng: number; lat: number },
+  waterType: WaterType,
+  publicationPin: ZonePublicationPin,
+  address?: any,
+  geo?: any,
+): Promise<ResolvedRestrictionPopup> => {
+  const selectedAddress = createSelectedMapAddress(coordinates, address, geo);
+  const communeCode = selectedAddress.properties.citycode;
+  try {
+    const { data, error } = await api.searchZonesByAdress(
+      selectedAddress,
+      publicationPin,
+    );
+    if (error?.value || !data?.value) {
+      return unavailableRestrictionPopup(communeCode);
+    }
+
+    const response: ZoneSearchResponse = normalizeZoneSearchResponse(
+      data.value,
+      getDepartmentCodeFromCommune(communeCode),
+    );
+    const matchingZones = response.zones.filter(
+      (zone) => zone.type === waterType,
+    );
+    const municipalDocumentUrl = matchingZones.find(
+      (zone) => zone.arreteMunicipalCheminFichier,
+    )?.arreteMunicipalCheminFichier;
+    if (municipalDocumentUrl) {
+      return {
+        properties: [],
+        emptyState: {
+          status: 'municipal',
+          documentUrl: municipalDocumentUrl,
+        },
+      };
+    }
+
+    const availability = response.availability[waterType];
+    if (availability.status === 'unavailable') {
+      return unavailableRestrictionPopup(communeCode, availability.officialUrl);
+    }
+    if (availability.status === 'confirmed_none') {
+      return {
+        properties: [],
+        emptyState: { status: 'confirmed_none' },
+      };
+    }
+    const restrictedZones = matchingZones.filter(
+      (zone) => zone.id !== null && zone.id !== undefined,
+    );
+    if (restrictedZones.length > 0) {
+      return {
+        properties: restrictedZones,
+        emptyState: { status: 'loading' },
+      };
+    }
+    return unavailableRestrictionPopup(communeCode, availability.officialUrl);
+  } catch {
+    return unavailableRestrictionPopup(communeCode);
+  }
+};
+
 const selectMapPoint = async (
   mapInstance: maplibregl.Map,
   point: maplibregl.PointLike,
@@ -344,14 +494,31 @@ const selectMapPoint = async (
     layers: ['zones-data'],
   });
   const properties = features.map((feature: any) => feature.properties);
-  zonesSelected.value = properties.map((property: any) => property.id);
+  const emptyPmtilesResult = properties.length === 0;
+  const shouldResolveCurrentAvailability = showRestrictionsBtn.value;
+  const selectedWaterType = selectedTypeEau.value as WaterType;
+  const publicationPin = captureDisplayedZonePublicationPin(
+    displayedZoneSource?.publicationId,
+  );
+  const initialProperties = shouldResolveCurrentAvailability ? [] : properties;
+  zonesSelected.value = initialProperties.map((property: any) => property.id);
 
   if (!popup.isOpen()) {
     mapPopupReturnFocus = mapInstance.getCanvas();
   }
 
   updateContourFilter();
-  renderMapPopup(coordinates, properties);
+  renderMapPopup(
+    coordinates,
+    initialProperties,
+    undefined,
+    undefined,
+    shouldResolveCurrentAvailability
+      ? { status: 'loading' }
+      : emptyPmtilesResult
+        ? { status: 'unavailable' }
+        : undefined,
+  );
   mapInstance.flyTo({
     center: [
       coordinates.lng - 0.5 / mapInstance.getZoom(),
@@ -373,10 +540,38 @@ const selectMapPoint = async (
       ? addressResult.value.data.value?.features?.[0]
       : null;
   const geo =
-    geoResult.status === 'fulfilled'
-      ? geoResult.value.data.value?.[0]
-      : null;
-  renderMapPopup(coordinates, properties, address, geo);
+    geoResult.status === 'fulfilled' ? geoResult.value.data.value?.[0] : null;
+  if (!shouldResolveCurrentAvailability) {
+    renderMapPopup(
+      coordinates,
+      properties,
+      address,
+      geo,
+      emptyPmtilesResult ? { status: 'unavailable' } : undefined,
+    );
+    return;
+  }
+
+  renderMapPopup(coordinates, [], address, geo, { status: 'loading' });
+  const resolved = await resolveCurrentRestrictionPopup(
+    coordinates,
+    selectedWaterType,
+    publicationPin,
+    address,
+    geo,
+  );
+  if (requestId !== mapPopupRequestId) {
+    return;
+  }
+  zonesSelected.value = resolved.properties.map((property: any) => property.id);
+  updateContourFilter();
+  renderMapPopup(
+    coordinates,
+    resolved.properties,
+    address,
+    geo,
+    resolved.emptyState,
+  );
 };
 
 const mapInitializer = createRetryableInitializer(() => {
@@ -628,6 +823,7 @@ function renderMapPopup(
   properties: any[],
   address?: any,
   geo?: any,
+  emptyState?: RestrictionPopupEmptyState,
 ) {
   const popupWasOpen = popup.isOpen();
   const popupContent = utils.generatePopupHtml(
@@ -635,6 +831,7 @@ function renderMapPopup(
     showRestrictionsBtn.value,
     address,
     geo,
+    emptyState,
   );
 
   popup.setLngLat(coordinates).setDOMContent(popupContent);
@@ -670,21 +867,7 @@ function bindMapPopupButton(
 
   btn.addEventListener('click', async () => {
     // On garde le lon/lat exact du clic, même quand le libellé vient d'un service externe.
-    const selectedAddress = {
-      geometry: {
-        coordinates: [coordinates.lng, coordinates.lat],
-      },
-      properties: {
-        postcode: address?.properties?.postcode || '',
-        label:
-          geo?.nom && geo?.codeDepartement
-            ? `${geo.nom}, ${geo.codeDepartement}`
-            : address?.properties?.label || 'Point sélectionné sur la carte',
-        type: 'coordinates',
-        citycode: address?.properties?.citycode || geo?.code || '',
-        context: address?.properties?.context || '',
-      },
-    };
+    const selectedAddress = createSelectedMapAddress(coordinates, address, geo);
     utils.searchZones(
       selectedAddress,
       null,
@@ -997,11 +1180,7 @@ const displayZoneLayers = async (
         ) {
           throw createAbortError();
         }
-        replaceZoneLayers(
-          requestedSource,
-          candidate.archive,
-          candidate.empty,
-        );
+        replaceZoneLayers(requestedSource, candidate.archive, candidate.empty);
       },
     );
   } catch (error) {
@@ -1087,7 +1266,15 @@ const synchronizeMapView = async (): Promise<void> => {
       return;
     }
   } else {
-    void zonePublicationStore.loadPublication().catch(() => undefined);
+    await zonePublicationStore.loadPublication().catch(() => null);
+    try {
+      await refreshHistoricMapManifest();
+    } catch {
+      if (isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
+        showError.value = true;
+      }
+      return;
+    }
   }
 
   if (!isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
@@ -1162,6 +1349,8 @@ watch(
 watch(
   () => [
     zonePublicationStore.publication,
+    zonePublicationStore.activeSourceRevision,
+    zonePublicationStore.activeHistoricComputeEpoch,
     getMapPublicationStateKey(
       zonePublicationStore.publication?.id,
       zonePublicationStore.manifestStatus,
@@ -1170,7 +1359,7 @@ watch(
     zonePublicationStore.successfulRefreshVersion,
   ],
   () => {
-    if (!componentMounted || !isCurrentMapDate(props.date)) {
+    if (!componentMounted) {
       return;
     }
     void synchronizeMapView();
@@ -1273,9 +1462,7 @@ watch(
         role="group"
         aria-label="Raccourcis de la carte"
       >
-        <p class="map-control-label fr-mb-1w fr-mr-2w">
-          Raccourcis :
-        </p>
+        <p class="map-control-label fr-mb-1w fr-mr-2w">Raccourcis :</p>
         <DsfrTag
           v-for="tag in mapTags"
           :key="tag.label"
@@ -1302,9 +1489,7 @@ watch(
         role="group"
         aria-label="Raccourcis de la carte"
       >
-        <p class="map-control-label fr-mb-1w fr-mr-2w">
-          Raccourcis :
-        </p>
+        <p class="map-control-label fr-mb-1w fr-mr-2w">Raccourcis :</p>
         <DsfrTag
           v-for="tag in mapTags"
           :key="tag.label"
@@ -1323,7 +1508,11 @@ watch(
       data-html2canvas-ignore="true"
       class="text-align-right"
     >
-      <DsfrButton @click="downloadMap()">
+      <DsfrButton
+        :disabled="downloadLoading"
+        :aria-busy="downloadLoading ? 'true' : undefined"
+        @click="downloadMap()"
+      >
         Télécharger la carte en .png
       </DsfrButton>
     </div>

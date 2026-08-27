@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { readFile, rm, mkdtemp, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, readFile, rm, mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const PMTILES_HEADER_SIZE = 127;
@@ -15,8 +16,19 @@ type CommandRunner = (
 
 export interface EmptyPmtilesOptions {
   workingDirectory: string;
+  tippecanoeBinDirectory?: string;
   outputPath: string;
   commandRunner?: CommandRunner;
+}
+
+async function assertExecutable(executable: string): Promise<void> {
+  try {
+    await access(executable, constants.X_OK);
+  } catch {
+    throw new Error(
+      `Required Tippecanoe executable is not executable: ${executable}`,
+    );
+  }
 }
 
 const EMPTY_TILESET_METADATA = {
@@ -80,35 +92,38 @@ async function assertEmptyPmtiles(outputPath: string): Promise<void> {
  */
 export async function generateEmptyPmtiles({
   workingDirectory,
+  tippecanoeBinDirectory = join(workingDirectory, 'tippecanoe_program/bin'),
   outputPath,
   commandRunner = runCommand,
 }: EmptyPmtilesOptions): Promise<void> {
-  const sourceDirectory = await mkdtemp(
-    join(workingDirectory, '.vigieau-empty-pmtiles-'),
-  );
+  const tileJoinPath = join(tippecanoeBinDirectory, 'tile-join');
+  let sourceDirectory: string | undefined;
 
   try {
+    await assertExecutable(tileJoinPath);
+    sourceDirectory = await mkdtemp(
+      join(workingDirectory, '.vigieau-empty-pmtiles-'),
+    );
     await writeFile(
       join(sourceDirectory, 'metadata.json'),
       JSON.stringify(EMPTY_TILESET_METADATA),
     );
     await rm(outputPath, { force: true });
-    await commandRunner(
-      join(workingDirectory, 'tippecanoe_program/bin/tile-join'),
-      [
-        '--quiet',
-        '--force',
-        '--name=Zones et arretes en vigueur',
-        '--description=',
-        `--output=${outputPath}`,
-        sourceDirectory,
-      ],
-    );
+    await commandRunner(tileJoinPath, [
+      '--quiet',
+      '--force',
+      '--name=Zones et arretes en vigueur',
+      '--description=',
+      `--output=${outputPath}`,
+      sourceDirectory,
+    ]);
     await assertEmptyPmtiles(outputPath);
   } catch (error) {
     await rm(outputPath, { force: true });
     throw error;
   } finally {
-    await rm(sourceDirectory, { force: true, recursive: true });
+    if (sourceDirectory) {
+      await rm(sourceDirectory, { force: true, recursive: true });
+    }
   }
 }

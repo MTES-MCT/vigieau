@@ -14,6 +14,8 @@ describeWithPostgres(
   () => {
     const schemaName = `statistic_cache_artifact_${process.pid}_${Date.now()}`;
     const previousRequired = process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+    const previousPublicSourceRevision =
+      process.env.PUBLIC_SOURCE_REVISION_ENABLED;
     let bootstrapDataSource: DataSource;
     let dataSource: DataSource;
     let firstService: StatisticCacheArtifactService;
@@ -31,6 +33,7 @@ describeWithPostgres(
       statisticRevision: string,
       currentPublishedDate: string,
       value: number,
+      overrides: Partial<StatisticCacheArtifactCandidate> = {},
     ): StatisticCacheArtifactCandidate => ({
       statisticRevision,
       currentPublishedDate,
@@ -61,6 +64,18 @@ describeWithPostgres(
         },
       ],
       latestCommuneWeights: [['01001', value]],
+      ...overrides,
+    });
+    const target = (value: StatisticCacheArtifactCandidate) => ({
+      statisticRevision: value.statisticRevision,
+      currentPublishedDate: value.currentPublishedDate,
+      protocolVersion: 1,
+      historicDirtyFrom: value.historicDirtyFrom,
+      historicDirtyThrough: value.historicDirtyThrough,
+      historicMapCursor: value.historicMapCursor,
+      historicStatsCursor: value.historicStatsCursor,
+      sourceRevision: value.sourceRevision,
+      historicComputeEpoch: value.historicComputeEpoch,
     });
 
     async function setBoundary(
@@ -106,6 +121,7 @@ describeWithPostgres(
 
     beforeAll(async () => {
       process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'true';
+      process.env.PUBLIC_SOURCE_REVISION_ENABLED = 'false';
       bootstrapDataSource = await new DataSource({
         type: 'postgres',
         url: postgresUrl,
@@ -177,6 +193,30 @@ describeWithPostgres(
       } finally {
         await runner.release();
       }
+      await dataSource.query(`
+        ALTER TABLE "statistic_cache_publication"
+          ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1;
+        ALTER TABLE "statistic_cache_state"
+          ADD COLUMN "candidatePublicationId" uuid;
+        ALTER TABLE "zone_publication_instance"
+          ADD COLUMN "statisticSourceRevision" bigint,
+          ADD COLUMN "statisticProtocolVersion" integer,
+          ADD COLUMN "candidateStatisticCachePublicationId" uuid,
+          ADD COLUMN "candidateStatisticRevision" bigint,
+          ADD COLUMN "candidateStatisticPublishedDate" date,
+          ADD COLUMN "candidateStatisticSourceRevision" bigint,
+          ADD COLUMN "candidateStatisticFingerprint" varchar(64),
+          ADD COLUMN "candidateStatisticProtocolVersion" integer,
+          ADD COLUMN "candidateStatisticLastError" text;
+        ALTER TABLE "statistic_cache_state"
+          ADD CONSTRAINT "FK_statistic_cache_state_candidate"
+          FOREIGN KEY ("candidatePublicationId")
+          REFERENCES "statistic_cache_publication"("id") ON DELETE RESTRICT;
+        ALTER TABLE "zone_publication_instance"
+          ADD CONSTRAINT "FK_zone_publication_instance_candidate_statistic_cache"
+          FOREIGN KEY ("candidateStatisticCachePublicationId")
+          REFERENCES "statistic_cache_publication"("id") ON DELETE RESTRICT
+      `);
       firstService = new StatisticCacheArtifactService(dataSource);
       secondService = new StatisticCacheArtifactService(dataSource);
     }, 60_000);
@@ -196,6 +236,12 @@ describeWithPostgres(
       } else {
         process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = previousRequired;
       }
+      if (previousPublicSourceRevision === undefined) {
+        delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
+      } else {
+        process.env.PUBLIC_SOURCE_REVISION_ENABLED =
+          previousPublicSourceRevision;
+      }
     });
 
     it('serializes publishers, retains active and previous, rolls back, and rematerializes the same source identity', async () => {
@@ -204,17 +250,18 @@ describeWithPostgres(
         releaseCandidate = resolve;
       });
       let factoryCalls = 0;
+      const firstCandidate = candidate('10', '2026-08-15', 1);
       const firstPublication = firstService.materialize(
-        { statisticRevision: '10', currentPublishedDate: '2026-08-15' },
+        target(firstCandidate),
         async () => {
           factoryCalls += 1;
           await candidateBlocked;
-          return candidate('10', '2026-08-15', 1);
+          return firstCandidate;
         },
       );
       await new Promise((resolve) => setTimeout(resolve, 50));
       const concurrentPublication = secondService.materialize(
-        { statisticRevision: '10', currentPublishedDate: '2026-08-15' },
+        target(firstCandidate),
         async () => {
           factoryCalls += 1;
           return candidate('10', '2026-08-15', 99);
@@ -237,14 +284,16 @@ describeWithPostgres(
       );
 
       await setBoundary('11', '2026-08-16');
+      const secondCandidate = candidate('11', '2026-08-16', 2);
       const second = await firstService.materialize(
-        { statisticRevision: '11', currentPublishedDate: '2026-08-16' },
-        async () => candidate('11', '2026-08-16', 2),
+        target(secondCandidate),
+        async () => secondCandidate,
       );
       await setBoundary('12', '2026-08-17');
+      const thirdCandidate = candidate('12', '2026-08-17', 3);
       const third = await firstService.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-17' },
-        async () => candidate('12', '2026-08-17', 3),
+        target(thirdCandidate),
+        async () => thirdCandidate,
       );
 
       const retainedAfterThird = await dataSource.query(`
@@ -271,9 +320,10 @@ describeWithPostgres(
       });
       expect(rolledBack.identity.id).toBe(second.identity.id);
 
+      const replacementCandidate = candidate('12', '2026-08-17', 4);
       const replacement = await firstService.materialize(
-        { statisticRevision: '12', currentPublishedDate: '2026-08-17' },
-        async () => candidate('12', '2026-08-17', 4),
+        target(replacementCandidate),
+        async () => replacementCandidate,
       );
       expect(replacement.identity.id).not.toBe(third.identity.id);
       expect(replacement.identity.contentFingerprint).not.toBe(
@@ -318,6 +368,241 @@ describeWithPostgres(
           [replacement.identity.id],
         ),
       ).rejects.toThrow(/identity is immutable/i);
+    }, 60_000);
+
+    it('activates one current replacement when only the clean map cursor advances', async () => {
+      const before = await firstService.loadActive();
+      expect(before).not.toBeNull();
+      await dataSource.query(
+        `UPDATE "config" SET "computeMapDate" = $1::date WHERE "id" = 1`,
+        ['2026-08-17'],
+      );
+      const mapCandidate = candidate('12', '2026-08-17', 4, {
+        materializationStrategy: 'current-replace',
+        historicMapCursor: '2026-08-17',
+      });
+      const factory = jest.fn(async () => mapCandidate);
+
+      const replacement = await firstService.materialize(
+        target(mapCandidate),
+        factory,
+      );
+
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(replacement.identity.id).not.toBe(before!.identity.id);
+      expect(replacement.identity.contentFingerprint).toBe(
+        before!.identity.contentFingerprint,
+      );
+      expect(replacement.identity).toMatchObject({
+        statisticRevision: before!.identity.statisticRevision,
+        currentPublishedDate: before!.identity.currentPublishedDate,
+        historicMapCursor: '2026-08-17',
+        materializationStrategy: 'current-replace',
+      });
+
+      const exactFactory = jest.fn(async () => mapCandidate);
+      const exact = await secondService.materialize(
+        target(mapCandidate),
+        exactFactory,
+      );
+      expect(exact.identity.id).toBe(replacement.identity.id);
+      expect(exactFactory).not.toHaveBeenCalled();
+    });
+
+    it('replaces a candidate after a concurrent heartbeat without aborting the snapshot transaction', async () => {
+      await dataSource.query(`
+        DELETE FROM "current_zone_recompute_request";
+        UPDATE "zone_publication_source_state" SET "revision" = 42
+        WHERE "id" = 1
+      `);
+      await setBoundary('13', '2026-08-18');
+      const previousCandidate = candidate('13', '2026-08-18', 13);
+      const previous = await firstService.stageCandidate(
+        target(previousCandidate),
+        async () => previousCandidate,
+      );
+      await dataSource.query(
+        `
+          INSERT INTO "zone_publication_instance" (
+            "instanceId", "heartbeatAt",
+            "candidateStatisticCachePublicationId",
+            "candidateStatisticRevision", "candidateStatisticPublishedDate",
+            "candidateStatisticSourceRevision",
+            "candidateStatisticFingerprint",
+            "candidateStatisticProtocolVersion"
+          ) VALUES (
+            'web-concurrent', now(), $1::uuid, 13, date '2026-08-18', 42,
+            $2, 1
+          )
+        `,
+        [previous.id, previous.contentFingerprint],
+      );
+
+      await setBoundary('14', '2026-08-19');
+      const replacementCandidate = candidate('14', '2026-08-19', 14);
+      let signalFactoryStarted!: () => void;
+      const factoryStarted = new Promise<void>((resolve) => {
+        signalFactoryStarted = resolve;
+      });
+      let releaseFactory!: () => void;
+      const factoryBlocked = new Promise<void>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const staging = firstService.stageCandidate(
+        target(replacementCandidate),
+        async (manager) => {
+          await manager.query(
+            `SELECT "revision" FROM "statistic_publication_state" WHERE "id" = 1`,
+          );
+          signalFactoryStarted();
+          await factoryBlocked;
+          return replacementCandidate;
+        },
+      );
+
+      try {
+        await factoryStarted;
+        await dataSource.query(`
+          UPDATE "zone_publication_instance"
+          SET "heartbeatAt" = now(),
+              "candidateStatisticLastError" = 'heartbeat refreshed'
+          WHERE "instanceId" = 'web-concurrent'
+        `);
+      } finally {
+        releaseFactory();
+      }
+
+      const replacement = await staging;
+      expect(replacement.id).not.toBe(previous.id);
+      await expect(
+        dataSource.query(
+          `
+            SELECT "candidatePublicationId"::text AS "candidatePublicationId"
+            FROM "statistic_cache_state" WHERE "id" = 1
+          `,
+        ),
+      ).resolves.toEqual([{ candidatePublicationId: replacement.id }]);
+      await expect(
+        dataSource.query(
+          `
+            SELECT COUNT(*)::integer AS "count"
+            FROM "statistic_cache_publication" WHERE "id" = $1::uuid
+          `,
+          [previous.id],
+        ),
+      ).resolves.toEqual([{ count: 0 }]);
+      await expect(
+        dataSource.query(
+          `
+            SELECT "candidateStatisticCachePublicationId"::text
+              AS "candidateStatisticCachePublicationId"
+            FROM "zone_publication_instance"
+            WHERE "instanceId" = 'web-concurrent'
+          `,
+        ),
+      ).resolves.toEqual([{ candidateStatisticCachePublicationId: null }]);
+    }, 60_000);
+
+    it('does not block a source mutation and rejects the stale repeatable-read candidate', async () => {
+      await setBoundary('13', '2026-08-18');
+      await dataSource.query(`
+        DELETE FROM "current_zone_recompute_request";
+        UPDATE "zone_publication_source_state" SET "revision" = 42
+        WHERE "id" = 1
+      `);
+      const [stateBefore] = await dataSource.query(`
+        SELECT "activePublicationId"::text AS "activePublicationId"
+        FROM "statistic_cache_state"
+        WHERE "id" = 1
+      `);
+      let signalFactoryStarted!: () => void;
+      const factoryStarted = new Promise<void>((resolve) => {
+        signalFactoryStarted = resolve;
+      });
+      let releaseFactory!: () => void;
+      const factoryBlocked = new Promise<void>((resolve) => {
+        releaseFactory = resolve;
+      });
+
+      const materialization = firstService.materialize(
+        target(candidate('13', '2026-08-18', 13)),
+        async (manager) => {
+          await manager.query(`
+            SELECT "revision"
+            FROM "zone_publication_source_state"
+            WHERE "id" = 1
+          `);
+          signalFactoryStarted();
+          await factoryBlocked;
+          return candidate('13', '2026-08-18', 13);
+        },
+      );
+
+      try {
+        await factoryStarted;
+        const currentWorkerLock = dataSource.createQueryRunner();
+        await currentWorkerLock.connect();
+        try {
+          const [globalLock] = await currentWorkerLock.query(
+            "SELECT pg_try_advisory_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS locked",
+          );
+          const [snapshotLock] = await currentWorkerLock.query(
+            'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+            ['vigieau:statistic-commune:snapshot-computation'],
+          );
+          expect(globalLock.locked).toBe(true);
+          expect(snapshotLock.locked).toBe(true);
+          await currentWorkerLock.query(
+            "SELECT pg_advisory_unlock(hashtext('vigieau'), hashtext('zone-compute-global'))",
+          );
+          await currentWorkerLock.query(
+            'SELECT pg_advisory_unlock(hashtext($1))',
+            ['vigieau:statistic-commune:snapshot-computation'],
+          );
+        } finally {
+          await currentWorkerLock.release();
+        }
+        const mutation = dataSource.transaction(async (manager) => {
+          await manager.query(`
+            UPDATE "zone_publication_source_state"
+            SET "revision" = 43
+            WHERE "id" = 1
+          `);
+          await manager.query(`
+            INSERT INTO "current_zone_recompute_request" ("departementId")
+            VALUES (49)
+          `);
+        });
+        const mutationCompletedWithoutWaitingForMaterialization =
+          await Promise.race([
+            mutation.then(() => true),
+            new Promise<false>((resolve) =>
+              setTimeout(() => resolve(false), 2_000),
+            ),
+          ]);
+        expect(mutationCompletedWithoutWaitingForMaterialization).toBe(true);
+      } finally {
+        releaseFactory();
+      }
+
+      await expect(materialization).rejects.toThrow(
+        'Statistic materialization boundary changed before activation',
+      );
+      const [stateAfter] = await dataSource.query(`
+        SELECT "activePublicationId"::text AS "activePublicationId"
+        FROM "statistic_cache_state"
+        WHERE "id" = 1
+      `);
+      expect(stateAfter.activePublicationId).toBe(
+        stateBefore.activePublicationId,
+      );
+      await expect(
+        dataSource.query(`
+          SELECT COUNT(*)::integer AS "count"
+          FROM "statistic_cache_publication"
+          WHERE "statisticRevision" = 13
+        `),
+      ).resolves.toEqual([{ count: 0 }]);
     }, 60_000);
   },
 );

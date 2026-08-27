@@ -3,6 +3,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   ManyToMany,
   ManyToOne,
   OneToOne,
@@ -42,6 +43,7 @@ export class Commune extends BaseEntity {
   geom: Polygon;
 
   @ManyToOne(() => Departement, (departement) => departement.communes)
+  @Index()
   departement: Departement;
 
   @ManyToMany(() => Restriction, (restriction) => restriction.communes, {

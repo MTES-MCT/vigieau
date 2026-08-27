@@ -2,7 +2,7 @@ import { Usage } from "./usage.dto";
 import { Arrete } from "./arrete.dto";
 
 export interface Zone {
-  id: string;
+  id: string | number | null;
   type: 'SUP' | 'SOU' | 'AEP';
   profil: string;
   nom: string;

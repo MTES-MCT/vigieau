@@ -5,6 +5,10 @@ import { Usage } from '~/client/dto/usage.dto';
 import { Icon } from '@iconify/vue';
 import moment from 'moment';
 import { useAddressStore } from '../../store/address';
+import {
+  normalizeRestrictionUsageLabel,
+  resolvePublicRestrictionUsages,
+} from '../../utils/restriction-conflicts';
 
 const props = defineProps<{
   usages: Usage[];
@@ -74,14 +78,30 @@ const thematiqueTags: Ref<TagProps[]> = ref([
   },
 ]);
 
+const restrictionUsageResolution = computed(() =>
+  resolvePublicRestrictionUsages(props.usages),
+);
+const publicUsages = computed(() => restrictionUsageResolution.value.usages);
+const hasConflictingUsages = computed(
+  () => restrictionUsageResolution.value.conflicts.length > 0,
+);
+
 const thematiqueTagsFiltered = computed<TagProps[]>(() => {
   return thematiqueTags.value.filter(
-    (t) => props.usages.findIndex((u) => u.thematique === t.label) >= 0,
+    (t) =>
+      publicUsages.value.findIndex(
+        (u) =>
+          normalizeRestrictionUsageLabel(u.thematique) ===
+          normalizeRestrictionUsageLabel(t.label),
+      ) >= 0,
   );
 });
 
 const usagesFiltered = (thematique: TagProps): Usage[] => {
-  return props.usages.filter((u) => u.thematique === thematique.label);
+  const normalizedTheme = normalizeRestrictionUsageLabel(thematique.label);
+  return publicUsages.value.filter(
+    (u) => normalizeRestrictionUsageLabel(u.thematique) === normalizedTheme,
+  );
 };
 
 const selectedThematique = computed(
@@ -128,6 +148,26 @@ watch(
     <h2 class="text-align-center">
       Détails des restrictions
     </h2>
+    <div v-if="hasConflictingUsages" class="fr-col-12 fr-mb-2w">
+      <DsfrAlert
+        title="Certaines restrictions ne peuvent pas être affichées"
+        type="warning"
+        :closeable="false"
+      >
+        Des consignes contradictoires ont été détectées. Elles sont masquées
+        pour ne pas vous induire en erreur.
+        <a
+          v-if="zone.arrete.cheminFichier"
+          class="fr-link"
+          :href="zone.arrete.cheminFichier"
+          target="_blank"
+          rel="noopener"
+          title="Consulter l'arrêté de restriction PDF (nouvelle fenêtre)"
+        >
+          Consultez l’arrêté de restriction
+        </a>.
+      </DsfrAlert>
+    </div>
     <div
       v-if="thematiqueTagsFiltered.length > 0"
       class="fr-col-12 text-align-center"
@@ -236,7 +276,7 @@ watch(
     </div>
 
     <div
-      v-if="thematiqueTagsFiltered.length === 0"
+      v-if="thematiqueTagsFiltered.length === 0 && !hasConflictingUsages"
       class="full-width fr-grid-row fr-grid-row--gutters fr-grid-row--center fr-p-2w"
     >
       <div class="fr-col-12 fr-col-md-4">
