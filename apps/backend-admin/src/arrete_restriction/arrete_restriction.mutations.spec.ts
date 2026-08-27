@@ -370,6 +370,121 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
   });
 
+  it('returns restriction usages after a full no-op PATCH from the frontend', async () => {
+    const harness = createHarness([createState(300)], 300);
+    const usage = {
+      id: 40,
+      nom: 'Arrosage des jardins',
+      thematique: { id: 4, nom: 'Arrosage' },
+      concerneParticulier: true,
+      concerneEntreprise: false,
+      concerneCollectivite: false,
+      concerneExploitation: false,
+      concerneEso: true,
+      concerneEsu: false,
+      concerneAep: false,
+      descriptionVigilance: null,
+      descriptionAlerte: 'Interdit de 8 h a 20 h',
+      descriptionAlerteRenforcee: 'Interdit',
+      descriptionCrise: 'Interdit',
+    };
+    const persistedRestriction = {
+      id: 20,
+      nomGroupementAep: null,
+      zoneAlerte: { id: 7, code: 'ZA-7', nom: 'Zone 7' },
+      arreteCadre: { id: 10 },
+      niveauGravite: 'alerte',
+      communes: [],
+      usages: [usage],
+    };
+    const fullAr = {
+      ...toEntity(harness.states.get(300)!, harness.states),
+      niveauGraviteSpecifiqueEap: false,
+      ressourceEapCommunique: 'max',
+      restrictions: [persistedRestriction],
+    } as unknown as ArreteRestriction;
+    jest.spyOn(harness.service, 'findOne').mockResolvedValue(fullAr);
+    const authorizationRestriction = { ...persistedRestriction } as any;
+    delete authorizationRestriction.usages;
+    jest
+      .spyOn(harness.service as any, 'findOneForMutationAuthorization')
+      .mockResolvedValue({
+        ...fullAr,
+        restrictions: [authorizationRestriction],
+      });
+
+    const result = await harness.service.update(
+      300,
+      {
+        numero: 'AR-300',
+        departement: { id: 53 },
+        niveauGraviteSpecifiqueEap: false,
+        ressourceEapCommunique: 'max',
+        arretesCadre: [{ id: 10 }],
+        restrictions: [
+          {
+            ...persistedRestriction,
+            isAep: false,
+            zoneAlerte: { id: 7 },
+            arreteCadre: { id: 10 },
+            usages: [{ ...usage, thematique: { id: 4 } }],
+          },
+        ],
+        arreteRestrictionAbroge: null,
+      } as any,
+      currentUser,
+    );
+
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+    expect(result.restrictions).toEqual([
+      expect.objectContaining({
+        id: 20,
+        usages: [expect.objectContaining({ id: 40 })],
+      }),
+    ]);
+  });
+
+  it('treats null restrictions as an empty list before rejecting a published deletion', async () => {
+    const harness = createHarness([createState(300)], 300);
+    jest.spyOn(harness.service, 'findOne').mockResolvedValue({
+      ...toEntity(harness.states.get(300)!, harness.states),
+      restrictions: [
+        {
+          id: 20,
+          zoneAlerte: { id: 7 },
+          arreteCadre: { id: 10 },
+          niveauGravite: 'alerte',
+          communes: [],
+          usages: [],
+        },
+      ],
+    } as ArreteRestriction);
+    harness.checkModifications.mockResolvedValue(undefined);
+    jest.spyOn(harness.service, 'checkBeforePublish').mockResolvedValueOnce({
+      errors: ['Une zone est obligatoire.'],
+      warnings: [],
+    });
+
+    await expect(
+      harness.service.update(300, { restrictions: null } as any, currentUser),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(harness.service.checkBeforePublish).toHaveBeenCalledWith(
+      expect.objectContaining({ restrictions: [] }),
+      harness.transactionRepository,
+    );
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
   it('valide les restrictions PATCH contre les arrêtés cadre persistés quand ils sont omis', async () => {
     const harness = createHarness(
       [createState(300, { statut: 'a_valider' })],

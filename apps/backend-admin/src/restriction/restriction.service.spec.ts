@@ -36,7 +36,7 @@ const createUsage = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const createArrete = (restrictions: any[]) => ({
+const createArrete = (restrictions: any[] | null) => ({
   numero: 'AR-TEST',
   departement: { id: 79 },
   arretesCadre: [{ id: 10 }],
@@ -87,16 +87,22 @@ describe('RestrictionService.updateAll', () => {
     jest.clearAllMocks();
   });
 
-  it('supprime explicitement toutes les anciennes restrictions quand la liste est vide', async () => {
-    const { repository, service } = createHarness();
+  it.each([
+    ['une liste vide', []],
+    ['null', null],
+  ])(
+    'supprime explicitement toutes les anciennes restrictions avec %s',
+    async (_label, restrictions) => {
+      const { repository, service } = createHarness();
 
-    await service.updateAll(createArrete([]) as any, 42);
+      await service.updateAll(createArrete(restrictions) as any, 42);
 
-    expect(repository.delete).toHaveBeenCalledWith({
-      arreteRestriction: { id: 42 },
-    });
-    expect(repository.save).toHaveBeenCalledWith([]);
-  });
+      expect(repository.delete).toHaveBeenCalledWith({
+        arreteRestriction: { id: 42 },
+      });
+      expect(repository.save).toHaveBeenCalledWith([]);
+    },
+  );
 
   it('normalise une zone AEP sans modifier le DTO reçu', async () => {
     const input = createRestriction({

@@ -135,4 +135,35 @@ describe('arrete public update detection', () => {
       }),
     ).toBe(true);
   });
+
+  it('treats explicit null restrictions as deleting the current restrictions', () => {
+    const current = {
+      numero: 'AR-1',
+      departement: { id: 1 },
+      arretesCadre: [{ id: 10 }],
+      restrictions: [
+        {
+          id: 20,
+          zoneAlerte: { id: 7 },
+          arreteCadre: { id: 10 },
+          niveauGravite: 'alerte',
+          communes: [],
+          usages: [],
+        },
+      ],
+      arreteRestrictionAbroge: null,
+    } as any;
+
+    expect(
+      hasArreteRestrictionPublicUpdate(current, {
+        restrictions: null,
+      }),
+    ).toBe(true);
+    expect(
+      hasArreteRestrictionPublicUpdate(
+        { ...current, restrictions: [] },
+        { restrictions: null },
+      ),
+    ).toBe(false);
+  });
 });

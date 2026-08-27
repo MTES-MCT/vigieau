@@ -142,7 +142,7 @@ const canonicalizeRestrictions = (
   const currentById = new Map(
     (current ?? []).map((restriction) => [restriction.id, restriction]),
   );
-  return requested
+  return requested !== undefined
     ? canonicalizeList(requested, (restriction) =>
         canonicalizeRequestedRestriction(
           restriction,

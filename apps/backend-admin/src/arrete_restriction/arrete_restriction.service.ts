@@ -792,7 +792,7 @@ export class ArreteRestrictionService {
                     updateArreteRestrictionDto.departement ??
                     authorizationState.departement,
                   restrictions: hasRestrictionsUpdate
-                    ? updateArreteRestrictionDto.restrictions
+                    ? (updateArreteRestrictionDto.restrictions ?? [])
                     : authorizationState.restrictions,
                   arretesCadre: proposedArretesCadre,
                   arreteRestrictionAbroge: nextPredecessorId
@@ -877,7 +877,7 @@ export class ArreteRestrictionService {
                         saved.id,
                         manager,
                       )
-                    : authorizationState.restrictions,
+                    : oldAr.restrictions,
               });
               const dirtyDates = changesPublicContent
                 ? before.map(({ dateDebut }) => normalizeCivilDate(dateDebut))
