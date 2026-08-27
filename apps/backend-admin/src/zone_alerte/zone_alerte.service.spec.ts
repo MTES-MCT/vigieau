@@ -4,7 +4,7 @@ import { SandreZoneAlias } from '@shared/entities/sandre_zone_alias.entity';
 import { SandreZoneSyncState } from '@shared/entities/sandre_zone_sync_state.entity';
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { of } from 'rxjs';
-import { getMetadataArgsStorage } from 'typeorm';
+import { DataSource, EntitySchema, getMetadataArgsStorage } from 'typeorm';
 import * as approvedReferences from './sandre-zone-sync-approved-references';
 import * as lkgApprovals from './sandre-zone-lkg-approvals';
 import * as reconciliationActions from './sandre-zone-reconciliation-actions';
@@ -188,6 +188,39 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         'sandreProvenance',
       ]),
     );
+  });
+
+  it('hydrates alert-zone geometries with the full Sandre precision', async () => {
+    const geometryColumn = getMetadataArgsStorage().columns.find(
+      ({ target, propertyName }) =>
+        target === ZoneAlerte && propertyName === 'geom',
+    );
+    expect(geometryColumn?.options.precision).toBe(15);
+
+    const precisionProbe = new EntitySchema({
+      name: 'GeometryPrecisionProbe',
+      columns: {
+        id: { type: Number, primary: true },
+        geom: {
+          type: 'geometry',
+          precision: geometryColumn?.options.precision,
+          select: false,
+        },
+      },
+    });
+    const dataSource = new DataSource({
+      type: 'postgres',
+      entities: [precisionProbe],
+    });
+    await (dataSource as any).buildMetadatas();
+
+    expect(
+      dataSource
+        .getRepository(precisionProbe)
+        .createQueryBuilder('zone')
+        .select('zone.geom')
+        .getSql(),
+    ).toContain('ST_AsGeoJSON("zone"."geom", 15)::json');
   });
 
   it('never matches a local_preserved zone through canonical, alias or legacy identity', async () => {
@@ -3784,9 +3817,20 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
   });
 
-  it('revalidates an unchanged snapshot without rewriting its zones', async () => {
+  it('revalidates an unchanged 15-decimal snapshot without revision churn', async () => {
+    const preciseFeature = rawFeature();
+    preciseFeature.geometry.coordinates = [
+      [
+        [
+          [-0.134046613281725, 43.1514164109316],
+          [-0.133046613281725, 43.1514164109316],
+          [-0.133546613281725, 43.1524164109316],
+          [-0.134046613281725, 43.1514164109316],
+        ],
+      ],
+    ];
     const snapshot = createSandreZoneSnapshot(
-      [rawFeature()],
+      [preciseFeature],
       1,
       department.code,
     );
@@ -3816,6 +3860,11 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const harness = createHarness({
       state,
       zoneFind: jest.fn().mockResolvedValue([existingZone]),
+      httpResponses: [
+        countResponse(1),
+        { data: { features: [preciseFeature] } },
+        countResponse(1),
+      ],
     });
 
     const result = await (harness.service as any).applySandreSnapshot(
@@ -3847,6 +3896,16 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(
       harness.manager.query.mock.calls.some(([query]) =>
         query.includes('UPDATE "config"'),
+      ),
+    ).toBe(false);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "zone_publication_source_state"'),
+      ),
+    ).toBe(false);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('INSERT INTO "historic_backfill_department_revision"'),
       ),
     ).toBe(false);
   });

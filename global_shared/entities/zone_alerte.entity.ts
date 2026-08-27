@@ -73,6 +73,7 @@ export class ZoneAlerte extends BaseEntity {
 
   @Column({
     type: "geometry",
+    precision: 15,
     nullable: false,
     select: false,
   })
