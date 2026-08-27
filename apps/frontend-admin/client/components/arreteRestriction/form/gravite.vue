@@ -28,13 +28,6 @@ const v$ = useVuelidate(rules, props.arreteRestriction);
 const api = useApi();
 const departementParametres: Ref<any> = ref(null);
 
-const getRestrictionsByZoneType = (type: string) => {
-  if (type === 'AEP') {
-    return props.arreteRestriction.restrictions.filter((r) => r.isAep);
-  }
-  return props.arreteRestriction.restrictions.filter((r) => r.zoneAlerte?.type === type);
-};
-
 const getRestrictionsByZoneTypeAndAc = (type: string, acId: number | null) => {
   if (type === 'AEP') {
     return props.arreteRestriction.restrictions.filter((r) => r.isAep && r.arreteCadre?.id === acId);
@@ -74,7 +67,10 @@ const niveauGraviteOptions = [
 ];
 
 const applyToAllRestrictions = (restriction: Restriction, $event: any) => {
-  const restrictions: Restriction[] = getRestrictionsByZoneType(restriction.isAep ? 'AEP' : restriction.zoneAlerte.type);
+  const restrictions: Restriction[] = getRestrictionsByZoneTypeAndAc(
+    restriction.isAep ? 'AEP' : restriction.zoneAlerte.type,
+    restriction.arreteCadre?.id,
+  );
   restrictions.forEach(r => {
     r.usages = r.usages.filter(u => u.nom !== $event);
   });
@@ -116,7 +112,7 @@ watch(
 
 watch(() => props.arreteRestriction.departement, async () => {
   if (props.arreteRestriction.departement) {
-    const { data, error } = await api.parametres.get(props.arreteRestriction.departement.code);
+    const { data } = await api.parametres.get(props.arreteRestriction.departement.code);
     if (data.value) {
       departementParametres.value = data.value;
     }
@@ -150,15 +146,19 @@ watch(() => props.arreteRestriction.departement, async () => {
           </div>
         </div>
         <h6>Zones d'alerte</h6>
-        <div v-for="ac of acFiltered">
+        <div v-for="(ac, acIndex) of acFiltered" :key="ac.id ?? acIndex">
           <b>{{ ac.numero }}</b>
-          <div class="fr-mt-2w fr-mb-4w" v-for="zoneType of zonesType">
+          <div class="fr-mt-2w fr-mb-4w" v-for="zoneType of zonesType" :key="zoneType.type">
             <template v-if="getRestrictionsByZoneTypeAndAc(zoneType.type, ac.id).length > 0">
               <p>
                 <b>{{ zoneType.label }}</b>
               </p>
               <div class="divider" />
-              <div v-for="r in getRestrictionsByZoneTypeAndAc(zoneType.type, ac.id)" class="divider">
+              <div
+                v-for="(r, restrictionIndex) in getRestrictionsByZoneTypeAndAc(zoneType.type, ac.id)"
+                :key="r.id ?? restrictionIndex"
+                class="divider"
+              >
                 <ArreteRestrictionFormRestriction
                   v-if="departementParametres"
                   :restriction="r"

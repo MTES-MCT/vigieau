@@ -138,6 +138,8 @@ async function runSmoke({
     }
     if (url.pathname === "/legacy.geojson") {
       response.writeHead(206, {
+        "content-disposition":
+          'attachment; filename="zones_arretes_en_vigueur.geojson"',
         "content-type": "application/geo+json",
         "last-modified": new Date(artifactLastModified).toUTCString(),
       });
@@ -283,6 +285,58 @@ test("zone cache policy rejects unusable and stale payloads", () => {
   assert.throws(
     () => assertPublicZoneCache({ ...policy, body: { ...body, fresh: false } }),
     /cache is not fresh/,
+  );
+});
+
+test("zone cache accepts a noon business marker loaded earlier that day", () => {
+  const body = zoneCacheStatus({
+    loadedAt: "2026-08-23T00:56:15.297Z",
+    loadedVersion: "2026-08-23T12:00:00.000Z",
+    availableVersion: "2026-08-23T12:00:00.000Z",
+    lastCheckAt: "2026-08-23T09:12:18.905Z",
+    mode: "versioned",
+    zones: 1,
+  });
+
+  assert.doesNotThrow(() =>
+    assertPublicZoneCache({
+      body,
+      deadline: "06:00",
+      expectedMode: "healthy",
+      minimumZoneCount: 1,
+      now: new Date("2026-08-23T09:12:30.000Z"),
+    }),
+  );
+});
+
+test("zone cache rejects future load and business dates", () => {
+  const policy = {
+    deadline: "06:00",
+    expectedMode: "healthy",
+    minimumZoneCount: 1,
+    now: new Date("2026-08-23T09:12:30.000Z"),
+  };
+  const body = zoneCacheStatus({ mode: "versioned", zones: 1 });
+
+  assert.throws(
+    () =>
+      assertPublicZoneCache({
+        ...policy,
+        body: { ...body, loadedAt: "2026-08-23T09:14:00.000Z" },
+      }),
+    /load date is implausibly in the future/,
+  );
+  assert.throws(
+    () =>
+      assertPublicZoneCache({
+        ...policy,
+        body: {
+          ...body,
+          loadedVersion: "2026-08-24T12:00:00.000Z",
+          availableVersion: "2026-08-24T12:00:00.000Z",
+        },
+      }),
+    /later than the current business date/,
   );
 });
 

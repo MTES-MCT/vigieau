@@ -18,7 +18,25 @@ const createRestriction = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const createArrete = (restrictions: any[]) => ({
+const createUsage = (overrides: Record<string, unknown> = {}) => ({
+  id: 1,
+  nom: 'Arrosage des jardins potagers',
+  thematique: { id: 1, nom: 'Arroser' },
+  concerneParticulier: true,
+  concerneEntreprise: false,
+  concerneCollectivite: false,
+  concerneExploitation: false,
+  concerneEso: false,
+  concerneEsu: false,
+  concerneAep: true,
+  descriptionVigilance: 'Autorisé',
+  descriptionAlerte: 'Interdit de 8 h à 20 h',
+  descriptionAlerteRenforcee: 'Interdit de 8 h à 20 h',
+  descriptionCrise: 'Interdit',
+  ...overrides,
+});
+
+const createArrete = (restrictions: any[] | null) => ({
   numero: 'AR-TEST',
   departement: { id: 79 },
   arretesCadre: [{ id: 10 }],
@@ -69,16 +87,22 @@ describe('RestrictionService.updateAll', () => {
     jest.clearAllMocks();
   });
 
-  it('supprime explicitement toutes les anciennes restrictions quand la liste est vide', async () => {
-    const { repository, service } = createHarness();
+  it.each([
+    ['une liste vide', []],
+    ['null', null],
+  ])(
+    'supprime explicitement toutes les anciennes restrictions avec %s',
+    async (_label, restrictions) => {
+      const { repository, service } = createHarness();
 
-    await service.updateAll(createArrete([]) as any, 42);
+      await service.updateAll(createArrete(restrictions) as any, 42);
 
-    expect(repository.delete).toHaveBeenCalledWith({
-      arreteRestriction: { id: 42 },
-    });
-    expect(repository.save).toHaveBeenCalledWith([]);
-  });
+      expect(repository.delete).toHaveBeenCalledWith({
+        arreteRestriction: { id: 42 },
+      });
+      expect(repository.save).toHaveBeenCalledWith([]);
+    },
+  );
 
   it('normalise une zone AEP sans modifier le DTO reçu', async () => {
     const input = createRestriction({
@@ -209,6 +233,30 @@ describe('RestrictionService.updateAll', () => {
     ).rejects.toThrow(
       `Une restriction est liée à un arrêté cadre qui n'appartient pas à cet arrêté de restriction.`,
     );
+  });
+
+  it("rejette les usages contradictoires avant d'enregistrer la restriction", async () => {
+    const { repository, service } = createHarness();
+
+    await expect(
+      service.updateAll(
+        createArrete([
+          createRestriction({
+            usages: [
+              createUsage(),
+              createUsage({
+                id: 2,
+                nom: 'ARROSAGE\u00A0DES JARDINS POTAGERS',
+                descriptionCrise: 'Interdit de 8 h à 20 h',
+              }),
+            ],
+          }),
+        ]) as any,
+        42,
+      ),
+    ).rejects.toThrow('possède des consignes contradictoires');
+
+    expect(repository.save).not.toHaveBeenCalled();
   });
 
   it('normalise une restriction non AEP et accepte un brouillon incomplet', async () => {
@@ -494,6 +542,119 @@ describe('RestrictionService.getPublicationValidationErrors', () => {
     ).toContain(
       `Chaque restriction hors eau potable doit être liée à une zone d'alerte.`,
     );
+  });
+
+  it('rejette les variantes typographiques contradictoires visant le même public', () => {
+    const { service } = createHarness();
+    const first = createUsage();
+    const second = createUsage({
+      id: 2,
+      nom: '  ARROSAGE\u00a0DES JARDINS POTAGERS  ',
+      thematique: { id: 2, nom: 'Arroser' },
+      descriptionCrise: 'Interdit de 8 h à 20 h',
+    });
+
+    expect(
+      service.getPublicationValidationErrors([
+        createRestriction({ usages: [first, second] }) as any,
+      ]),
+    ).toContain(
+      `L'usage « Arrosage des jardins potagers » possède des consignes contradictoires pour des profils et ressources identiques dans une même zone.`,
+    );
+  });
+
+  it('unifie les apostrophes, les tirets et les formes Unicode du libellé', () => {
+    const { service } = createHarness();
+    const first = createUsage({
+      nom: "Nettoyage d'installations - hors production",
+      thematique: { id: 1, nom: 'Activités économiques' },
+    });
+    const second = createUsage({
+      id: 2,
+      nom: 'Nettoyage d’installations – hors production',
+      thematique: { id: 2, nom: 'ACTIVITE\u0301S E\u0301CONOMIQUES' },
+      descriptionAlerte: 'Interdit',
+    });
+
+    expect(
+      service.getPublicationValidationErrors([
+        createRestriction({ usages: [first, second] }) as any,
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('possède des consignes contradictoires'),
+      ]),
+    );
+  });
+
+  it('détecte la variante réelle avec un article facultatif après y compris', () => {
+    const { service } = createHarness();
+
+    expect(
+      service.getPublicationValidationErrors([
+        createRestriction({
+          usages: [
+            createUsage({
+              nom: 'Arrosage des jardins potagers (y compris les serres non-agricoles)',
+            }),
+            createUsage({
+              id: 2,
+              nom: 'Arrosage des jardins potagers (y compris serres non-agricoles)',
+              descriptionCrise: 'Interdit de 8 h à 20 h',
+            }),
+          ],
+        }) as any,
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('possède des consignes contradictoires'),
+      ]),
+    );
+  });
+
+  it('accepte les doublons équivalents et les variantes sans audience commune', () => {
+    const { service } = createHarness();
+    const reference = createUsage();
+
+    expect(
+      service.getPublicationValidationErrors([
+        createRestriction({
+          usages: [
+            reference,
+            createUsage({ id: 2, nom: 'ARROSAGE DES JARDINS POTAGERS' }),
+            createUsage({
+              id: 3,
+              concerneParticulier: false,
+              concerneEntreprise: true,
+              descriptionCrise: 'Interdit de 8 h à 20 h',
+            }),
+            createUsage({
+              id: 4,
+              concerneAep: false,
+              concerneEso: true,
+              descriptionCrise: 'Interdit totalement',
+            }),
+          ],
+        }) as any,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('ne compare jamais les usages de deux restrictions différentes', () => {
+    const { service } = createHarness();
+
+    expect(
+      service.getPublicationValidationErrors([
+        createRestriction({ usages: [createUsage()] }) as any,
+        createRestriction({
+          nomGroupementAep: 'Réseau Sud',
+          communes: [{ id: 2 }],
+          usages: [
+            createUsage({ id: 2, descriptionCrise: 'Interdit de 8 h à 20 h' }),
+          ],
+        }) as any,
+      ]),
+    ).toEqual([]);
   });
 });
 

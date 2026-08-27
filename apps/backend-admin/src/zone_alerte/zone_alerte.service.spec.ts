@@ -6,6 +6,8 @@ import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
 import { of } from 'rxjs';
 import { getMetadataArgsStorage } from 'typeorm';
 import * as approvedReferences from './sandre-zone-sync-approved-references';
+import * as lkgApprovals from './sandre-zone-lkg-approvals';
+import * as reconciliationActions from './sandre-zone-reconciliation-actions';
 import * as syncApprovals from './sandre-zone-sync-approvals';
 import {
   fetchSandreMdmZoneRecordEvidence,
@@ -232,6 +234,10 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     basinFind?: jest.Mock;
     basinMappings?: Record<number, { localBasinCode: number; source: string }>;
     recomputeResult?: any;
+    pendingRecomputeRows?: Array<{
+      departementId: number;
+      recomputeRevision: number;
+    }>;
     syncMode?: string;
     forceFullAuditAfter?: string;
     rolloutAuditRows?: Array<{
@@ -258,6 +264,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     }>;
     globalLockAvailable?: boolean;
     exactAuditBatch?: Record<string, unknown> | null;
+    historicDirtyFrom?: string | null;
+    historicInvalidationSucceeds?: boolean;
   }) => {
     const zoneRepository = {
       create: jest.fn(() => ({})),
@@ -325,6 +333,30 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const manager = {
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
+        if (
+          query.includes('MIN(restriction_order."dateDebut")') &&
+          query.includes('FROM "arrete_restriction"')
+        ) {
+          return [
+            {
+              dirtyFrom:
+                options && 'historicDirtyFrom' in options
+                  ? options.historicDirtyFrom
+                  : '2011-06-07',
+            },
+          ];
+        }
+        if (
+          query.includes('information_schema.columns') &&
+          query.includes("column_name = 'historicComputeEpoch'")
+        ) {
+          return [{ exists: true }];
+        }
+        if (query.includes('UPDATE "config"')) {
+          return options?.historicInvalidationSucceeds === false
+            ? [[], 0]
+            : [[{ id: 1 }], 1];
+        }
         if (
           query.includes('UPDATE "zone_publication_source_state"') &&
           query.includes('RETURNING "publicRevision"')
@@ -440,6 +472,12 @@ describe('ZoneAlerteService Sandre synchronization', () => {
             },
           ];
         }
+        if (
+          query.includes('FROM "departement"') &&
+          query.includes('WHERE "code" = $1')
+        ) {
+          return [{ id: department.id }];
+        }
         if (query.includes('pg_advisory_unlock')) {
           return [{ unlocked: true }];
         }
@@ -480,6 +518,32 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         }
         if (query.includes('INSERT INTO sandre_zone_sync_batch')) {
           return [{ id: '1' }];
+        }
+        if (query.includes('FROM sandre_zone_sync_state state')) {
+          if (options && 'pendingRecomputeRows' in options) {
+            return options.pendingRecomputeRows;
+          }
+          return storedState?.needsRecompute
+            ? [
+                {
+                  departementId: department.id,
+                  recomputeRevision: storedState.recomputeRevision ?? 0,
+                },
+              ]
+            : [];
+        }
+        if (query.includes('FROM unnest($1::integer[], $2::integer[])')) {
+          const departmentIndex = (parameters?.[0] ?? []).indexOf(
+            department.id,
+          );
+          if (
+            departmentIndex >= 0 &&
+            storedState?.recomputeRevision ===
+              parameters?.[1]?.[departmentIndex]
+          ) {
+            storedState.needsRecompute = false;
+          }
+          return [];
         }
         if (
           query.includes('UPDATE sandre_zone_sync_state') &&
@@ -1331,20 +1395,392 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const publicRevisionCallIndex = harness.manager.query.mock.calls.findIndex(
       ([query]) => query.includes('UPDATE "zone_publication_source_state"'),
     );
+    const historicInvalidationCallIndex =
+      harness.manager.query.mock.calls.findIndex(([query]) =>
+        query.includes('UPDATE "config"'),
+      );
+    const historicBoundaryCallIndex =
+      harness.manager.query.mock.calls.findIndex(([query]) =>
+        query.includes('MIN(restriction_order."dateDebut")'),
+      );
     expect(publicRevisionCallIndex).toBeGreaterThanOrEqual(0);
+    expect(historicInvalidationCallIndex).toBeGreaterThanOrEqual(0);
+    expect(historicBoundaryCallIndex).toBeGreaterThanOrEqual(0);
+    const [historicBoundarySql, historicBoundaryParameters] =
+      harness.manager.query.mock.calls[historicBoundaryCallIndex];
+    expect(historicBoundarySql).toContain(
+      'restriction_order."departementId" = $1',
+    );
+    expect(historicBoundarySql).toContain(
+      'restriction_order."dateDebut" < $2::date',
+    );
+    expect(historicBoundaryParameters).toEqual([
+      department.id,
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+    ]);
+    const [historicInvalidationSql, historicInvalidationParameters] =
+      harness.manager.query.mock.calls[historicInvalidationCallIndex];
+    expect(historicInvalidationSql).toContain(
+      '"historicComputeEpoch" = "historicComputeEpoch" + 1',
+    );
+    expect(historicInvalidationSql).toContain(
+      '"computeMapGeneration" = "computeMapGeneration" + 1',
+    );
+    expect(historicInvalidationSql).toContain(
+      '"computeStatsGeneration" = "computeStatsGeneration" + 1',
+    );
+    expect(historicInvalidationParameters).toEqual(['2011-06-07']);
     expect(harness.manager.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO "zone_type_availability"'),
+      expect.stringContaining(
+        'INSERT INTO "historic_backfill_department_revision"',
+      ),
       [[department.id], '43'],
+    );
+    expect(harness.manager.query.mock.calls).not.toEqual(
+      expect.arrayContaining([
+        [
+          expect.stringContaining('INSERT INTO "zone_type_availability"'),
+          expect.anything(),
+        ],
+      ]),
     );
     expect(harness.manager.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO "current_zone_recompute_request"'),
       [[department.id], '43', 'SYNCHRONISATION SANDRE', null],
     );
     expect(
+      harness.manager.query.mock.invocationCallOrder[
+        historicInvalidationCallIndex
+      ],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    );
+    expect(
       harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
     ).toBeLessThan(
       harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
     );
+  });
+
+  it('rolls back the Sandre mutation when historic invalidation fails', async () => {
+    const harness = createHarness({ historicInvalidationSucceeds: false });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'Unable to invalidate zone computations',
+    );
+
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "zone_publication_source_state"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('acquires the department session lock before the transaction and the shared publication fence before the public mutation', async () => {
+    const harness = createHarness();
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshotOnce(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ stale: false }));
+
+    const lockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('SELECT pg_advisory_lock('),
+    );
+    const unlockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('SELECT pg_advisory_unlock('),
+    );
+    const sharedFenceCallIndex = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('pg_advisory_xact_lock_shared'),
+    );
+    const publicRevisionCallIndex = harness.manager.query.mock.calls.findIndex(
+      ([query]) => query.includes('UPDATE "zone_publication_source_state"'),
+    );
+    expect(lockCallIndex).toBeGreaterThanOrEqual(0);
+    expect(unlockCallIndex).toBeGreaterThanOrEqual(0);
+    expect(harness.queryRunner.query.mock.calls[lockCallIndex][1]).toEqual([
+      department.id,
+    ]);
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[lockCallIndex],
+    ).toBeLessThan(
+      harness.queryRunner.startTransaction.mock.invocationCallOrder[0],
+    );
+    expect(
+      harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    );
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    ).toBeLessThan(harness.queryRunner.release.mock.invocationCallOrder[0]);
+    expect(sharedFenceCallIndex).toBeGreaterThanOrEqual(0);
+    expect(publicRevisionCallIndex).toBeGreaterThanOrEqual(0);
+    expect(harness.manager.query.mock.calls[sharedFenceCallIndex][1]).toEqual([
+      'historic-map-publication-fence',
+    ]);
+    expect(
+      harness.queryRunner.startTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[sharedFenceCallIndex],
+    );
+    expect(
+      harness.manager.query.mock.invocationCallOrder[sharedFenceCallIndex],
+    ).toBeLessThan(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    );
+    expect(
+      harness.manager.query.mock.invocationCallOrder[publicRevisionCallIndex],
+    ).toBeLessThan(
+      harness.queryRunner.commitTransaction.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('rolls back before releasing the department session lock', async () => {
+    const harness = createHarness({ historicInvalidationSucceeds: false });
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshotOnce(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toThrow('Unable to invalidate zone computations');
+
+    const unlockCallIndex = harness.queryRunner.query.mock.calls.findIndex(
+      ([query]) => query.includes('SELECT pg_advisory_unlock('),
+    );
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.queryRunner.rollbackTransaction.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    );
+    expect(
+      harness.queryRunner.query.mock.invocationCallOrder[unlockCallIndex],
+    ).toBeLessThan(harness.queryRunner.release.mock.invocationCallOrder[0]);
+  });
+
+  it('falls back to unlocking the whole session when the keyed unlock fails', async () => {
+    const harness = createHarness();
+    const originalQuery = harness.queryRunner.query.getMockImplementation();
+    harness.queryRunner.query.mockImplementation(
+      async (query: string, parameters?: any[]) => {
+        if (query.includes('SELECT pg_advisory_unlock(')) {
+          return [{ unlocked: false }];
+        }
+        return originalQuery?.(query, parameters);
+      },
+    );
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshotOnce(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toThrow('Failed to clean up Sandre department lock session');
+
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_unlock_all()',
+    );
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a new query runner for a retried Sandre transaction', async () => {
+    const harness = createHarness();
+    const serializationFailure = Object.assign(
+      new Error('serialization failure'),
+      { code: '40001' },
+    );
+    const firstRunner = {
+      manager: harness.manager,
+      query: jest.fn(async (query: string) => {
+        if (query.includes('FROM "departement"')) {
+          return [{ id: department.id }];
+        }
+        if (query.includes('SELECT pg_advisory_unlock(')) {
+          return [{ unlocked: true }];
+        }
+        return [];
+      }),
+      connect: jest.fn().mockResolvedValue(undefined),
+      startTransaction: jest.fn().mockRejectedValue(serializationFailure),
+      commitTransaction: jest.fn().mockResolvedValue(undefined),
+      rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+    harness.dataSource.createQueryRunner
+      .mockReturnValueOnce(firstRunner)
+      .mockReturnValueOnce(harness.queryRunner);
+    const waitForRetry = jest
+      .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+      .mockResolvedValue(undefined);
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshot(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ stale: false }));
+
+    expect(harness.dataSource.createQueryRunner).toHaveBeenCalledTimes(2);
+    expect(firstRunner.release).toHaveBeenCalledTimes(1);
+    expect(firstRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).toHaveBeenCalledWith(50);
+  });
+
+  it.each([
+    [
+      'serialization failure',
+      Object.assign(new Error('serialization failure'), { code: '40001' }),
+    ],
+    [
+      'deadlock through the driver error',
+      Object.assign(new Error('deadlock detected'), {
+        driverError: { code: '40P01' },
+      }),
+    ],
+  ])(
+    'retries a %s by replaying the Sandre transaction',
+    async (_label, error) => {
+      const harness = createHarness();
+      const application = {
+        result: { added: 1, updated: 0, disabled: 0, unchanged: 0 },
+        recomputeRequired: true,
+        decisions: [],
+        stale: false,
+      };
+      const applyOnce = jest
+        .spyOn(harness.service as any, 'applySandreSnapshotOnce')
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce(application);
+      const waitForRetry = jest
+        .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+        .mockResolvedValue(undefined);
+      const snapshot = createSandreZoneSnapshot(
+        [rawFeature()],
+        1,
+        department.code,
+      );
+
+      await expect(
+        (harness.service as any).applySandreSnapshot(
+          department.code,
+          snapshot,
+          new Date('2026-08-23T12:00:00.000Z'),
+          'batch-1',
+        ),
+      ).resolves.toBe(application);
+
+      expect(applyOnce).toHaveBeenCalledTimes(2);
+      expect(waitForRetry).toHaveBeenCalledWith(50);
+    },
+  );
+
+  it('bounds Sandre transaction retries and rethrows the last conflict', async () => {
+    const harness = createHarness();
+    const serializationFailure = Object.assign(
+      new Error('serialization failure'),
+      { code: '40001' },
+    );
+    const applyOnce = jest
+      .spyOn(harness.service as any, 'applySandreSnapshotOnce')
+      .mockRejectedValue(serializationFailure);
+    const waitForRetry = jest
+      .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+      .mockResolvedValue(undefined);
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshot(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toBe(serializationFailure);
+
+    expect(applyOnce).toHaveBeenCalledTimes(3);
+    expect(waitForRetry.mock.calls).toEqual([[50], [100]]);
+  });
+
+  it('does not retry a non-transactional Sandre failure', async () => {
+    const harness = createHarness();
+    const validationFailure = new Error('Sandre validation drift');
+    const applyOnce = jest
+      .spyOn(harness.service as any, 'applySandreSnapshotOnce')
+      .mockRejectedValue(validationFailure);
+    const waitForRetry = jest
+      .spyOn(harness.service as any, 'waitForSandreTransactionRetry')
+      .mockResolvedValue(undefined);
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+
+    await expect(
+      (harness.service as any).applySandreSnapshot(
+        department.code,
+        snapshot,
+        new Date('2026-08-23T12:00:00.000Z'),
+      ),
+    ).rejects.toBe(validationFailure);
+
+    expect(applyOnce).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).not.toHaveBeenCalled();
+  });
+
+  it('keeps the historic epoch for a current-only Sandre mutation', async () => {
+    const harness = createHarness({ historicDirtyFrom: null });
+
+    await harness.service.updateDepartementZones('65');
+
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "config"'),
+      ),
+    ).toBe(false);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "zone_publication_source_state"'),
+      ),
+    ).toBe(true);
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('binds a virtual-target audit before promoting and splitting a strict legacy source', async () => {
@@ -1488,6 +1924,17 @@ describe('ZoneAlerteService Sandre synchronization', () => {
           : targetState.map((target) => ({
               ...target,
               arreteCadreIds: [700],
+              restrictions: [
+                {
+                  restrictionId: 900 + target.targetIndex,
+                  arreteRestrictionId: 800 + target.targetIndex,
+                  parentStatus: 'publie',
+                  parentDateDebut: '2026-06-30',
+                  payloadFingerprint: `${target.targetIndex + 1}`.repeat(64),
+                  computedIds: [1000 + target.targetIndex],
+                  historicIds: [2000 + target.targetIndex],
+                },
+              ],
             }));
       const unsigned = {
         sourceZoneId: sourceZone.id,
@@ -1633,6 +2080,93 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
     expect(referencesSpy).toHaveBeenCalledTimes(3);
 
+    const rematerializedTargetState = postApplyLineage.targetState.map(
+      (target) => ({
+        ...target,
+        restrictions: target.restrictions.map((restriction) => ({
+          ...restriction,
+          computedIds: restriction.computedIds.map((id) => id + 100),
+          historicIds: restriction.historicIds.map((id) => id + 100),
+        })),
+      }),
+    );
+    const rematerializedUnsigned = {
+      sourceZoneId: postApplyLineage.sourceZoneId,
+      lifecycle: postApplyLineage.lifecycle,
+      sourceOperationalEmpty: postApplyLineage.sourceOperationalEmpty,
+      arreteCadreLinks: postApplyLineage.arreteCadreLinks,
+      restrictions: postApplyLineage.restrictions,
+      customizationCount: postApplyLineage.customizationCount,
+      aliasCount: postApplyLineage.aliasCount,
+      targetCollisionFingerprint: postApplyLineage.targetCollisionFingerprint,
+      targetStateFingerprint: fingerprint(rematerializedTargetState),
+      targetState: rematerializedTargetState,
+    };
+    const rematerializedReferences = {
+      ...rematerializedUnsigned,
+      fingerprint: fingerprint(rematerializedUnsigned),
+    };
+    const postApplySourceIdentity = {
+      matchType: 'canonical',
+      idSandre: sourceFeature.gid,
+      codeSandre: sourceFeature.codeSandre,
+      provenance: 'official',
+      disabled: sourceZone.disabled,
+      statutSandre: sourceZone.statutSandre,
+      dateMajSandre: sourceZone.dateMajSandre,
+      numeroVersionSandre: sourceZone.numeroVersionSandre,
+      sandrePayloadHash: sourceZone.sandrePayloadHash,
+    };
+    const postApplyAudit = {
+      ...audited,
+      referenceEvidence: postApplyLineage,
+      migrationLineage: postApplyLineage,
+      observedSourceIdentity: postApplySourceIdentity,
+      approvalFingerprint: fingerprint({
+        staticFingerprint: audited.staticFingerprint,
+        referenceEvidence: postApplyLineage,
+        migrationLineage: postApplyLineage,
+        observedSourceIdentity: postApplySourceIdentity,
+      }),
+    };
+    referencesSpy.mockResolvedValueOnce(rematerializedReferences);
+    const replayDecisions: any[] = [];
+
+    await (harness.service as any).reconcileApprovedSandreSnapshotMappings(
+      harness.manager,
+      department,
+      snapshot,
+      approval,
+      [
+        {
+          feature: sourceFeature,
+          match: { zone: sourceZone, matchType: 'canonical' },
+        },
+      ],
+      new Map(
+        targetFeatures.map((feature, index) => [
+          feature.codeSandre,
+          targetZones[index],
+        ]),
+      ),
+      replayDecisions,
+      true,
+      {
+        batchId: 'audit-2',
+        decisions: new Map([['355:approved-snapshot', postApplyAudit]]),
+      },
+      mdmEvidence,
+    );
+
+    expect(replayDecisions[0]).toEqual(
+      expect.objectContaining({
+        outcome: 'applied',
+        reason: 'APPROVED_MAPPING_ALREADY_APPLIED',
+      }),
+    );
+    expect(referencesSpy).toHaveBeenCalledTimes(4);
+    expect(partitionSpy).toHaveBeenCalledTimes(1);
+
     materializedSpy.mockRejectedValueOnce(
       new Error('Approved Sandre materialized target geometry changed'),
     );
@@ -1664,7 +2198,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       ),
     ).rejects.toThrow('materialized target geometry changed');
     expect(partitionSpy).toHaveBeenCalledTimes(1);
-    expect(geometrySpy).toHaveBeenCalledTimes(2);
+    expect(geometrySpy).toHaveBeenCalledTimes(3);
   });
 
   it('exposes a redacted operator status with observed, applied and blocked state', async () => {
@@ -1861,6 +2395,291 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       query.includes('INSERT INTO sandre_zone_sync_decision'),
     );
     expect(decisionCall?.[1]?.[2]).toContain('GENEALOGY_STALE_OR_MISSING');
+  });
+
+  it('retains an exact approved LKG unchanged across audit and safe modes', async () => {
+    const frozenSnapshot = createSandreZoneSnapshot(
+      [
+        rawFeature({
+          gid: 1380,
+          CdZAS: '1380',
+          LbZAS: 'Zone historique',
+          StZAS: 'Gelé',
+          DateMajZAS: '2026-08-17',
+        }),
+      ],
+      1,
+      department.code,
+    );
+    const feature = frozenSnapshot.features[0];
+    const localZone = {
+      id: 102,
+      departementId: department.id,
+      departmentCode: department.code,
+      bassinVersantId: basin.id,
+      bassinVersantCode: basin.code,
+      idSandre: 1380,
+      codeSandre: '1380',
+      code: '1380',
+      nom: 'Zone historique',
+      type: 'SUP',
+      ressourceInfluencee: false,
+      disabled: false,
+      sandreProvenance: 'official',
+      statutSandre: 'Validé',
+      dateMajSandre: '2026-07-08',
+      numeroVersionSandre: null,
+      numeroVersion: null,
+      codesAlternatifs: [],
+      sandrePayloadHash: '1'.repeat(64),
+      geometryHash: '2'.repeat(32),
+    };
+    const reconciliationState = {
+      zones: [localZone],
+      arreteCadreLinks: [{ arreteCadreId: 10, zoneAlerteId: 102 }],
+      restrictions: [],
+      usages: [],
+      restrictionCommunes: [],
+      customizations: [],
+      customizationCommunes: [],
+      aliases: [],
+    };
+    const emptyFingerprint = fingerprint([]);
+    const referenceEvidenceWithoutFingerprint = {
+      sourceZoneId: 102,
+      lifecycle: 'pre_apply' as const,
+      sourceOperationalEmpty: false,
+      arreteCadreLinks: [{ arreteCadreId: 10, parentStatus: 'publie' }],
+      restrictions: [],
+      customizationCount: 0,
+      aliasCount: 0,
+      targetCollisionFingerprint: emptyFingerprint,
+      targetStateFingerprint: emptyFingerprint,
+      targetState: [],
+    };
+    const referenceEvidence = {
+      ...referenceEvidenceWithoutFingerprint,
+      fingerprint: fingerprint(referenceEvidenceWithoutFingerprint),
+    };
+    const genealogyRelations = [
+      {
+        id: '1',
+        parentCode: 'OTHER',
+        childCode: 'NEW',
+        modificationDate: '2024-10-01',
+        modificationType: '2',
+        reason: null,
+      },
+    ];
+    const genealogyEvidenceFingerprint = fingerprint({
+      relationCount: genealogyRelations.length,
+      latestModificationDate: '2024-10-01',
+      sourceCode: feature.codeSandre,
+      sourceRelations: [],
+    });
+    const mdmProjectionSha256 = '3'.repeat(64);
+    const approval: lkgApprovals.SandreLkgApproval = {
+      approvalId: 'test-lkg-approval',
+      departmentCode: department.code,
+      snapshotHash: frozenSnapshot.snapshotHash,
+      sourceUpdatedAt: frozenSnapshot.sourceUpdatedAt!,
+      featureCount: frozenSnapshot.featureCount,
+      feature: {
+        ...lkgApprovals.sandreLkgFeatureEvidence(feature),
+        status: 'Gelé',
+      },
+      localZone: {
+        zoneAlerteId: localZone.id,
+        bassinVersantId: localZone.bassinVersantId,
+        bassinVersantCode: localZone.bassinVersantCode,
+        idSandre: localZone.idSandre,
+        codeSandre: localZone.codeSandre,
+        code: localZone.code,
+        nom: localZone.nom,
+        type: 'SUP',
+        ressourceInfluencee: localZone.ressourceInfluencee,
+        disabled: false,
+        sandreProvenance: 'official',
+        statutSandre: localZone.statutSandre,
+        dateMajSandre: localZone.dateMajSandre,
+        numeroVersionSandre: null,
+        numeroVersion: null,
+        sandrePayloadHash: localZone.sandrePayloadHash,
+        ewkbMd5: localZone.geometryHash,
+      },
+      mdmRecords: [
+        {
+          codeSandre: feature.codeSandre,
+          projectionSha256: mdmProjectionSha256,
+          requiredEvolution: null,
+        },
+      ],
+      mdmNomenclature: null,
+      genealogyLatestDate: '2024-10-01',
+      genealogySourceRelationCount: 0,
+      genealogyEvidenceFingerprint,
+      operationalReferenceEvidenceFingerprint: referenceEvidence.fingerprint,
+      reconciliationStateFingerprint: fingerprint(reconciliationState),
+    };
+    const mdmEvidence = {
+      approvalId: approval.approvalId,
+      zoneRecords: [
+        {
+          codeSandre: feature.codeSandre,
+          url: 'https://mdm.sandre.test/1380/json',
+          byteLength: 1,
+          rawSha256: '4'.repeat(64),
+          projection: 'zone_alert_evolution_v1',
+          projectionSha256: mdmProjectionSha256,
+          requiredEvolution: null,
+        },
+      ],
+      nomenclature: null,
+    };
+    const sourceZone = {
+      id: localZone.id,
+      idSandre: localZone.idSandre,
+      codeSandre: localZone.codeSandre,
+      sandreProvenance: localZone.sandreProvenance,
+      disabled: false,
+      type: 'SUP',
+    };
+    const resolvedInactiveFeatures = [
+      {
+        feature,
+        match: { matchType: 'canonical', zone: sourceZone },
+      },
+    ];
+    const harness = createHarness();
+    harness.manager.query.mockResolvedValue([
+      {
+        ...localZone,
+        zoneAlerteId: localZone.id,
+        ewkbMd5: localZone.geometryHash,
+      },
+    ]);
+    harness.getSandreGenealogyRelations.mockResolvedValue(genealogyRelations);
+    const stateSpy = jest
+      .spyOn(reconciliationActions, 'loadSandreReconciliationZoneState')
+      .mockResolvedValue(reconciliationState);
+    const referenceSpy = jest
+      .spyOn(approvedReferences, 'loadSandreApprovedReferenceEvidence')
+      .mockResolvedValue(referenceEvidence);
+    const lockSpy = jest
+      .spyOn(approvedReferences, 'lockSandreApprovedSyncReferences')
+      .mockResolvedValue(undefined);
+    lockSpy.mockClear();
+    const observationSpy = jest
+      .spyOn(lkgApprovals, 'findSandreApprovedLkgRetentionForObservation')
+      .mockReturnValue(approval);
+
+    const auditDecisions: any[] = [];
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        auditDecisions,
+        false,
+        undefined,
+        mdmEvidence,
+      ),
+    ).resolves.toBe(localZone.id);
+    expect(auditDecisions).toEqual([
+      expect.objectContaining({
+        decisionKey: '1380:approved-lkg',
+        action: 'RETAIN_APPROVED_LKG',
+        outcome: 'observed',
+      }),
+    ]);
+    expect(lockSpy).not.toHaveBeenCalled();
+
+    const safeDecisions: any[] = [];
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        safeDecisions,
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([
+            ['1380:approved-lkg', auditDecisions[0].evidence],
+          ]),
+        },
+        mdmEvidence,
+      ),
+    ).resolves.toBe(localZone.id);
+    expect(safeDecisions[0]).toEqual(
+      expect.objectContaining({ outcome: 'applied' }),
+    );
+    expect(lockSpy).toHaveBeenCalledWith(harness.manager, [102], []);
+    expect(sourceZone).toEqual(
+      expect.objectContaining({ disabled: false, codeSandre: '1380' }),
+    );
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('remap_operational_sandre_zone_references'),
+      ),
+    ).toBe(false);
+
+    referenceSpy.mockResolvedValueOnce({
+      ...referenceEvidence,
+      fingerprint: 'f'.repeat(64),
+    });
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        [],
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([
+            ['1380:approved-lkg', auditDecisions[0].evidence],
+          ]),
+        },
+        mdmEvidence,
+      ),
+    ).rejects.toThrow('Approved Sandre LKG retention blocked');
+
+    const serializationError = Object.assign(
+      new Error('serialization failure'),
+      { code: '40001' },
+    );
+    stateSpy.mockRejectedValueOnce(serializationError);
+    await expect(
+      (harness.service as any).retainApprovedSandreLkg(
+        harness.manager,
+        department,
+        frozenSnapshot,
+        approval,
+        resolvedInactiveFeatures,
+        [],
+        true,
+        {
+          batchId: 'audit-1',
+          decisions: new Map([
+            ['1380:approved-lkg', auditDecisions[0].evidence],
+          ]),
+        },
+        mdmEvidence,
+      ),
+    ).rejects.toBe(serializationError);
+
+    stateSpy.mockRestore();
+    referenceSpy.mockRestore();
+    lockSpy.mockRestore();
+    observationSpy.mockRestore();
   });
 
   it.each(['audit', 'safe'])(
@@ -2939,8 +3758,8 @@ describe('ZoneAlerteService Sandre synchronization', () => {
 
     expect(state.needsRecompute).toBe(true);
     expect(harness.dataSource.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE sandre_zone_sync_state'),
-      [65, 1],
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      [[65], [1]],
     );
   });
 
@@ -3025,6 +3844,11 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       }),
     );
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('UPDATE "config"'),
+      ),
+    ).toBe(false);
   });
 
   it('fails closed before the domain preflight without an exact audit', async () => {
@@ -3225,11 +4049,18 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     await firstRun;
   });
 
-  it('continues the Sandre sync when a pending recomputation retry fails', async () => {
+  it('does not retry a singleton when its grouped recomputation fails', async () => {
+    const state = {
+      needsRecompute: true,
+      recomputeRevision: 2,
+      lastFullSyncAt: null,
+      departement: department,
+    };
     const harness = createHarness({
-      state: {
-        needsRecompute: true,
-        lastFullSyncAt: null,
+      state,
+      recomputeResult: {
+        success: false,
+        error: 'worker unavailable',
       },
     });
     const updateSpy = jest
@@ -3240,13 +4071,193 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         disabled: 0,
         unchanged: 0,
       });
-    jest
-      .spyOn(harness.service as any, 'recomputeSandreDepartment')
-      .mockRejectedValue(new Error('worker unavailable'));
+    const loggerError = jest.fn();
+    (harness.service as any).logger.error = loggerError;
 
     await harness.service.updateZones();
 
     expect(updateSpy).toHaveBeenCalledWith('65');
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledTimes(1);
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65]);
+    expect(state.needsRecompute).toBe(true);
+    expect(harness.dataSource.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      expect.anything(),
+    );
+    expect(loggerError).toHaveBeenCalledWith(
+      'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+      expect.objectContaining({ message: 'worker unavailable' }),
+    );
+  });
+
+  it('isolates a returned grouped failure and clears only successful departments', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: true,
+        lastFullSyncAt: null,
+      },
+      pendingRecomputeRows: [
+        { departementId: 71, recomputeRevision: 4 },
+        { departementId: 65, recomputeRevision: 3 },
+      ],
+    });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    harness.runCurrentZoneComputeWorker
+      .mockReset()
+      .mockResolvedValueOnce({ success: false, error: 'group failed' })
+      .mockResolvedValueOnce({ success: true })
+      .mockResolvedValueOnce({ success: false, error: 'invalid department' });
+    const loggerError = jest.fn();
+    (harness.service as any).logger.error = loggerError;
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker.mock.calls).toEqual([
+      [[65, 71]],
+      [[65]],
+      [[71]],
+    ]);
+    const clearCalls = harness.dataSource.query.mock.calls.filter(([query]) =>
+      query.includes('FROM unnest($1::integer[], $2::integer[])'),
+    );
+    expect(clearCalls).toEqual([[expect.any(String), [[65], [3]]]]);
+    const reportedError = loggerError.mock.calls.find(
+      ([message]) =>
+        message ===
+        'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+    )?.[1] as Error;
+    expect(reportedError).toBeInstanceOf(AggregateError);
+    expect(reportedError.message).toContain('71');
+    expect(reportedError.message).not.toContain('65');
+  });
+
+  it('does not isolate a thrown grouped recomputation and keeps every debt', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: true,
+        lastFullSyncAt: null,
+      },
+      pendingRecomputeRows: [
+        { departementId: 71, recomputeRevision: 4 },
+        { departementId: 65, recomputeRevision: 3 },
+      ],
+    });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    harness.runCurrentZoneComputeWorker
+      .mockReset()
+      .mockRejectedValue(new Error('worker timed out'));
+    const loggerError = jest.fn();
+    (harness.service as any).logger.error = loggerError;
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker.mock.calls).toEqual([
+      [[65, 71]],
+    ]);
+    expect(
+      harness.dataSource.query.mock.calls.some(([query]) =>
+        query.includes('FROM unnest($1::integer[], $2::integer[])'),
+      ),
+    ).toBe(false);
+    expect(loggerError).toHaveBeenCalledWith(
+      'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+      expect.objectContaining({ message: 'worker timed out' }),
+    );
+  });
+
+  it('recomputes every pending safe cron department once in sorted order', async () => {
+    const harness = createHarness({
+      state: {
+        needsRecompute: true,
+        lastFullSyncAt: null,
+      },
+      pendingRecomputeRows: [
+        { departementId: 71, recomputeRevision: 4 },
+        { departementId: 65, recomputeRevision: 3 },
+      ],
+    });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledTimes(1);
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65, 71]);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      [
+        [65, 71],
+        [3, 4],
+      ],
+    );
+  });
+
+  it('does not clear a newer grouped recomputation revision', async () => {
+    const state = {
+      needsRecompute: true,
+      recomputeRevision: 1,
+      lastFullSyncAt: null,
+      departement: department,
+    };
+    const harness = createHarness({ state });
+    jest.spyOn(harness.service, 'updateDepartementZones').mockResolvedValue({
+      added: 0,
+      updated: 0,
+      disabled: 0,
+      unchanged: 0,
+    });
+    let finishRecompute: (result: any) => void;
+    harness.runCurrentZoneComputeWorker.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishRecompute = resolve;
+        }),
+    );
+
+    const recompute = harness.service.updateZones();
+    await new Promise((resolve) => setImmediate(resolve));
+    state.recomputeRevision = 2;
+    finishRecompute({ success: true });
+    await recompute;
+
+    expect(state.needsRecompute).toBe(true);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'state."recomputeRevision" = completed."recomputeRevision"',
+      ),
+      [[65], [1]],
+    );
+  });
+
+  it('defers a safe cron application recompute until the grouped flush', async () => {
+    const harness = createHarness();
+
+    await harness.service.updateZones();
+
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledTimes(1);
+    expect(harness.runCurrentZoneComputeWorker).toHaveBeenCalledWith([65]);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM unnest($1::integer[], $2::integer[])'),
+      [[65], [1]],
+    );
+    expect(harness.dataSource.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('WHERE "departementId" = $1'),
+      [65, 1],
+    );
   });
 
   it.each(['audit', 'safe'])(
@@ -3275,6 +4286,61 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       expect(harness.httpService.get).not.toHaveBeenCalled();
     },
   );
+
+  it('reapplies a safe snapshot when its last application is expired', async () => {
+    const harness = createHarness({
+      syncMode: 'safe',
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000),
+        observedSnapshotHash: 'same-snapshot',
+        appliedSnapshotHash: 'same-snapshot',
+        observedSourceUpdatedAt: '2026-08-23',
+        appliedSourceUpdatedAt: '2026-08-23',
+      },
+    });
+    const changeSpy = jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest
+      .spyOn(harness.service, 'updateDepartementZones')
+      .mockResolvedValue({
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 1,
+      });
+
+    await harness.service.updateZones();
+
+    expect(updateSpy).toHaveBeenCalledWith('65');
+    expect(changeSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps a fresh audit observation on its normal change check', async () => {
+    const harness = createHarness({
+      syncMode: 'audit',
+      state: {
+        needsRecompute: false,
+        lastObservedAt: new Date(),
+        lastAppliedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000),
+        observedSnapshotHash: 'same-snapshot',
+        appliedSnapshotHash: 'same-snapshot',
+        observedSourceUpdatedAt: '2026-08-23',
+        appliedSourceUpdatedAt: '2026-08-23',
+      },
+    });
+    const changeSpy = jest
+      .spyOn(harness.service as any, 'hasSandreChanges')
+      .mockResolvedValue(false);
+    const updateSpy = jest.spyOn(harness.service, 'updateDepartementZones');
+
+    await harness.service.updateZones();
+
+    expect(changeSpy).toHaveBeenCalledWith('65', expect.any(Object));
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
 
   it('forces one fresh audit after the configured rollout cutoff', async () => {
     const harness = createHarness({
@@ -3718,6 +4784,40 @@ describe('ZoneAlerteService geometry reads', () => {
 
     await expect(service.findGeometriesByIds([])).resolves.toEqual(new Map());
     expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
+  it('allows only allowlisted valid MultiPolygon empties for legacy history', async () => {
+    const emptyGeometry = '{"type":"MultiPolygon","coordinates":[]}';
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([{ id: 7626, geom: emptyGeometry }]),
+    };
+    const service = createService({} as any, dataSource);
+
+    const geometries = await service.findLegacyHistoricGeometriesByIds(
+      [7626],
+      [7626],
+    );
+
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'normalized.id = ANY($2::int[])',
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      "ST_GeometryType(normalized.geom) <> 'ST_MultiPolygon'",
+    );
+    expect(dataSource.query.mock.calls[0][0]).toContain(
+      'OR NOT ST_IsValid(normalized.geom, 0)',
+    );
+    expect(dataSource.query.mock.calls[0][1]).toEqual([[7626], [7626]]);
+    expect(geometries.get(7626)).toBe(emptyGeometry);
+  });
+
+  it('fails closed when a legacy geometry is not returned by the allowlisted query', async () => {
+    const dataSource = { query: jest.fn().mockResolvedValue([]) };
+    const service = createService({} as any, dataSource);
+
+    await expect(
+      service.findLegacyHistoricGeometriesByIds([9], [7626]),
+    ).rejects.toThrow('Missing geometry for alert zone(s): 9');
   });
 
   it('fails when a requested geometry is absent', async () => {

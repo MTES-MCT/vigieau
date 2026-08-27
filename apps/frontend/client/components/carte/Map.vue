@@ -50,6 +50,12 @@ import {
   getOfficialDepartmentUrl,
   normalizeZoneSearchResponse,
 } from '../../utils/zone-availability';
+import {
+  deriveHistoricMapManifestUrl,
+  loadHistoricMapManifest,
+  resolveHistoricMapSourceUrl,
+} from '../../utils/historic-map-manifest';
+import type { HistoricMapManifest } from '../../utils/historic-map-manifest';
 
 const props = defineProps<{
   embedded: any;
@@ -60,6 +66,7 @@ const props = defineProps<{
   hideTypeEau: boolean;
   typeEau: string;
   profil: string;
+  downloadLoading?: boolean;
   accessibleDescriptionId?: string;
 }>();
 
@@ -99,6 +106,10 @@ const CONFIGURED_PMTILES_URL = String(
   runtimeConfig.public.pmtilesUrl || DEFAULT_PMTILES_URL,
 ).trim();
 const PMTILES_URL_TRUNC = CONFIGURED_PMTILES_URL.replace(/\.pmtiles$/, '');
+const HISTORIC_MAP_MANIFEST_URL = String(
+  runtimeConfig.public.historicMapManifestUrl ||
+    deriveHistoricMapManifestUrl(CONFIGURED_PMTILES_URL),
+).trim();
 const PMTILES_PREFLIGHT_ATTEMPTS = 3;
 const PMTILES_PREFLIGHT_RETRY_MS = 500;
 const PMTILES_TILE_RETRY_LIMIT = 2;
@@ -170,7 +181,18 @@ const getRequestedZoneSource = (
   const restrictionsAvailable = isCurrentMapDate(dateValue);
   const pmtilesUrl = restrictionsAvailable
     ? zonePublicationStore.pmtilesUrl
-    : `${PMTILES_URL_TRUNC}_${dateValue}.pmtiles`;
+    : dateValue
+      ? resolveHistoricMapSourceUrl(
+          historicMapManifest,
+          dateValue,
+          PMTILES_URL_TRUNC,
+          {
+            sourceRevision: zonePublicationStore.activeSourceRevision,
+            historicComputeEpoch:
+              zonePublicationStore.activeHistoricComputeEpoch,
+          },
+        )
+      : null;
   if (!pmtilesUrl) {
     return null;
   }
@@ -199,9 +221,25 @@ let exhaustedZoneSourceKey: string | null = null;
 let zoneTileRetryCount = 0;
 let handledSuccessfulRefreshVersion =
   zonePublicationStore.successfulRefreshVersion;
+let historicMapManifest: HistoricMapManifest | null | undefined;
+let historicMapManifestRequest: Promise<HistoricMapManifest | null> | null =
+  null;
 let localDateRollover: LocalDateRollover | null = null;
 let unsubscribePmtilesStatus: (() => void) | null = null;
 const zoneLayerTaskRunner = createLatestTaskRunner();
+const refreshHistoricMapManifest = async (): Promise<void> => {
+  const request =
+    historicMapManifestRequest ??
+    loadHistoricMapManifest(HISTORIC_MAP_MANIFEST_URL);
+  historicMapManifestRequest = request;
+  try {
+    historicMapManifest = await request;
+  } finally {
+    if (historicMapManifestRequest === request) {
+      historicMapManifestRequest = null;
+    }
+  }
+};
 const zoneTileRetry = createRetryScheduler(() => {
   const retrySourceKey = scheduledZoneSourceKey;
   scheduledZoneSourceKey = null;
@@ -1228,7 +1266,15 @@ const synchronizeMapView = async (): Promise<void> => {
       return;
     }
   } else {
-    void zonePublicationStore.loadPublication().catch(() => undefined);
+    await zonePublicationStore.loadPublication().catch(() => null);
+    try {
+      await refreshHistoricMapManifest();
+    } catch {
+      if (isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
+        showError.value = true;
+      }
+      return;
+    }
   }
 
   if (!isMapViewRequestCurrent(requestId, dateValue, currentDate)) {
@@ -1303,6 +1349,8 @@ watch(
 watch(
   () => [
     zonePublicationStore.publication,
+    zonePublicationStore.activeSourceRevision,
+    zonePublicationStore.activeHistoricComputeEpoch,
     getMapPublicationStateKey(
       zonePublicationStore.publication?.id,
       zonePublicationStore.manifestStatus,
@@ -1311,7 +1359,7 @@ watch(
     zonePublicationStore.successfulRefreshVersion,
   ],
   () => {
-    if (!componentMounted || !isCurrentMapDate(props.date)) {
+    if (!componentMounted) {
       return;
     }
     void synchronizeMapView();
@@ -1460,7 +1508,11 @@ watch(
       data-html2canvas-ignore="true"
       class="text-align-right"
     >
-      <DsfrButton @click="downloadMap()">
+      <DsfrButton
+        :disabled="downloadLoading"
+        :aria-busy="downloadLoading ? 'true' : undefined"
+        @click="downloadMap()"
+      >
         Télécharger la carte en .png
       </DsfrButton>
     </div>

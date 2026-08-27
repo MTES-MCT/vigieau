@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager, QueryRunner } from 'typeorm';
+import { VigieauLogger } from '../logger/vigieau.logger';
 import { statisticSourceRevisionSql } from './statistic-cache-config';
 
 export const STATISTIC_CACHE_ARTIFACT_SCHEMA_VERSION = 1;
@@ -31,7 +32,7 @@ export interface StatisticCacheArtifactTarget {
   currentPublishedDate: string;
 }
 
-export interface StatisticCacheCandidateTarget extends StatisticCacheArtifactTarget {
+export interface StatisticCacheMaterializationTarget extends StatisticCacheArtifactTarget {
   protocolVersion: number;
   historicDirtyFrom: string | null;
   historicDirtyThrough: string | null;
@@ -40,6 +41,8 @@ export interface StatisticCacheCandidateTarget extends StatisticCacheArtifactTar
   sourceRevision: string | null;
   historicComputeEpoch: string | null;
 }
+
+export type StatisticCacheCandidateTarget = StatisticCacheMaterializationTarget;
 
 export type StatisticCacheCandidateActivationResult =
   | {
@@ -230,20 +233,18 @@ function normalizeMaterializationError(error: unknown): unknown {
   return boundaryError;
 }
 
-function hasTarget(
+function hasMaterializationTarget(
   payload: StatisticCacheArtifactPayload | null,
-  target: StatisticCacheArtifactTarget,
+  target: StatisticCacheMaterializationTarget,
 ): payload is StatisticCacheArtifactPayload {
   return Boolean(
-    payload &&
-    payload.identity.statisticRevision === target.statisticRevision &&
-    payload.identity.currentPublishedDate === target.currentPublishedDate,
+    payload && hasCandidateIdentityTarget(payload.identity, target),
   );
 }
 
 function hasCandidateIdentityTarget(
   identity: StatisticCacheArtifactIdentity | null,
-  target: StatisticCacheCandidateTarget,
+  target: StatisticCacheMaterializationTarget,
 ): identity is StatisticCacheArtifactIdentity {
   return Boolean(
     identity &&
@@ -259,8 +260,27 @@ function hasCandidateIdentityTarget(
   );
 }
 
+function candidateMatchesTarget(
+  candidate: StatisticCacheArtifactCandidate,
+  target: StatisticCacheMaterializationTarget,
+): boolean {
+  return (
+    candidate.statisticRevision === target.statisticRevision &&
+    candidate.currentPublishedDate === target.currentPublishedDate &&
+    target.protocolVersion === STATISTIC_CACHE_PROTOCOL_VERSION &&
+    candidate.historicDirtyFrom === target.historicDirtyFrom &&
+    candidate.historicDirtyThrough === target.historicDirtyThrough &&
+    candidate.historicMapCursor === target.historicMapCursor &&
+    candidate.historicStatsCursor === target.historicStatsCursor &&
+    candidate.sourceRevision === target.sourceRevision &&
+    candidate.historicComputeEpoch === target.historicComputeEpoch
+  );
+}
+
 @Injectable()
 export class StatisticCacheArtifactService {
+  private readonly logger = new VigieauLogger('StatisticCacheArtifactService');
+
   constructor(private readonly dataSource: DataSource) {}
 
   async loadActive(
@@ -632,13 +652,14 @@ export class StatisticCacheArtifactService {
   }
 
   async materialize(
-    target: StatisticCacheArtifactTarget,
+    target: StatisticCacheMaterializationTarget,
     candidateFactory: (
       manager: EntityManager,
     ) => Promise<StatisticCacheArtifactCandidate>,
   ): Promise<StatisticCacheArtifactPayload> {
     const activeBeforeLock = await this.loadActive();
-    if (hasTarget(activeBeforeLock, target)) {
+    if (hasMaterializationTarget(activeBeforeLock, target)) {
+      await this.garbageCollectPublications(this.dataSource);
       return activeBeforeLock;
     }
 
@@ -654,20 +675,20 @@ export class StatisticCacheArtifactService {
       );
       locked = lock?.locked === true;
       if (!locked) {
-        return this.waitForActivePublication(target);
+        const published = await this.waitForActivePublication(target);
+        await this.garbageCollectPublications(queryRunner.manager);
+        return published;
       }
 
       const activeAfterLock = await this.loadActive(queryRunner.manager);
-      if (hasTarget(activeAfterLock, target)) {
+      if (hasMaterializationTarget(activeAfterLock, target)) {
+        await this.garbageCollectPublications(queryRunner.manager);
         return activeAfterLock;
       }
       await queryRunner.startTransaction('REPEATABLE READ');
       transactionStarted = true;
       const candidate = await candidateFactory(queryRunner.manager);
-      if (
-        candidate.statisticRevision !== target.statisticRevision ||
-        candidate.currentPublishedDate !== target.currentPublishedDate
-      ) {
+      if (!candidateMatchesTarget(candidate, target)) {
         throw new Error('Statistic cache candidate does not match its target');
       }
       const publicationId = randomUUID();
@@ -680,6 +701,7 @@ export class StatisticCacheArtifactService {
       );
       await queryRunner.commitTransaction();
       transactionStarted = false;
+      await this.garbageCollectPublications(queryRunner.manager);
       const published = await this.loadPublication(publicationId);
       if (!published) {
         throw new Error(
@@ -718,10 +740,12 @@ export class StatisticCacheArtifactService {
   ): Promise<StatisticCacheArtifactIdentity> {
     const activeBeforeLock = await this.loadActiveIdentity();
     if (hasCandidateIdentityTarget(activeBeforeLock, target)) {
+      await this.garbageCollectPublications(this.dataSource);
       return activeBeforeLock;
     }
     const candidateBeforeLock = await this.loadCandidateIdentity();
     if (hasCandidateIdentityTarget(candidateBeforeLock, target)) {
+      await this.garbageCollectPublications(this.dataSource);
       return candidateBeforeLock;
     }
 
@@ -737,35 +761,30 @@ export class StatisticCacheArtifactService {
       );
       locked = lock?.locked === true;
       if (!locked) {
-        return this.waitForCandidateIdentity(target);
+        const staged = await this.waitForCandidateIdentity(target);
+        await this.garbageCollectPublications(queryRunner.manager);
+        return staged;
       }
 
       const activeAfterLock = await this.loadActiveIdentity(
         queryRunner.manager,
       );
       if (hasCandidateIdentityTarget(activeAfterLock, target)) {
+        await this.garbageCollectPublications(queryRunner.manager);
         return activeAfterLock;
       }
       const candidateAfterLock = await this.loadCandidateIdentity(
         queryRunner.manager,
       );
       if (hasCandidateIdentityTarget(candidateAfterLock, target)) {
+        await this.garbageCollectPublications(queryRunner.manager);
         return candidateAfterLock;
       }
 
       await queryRunner.startTransaction('REPEATABLE READ');
       transactionStarted = true;
       const candidate = await candidateFactory(queryRunner.manager);
-      if (
-        candidate.statisticRevision !== target.statisticRevision ||
-        candidate.currentPublishedDate !== target.currentPublishedDate ||
-        candidate.historicDirtyFrom !== target.historicDirtyFrom ||
-        candidate.historicDirtyThrough !== target.historicDirtyThrough ||
-        candidate.historicMapCursor !== target.historicMapCursor ||
-        candidate.historicStatsCursor !== target.historicStatsCursor ||
-        candidate.sourceRevision !== target.sourceRevision ||
-        candidate.historicComputeEpoch !== target.historicComputeEpoch
-      ) {
+      if (!candidateMatchesTarget(candidate, target)) {
         throw new Error('Statistic cache candidate does not match its target');
       }
       const publicationId = randomUUID();
@@ -779,6 +798,7 @@ export class StatisticCacheArtifactService {
       );
       await queryRunner.commitTransaction();
       transactionStarted = false;
+      await this.garbageCollectPublications(queryRunner.manager);
       const staged = await this.loadCandidateIdentity();
       if (!staged || staged.id !== publicationId) {
         throw new Error(
@@ -829,6 +849,7 @@ export class StatisticCacheArtifactService {
       );
       locked = lock?.locked === true;
       if (!locked) {
+        await this.garbageCollectPublications(queryRunner.manager);
         return {
           outcome: 'retry',
           reason: 'materialization-lock-busy',
@@ -911,6 +932,7 @@ export class StatisticCacheArtifactService {
       if (!candidateId || state?.status !== 'ready') {
         await queryRunner.commitTransaction();
         transactionStarted = false;
+        await this.garbageCollectPublications(queryRunner.manager);
         return {
           outcome: 'superseded',
           reason: 'candidate-is-no-longer-ready',
@@ -955,6 +977,7 @@ export class StatisticCacheArtifactService {
         await this.discardCandidate(queryRunner.manager, candidateId);
         await queryRunner.commitTransaction();
         transactionStarted = false;
+        await this.garbageCollectPublications(queryRunner.manager);
         return {
           outcome: 'superseded',
           reason: 'publication-boundary-changed',
@@ -1004,6 +1027,7 @@ export class StatisticCacheArtifactService {
       if (readyInstances < requiredAcknowledgements) {
         await queryRunner.commitTransaction();
         transactionStarted = false;
+        await this.garbageCollectPublications(queryRunner.manager);
         return {
           outcome: 'awaiting-acknowledgements',
           reason: `${readyInstances}/${requiredAcknowledgements}-acknowledgements`,
@@ -1044,13 +1068,9 @@ export class StatisticCacheArtifactService {
         `,
         [candidateId, previousActiveId],
       );
-      await this.clearCandidateAcknowledgements(
-        queryRunner.manager,
-        candidateId,
-      );
-      await this.purgeRetiredPublications(queryRunner.manager);
       await queryRunner.commitTransaction();
       transactionStarted = false;
+      await this.garbageCollectPublications(queryRunner.manager);
       const publication = await this.loadActiveIdentity();
       if (!publication || publication.id !== candidateId) {
         throw new Error(
@@ -1486,27 +1506,6 @@ export class StatisticCacheArtifactService {
       (total, artifact) => total + artifact.uncompressedByteLength,
       0,
     );
-    const previousCandidateId = cacheState?.candidatePublicationId
-      ? String(cacheState.candidatePublicationId)
-      : null;
-    if (previousCandidateId) {
-      await this.clearCandidateAcknowledgements(manager, previousCandidateId);
-      await manager.query(
-        `
-          UPDATE "statistic_cache_state"
-          SET "candidatePublicationId" = NULL, "updatedAt" = now()
-          WHERE "id" = 1 AND "candidatePublicationId" = $1::uuid
-        `,
-        [previousCandidateId],
-      );
-      await manager.query(
-        `
-          DELETE FROM "statistic_cache_publication"
-          WHERE "id" = $1::uuid AND "status" = 'ready'
-        `,
-        [previousCandidateId],
-      );
-    }
     await manager.query(
       `
           DELETE FROM "statistic_cache_publication"
@@ -1630,14 +1629,12 @@ export class StatisticCacheArtifactService {
       `,
       [publicationId, previousActiveId],
     );
-    await this.purgeRetiredPublications(manager);
   }
 
   private async discardCandidate(
     manager: EntityManager,
     candidateId: string,
   ): Promise<void> {
-    await this.clearCandidateAcknowledgements(manager, candidateId);
     await manager.query(
       `
         UPDATE "statistic_cache_state"
@@ -1646,98 +1643,84 @@ export class StatisticCacheArtifactService {
       `,
       [candidateId],
     );
-    await manager.query(
-      `
-        DELETE FROM "statistic_cache_publication"
-        WHERE "id" = $1::uuid AND "status" = 'ready'
-      `,
-      [candidateId],
-    );
   }
 
-  private async clearCandidateAcknowledgements(
-    manager: EntityManager,
-    candidateId: string,
+  private async garbageCollectPublications(
+    manager: StatisticCacheQueryable,
   ): Promise<void> {
-    await manager.query(
-      `
-        UPDATE "zone_publication_instance"
-        SET "candidateStatisticCachePublicationId" = NULL,
-            "candidateStatisticRevision" = NULL,
-            "candidateStatisticPublishedDate" = NULL,
-            "candidateStatisticSourceRevision" = NULL,
-            "candidateStatisticFingerprint" = NULL,
-            "candidateStatisticProtocolVersion" = NULL,
-            "candidateStatisticLastError" = NULL
-        WHERE "candidateStatisticCachePublicationId" = $1::uuid
-      `,
-      [candidateId],
-    );
-  }
-
-  private async purgeRetiredPublications(
-    manager: EntityManager,
-  ): Promise<void> {
-    await manager.query(
-      `
-        UPDATE "zone_publication_instance" instance
-        SET "candidateStatisticCachePublicationId" = NULL,
-            "candidateStatisticRevision" = NULL,
-            "candidateStatisticPublishedDate" = NULL,
-            "candidateStatisticSourceRevision" = NULL,
-            "candidateStatisticFingerprint" = NULL,
-            "candidateStatisticProtocolVersion" = NULL,
-            "candidateStatisticLastError" = NULL
-        FROM "statistic_cache_publication" publication,
-             "statistic_cache_state" state
-        WHERE state."id" = 1
-          AND publication."status" = 'retired'
-          AND publication."id" IS DISTINCT FROM state."activePublicationId"
-          AND publication."id" IS DISTINCT FROM state."previousPublicationId"
-          AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
-          AND instance."candidateStatisticCachePublicationId" = publication."id"
-      `,
-    );
-    await manager.query(
-      `
-        UPDATE "zone_publication_instance" instance
-        SET "statisticCachePublicationId" = NULL,
-            "statisticRevision" = NULL,
-            "statisticPublishedDate" = NULL,
-            "statisticSourceRevision" = NULL,
-            "statisticFingerprint" = NULL,
-            "statisticProtocolVersion" = NULL,
-            "statisticLastError" = NULL
-        FROM "statistic_cache_publication" publication,
-             "statistic_cache_state" state
-        WHERE state."id" = 1
-          AND publication."status" = 'retired'
-          AND publication."id" IS DISTINCT FROM state."activePublicationId"
-          AND publication."id" IS DISTINCT FROM state."previousPublicationId"
-          AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
-          AND instance."statisticCachePublicationId" = publication."id"
-      `,
-    );
-    await manager.query(
-      `
-        DELETE FROM "statistic_cache_publication" publication
-        USING "statistic_cache_state" state
-        WHERE state."id" = 1
-          AND publication."status" = 'retired'
-          AND publication."id" IS DISTINCT FROM state."activePublicationId"
-          AND publication."id" IS DISTINCT FROM state."previousPublicationId"
-          AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
-      `,
-    );
+    try {
+      await manager.query(
+        `
+          UPDATE "zone_publication_instance" instance
+          SET "candidateStatisticCachePublicationId" = NULL,
+              "candidateStatisticRevision" = NULL,
+              "candidateStatisticPublishedDate" = NULL,
+              "candidateStatisticSourceRevision" = NULL,
+              "candidateStatisticFingerprint" = NULL,
+              "candidateStatisticProtocolVersion" = NULL,
+              "candidateStatisticLastError" = NULL
+          FROM "statistic_cache_state" state
+          WHERE state."id" = 1
+            AND instance."candidateStatisticCachePublicationId" IS NOT NULL
+            AND instance."candidateStatisticCachePublicationId"
+              IS DISTINCT FROM state."candidatePublicationId"
+        `,
+      );
+      await manager.query(
+        `
+          UPDATE "zone_publication_instance" instance
+          SET "statisticCachePublicationId" = NULL,
+              "statisticRevision" = NULL,
+              "statisticPublishedDate" = NULL,
+              "statisticSourceRevision" = NULL,
+              "statisticFingerprint" = NULL,
+              "statisticProtocolVersion" = NULL,
+              "statisticLastError" = NULL
+          FROM "statistic_cache_publication" publication,
+               "statistic_cache_state" state
+          WHERE state."id" = 1
+            AND publication."status" IN ('ready', 'retired')
+            AND publication."id" IS DISTINCT FROM state."activePublicationId"
+            AND publication."id" IS DISTINCT FROM state."previousPublicationId"
+            AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
+            AND instance."statisticCachePublicationId" = publication."id"
+        `,
+      );
+      await manager.query(
+        `
+          DELETE FROM "statistic_cache_publication" publication
+          USING "statistic_cache_state" state
+          WHERE state."id" = 1
+            AND publication."status" IN ('ready', 'retired')
+            AND publication."id" IS DISTINCT FROM state."activePublicationId"
+            AND publication."id" IS DISTINCT FROM state."previousPublicationId"
+            AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
+            AND NOT EXISTS (
+              SELECT 1
+              FROM "zone_publication_instance" instance
+              WHERE instance."candidateStatisticCachePublicationId" =
+                publication."id"
+                 OR instance."statisticCachePublicationId" = publication."id"
+            )
+        `,
+      );
+    } catch (error) {
+      // Detached publications are safe to retain and will be retried later.
+      this.logger.warn(
+        `STATISTIC CACHE GARBAGE COLLECTION DEFERRED: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private async waitForActivePublication(
-    target: StatisticCacheArtifactTarget,
+    target: StatisticCacheMaterializationTarget,
   ): Promise<StatisticCacheArtifactPayload> {
     const deadline = Date.now() + MATERIALIZATION_WAIT_MS;
     while (Date.now() < deadline) {
       const active = await this.loadActive();
-      if (hasTarget(active, target)) {
+      if (hasMaterializationTarget(active, target)) {
         return active;
       }
       await new Promise((resolve) =>

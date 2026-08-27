@@ -12,6 +12,7 @@ const props = defineProps<{
   dateBegin: string,
   dateEnd: string,
   area: string,
+  downloadLoading?: boolean,
 }>();
 
 const emit = defineEmits<{
@@ -549,7 +550,11 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
       </div>
 
       <div data-html2canvas-ignore="true" class="text-align-right">
-        <DsfrButton @click="downloadMap()">
+        <DsfrButton
+          :disabled="downloadLoading"
+          :aria-busy="downloadLoading ? 'true' : undefined"
+          @click="downloadMap()"
+        >
           Télécharger la carte en .png
         </DsfrButton>
       </div>

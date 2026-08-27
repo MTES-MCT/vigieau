@@ -131,6 +131,7 @@ export class ConfigService {
             }
           : {}),
         historicComputeEpoch: () => '"historicComputeEpoch" + 1',
+        historicBackfillGlobalEpoch: () => '"historicBackfillGlobalEpoch" + 1',
       };
       const qb = this.configRepository
         .createQueryBuilder()
@@ -178,6 +179,7 @@ export class ConfigService {
         computeMapGeneration: () => '"computeMapGeneration" + 1',
         computeStatsGeneration: () => '"computeStatsGeneration" + 1',
         historicComputeEpoch: () => '"historicComputeEpoch" + 1',
+        historicBackfillGlobalEpoch: () => '"historicBackfillGlobalEpoch" + 1',
       })
       .where('id = 1')
       .execute();

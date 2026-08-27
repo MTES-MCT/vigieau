@@ -38,6 +38,9 @@ const createService = (askCompute: jest.Mock) => {
   const manager = {
     getRepository: jest.fn(() => transactionRepository),
     query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('pg_advisory_xact_lock_shared')) {
+        return [];
+      }
       if (sql.includes('SELECT id FROM departement')) {
         return [{ id: 65 }];
       }
@@ -56,6 +59,9 @@ const createService = (askCompute: jest.Mock) => {
       if (sql.includes('zone_type_availability')) {
         return [];
       }
+      if (sql.includes('historic_backfill_department_revision')) {
+        return [];
+      }
       if (sql.includes('current_zone_recompute_request')) {
         queuedDepartementIds = [
           ...((parameters?.[0] as number[] | undefined) ?? []),
@@ -65,7 +71,7 @@ const createService = (askCompute: jest.Mock) => {
       if (sql.includes('information_schema.columns')) {
         return [{ exists: true }];
       }
-      if (sql.includes('UPDATE config')) {
+      if (sql.includes('UPDATE "config"')) {
         return [{ id: 1 }];
       }
       throw new Error(`Unexpected query: ${sql}`);
@@ -253,7 +259,18 @@ describe('ArreteRestrictionService scheduled status update', () => {
     const enqueueCall = manager.query.mock.calls.find(([sql]) =>
       sql.includes('current_zone_recompute_request'),
     );
+    const fenceCallIndex = manager.query.mock.calls.findIndex(([sql]) =>
+      sql.includes('pg_advisory_xact_lock_shared'),
+    );
+    const enqueueCallIndex = manager.query.mock.calls.findIndex(([sql]) =>
+      sql.includes('current_zone_recompute_request'),
+    );
     const enqueueParameters = enqueueCall?.[1];
+    expect(fenceCallIndex).toBeGreaterThanOrEqual(0);
+    expect(manager.query.mock.calls[fenceCallIndex][1]).toEqual([
+      'historic-map-publication-fence',
+    ]);
+    expect(fenceCallIndex).toBeLessThan(enqueueCallIndex);
     expect(enqueueParameters?.[0]).toEqual([65]);
     expect(enqueueParameters?.[1]).toBe('42');
     expect(enqueueParameters?.[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -368,7 +385,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     ).not.toHaveProperty('dateDebut');
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
     ).toBe(false);
   });
@@ -409,9 +426,29 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.find(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
-    ).toEqual([expect.stringContaining('UPDATE config'), ['2026-07-01']]);
+    ).toEqual([expect.stringContaining('UPDATE "config"'), ['2026-07-01']]);
+    const publicMutationCalls = harness.manager.query.mock.calls;
+    const fenceCallIndexes = publicMutationCalls.flatMap(([sql], index) =>
+      sql.includes('pg_advisory_xact_lock_shared') ? [index] : [],
+    );
+    const sourceRevisionCallIndex = publicMutationCalls.findIndex(([sql]) =>
+      sql.includes('UPDATE "zone_publication_source_state"'),
+    );
+    const enqueueCallIndex = publicMutationCalls.findIndex(([sql]) =>
+      sql.includes('current_zone_recompute_request'),
+    );
+    expect(fenceCallIndexes).toHaveLength(2);
+    expect(
+      fenceCallIndexes.map((index) => publicMutationCalls[index][1]),
+    ).toEqual([
+      ['historic-map-publication-fence'],
+      ['historic-map-publication-fence'],
+    ]);
+    expect(fenceCallIndexes[0]).toBeLessThan(sourceRevisionCallIndex);
+    expect(sourceRevisionCallIndex).toBeLessThan(fenceCallIndexes[1]);
+    expect(fenceCallIndexes[1]).toBeLessThan(enqueueCallIndex);
   });
 
   it('reconciles a stale status without extending an unknown legacy end', async () => {
@@ -488,7 +525,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
     ).toBe(false);
   });
@@ -526,7 +563,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE config'),
+        sql.includes('UPDATE "config"'),
       ),
     ).toBe(false);
   });

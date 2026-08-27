@@ -32,9 +32,12 @@ import {
   HistoricDepartmentCheckpointOptions,
   HistoricDepartmentCheckpointService,
 } from './historic-department-checkpoint.service';
+import { LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS } from './legacy-historic-empty-geometries';
 import { generateEmptyPmtiles } from './empty-pmtiles';
 import {
-  collectPmtilesFeatureIds,
+  collectComputedHistoricPmtilesFeatureIds,
+  collectLegacyHistoricBackfillPmtilesFeatureIds,
+  COMPUTED_HISTORIC_PMTILES_MAX_ZOOM,
   generatePmtiles,
 } from './pmtiles-generation';
 
@@ -339,7 +342,22 @@ export class ZoneAlerteComputedHistoricService {
         type: 'FeatureCollection',
         features: zasFormated,
       };
-      const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(zasFormated);
+      const legacyPmtilesFeatureIds =
+        collectLegacyHistoricBackfillPmtilesFeatureIds(
+          zasFormated,
+          LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
+        );
+      const expectedPmtilesFeatureIds =
+        legacyPmtilesFeatureIds.expectedFeatureIds;
+      if (legacyPmtilesFeatureIds.excludedEmptyGeometryIds.length > 0) {
+        this.logger.warn(
+          JSON.stringify({
+            type: 'legacy_historic_pmtiles_empty_geometries_excluded',
+            computedFor: m.format('YYYY-MM-DD'),
+            zoneIds: legacyPmtilesFeatureIds.excludedEmptyGeometryIds,
+          }),
+        );
+      }
 
       const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
 
@@ -350,7 +368,7 @@ export class ZoneAlerteComputedHistoricService {
         [geojsonPath, pmtilesPath],
         async () => {
           await writeFile(geojsonPath, JSON.stringify(geojson));
-          if (zasFormated.length === 0) {
+          if (expectedPmtilesFeatureIds.length === 0) {
             await generateEmptyPmtiles({
               workingDirectory: path,
               outputPath: pmtilesPath,
@@ -491,9 +509,11 @@ export class ZoneAlerteComputedHistoricService {
         restrictions: [restriction],
       }) as ZoneAlerte;
     });
-    const rawGeometries = await this.zoneAlerteService.findGeometriesByIds(
-      normalizedZones.map((zone) => zone.id),
-    );
+    const rawGeometries =
+      await this.zoneAlerteService.findLegacyHistoricGeometriesByIds(
+        normalizedZones.map((zone) => zone.id),
+        LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
+      );
 
     const features = normalizedZones.map((zone) => {
       const restriction = zone.restrictions[0];
@@ -1259,6 +1279,27 @@ export class ZoneAlerteComputedHistoricService {
     }
 
     return this.zoneAlerteComputedHistoricRepository.find(options);
+  }
+
+  findZonesForHistoricBackfill(departementCodes: string[]) {
+    if (departementCodes.length === 0) {
+      return Promise.resolve([]);
+    }
+    return this.zoneAlerteComputedHistoricRepository.find({
+      relations: [
+        'departement',
+        'restriction',
+        'restriction.arreteRestriction',
+        'restriction.arreteRestriction.fichier',
+        'restriction.usages',
+        'restriction.usages.thematique',
+      ],
+      where: {
+        departement: {
+          code: In(departementCodes),
+        },
+      },
+    });
   }
 
   async computeRegleAr(departement: Departement, date: Moment) {
@@ -2093,7 +2134,19 @@ DELETE FROM zone_alerte_computed_historic
       type: 'FeatureCollection',
       features: allZones,
     };
-    const expectedPmtilesFeatureIds = collectPmtilesFeatureIds(allZones);
+    const computedPmtilesFeatureIds =
+      collectComputedHistoricPmtilesFeatureIds(allZones);
+    const expectedPmtilesFeatureIds =
+      computedPmtilesFeatureIds.expectedFeatureIds;
+    if (computedPmtilesFeatureIds.excludedNonRenderableGeometryIds.length > 0) {
+      this.logger.warn(
+        JSON.stringify({
+          type: 'computed_historic_pmtiles_non_renderable_geometries_excluded',
+          computedFor: date.format('YYYY-MM-DD'),
+          zoneIds: computedPmtilesFeatureIds.excludedNonRenderableGeometryIds,
+        }),
+      );
+    }
 
     const path = this.nestConfigService.get('PATH_TO_WRITE_FILE');
     const fileName = `zones_arretes_en_vigueur_${date.format('YYYY-MM-DD')}`;
@@ -2103,7 +2156,7 @@ DELETE FROM zone_alerte_computed_historic
       [geojsonPath, pmtilesPath],
       async () => {
         await writeFile(geojsonPath, JSON.stringify(geojson));
-        if (allZones.length === 0) {
+        if (expectedPmtilesFeatureIds.length === 0) {
           await generateEmptyPmtiles({
             workingDirectory: path,
             outputPath: pmtilesPath,
@@ -2114,6 +2167,9 @@ DELETE FROM zone_alerte_computed_historic
             inputPath: geojsonPath,
             outputPath: pmtilesPath,
             expectedFeatureIds: expectedPmtilesFeatureIds,
+            optionalFeatureIds:
+              computedPmtilesFeatureIds.excludedNonRenderableGeometryIds,
+            maximumZoom: COMPUTED_HISTORIC_PMTILES_MAX_ZOOM,
           });
         }
         const fileToTransferPmtiles = {
@@ -2140,6 +2196,72 @@ DELETE FROM zone_alerte_computed_historic
         ),
     );
     return allZonesComputed;
+  }
+
+  async findLegacyHistoricDepartmentZones(
+    departementCode: string,
+    computedFor: string,
+  ): Promise<ZoneAlerteComputedHistoric[]> {
+    const date = moment.utc(computedFor, 'YYYY-MM-DD', true);
+    if (!date.isValid() || date.format('YYYY-MM-DD') !== computedFor) {
+      throw new Error(`Invalid historic department date: ${computedFor}`);
+    }
+    const arretes = await this.arreteResrictionService.findByDepartementAndDate(
+      departementCode,
+      date,
+    );
+    const arreteIds = arretes.map((arrete) => arrete.id);
+    if (arreteIds.length === 0) {
+      return [];
+    }
+    const zones = (await this.zoneAlerteService.findByArreteRestriction(
+      arreteIds,
+    )) as ZoneAlerte[];
+    const normalized = await this.formatLegacyHistoricZones(
+      zones,
+      arreteIds,
+      date,
+    );
+    return normalized.zones.map((zone) => {
+      const restriction = zone.restrictions[0];
+      return Object.assign(Object.create(Object.getPrototypeOf(zone)), zone, {
+        restriction,
+        niveauGravite: restriction.niveauGravite,
+      }) as unknown as ZoneAlerteComputedHistoric;
+    });
+  }
+
+  async buildHistoricDepartmentFeatureCollection(
+    zones: readonly ZoneAlerteComputedHistoric[],
+    computedFor: string,
+    legacy: boolean,
+  ): Promise<{ type: 'FeatureCollection'; features: any[] }> {
+    const date = moment.utc(computedFor, 'YYYY-MM-DD', true);
+    if (!date.isValid() || date.format('YYYY-MM-DD') !== computedFor) {
+      throw new Error(`Invalid historic department date: ${computedFor}`);
+    }
+    if (legacy) {
+      const legacyZones = zones as unknown as ZoneAlerte[];
+      const activeArIds = [
+        ...new Set(
+          legacyZones.flatMap((zone) =>
+            (zone.restrictions ?? [])
+              .map((restriction) => restriction.arreteRestriction?.id)
+              .filter((id): id is number => Number.isInteger(id)),
+          ),
+        ),
+      ];
+      const formatted = await this.formatLegacyHistoricZones(
+        legacyZones,
+        activeArIds,
+        date,
+      );
+      return { type: 'FeatureCollection', features: formatted.features };
+    }
+    return {
+      type: 'FeatureCollection',
+      features: await this.formatComputedHistoricZones([...zones], date),
+    };
   }
 
   private async formatComputedHistoricZones(

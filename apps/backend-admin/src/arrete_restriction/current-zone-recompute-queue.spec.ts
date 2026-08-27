@@ -36,6 +36,9 @@ function createHarness(
   requestBatches: RecomputeRequest[][],
   options: {
     lockAcquired?: boolean;
+    sandreLockAcquired?: boolean;
+    sandreUnlockError?: Error;
+    unlockAllError?: Error;
     askCompute?: jest.Mock;
     generationAdvanced?: boolean | boolean[];
     postComputePublicRevision?: string;
@@ -50,6 +53,9 @@ function createHarness(
   let publicRevisionIndex = 0;
   const query = jest.fn(async (sql: string) => {
     if (sql.includes('pg_try_advisory_lock')) {
+      if (sql.includes('sandre-zone-sync')) {
+        return [{ locked: options.sandreLockAcquired ?? true }];
+      }
       return [{ locked: options.lockAcquired ?? true }];
     }
     if (
@@ -99,8 +105,17 @@ function createHarness(
         },
       ];
     }
+    if (sql.includes('pg_advisory_unlock_all')) {
+      if (options.unlockAllError) {
+        throw options.unlockAllError;
+      }
+      return [];
+    }
     if (sql.includes('pg_advisory_unlock')) {
-      return [{ pg_advisory_unlock: true }];
+      if (sql.includes('sandre-zone-sync') && options.sandreUnlockError) {
+        throw options.sandreUnlockError;
+      }
+      return [{ unlocked: true }];
     }
     if (
       sql.includes('DELETE FROM "current_zone_recompute_request"') ||
@@ -115,6 +130,7 @@ function createHarness(
     connect: jest.fn().mockResolvedValue(undefined),
     query,
     release: jest.fn().mockResolvedValue(undefined),
+    releasePostgresConnection: jest.fn().mockResolvedValue(undefined),
   };
   const managerQuery = jest.fn();
   const repository = {
@@ -195,17 +211,19 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       [7, 2, 7, 2],
     );
 
-    expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls[1][1]).toEqual([[2, 7], '42', 'LEGACY', null]);
-    expect(query.mock.calls[1][0]).toContain(
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[1][0]).toContain('pg_advisory_xact_lock_shared');
+    expect(query.mock.calls[1][1]).toEqual(['historic-map-publication-fence']);
+    expect(query.mock.calls[2][1]).toEqual([[2, 7], '42', 'LEGACY', null]);
+    expect(query.mock.calls[2][0]).toContain(
       'ON CONFLICT ("departementId") DO UPDATE',
     );
-    expect(query.mock.calls[1][0]).toContain(
+    expect(query.mock.calls[2][0]).toContain(
       'ELSE "current_zone_recompute_request"."generation" + 1',
     );
-    expect(query.mock.calls[1][0]).toContain('"pendingScheduledDates"');
-    expect(query.mock.calls[1][0]).toContain('SELECT DISTINCT pending_date');
-    expect(query.mock.calls[1][0]).toContain('OR EXCLUDED."currentPending"');
+    expect(query.mock.calls[2][0]).toContain('"pendingScheduledDates"');
+    expect(query.mock.calls[2][0]).toContain('SELECT DISTINCT pending_date');
+    expect(query.mock.calls[2][0]).toContain('OR EXCLUDED."currentPending"');
   });
 
   it('does not write an empty request', async () => {
@@ -220,10 +238,12 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it('uses the trigger revision in dual-write mode and queues that exact target', async () => {
+  it('keeps the last certification while queuing the exact replacement revision', async () => {
     const query = jest
       .fn()
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce([[{ publicRevision: '43' }], 1])
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
     const harness = createHarness([]);
@@ -236,17 +256,18 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       ),
     ).resolves.toBe('43');
 
-    expect(query.mock.calls[0][0]).toContain('WHEN "legacyDualWrite" THEN 0');
-    expect(query.mock.calls[0][0]).toContain('ELSE 1');
-    expect(query.mock.calls[1][0]).toContain("'unavailable'");
-    expect(query.mock.calls[1][0]).toContain(
-      'ON CONFLICT ("departmentCode", "zoneType") DO UPDATE',
+    expect(query.mock.calls[0][0]).toContain('pg_advisory_xact_lock_shared');
+    expect(query.mock.calls[1][0]).toContain('WHEN "legacyDualWrite" THEN 0');
+    expect(query.mock.calls[1][0]).toContain('ELSE 1');
+    expect(query).toHaveBeenCalledTimes(5);
+    expect(query.mock.calls[2][0]).toContain(
+      '"historic_backfill_department_revision"',
     );
-    expect(query.mock.calls[1][0]).not.toContain(
-      '"officialUrl" = EXCLUDED."officialUrl"',
-    );
-    expect(query.mock.calls[1][1]).toEqual([[2, 7], '43']);
-    expect(query.mock.calls[2][1]).toEqual([
+    expect(query.mock.calls[2][0]).toContain('"generation" + 1');
+    expect(query.mock.calls[2][1]).toEqual([[2, 7], '43']);
+    expect(query.mock.calls[3][0]).toContain('pg_advisory_xact_lock_shared');
+    expect(query.mock.calls[4][0]).not.toContain('zone_type_availability');
+    expect(query.mock.calls[4][1]).toEqual([
       [2, 7],
       '43',
       'PUBLICATION AR',
@@ -302,6 +323,11 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
     ).resolves.toBe('processed');
 
     expect(harness.askCompute).toHaveBeenCalledWith([2, 7], false, false);
+    expect(
+      harness.query.mock.calls.some(([sql]) =>
+        sql.includes('sandre-zone-sync'),
+      ),
+    ).toBe(false);
     expect(
       harness.statisticDepartementService.computeDepartementStatistics,
     ).toHaveBeenCalledTimes(1);
@@ -570,6 +596,138 @@ describe('ArreteRestrictionService current zone recompute queue', () => {
       ),
     ).toBe(false);
     expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a versioned queue untouched while Sandre owns the global lock', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createHarness([[{ departementId: 7, generation: '1' }]], {
+      sandreLockAcquired: false,
+    });
+
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('busy');
+
+    expect(harness.askCompute).not.toHaveBeenCalled();
+    expect(
+      harness.query.mock.calls.some(([sql]) =>
+        sql.includes('current_zone_recompute_request'),
+      ),
+    ).toBe(false);
+    expect(
+      harness.query.mock.calls
+        .map(([sql]) => sql)
+        .filter((sql) => sql.includes('pg_advisory_unlock')),
+    ).toEqual([expect.stringContaining("hashtext('current-zone-recompute')")]);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the Sandre barrier through versioned certification and releases locks in reverse order', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createHarness([
+      [{ departementId: 7, generation: '1' }],
+      [],
+    ]);
+
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).resolves.toBe('processed');
+
+    const sqlCalls = harness.query.mock.calls.map(([sql]) => sql as string);
+    const currentLockIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('pg_try_advisory_lock') &&
+        sql.includes('current-zone-recompute'),
+    );
+    const sandreLockIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('pg_try_advisory_lock') &&
+        sql.includes('sandre-zone-sync'),
+    );
+    const queueReadIndex = sqlCalls.findIndex((sql) =>
+      sql.includes('WITH due_context AS'),
+    );
+    const certificationIndex = sqlCalls.findIndex((sql) =>
+      sql.includes('INSERT INTO "zone_type_availability"'),
+    );
+    const acknowledgementIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('DELETE FROM "current_zone_recompute_request"') &&
+        sql.includes('USING unnest'),
+    );
+    const sandreUnlockIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('pg_advisory_unlock') && sql.includes('sandre-zone-sync'),
+    );
+    const currentUnlockIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('pg_advisory_unlock') &&
+        sql.includes('current-zone-recompute'),
+    );
+    expect(currentLockIndex).toBeGreaterThanOrEqual(0);
+    expect(sandreLockIndex).toBeGreaterThanOrEqual(0);
+    expect(queueReadIndex).toBeGreaterThanOrEqual(0);
+    expect(certificationIndex).toBeGreaterThanOrEqual(0);
+    expect(acknowledgementIndex).toBeGreaterThanOrEqual(0);
+    expect(sandreUnlockIndex).toBeGreaterThanOrEqual(0);
+    expect(currentUnlockIndex).toBeGreaterThanOrEqual(0);
+    expect(currentLockIndex).toBeLessThan(sandreLockIndex);
+    expect(sandreLockIndex).toBeLessThan(queueReadIndex);
+    expect(certificationIndex).toBeLessThan(sandreUnlockIndex);
+    expect(acknowledgementIndex).toBeLessThan(sandreUnlockIndex);
+    expect(sandreUnlockIndex).toBeLessThan(currentUnlockIndex);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a compute error while safely cleaning up both versioned locks', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const harness = createHarness([[{ departementId: 7, generation: '1' }]], {
+      askCompute: jest.fn().mockRejectedValue(new Error('worker failed')),
+      sandreUnlockError: new Error('Sandre unlock failed'),
+    });
+
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).rejects.toThrow('worker failed');
+
+    const sqlCalls = harness.query.mock.calls.map(([sql]) => sql as string);
+    const sandreUnlockIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('pg_advisory_unlock') && sql.includes('sandre-zone-sync'),
+    );
+    const currentUnlockIndex = sqlCalls.findIndex(
+      (sql) =>
+        sql.includes('pg_advisory_unlock') &&
+        sql.includes('current-zone-recompute'),
+    );
+    const unlockAllIndex = sqlCalls.findIndex((sql) =>
+      sql.includes('pg_advisory_unlock_all'),
+    );
+    expect(sandreUnlockIndex).toBeGreaterThanOrEqual(0);
+    expect(currentUnlockIndex).toBeGreaterThanOrEqual(0);
+    expect(unlockAllIndex).toBeGreaterThanOrEqual(0);
+    expect(sandreUnlockIndex).toBeLessThan(currentUnlockIndex);
+    expect(currentUnlockIndex).toBeLessThan(unlockAllIndex);
+    expect(harness.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroys a locked PostgreSQL connection when unlock_all also fails', async () => {
+    process.env.ZONE_PUBLICATION_ENABLED = 'true';
+    const unlockAllError = new Error('unlock all failed');
+    const harness = createHarness([[{ departementId: 7, generation: '1' }]], {
+      askCompute: jest.fn().mockRejectedValue(new Error('worker failed')),
+      sandreUnlockError: new Error('Sandre unlock failed'),
+      unlockAllError,
+    });
+
+    await expect(
+      harness.service.processPendingCurrentZoneRecomputes(),
+    ).rejects.toThrow('worker failed');
+
+    expect(harness.queryRunner.releasePostgresConnection).toHaveBeenCalledWith(
+      unlockAllError,
+    );
+    expect(harness.queryRunner.release).not.toHaveBeenCalled();
   });
 
   it('coalesces concurrent prompts in one process', async () => {

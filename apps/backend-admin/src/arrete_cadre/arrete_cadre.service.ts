@@ -42,10 +42,12 @@ import {
   getReconciledArreteLifecycleStatus,
   hasArreteComputationStateChanged,
   hasArreteMutationVersionChanged,
+  hasArretePublicationStateChanged,
   normalizeCivilDate,
   resolveArreteEndDate,
   UnknownArreteEndDateProvenanceError,
 } from '../shared/arrete-date-continuity';
+import { hasArreteCadrePublicUpdate } from '../shared/arrete-public-update';
 import { UsageService } from '../usage/usage.service';
 import { UserService } from '../user/user.service';
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
@@ -430,6 +432,11 @@ export class ArreteCadreService {
       currentUser,
     );
     await this.checkAci(updateArreteCadreDto);
+    const changesPublicContent = hasArreteCadrePublicUpdate(
+      oldAc,
+      updateArreteCadreDto,
+    );
+    let publicMutationRecorded = false;
     let arreteCadre: ArreteCadre;
     if (oldAc.statut === 'a_valider') {
       arreteCadre = await this.arreteCadreRepository.manager.transaction(
@@ -564,10 +571,12 @@ export class ArreteCadreService {
               ...authorizationState,
               usages: await this.usageService.findByArreteCadre(id, manager),
             } as ArreteCadre;
-            const saved = await repository.save({
-              id,
-              ...updateArreteCadreDto,
-            });
+            const saved = changesPublicContent
+              ? await repository.save({
+                  id,
+                  ...updateArreteCadreDto,
+                })
+              : ({ ...oldAc } as ArreteCadre);
             const savedCurrent = await this.findOneForContinuity(
               repository,
               id,
@@ -585,54 +594,81 @@ export class ArreteCadreService {
                 HttpStatus.CONFLICT,
               );
             }
+            const continuityDirtyDates: string[] = [];
             for (const affectedId of affectedIds) {
+              const previous = before.find(
+                (arrete) => arrete.id === affectedId,
+              );
               const synchronized = await this.synchronizeArreteCadreEndDate(
                 repository,
                 affectedId,
                 businessDate,
               );
+              if (
+                previous?.dateDebut &&
+                hasArreteComputationStateChanged(previous, {
+                  dateDebut: previous.dateDebut,
+                  dateFin: synchronized.dateFin,
+                  statut: synchronized.statut ?? previous.statut,
+                })
+              ) {
+                continuityDirtyDates.push(
+                  normalizeCivilDate(previous.dateDebut),
+                );
+              }
               if (affectedId === id) {
                 Object.assign(saved, synchronized);
               }
             }
-            saved.usages = await this.usageService.updateAllByArreteCadre(
-              saved,
-              manager,
-            );
-            await this.arreteCadreZoneAlerteCommunesService.updateAllByArreteCadre(
-              saved.id,
-              updateArreteCadreDto,
-              manager,
-            );
-            await this.repercussionOnAr(beforeMutation, saved, manager);
-            const dirtyDates = [
-              ...before
-                .filter(({ id: arreteId }) => affectedIds.includes(arreteId))
-                .map(({ dateDebut }) => dateDebut)
-                .filter((date): date is string => !!date)
-                .map(normalizeCivilDate),
-              ...(await this.arreteRestrictionService.reconcileArreteRestrictionsForArreteCadres(
+            if (changesPublicContent) {
+              saved.usages = await this.usageService.updateAllByArreteCadre(
+                saved,
+                manager,
+              );
+              await this.arreteCadreZoneAlerteCommunesService.updateAllByArreteCadre(
+                saved.id,
+                updateArreteCadreDto,
+                manager,
+              );
+              await this.repercussionOnAr(beforeMutation, saved, manager);
+            }
+            const restrictionDirtyDates =
+              await this.arreteRestrictionService.reconcileArreteRestrictionsForArreteCadres(
                 manager,
                 affectedIds,
                 businessDate,
-              )),
-            ];
+              );
+            const dirtyDates = changesPublicContent
+              ? before
+                  .filter(({ id: arreteId }) => affectedIds.includes(arreteId))
+                  .map(({ dateDebut }) => dateDebut)
+                  .filter((date): date is string => !!date)
+                  .map(normalizeCivilDate)
+              : continuityDirtyDates;
+            dirtyDates.push(...restrictionDirtyDates);
             if (dirtyDates.length > 0) {
               await this.arreteRestrictionService.invalidateComputationsFromWithManager(
                 manager,
                 dirtyDates.sort()[0],
               );
             }
-            await this.arreteRestrictionService.recordPublicMutation(
-              manager,
-              [
-                ...oldAc.departements.map(
-                  ({ id: departementId }) => departementId,
-                ),
-                ...nextDepartementIds,
-              ],
-              'MODIFICATION AC',
-            );
+            if (
+              changesPublicContent ||
+              continuityDirtyDates.length > 0 ||
+              restrictionDirtyDates.length > 0
+            ) {
+              await this.arreteRestrictionService.recordPublicMutation(
+                manager,
+                [
+                  ...oldAc.departements.map(
+                    ({ id: departementId }) => departementId,
+                  ),
+                  ...nextDepartementIds,
+                ],
+                'MODIFICATION AC',
+              );
+              publicMutationRecorded = true;
+            }
             return saved;
           },
         );
@@ -643,7 +679,7 @@ export class ArreteCadreService {
         throw error;
       }
     }
-    if (oldAc.statut !== 'a_valider') {
+    if (oldAc.statut !== 'a_valider' && publicMutationRecorded) {
       this.arreteRestrictionService.requestCurrentZoneRecompute(
         [...oldAc.departements, ...(updateArreteCadreDto.departements ?? [])],
         'MODIFICATION AC',
@@ -723,6 +759,7 @@ export class ArreteCadreService {
       statut: getArreteLifecycleStatus(dateDebut, dateFin, businessDate),
     };
     let toReturn: ArreteCadre;
+    let publicMutationRecorded = false;
     try {
       toReturn = await this.arreteCadreRepository.manager.transaction(
         'SERIALIZABLE',
@@ -787,6 +824,16 @@ export class ArreteCadreService {
             businessDate,
           );
           Object.assign(saved, synchronized);
+          const publicationContentChanged =
+            !!newFile ||
+            hasArretePublicationStateChanged(current, {
+              dateDebut,
+              dateFin: synchronized.dateFin,
+              dateFinSaisie: synchronized.dateFinSaisie,
+              dateFinCalculee: synchronized.dateFinCalculee,
+              dateFinSaisieConnue: synchronized.dateFinSaisieConnue,
+              statut: synchronized.statut ?? toSave.statut,
+            });
           const dirtyDates: string[] = [];
           if (
             hasArreteComputationStateChanged(current, {
@@ -840,11 +887,14 @@ export class ArreteCadreService {
               dirtyDates.sort()[0],
             );
           }
-          await this.arreteRestrictionService.recordPublicMutation(
-            manager,
-            ac.departements.map(({ id: departementId }) => departementId),
-            'PUBLICATION AC',
-          );
+          if (publicationContentChanged || dirtyDates.length > 0) {
+            await this.arreteRestrictionService.recordPublicMutation(
+              manager,
+              ac.departements.map(({ id: departementId }) => departementId),
+              'PUBLICATION AC',
+            );
+            publicMutationRecorded = true;
+          }
           return saved;
         },
       );
@@ -867,10 +917,12 @@ export class ArreteCadreService {
     if (!arreteCadrePdf) {
       toReturn.fichier = ac.fichier;
     }
-    this.arreteRestrictionService.requestCurrentZoneRecompute(
-      ac.departements,
-      'PUBLICATION AC',
-    );
+    if (publicMutationRecorded) {
+      this.arreteRestrictionService.requestCurrentZoneRecompute(
+        ac.departements,
+        'PUBLICATION AC',
+      );
+    }
     delete toReturn.dateFinSaisie;
     delete toReturn.dateFinCalculee;
     delete toReturn.dateFinSaisieConnue;
@@ -1293,10 +1345,12 @@ export class ArreteCadreService {
               HttpStatus.CONFLICT,
             );
           }
-          const dirtyFrom = current.dateDebut
-            ? [normalizeCivilDate(current.dateDebut)]
-            : [];
-          if (predecessorId) {
+          const affectsPublicComputations = current.statut !== 'a_valider';
+          const dirtyFrom =
+            affectsPublicComputations && current.dateDebut
+              ? [normalizeCivilDate(current.dateDebut)]
+              : [];
+          if (affectsPublicComputations && predecessorId) {
             const predecessor = await this.findOneForContinuity(
               repository,
               predecessorId,
@@ -1305,13 +1359,15 @@ export class ArreteCadreService {
               dirtyFrom.push(normalizeCivilDate(predecessor.dateDebut));
             }
           }
-          dirtyFrom.push(
-            ...(await this.arreteRestrictionService.deleteByArreteCadreId(
+          const deletedRestrictionDirtyDates =
+            await this.arreteRestrictionService.deleteByArreteCadreId(
               id,
               manager,
               businessDate,
-            )),
-          );
+            );
+          if (affectsPublicComputations) {
+            dirtyFrom.push(...deletedRestrictionDirtyDates);
+          }
           await repository.update(
             { arreteCadreAbroge: { id } },
             { arreteCadreAbroge: null },
@@ -1320,7 +1376,7 @@ export class ArreteCadreService {
           if (deleted.affected !== 1) {
             throw new Error(`Unable to delete framework order ${id}`);
           }
-          if (predecessorId) {
+          if (affectsPublicComputations && predecessorId) {
             await this.synchronizeArreteCadreEndDate(
               repository,
               predecessorId,
@@ -1333,7 +1389,7 @@ export class ArreteCadreService {
               dirtyFrom.sort()[0],
             );
           }
-          if (current.statut !== 'a_valider') {
+          if (affectsPublicComputations) {
             await this.arreteRestrictionService.recordPublicMutation(
               manager,
               arrete.departements.map(({ id: departementId }) => departementId),

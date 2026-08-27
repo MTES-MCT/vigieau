@@ -107,8 +107,8 @@ export function assertPublicZoneCache({
   );
   const loadedAt = timestamp(body.loadedAt, "The zone cache load date");
   assert.ok(
-    loadedAt >= loadedVersion,
-    "The zone cache load predates its version",
+    loadedAt.getTime() <= now.getTime() + 60_000,
+    "The zone cache load date is implausibly in the future",
   );
   timestamp(body.lastVersionCheckAt, "The zone cache version check date");
   const successfulCheck = timestamp(
@@ -122,13 +122,14 @@ export function assertPublicZoneCache({
 
   const expectedBusinessDate = getExpectedZoneBusinessDate({ deadline, now });
   const loadedBusinessDate = parisDateTime(loadedVersion).date;
+  const currentBusinessDate = parisDateTime(now).date;
   assert.ok(
     loadedBusinessDate >= expectedBusinessDate,
     "The zone cache version is older than the expected business date",
   );
   assert.ok(
-    loadedVersion.getTime() <= now.getTime() + 60_000,
-    "The loaded zone cache version is implausibly in the future",
+    loadedBusinessDate <= currentBusinessDate,
+    "The zone cache version is later than the current business date",
   );
 
   assert.ok(

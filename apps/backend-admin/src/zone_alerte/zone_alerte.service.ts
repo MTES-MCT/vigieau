@@ -3,6 +3,7 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CronExpression } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BassinVersant } from '@shared/entities/bassin_versant.entity';
 import { Departement } from '@shared/entities/departement.entity';
 import { SandreZoneAlias } from '@shared/entities/sandre_zone_alias.entity';
@@ -25,8 +26,10 @@ import { isMainThread } from 'worker_threads';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { BassinVersantService } from '../bassin_versant/bassin_versant.service';
 import { BusinessCron } from '../core/scheduling/business-cron';
+import { invalidateHistoricComputationsFromWithManager } from '../config/historic-computation-invalidation';
 import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
+import { getCurrentParisCivilDate } from '../shared/arrete-date-continuity';
 import { MailService } from '../shared/services/mail.service';
 import { runCurrentZoneComputeWorker } from '../worker_threads/run-current-zone-compute';
 import { recordPublicMutation } from '../zone_publication/public-mutation';
@@ -75,17 +78,26 @@ import {
 import {
   applySandreApprovedPartitionReferences,
   assertSandreApprovedOneToOneApplied,
+  fingerprintSandreApprovedPostApplyEvidence,
   loadSandreApprovedReferenceEvidence,
   lockSandreApprovedSyncReferences,
   parseSandreApprovedReferenceEvidence,
   SandreApprovedReferenceEvidence,
 } from './sandre-zone-sync-approved-references';
+import { loadSandreReconciliationZoneState } from './sandre-zone-reconciliation-actions';
 import {
   assertSandreApprovedMaterializedTargets,
   auditSandreApprovedSyncGeometry,
   findSandreApprovedSyncSnapshot,
   SandreApprovedSyncSnapshot,
 } from './sandre-zone-sync-approvals';
+import {
+  findSandreApprovedLkgRetentionForObservation,
+  findSandreLkgApproval,
+  sandreLkgFeatureEvidence,
+  SandreLkgApproval,
+  SandreLkgLocalZoneEvidence,
+} from './sandre-zone-lkg-approvals';
 import { fingerprint } from './sandre-zone-reconciliation';
 
 const SANDRE_FULL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -98,6 +110,8 @@ const SANDRE_MDM_REQUEST_TIMEOUT_MS = 60_000;
 const SANDRE_MDM_REQUEST_RETRY_BASE_MS = 250;
 const SANDRE_MDM_PROOF_RETRY_BASE_MS = 2_000;
 const SANDRE_MDM_PROOF_RETRY_MAX_MS = 10_000;
+const SANDRE_TRANSACTION_MAX_ATTEMPTS = 3;
+const SANDRE_TRANSACTION_RETRY_BASE_MS = 50;
 const SANDRE_MDM_TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const SANDRE_VALID_STATUS = 'Validé';
 const SANDRE_ZONE_SELECT = {
@@ -151,6 +165,11 @@ interface SandreSyncResult {
   updated: number;
   disabled: number;
   unchanged: number;
+}
+
+interface SandreRecomputeDebt {
+  departementId: number;
+  recomputeRevision: number;
 }
 
 interface SandreZoneMatch {
@@ -209,6 +228,11 @@ interface SandreApprovedMdmEvidenceAccumulator {
   nomenclature: SandreMdmNomenclatureEvidence | null | undefined;
 }
 
+type SandreMdmProofApproval = Pick<
+  SandreApprovedSyncSnapshot,
+  'approvalId' | 'mdmRecords' | 'mdmNomenclature'
+>;
+
 interface SandreApprovedSourceIdentityEvidence {
   matchType: 'canonical' | 'legacy_gid';
   idSandre: number;
@@ -251,6 +275,8 @@ export class ZoneAlerteService {
   private readonly logger = new RegleauLogger('ZoneAlerteService');
   private sandreSyncRunning = false;
   private sandreGlobalLockHeld = false;
+  private readonly sandreBatchRecomputeContext =
+    new AsyncLocalStorage<boolean>();
   private sandreSyncConfigurationWarned = false;
   private sandreGenealogyCache: {
     expiresAt: number;
@@ -311,10 +337,38 @@ export class ZoneAlerteService {
   async findGeometriesByIds(
     ids: readonly number[],
   ): Promise<ReadonlyMap<number, string>> {
+    return this.findGeometriesByIdsWithEmptyAllowlist(ids);
+  }
+
+  async findLegacyHistoricGeometriesByIds(
+    ids: readonly number[],
+    allowedEmptyGeometryIds: readonly number[],
+  ): Promise<ReadonlyMap<number, string>> {
+    return this.findGeometriesByIdsWithEmptyAllowlist(
+      ids,
+      allowedEmptyGeometryIds,
+    );
+  }
+
+  private async findGeometriesByIdsWithEmptyAllowlist(
+    ids: readonly number[],
+    allowedEmptyGeometryIds?: readonly number[],
+  ): Promise<ReadonlyMap<number, string>> {
     const uniqueIds = [...new Set(ids)];
     if (uniqueIds.length === 0) {
       return new Map();
     }
+
+    const allowLegacyEmpty = allowedEmptyGeometryIds !== undefined;
+    const emptyGeometryRejection = allowLegacyEmpty
+      ? `(
+                  ST_IsEmpty(normalized.geom)
+                  AND (
+                    NOT (normalized.id = ANY($2::int[]))
+                    OR ST_GeometryType(normalized.geom) <> 'ST_MultiPolygon'
+                  )
+                )`
+      : 'ST_IsEmpty(normalized.geom)';
 
     const rows: Array<{ id: number; geom: string | null }> =
       await this.dataSource.query(
@@ -344,7 +398,7 @@ export class ZoneAlerteService {
             normalized.id AS "id",
             CASE
               WHEN normalized.geom IS NULL
-                OR ST_IsEmpty(normalized.geom)
+                OR ${emptyGeometryRejection}
                 OR ST_GeometryType(normalized.geom) NOT IN ('ST_Polygon', 'ST_MultiPolygon')
                 OR NOT ST_IsValid(normalized.geom, 0)
               THEN NULL
@@ -353,7 +407,9 @@ export class ZoneAlerteService {
           FROM normalized
           ORDER BY normalized.id
         `,
-        [uniqueIds],
+        allowLegacyEmpty
+          ? [uniqueIds, [...new Set(allowedEmptyGeometryIds)]]
+          : [uniqueIds],
       );
     const geometries = new Map<number, string>();
     for (const row of rows) {
@@ -671,7 +727,6 @@ export class ZoneAlerteService {
       }
 
       for (const d of departements) {
-        let recomputeWasPending = false;
         try {
           const state = await this.dataSource
             .getRepository(SandreZoneSyncState)
@@ -682,13 +737,14 @@ export class ZoneAlerteService {
                 },
               },
             });
-          recomputeWasPending = Boolean(state?.needsRecompute);
-          const lastFullSyncAt = (
-            state?.lastObservedAt ?? state?.lastFullSyncAt
+          const lastModeSyncAt = (
+            (syncMode === 'safe'
+              ? state?.lastAppliedAt
+              : state?.lastObservedAt) ?? state?.lastFullSyncAt
           )?.getTime();
           const fullSyncExpired =
-            !lastFullSyncAt ||
-            Date.now() - lastFullSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
+            !lastModeSyncAt ||
+            Date.now() - lastModeSyncAt >= SANDRE_FULL_SYNC_INTERVAL_MS;
           const forcedAuditDue =
             syncMode === 'audit' &&
             !auditCoverage.attemptedDepartmentIds.has(d.id);
@@ -712,7 +768,13 @@ export class ZoneAlerteService {
             applicationPending ||
             sourceChanged
           ) {
-            await this.updateDepartementZones(d.code);
+            if (syncMode === 'safe') {
+              await this.sandreBatchRecomputeContext.run(true, () =>
+                this.updateDepartementZones(d.code),
+              );
+            } else {
+              await this.updateDepartementZones(d.code);
+            }
           }
         } catch (error) {
           this.logger.error(
@@ -720,15 +782,15 @@ export class ZoneAlerteService {
             error,
           );
         }
-        if (syncMode === 'safe' && recomputeWasPending) {
-          try {
-            await this.recomputeSandreDepartment(d.code);
-          } catch (error) {
-            this.logger.error(
-              `ERREUR LORS DU RECALCUL DES ZONES D'ALERTES DU DEPARTEMENT ${d.code}`,
-              error,
-            );
-          }
+      }
+      if (syncMode === 'safe') {
+        try {
+          await this.recomputePendingSandreDepartments();
+        } catch (error) {
+          this.logger.error(
+            'SYNCHRONISATION SANDRE APPLIQUEE MAIS RECALCUL GROUPE NON TERMINE',
+            error,
+          );
         }
       }
     } catch (error) {
@@ -829,8 +891,15 @@ export class ZoneAlerteService {
           depCode,
           snapshot,
         );
-        const approvedMdmEvidence = approvedSnapshot
-          ? await this.fetchApprovedSandreMdmEvidence(approvedSnapshot)
+        const lkgApproval = findSandreLkgApproval(depCode, snapshot);
+        if (approvedSnapshot && lkgApproval) {
+          throw new Error(
+            `Multiple Sandre approvals match department ${depCode}`,
+          );
+        }
+        const mdmApproval = approvedSnapshot ?? lkgApproval;
+        const approvedMdmEvidence = mdmApproval
+          ? await this.fetchApprovedSandreMdmEvidence(mdmApproval)
           : undefined;
         const preflight = await this.createSandreSnapshotPreflight(
           this.dataSource.manager,
@@ -879,8 +948,15 @@ export class ZoneAlerteService {
         depCode,
         snapshot,
       );
-      const approvedMdmEvidence = approvedSnapshot
-        ? await this.fetchApprovedSandreMdmEvidence(approvedSnapshot)
+      const lkgApproval = findSandreLkgApproval(depCode, snapshot);
+      if (approvedSnapshot && lkgApproval) {
+        throw new Error(
+          `Multiple Sandre approvals match department ${depCode}`,
+        );
+      }
+      const mdmApproval = approvedSnapshot ?? lkgApproval;
+      const approvedMdmEvidence = mdmApproval
+        ? await this.fetchApprovedSandreMdmEvidence(mdmApproval)
         : undefined;
       application = await this.applySandreSnapshot(
         depCode,
@@ -935,7 +1011,10 @@ export class ZoneAlerteService {
       );
     }
 
-    if (recomputeRequired) {
+    if (
+      recomputeRequired &&
+      this.sandreBatchRecomputeContext.getStore() !== true
+    ) {
       try {
         await this.recomputeSandreDepartment(depCode);
       } catch (error) {
@@ -1556,6 +1635,7 @@ export class ZoneAlerteService {
         undefined,
         undefined,
         approvedMdmEvidence,
+        new Set<number>(),
       );
     } catch (error) {
       if (error instanceof SandreDepartmentBlockedError) {
@@ -1727,11 +1807,136 @@ export class ZoneAlerteService {
     batchId: string | null = null,
     approvedMdmEvidence?: SandreApprovedMdmEvidence,
   ): Promise<SandreSnapshotApplication> {
+    let lastError: unknown;
+    for (
+      let attempt = 1;
+      attempt <= SANDRE_TRANSACTION_MAX_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await this.applySandreSnapshotOnce(
+          depCode,
+          snapshot,
+          snapshotStartedAt,
+          batchId,
+          approvedMdmEvidence,
+        );
+      } catch (error) {
+        lastError = error;
+        if (
+          !this.isRetryableSandreTransactionError(error) ||
+          attempt >= SANDRE_TRANSACTION_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await this.waitForSandreTransactionRetry(
+          SANDRE_TRANSACTION_RETRY_BASE_MS * 2 ** (attempt - 1),
+        );
+      }
+    }
+    throw lastError;
+  }
+
+  private isRetryableSandreTransactionError(error: unknown): boolean {
+    const candidate = error as {
+      code?: string;
+      driverError?: { code?: string };
+    };
+    const code = candidate?.code ?? candidate?.driverError?.code;
+    return code === '40001' || code === '40P01';
+  }
+
+  private async waitForSandreTransactionRetry(delayMs: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private async cleanupSandreDepartmentLockSession(
+    queryRunner: QueryRunner,
+    departementId: number | null,
+    rollbackTransaction: boolean,
+    primaryError: unknown,
+  ): Promise<void> {
+    const cleanupErrors: unknown[] = [];
+    if (rollbackTransaction) {
+      try {
+        await queryRunner.rollbackTransaction();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    let advisoryCleanupFailed = false;
+    if (departementId !== null) {
+      try {
+        const [unlock] = await queryRunner.query(
+          "SELECT pg_advisory_unlock(hashtext('vigieau:sandre-zone-sync'), $1) AS unlocked",
+          [departementId],
+        );
+        if (unlock?.unlocked !== true) {
+          throw new Error(
+            `Unable to release the Sandre lock for department ${departementId}`,
+          );
+        }
+      } catch (error) {
+        advisoryCleanupFailed = true;
+        cleanupErrors.push(error);
+      }
+    }
+    if (advisoryCleanupFailed) {
+      try {
+        await queryRunner.query('SELECT pg_advisory_unlock_all()');
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      await queryRunner.release();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (cleanupErrors.length > 0) {
+      const cleanupError = new AggregateError(
+        cleanupErrors,
+        'Failed to clean up Sandre department lock session',
+      );
+      if (primaryError === null) {
+        throw cleanupError;
+      }
+      this.logger.error(
+        'ERREUR LORS DU NETTOYAGE DU VERROU DEPARTEMENTAL SANDRE',
+        cleanupError.stack ?? cleanupError.message,
+      );
+    }
+  }
+
+  private async applySandreSnapshotOnce(
+    depCode: string,
+    snapshot: SandreZoneSnapshot,
+    snapshotStartedAt: Date,
+    batchId: string | null = null,
+    approvedMdmEvidence?: SandreApprovedMdmEvidence,
+  ): Promise<SandreSnapshotApplication> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
-    await queryRunner.startTransaction('SERIALIZABLE');
-
+    let lockedDepartementId: number | null = null;
+    let transactionStarted = false;
+    let primaryError: unknown = null;
     try {
+      const [lockTarget] = (await queryRunner.query(
+        `SELECT "id" FROM "departement" WHERE "code" = $1`,
+        [depCode],
+      )) as Array<{ id: number | string }>;
+      const departementId = Number(lockTarget?.id);
+      if (!Number.isSafeInteger(departementId)) {
+        throw new Error(`Unknown department ${depCode}`);
+      }
+      lockedDepartementId = departementId;
+      await queryRunner.query(
+        "SELECT pg_advisory_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
+        [departementId],
+      );
+      await queryRunner.startTransaction('SERIALIZABLE');
+      transactionStarted = true;
+
       const departementRepository =
         queryRunner.manager.getRepository(Departement);
       const stateRepository =
@@ -1739,13 +1944,9 @@ export class ZoneAlerteService {
       const departement = await departementRepository.findOne({
         where: { code: depCode },
       });
-      if (!departement) {
+      if (!departement || departement.id !== departementId) {
         throw new Error(`Unknown department ${depCode}`);
       }
-      await queryRunner.manager.query(
-        "SELECT pg_advisory_xact_lock(hashtext('vigieau:sandre-zone-sync'), $1)",
-        [departement.id],
-      );
       let state = await stateRepository.findOne({
         where: {
           departement: {
@@ -1786,6 +1987,7 @@ export class ZoneAlerteService {
           );
         }
         await queryRunner.commitTransaction();
+        transactionStarted = false;
         return {
           result: {
             added: 0,
@@ -1814,6 +2016,7 @@ export class ZoneAlerteService {
         unchanged: 0,
       };
       const decisions: SandreSyncDecisionDraft[] = [];
+      const retainedLkgZoneIds = new Set<number>();
       let recomputeRequired = false;
       const preflight = await this.createSandreSnapshotPreflight(
         queryRunner.manager,
@@ -1910,6 +2113,7 @@ export class ZoneAlerteService {
           genealogyLoad,
           approvedAuditEvidence,
           approvedMdmEvidence,
+          retainedLkgZoneIds,
         );
       recomputeRequired ||= operationalReferencesReconciled;
 
@@ -1925,7 +2129,9 @@ export class ZoneAlerteService {
             action: 'KEEP_ZONE_STATE',
             outcome: 'applied',
             reason: match
-              ? 'ACTIVE_CANONICAL_MATCH_TAKES_PRECEDENCE'
+              ? retainedLkgZoneIds.has(match.zone.id)
+                ? 'APPROVED_LKG_RETAINED_UNCHANGED'
+                : 'ACTIVE_CANONICAL_MATCH_TAKES_PRECEDENCE'
               : 'INACTIVE_ZONE_NOT_LOCAL',
           });
           continue;
@@ -2013,6 +2219,24 @@ export class ZoneAlerteService {
       }
       await stateRepository.save(state);
       if (recomputeRequired) {
+        const businessDate = getCurrentParisCivilDate();
+        const [historicBoundary] = (await queryRunner.manager.query(
+          `
+            SELECT MIN(restriction_order."dateDebut")::text AS "dirtyFrom"
+            FROM "arrete_restriction" restriction_order
+            WHERE restriction_order."departementId" = $1
+              AND restriction_order."statut" <> 'a_valider'
+              AND restriction_order."dateDebut" IS NOT NULL
+              AND restriction_order."dateDebut" < $2::date
+          `,
+          [departement.id, businessDate],
+        )) as Array<{ dirtyFrom: string | null }>;
+        if (historicBoundary?.dirtyFrom) {
+          await invalidateHistoricComputationsFromWithManager(
+            queryRunner.manager,
+            historicBoundary.dirtyFrom,
+          );
+        }
         await recordPublicMutation(
           queryRunner.manager,
           [departement.id],
@@ -2028,13 +2252,19 @@ export class ZoneAlerteService {
         );
       }
       await queryRunner.commitTransaction();
+      transactionStarted = false;
 
       return { result, recomputeRequired, decisions, stale: false };
     } catch (error) {
-      await queryRunner.rollbackTransaction();
+      primaryError = error;
       throw error;
     } finally {
-      await queryRunner.release();
+      await this.cleanupSandreDepartmentLockSession(
+        queryRunner,
+        lockedDepartementId,
+        transactionStarted,
+        primaryError,
+      );
     }
   }
 
@@ -2111,6 +2341,7 @@ export class ZoneAlerteService {
     genealogyLoad?: SandreGenealogyLoad,
     approvedAuditEvidence?: SandreApprovedAuditEvidence,
     approvedMdmEvidence?: SandreApprovedMdmEvidence,
+    retainedLkgZoneIds: Set<number> = new Set<number>(),
   ): Promise<boolean> {
     const resolvedInactiveZoneIds = new Set(
       resolvedInactiveFeatures.flatMap(({ match }) =>
@@ -2235,6 +2466,27 @@ export class ZoneAlerteService {
     referencedSources = referencedSources.filter(
       (source) => !unverifiedSourceIds.has(source.zone.id),
     );
+
+    const lkgApproval = findSandreLkgApproval(departement.code, snapshot);
+    if (lkgApproval) {
+      const retainedZoneId = await this.retainApprovedSandreLkg(
+        manager,
+        departement,
+        snapshot,
+        lkgApproval,
+        resolvedInactiveFeatures,
+        decisions,
+        apply,
+        approvedAuditEvidence,
+        approvedMdmEvidence,
+        genealogyLoad,
+      );
+      activeZoneIds.add(retainedZoneId);
+      retainedLkgZoneIds.add(retainedZoneId);
+      referencedSources = referencedSources.filter(
+        (source) => source.zone.id !== retainedZoneId,
+      );
+    }
 
     let approvedReferencesReconciled = false;
     const approvedSnapshot = findSandreApprovedSyncSnapshot(
@@ -2598,6 +2850,280 @@ export class ZoneAlerteService {
     );
   }
 
+  private async retainApprovedSandreLkg(
+    manager: EntityManager,
+    departement: Departement,
+    snapshot: SandreZoneSnapshot,
+    approval: SandreLkgApproval,
+    resolvedInactiveFeatures: Array<{
+      feature: SandreZoneFeature;
+      match: SandreZoneMatch | null;
+    }>,
+    decisions: SandreSyncDecisionDraft[],
+    apply: boolean,
+    approvedAuditEvidence?: SandreApprovedAuditEvidence,
+    approvedMdmEvidence?: SandreApprovedMdmEvidence,
+    genealogyLoad?: SandreGenealogyLoad,
+  ): Promise<number> {
+    const decisionKey = `${approval.feature.codeSandre}:approved-lkg`;
+    try {
+      const sources = resolvedInactiveFeatures.filter(
+        ({ feature }) => feature.codeSandre === approval.feature.codeSandre,
+      );
+      if (
+        sources.length !== 1 ||
+        !sources[0].match ||
+        sources[0].match.matchType !== 'canonical' ||
+        sources[0].match.zone.id !== approval.localZone.zoneAlerteId
+      ) {
+        throw new Error('approved LKG source identity changed');
+      }
+      const source = sources[0] as {
+        feature: SandreZoneFeature;
+        match: SandreZoneMatch;
+      };
+
+      if (apply) {
+        await lockSandreApprovedSyncReferences(
+          manager,
+          [approval.localZone.zoneAlerteId],
+          [],
+        );
+      }
+      const reconciliationState = await loadSandreReconciliationZoneState(
+        manager,
+        [approval.localZone.zoneAlerteId],
+      );
+      if (
+        reconciliationState.zones.length !== 1 ||
+        fingerprint(reconciliationState) !==
+          approval.reconciliationStateFingerprint
+      ) {
+        throw new Error('approved LKG reconciliation state changed');
+      }
+      const localZone = await this.loadSandreLkgLocalZoneEvidence(
+        manager,
+        departement.id,
+        approval.localZone.zoneAlerteId,
+      );
+
+      const referenceEvidence = await loadSandreApprovedReferenceEvidence(
+        manager,
+        approval.localZone.zoneAlerteId,
+        [],
+      );
+      if (
+        referenceEvidence.lifecycle !== 'pre_apply' ||
+        referenceEvidence.sourceOperationalEmpty ||
+        referenceEvidence.fingerprint !==
+          approval.operationalReferenceEvidenceFingerprint
+      ) {
+        throw new Error('approved LKG operational references changed');
+      }
+
+      if (genealogyLoad && 'error' in genealogyLoad) {
+        throw genealogyLoad.error;
+      }
+      const relations: SandreGenealogyRelation[] =
+        genealogyLoad?.relations ?? (await this.getSandreGenealogyRelations());
+      const sourceRelations = relations.filter(
+        (relation) =>
+          relation.parentCode === approval.feature.codeSandre ||
+          relation.childCode === approval.feature.codeSandre,
+      );
+      const genealogyLatestDate = relations
+        .map((relation) => relation.modificationDate)
+        .filter(
+          (value): value is string =>
+            typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value),
+        )
+        .sort()
+        .at(-1);
+      const genealogyEvidenceFingerprint = fingerprint({
+        relationCount: relations.length,
+        latestModificationDate: genealogyLatestDate ?? null,
+        sourceCode: approval.feature.codeSandre,
+        sourceRelations,
+      });
+      if (
+        genealogyLatestDate !== approval.genealogyLatestDate ||
+        sourceRelations.length !== approval.genealogySourceRelationCount ||
+        genealogyEvidenceFingerprint !== approval.genealogyEvidenceFingerprint
+      ) {
+        throw new Error('approved LKG genealogy evidence changed');
+      }
+
+      if (
+        !approvedMdmEvidence ||
+        approvedMdmEvidence.approvalId !== approval.approvalId ||
+        approvedMdmEvidence.nomenclature !== null ||
+        approvedMdmEvidence.zoneRecords.some(
+          (record) => record.requiredEvolution !== null,
+        )
+      ) {
+        throw new Error('approved LKG MDM evidence is missing');
+      }
+      const mdmRecords = approvedMdmEvidence.zoneRecords
+        .map((record) => ({
+          codeSandre: record.codeSandre,
+          projectionSha256: record.projectionSha256,
+          requiredEvolution: null,
+        }))
+        .sort((left, right) => left.codeSandre.localeCompare(right.codeSandre));
+      const observation = {
+        departmentCode: departement.code,
+        snapshot: {
+          snapshotHash: snapshot.snapshotHash,
+          sourceUpdatedAt: snapshot.sourceUpdatedAt,
+          featureCount: snapshot.featureCount,
+        },
+        feature: sandreLkgFeatureEvidence(source.feature),
+        localZone,
+        mdmRecords,
+        mdmNomenclature: null,
+        genealogyLatestDate,
+        genealogySourceRelationCount: sourceRelations.length,
+        genealogyEvidenceFingerprint,
+        operationalReferenceEvidenceFingerprint: referenceEvidence.fingerprint,
+        reconciliationStateFingerprint: fingerprint(reconciliationState),
+      };
+      if (
+        findSandreApprovedLkgRetentionForObservation(observation) !== approval
+      ) {
+        throw new Error('approved LKG observation changed');
+      }
+
+      const approvalFingerprint = fingerprint({
+        approvalId: approval.approvalId,
+        observation,
+      });
+      if (apply) {
+        const audited = approvedAuditEvidence?.decisions.get(decisionKey);
+        if (
+          audited?.approvalId !== approval.approvalId ||
+          audited?.approvalFingerprint !== approvalFingerprint ||
+          audited?.reconciliationStateFingerprint !==
+            approval.reconciliationStateFingerprint ||
+          audited?.operationalReferenceEvidenceFingerprint !==
+            approval.operationalReferenceEvidenceFingerprint ||
+          audited?.genealogyEvidenceFingerprint !==
+            approval.genealogyEvidenceFingerprint
+        ) {
+          throw new Error('approved LKG audit evidence changed');
+        }
+      }
+
+      decisions.push({
+        decisionKey,
+        zoneType: approval.feature.type,
+        sourceCode: approval.feature.codeSandre,
+        zoneAlerteId: approval.localZone.zoneAlerteId,
+        action: 'RETAIN_APPROVED_LKG',
+        outcome: apply ? 'applied' : 'observed',
+        reason: 'APPROVED_EXACT_LKG_RETENTION',
+        evidence: {
+          approvalId: approval.approvalId,
+          approvedAuditBatchId: approvedAuditEvidence?.batchId ?? null,
+          approvalFingerprint,
+          reconciliationStateFingerprint:
+            approval.reconciliationStateFingerprint,
+          operationalReferenceEvidenceFingerprint:
+            approval.operationalReferenceEvidenceFingerprint,
+          genealogyEvidenceFingerprint: approval.genealogyEvidenceFingerprint,
+          mdmProjectionSha256: mdmRecords[0]?.projectionSha256 ?? null,
+        },
+      });
+      return approval.localZone.zoneAlerteId;
+    } catch (error) {
+      if (this.isRetryableSandreTransactionError(error)) {
+        throw error;
+      }
+      throw new SandreDepartmentBlockedError(
+        `Approved Sandre LKG retention blocked for ${approval.feature.codeSandre}: ${this.sandreFailureReason(error)}`,
+        [
+          {
+            decisionKey,
+            zoneType: approval.feature.type,
+            sourceCode: approval.feature.codeSandre,
+            zoneAlerteId: approval.localZone.zoneAlerteId,
+            action: 'RETAIN_APPROVED_LKG',
+            outcome: 'blocked',
+            reason: 'LKG_APPROVAL_MISMATCH',
+            evidence: { approvalId: approval.approvalId },
+          },
+        ],
+      );
+    }
+  }
+
+  private async loadSandreLkgLocalZoneEvidence(
+    manager: EntityManager,
+    departmentId: number,
+    zoneAlerteId: number,
+  ): Promise<SandreLkgLocalZoneEvidence> {
+    const [value] = await manager.query(
+      `
+        SELECT
+          zone.id AS "zoneAlerteId",
+          zone."bassinVersantId",
+          basin.code AS "bassinVersantCode",
+          zone."idSandre",
+          zone."codeSandre",
+          zone.code,
+          zone.nom,
+          zone.type,
+          zone."ressourceInfluencee",
+          zone.disabled,
+          zone."sandreProvenance",
+          zone."statutSandre",
+          zone."dateMajSandre"::text AS "dateMajSandre",
+          zone."numeroVersionSandre",
+          zone."numeroVersion",
+          zone."sandrePayloadHash",
+          md5(ST_AsEWKB(zone.geom)) AS "ewkbMd5"
+        FROM zone_alerte zone
+        JOIN bassin_versant basin ON basin.id = zone."bassinVersantId"
+        WHERE zone.id = $1
+          AND zone."departementId" = $2
+      `,
+      [zoneAlerteId, departmentId],
+    );
+    if (!value) {
+      throw new Error('approved LKG local zone disappeared');
+    }
+    return {
+      zoneAlerteId: Number(value.zoneAlerteId),
+      bassinVersantId: Number(value.bassinVersantId),
+      bassinVersantCode: Number(value.bassinVersantCode),
+      idSandre: Number(value.idSandre),
+      codeSandre: String(value.codeSandre),
+      code: String(value.code),
+      nom: String(value.nom),
+      type: value.type as 'SOU' | 'SUP',
+      ressourceInfluencee: value.ressourceInfluencee === true,
+      disabled: value.disabled === true,
+      sandreProvenance: value.sandreProvenance as
+        | 'official'
+        | 'legacy_unverified'
+        | 'local_preserved',
+      statutSandre:
+        value.statutSandre === null ? null : String(value.statutSandre),
+      dateMajSandre:
+        value.dateMajSandre === null ? null : String(value.dateMajSandre),
+      numeroVersionSandre:
+        value.numeroVersionSandre === null
+          ? null
+          : Number(value.numeroVersionSandre),
+      numeroVersion:
+        value.numeroVersion === null ? null : Number(value.numeroVersion),
+      sandrePayloadHash:
+        value.sandrePayloadHash === null
+          ? null
+          : String(value.sandrePayloadHash),
+      ewkbMd5: String(value.ewkbMd5),
+    };
+  }
+
   private async getOperationalDisabledZoneSources(
     manager: EntityManager,
     departmentId: number,
@@ -2851,12 +3377,18 @@ export class ZoneAlerteService {
               ? expectedReferences
               : undefined),
         );
+        const referencesMatch =
+          currentReferences.fingerprint === expectedReferences.fingerprint ||
+          (currentReferences.lifecycle === 'post_apply' &&
+            expectedReferences.lifecycle === 'post_apply' &&
+            fingerprintSandreApprovedPostApplyEvidence(currentReferences) ===
+              fingerprintSandreApprovedPostApplyEvidence(expectedReferences));
         auditedSourceIdentity = parseSandreApprovedSourceIdentityEvidence(
           audited.observedSourceIdentity,
         );
         const sourceZone = item.source.match.zone;
         if (
-          currentReferences.fingerprint === expectedReferences.fingerprint &&
+          referencesMatch &&
           (sourceZone.idSandre !== item.source.feature.gid ||
             sourceZone.codeSandre !== item.source.feature.codeSandre ||
             sourceZone.sandreProvenance !== 'official')
@@ -2866,7 +3398,7 @@ export class ZoneAlerteService {
           sourceZone.sandreProvenance = 'official';
           await manager.getRepository(ZoneAlerte).save(sourceZone);
         }
-        if (currentReferences.fingerprint === expectedReferences.fingerprint) {
+        if (referencesMatch) {
           if (
             fingerprint(observedSourceIdentity) !==
             fingerprint(auditedSourceIdentity)
@@ -3084,7 +3616,7 @@ export class ZoneAlerteService {
   }
 
   private async fetchApprovedSandreMdmEvidence(
-    approval: SandreApprovedSyncSnapshot,
+    approval: SandreMdmProofApproval,
   ): Promise<SandreApprovedMdmEvidence> {
     // A proof call validates each resource once; retries only fill missing slots.
     const accumulatedEvidence: SandreApprovedMdmEvidenceAccumulator = {
@@ -3103,7 +3635,7 @@ export class ZoneAlerteService {
   }
 
   private async fetchApprovedSandreMdmEvidenceAttempt(
-    approval: SandreApprovedSyncSnapshot,
+    approval: SandreMdmProofApproval,
     budget: SandreMdmProofBudget,
     accumulatedEvidence: SandreApprovedMdmEvidenceAccumulator = {
       zoneRecords: approval.mdmRecords.map(() => undefined),
@@ -3891,16 +4423,93 @@ export class ZoneAlerteService {
       throw new Error(result?.error || 'Zone recomputation did not complete');
     }
 
+    await this.clearSandreRecomputeDebts([
+      {
+        departementId: departement.id,
+        recomputeRevision,
+      },
+    ]);
+  }
+
+  private async clearSandreRecomputeDebts(
+    debts: readonly SandreRecomputeDebt[],
+  ): Promise<void> {
+    if (debts.length === 0) {
+      return;
+    }
     await this.dataSource.query(
       `
-        UPDATE sandre_zone_sync_state
+        UPDATE sandre_zone_sync_state state
         SET "needsRecompute" = false, "updatedAt" = now()
-        WHERE "departementId" = $1
-          AND "recomputeRevision" = $2
-          AND "needsRecompute" = true
+        FROM unnest($1::integer[], $2::integer[])
+          AS completed("departementId", "recomputeRevision")
+        WHERE state."departementId" = completed."departementId"
+          AND state."recomputeRevision" = completed."recomputeRevision"
+          AND state."needsRecompute" = true
       `,
-      [departement.id, recomputeRevision],
+      [
+        debts.map((debt) => debt.departementId),
+        debts.map((debt) => debt.recomputeRevision),
+      ],
     );
+  }
+
+  private async recomputePendingSandreDepartments(): Promise<void> {
+    const pendingStates: SandreRecomputeDebt[] = await this.dataSource.query(`
+      SELECT
+        state."departementId" AS "departementId",
+        state."recomputeRevision" AS "recomputeRevision"
+      FROM sandre_zone_sync_state state
+      WHERE state."needsRecompute" = true
+      ORDER BY state."departementId"
+    `);
+    if (pendingStates.length === 0) {
+      return;
+    }
+
+    pendingStates.sort(
+      (left, right) => left.departementId - right.departementId,
+    );
+    const departmentIds = pendingStates.map((state) => state.departementId);
+    const result = await this.runCurrentZoneComputeWorker(departmentIds);
+    if (result?.success === true) {
+      await this.clearSandreRecomputeDebts(pendingStates);
+      return;
+    }
+    if (result?.success !== false || pendingStates.length === 1) {
+      throw new Error(result?.error || 'Zone recomputation did not complete');
+    }
+
+    const failures: Error[] = [];
+    const failedDepartmentIds: number[] = [];
+    for (const pendingState of pendingStates) {
+      try {
+        const departmentResult = await this.runCurrentZoneComputeWorker([
+          pendingState.departementId,
+        ]);
+        if (departmentResult?.success !== true) {
+          throw new Error(
+            departmentResult?.error || 'Zone recomputation did not complete',
+          );
+        }
+        await this.clearSandreRecomputeDebts([pendingState]);
+      } catch (error) {
+        failedDepartmentIds.push(pendingState.departementId);
+        failures.push(
+          new Error(
+            `Department ${pendingState.departementId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        );
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `Zone recomputation did not complete for departments ${failedDepartmentIds.join(', ')}`,
+      );
+    }
   }
 
   private runCurrentZoneComputeWorker(departmentIds: number[]) {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import {
   buildTarbesSituationExpectations,
+  isTarbesZoneLookupUrl,
   parseTarbesCheckMode,
   resolveTarbesLookupOutcome,
 } from "./smoke-browser-tarbes.mjs";
@@ -858,10 +859,8 @@ async function runTarbesAddressJourney(client) {
       const input = document.querySelector(
         '[data-cy="AddressSearchInput"] input[role="combobox"]'
       );
-      const button = [...document.querySelectorAll('button')].find(
-        (candidate) =>
-          candidate.textContent.replace(/\\s+/g, ' ').trim() ===
-          'Je consulte les restrictions'
+      const button = document.querySelector(
+        '[data-cy="MainRestrictionSearchForm"] [data-cy="MainRestrictionSearchSubmit"]'
       );
       if (
         input?.value !== 'Tarbes, 65' ||
@@ -885,15 +884,7 @@ async function runTarbesAddressJourney(client) {
       };
     })()`);
   }, "The enabled restrictions lookup button for Tarbes");
-  await client.evaluate(`(() => {
-    const button = [...document.querySelectorAll('button')].find(
-      (candidate) =>
-        candidate.textContent.replace(/\\s+/g, ' ').trim() ===
-        'Je consulte les restrictions'
-    );
-    button.click();
-    return true;
-  })()`);
+  await clickViewportPoint(client, consultButton);
 
   const lookup = await waitFor(
     () => zoneLookupResponses.at(-1) || null,
@@ -1235,18 +1226,12 @@ try {
           fromServiceWorker: event.params.response.fromServiceWorker,
         });
       }
-      if (request?.url) {
-        const requestUrl = new URL(request.url);
-        if (
-          /\/(?:api\/)?zones\/?$/.test(requestUrl.pathname) &&
-          requestUrl.searchParams.get("commune") === "65440"
-        ) {
-          zoneLookupResponses.push({
-            requestId: event.params.requestId,
-            status: event.params.response.status,
-            fromServiceWorker: event.params.response.fromServiceWorker,
-          });
-        }
+      if (request?.url && isTarbesZoneLookupUrl(request.url)) {
+        zoneLookupResponses.push({
+          requestId: event.params.requestId,
+          status: event.params.response.status,
+          fromServiceWorker: event.params.response.fromServiceWorker,
+        });
       }
     } else if (event.method === "Runtime.exceptionThrown") {
       fatalErrors.push(

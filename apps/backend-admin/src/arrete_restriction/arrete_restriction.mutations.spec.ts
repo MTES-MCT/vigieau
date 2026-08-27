@@ -204,6 +204,12 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
   const restrictionService = {
     updateAll: jest.fn().mockResolvedValue([]),
   };
+  const mailService = {
+    sendEmail: jest.fn().mockResolvedValue(undefined),
+  };
+  const configService = {
+    setConfig: jest.fn().mockResolvedValue(undefined),
+  };
   const service = new ArreteRestrictionService(
     repository as any,
     {} as any,
@@ -211,11 +217,11 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
     restrictionService as any,
     {} as any,
     {} as any,
+    mailService as any,
     {} as any,
     {} as any,
     {} as any,
-    {} as any,
-    { setConfig: jest.fn() } as any,
+    configService as any,
     { get: jest.fn() } as any,
   );
   const requestCurrentZoneRecompute = jest
@@ -224,7 +230,17 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
   jest
     .spyOn(service, 'enqueueCurrentZoneRecomputeWithManager')
     .mockResolvedValue(undefined);
-  jest.spyOn(service, 'recordPublicMutation').mockResolvedValue('43');
+  const invalidateComputationsFromWithManager = jest.spyOn(
+    service,
+    'invalidateComputationsFromWithManager',
+  );
+  const recordPublicMutation = jest
+    .spyOn(service, 'recordPublicMutation')
+    .mockResolvedValue('43');
+  const synchronizeArreteRestrictionEndDate = jest.spyOn(
+    service as any,
+    'synchronizeArreteRestrictionEndDate',
+  );
   const checkModifications = jest
     .spyOn(service as any, 'checkModifications')
     .mockResolvedValue(undefined);
@@ -244,17 +260,22 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
 
   return {
     checkModifications,
+    configService,
     departementRepository,
     get transactionRolledBack() {
       return transactionRolledBack;
     },
     lockQuery,
     manager,
+    mailService,
+    invalidateComputationsFromWithManager,
+    recordPublicMutation,
     repository,
     requestCurrentZoneRecompute,
     restrictionService,
     service,
     states,
+    synchronizeArreteRestrictionEndDate,
     transactionRepository,
   };
 }
@@ -284,6 +305,184 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.transactionRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({ id: 300, numero: 'AR renommé' }),
     );
+  });
+
+  it('notifies a published update without reopening historic cursors twice', async () => {
+    const harness = createHarness([createState(300)], 300);
+    harness.checkModifications.mockRestore();
+    const oldAr = toEntity(harness.states.get(300)!, harness.states);
+    const updatedAr = { ...oldAr, numero: 'AR-300-modified' };
+
+    await (harness.service as any).checkModifications(
+      oldAr,
+      updatedAr,
+      currentUser,
+    );
+
+    expect(harness.mailService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(harness.configService.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('keeps a committed published update when its notification fails', async () => {
+    const harness = createHarness([createState(300)], 300);
+    harness.checkModifications.mockRejectedValueOnce(
+      new Error('mail unavailable'),
+    );
+    const loggerError = jest
+      .spyOn((harness.service as any).logger, 'error')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      harness.service.update(
+        300,
+        { numero: 'AR-300-modified' } as any,
+        currentUser,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ id: 300 }));
+    await Promise.resolve();
+
+    expect(harness.recordPublicMutation).toHaveBeenCalledWith(
+      harness.manager,
+      [53, 53],
+      'MODIFICATION AR',
+    );
+    expect(harness.invalidateComputationsFromWithManager).toHaveBeenCalledWith(
+      harness.manager,
+      '2026-07-01',
+    );
+    expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
+    expect(loggerError).toHaveBeenCalledWith(
+      'ERREUR NOTIFICATION MODIFICATION AR',
+      expect.objectContaining({ message: 'mail unavailable' }),
+    );
+  });
+
+  it('ignores a no-op PATCH on a published restriction order', async () => {
+    const harness = createHarness([createState(300)], 300);
+
+    await harness.service.update(300, { numero: 'AR-300' } as any, currentUser);
+
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
+  it('returns restriction usages after a full no-op PATCH from the frontend', async () => {
+    const harness = createHarness([createState(300)], 300);
+    const usage = {
+      id: 40,
+      nom: 'Arrosage des jardins',
+      thematique: { id: 4, nom: 'Arrosage' },
+      concerneParticulier: true,
+      concerneEntreprise: false,
+      concerneCollectivite: false,
+      concerneExploitation: false,
+      concerneEso: true,
+      concerneEsu: false,
+      concerneAep: false,
+      descriptionVigilance: null,
+      descriptionAlerte: 'Interdit de 8 h a 20 h',
+      descriptionAlerteRenforcee: 'Interdit',
+      descriptionCrise: 'Interdit',
+    };
+    const persistedRestriction = {
+      id: 20,
+      nomGroupementAep: null,
+      zoneAlerte: { id: 7, code: 'ZA-7', nom: 'Zone 7' },
+      arreteCadre: { id: 10 },
+      niveauGravite: 'alerte',
+      communes: [],
+      usages: [usage],
+    };
+    const fullAr = {
+      ...toEntity(harness.states.get(300)!, harness.states),
+      niveauGraviteSpecifiqueEap: false,
+      ressourceEapCommunique: 'max',
+      restrictions: [persistedRestriction],
+    } as unknown as ArreteRestriction;
+    jest.spyOn(harness.service, 'findOne').mockResolvedValue(fullAr);
+    const authorizationRestriction = { ...persistedRestriction } as any;
+    delete authorizationRestriction.usages;
+    jest
+      .spyOn(harness.service as any, 'findOneForMutationAuthorization')
+      .mockResolvedValue({
+        ...fullAr,
+        restrictions: [authorizationRestriction],
+      });
+
+    const result = await harness.service.update(
+      300,
+      {
+        numero: 'AR-300',
+        departement: { id: 53 },
+        niveauGraviteSpecifiqueEap: false,
+        ressourceEapCommunique: 'max',
+        arretesCadre: [{ id: 10 }],
+        restrictions: [
+          {
+            ...persistedRestriction,
+            isAep: false,
+            zoneAlerte: { id: 7 },
+            arreteCadre: { id: 10 },
+            usages: [{ ...usage, thematique: { id: 4 } }],
+          },
+        ],
+        arreteRestrictionAbroge: null,
+      } as any,
+      currentUser,
+    );
+
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+    expect(result.restrictions).toEqual([
+      expect.objectContaining({
+        id: 20,
+        usages: [expect.objectContaining({ id: 40 })],
+      }),
+    ]);
+  });
+
+  it('treats null restrictions as an empty list before rejecting a published deletion', async () => {
+    const harness = createHarness([createState(300)], 300);
+    jest.spyOn(harness.service, 'findOne').mockResolvedValue({
+      ...toEntity(harness.states.get(300)!, harness.states),
+      restrictions: [
+        {
+          id: 20,
+          zoneAlerte: { id: 7 },
+          arreteCadre: { id: 10 },
+          niveauGravite: 'alerte',
+          communes: [],
+          usages: [],
+        },
+      ],
+    } as ArreteRestriction);
+    harness.checkModifications.mockResolvedValue(undefined);
+    jest.spyOn(harness.service, 'checkBeforePublish').mockResolvedValueOnce({
+      errors: ['Une zone est obligatoire.'],
+      warnings: [],
+    });
+
+    await expect(
+      harness.service.update(300, { restrictions: null } as any, currentUser),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(harness.service.checkBeforePublish).toHaveBeenCalledWith(
+      expect.objectContaining({ restrictions: [] }),
+      harness.transactionRepository,
+    );
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(harness.restrictionService.updateAll).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
   });
 
   it('valide les restrictions PATCH contre les arrêtés cadre persistés quand ils sont omis', async () => {
@@ -462,8 +661,17 @@ describe('ArreteRestrictionService chain mutations', () => {
       statut: 'publie',
     });
     expect(harness.transactionRepository.delete).toHaveBeenCalledWith(300);
+    expect(harness.invalidateComputationsFromWithManager).toHaveBeenCalledWith(
+      harness.manager,
+      '2026-07-01',
+    );
+    expect(harness.recordPublicMutation).toHaveBeenCalledWith(
+      harness.manager,
+      [53],
+      'SUPPRESSION AR',
+    );
     expect(harness.manager.query).toHaveBeenLastCalledWith(
-      expect.stringContaining('UPDATE config'),
+      expect.stringContaining('UPDATE "config"'),
       ['2026-07-01'],
     );
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
@@ -630,11 +838,11 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.manager.query).not.toHaveBeenCalled();
   });
 
-  it('deletes an undated draft without triggering historic invalidation', async () => {
+  it('deletes a dated draft without touching historic control-plane state', async () => {
     const harness = createHarness(
       [
         createState(500, {
-          dateDebut: null,
+          dateDebut: '2026-07-01',
           statut: 'a_valider',
         }),
       ],
@@ -644,6 +852,39 @@ describe('ArreteRestrictionService chain mutations', () => {
     await harness.service.remove(500, currentUser);
 
     expect(harness.states.has(500)).toBe(false);
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
+  it('does not reconcile a public predecessor when deleting its draft successor', async () => {
+    const harness = createHarness(
+      [
+        createState(100, { statut: 'publie' }),
+        createState(500, {
+          dateDebut: '2026-07-15',
+          statut: 'a_valider',
+          predecessorId: 100,
+        }),
+      ],
+      500,
+    );
+
+    await harness.service.remove(500, currentUser);
+
+    expect(harness.states.has(500)).toBe(false);
+    expect(harness.states.get(100)).toMatchObject({
+      dateFin: null,
+      statut: 'publie',
+    });
+    expect(harness.synchronizeArreteRestrictionEndDate).not.toHaveBeenCalled();
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
     expect(harness.manager.query).not.toHaveBeenCalled();
     expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
   });

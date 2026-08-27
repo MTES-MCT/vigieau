@@ -3,9 +3,92 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, FindOneOptions, In, Not, Repository } from 'typeorm';
 import { Commune } from '@shared/entities/commune.entity';
 import { Restriction } from '@shared/entities/restriction.entity';
+import { Usage } from '@shared/entities/usage.entity';
 import { UsageService } from '../usage/usage.service';
 import { CreateUpdateArreteRestrictionDto } from '../arrete_restriction/dto/create_update_arrete_restriction.dto';
 import { CreateUpdateRestrictionDto } from './dto/create_update_restriction.dto';
+
+const usageProfileFields = [
+  'concerneParticulier',
+  'concerneEntreprise',
+  'concerneCollectivite',
+  'concerneExploitation',
+] as const satisfies readonly (keyof Usage)[];
+
+const usageResourceFields = [
+  'concerneEso',
+  'concerneEsu',
+  'concerneAep',
+] as const satisfies readonly (keyof Usage)[];
+
+const usageDescriptionFields = [
+  'descriptionVigilance',
+  'descriptionAlerte',
+  'descriptionAlerteRenforcee',
+  'descriptionCrise',
+] as const satisfies readonly (keyof Usage)[];
+
+const normalizeRestrictionUsageText = (value: string): string =>
+  (value ?? '')
+    .normalize('NFKC')
+    .replace(/[\u2018\u2019\u02BC\uFF07]/gu, "'")
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/gu, '-')
+    .replace(/\s+/gu, ' ')
+    .replace(/\by compris (?:le|la|les|des) /giu, 'y compris ')
+    .trim()
+    .toLocaleLowerCase('fr-FR');
+
+export const normalizeRestrictionUsageLabel = normalizeRestrictionUsageText;
+
+const usagesOverlapOn = (
+  first: Usage,
+  second: Usage,
+  fields: readonly (keyof Usage)[],
+): boolean =>
+  fields.some((field) => first[field] === true && second[field] === true);
+
+const usagesHaveDifferentDescriptions = (
+  first: Usage,
+  second: Usage,
+): boolean =>
+  usageDescriptionFields.some(
+    (field) =>
+      normalizeRestrictionUsageText(String(first[field] ?? '')) !==
+      normalizeRestrictionUsageText(String(second[field] ?? '')),
+  );
+
+const getConflictingUsageLabels = (usages: Usage[] = []): string[] => {
+  const usagesByLabel = new Map<string, Usage[]>();
+
+  for (const usage of usages) {
+    const theme = normalizeRestrictionUsageLabel(usage.thematique?.nom);
+    const name = normalizeRestrictionUsageLabel(usage.nom);
+    if (!theme || !name) {
+      continue;
+    }
+    const key = `${theme}\u0000${name}`;
+    usagesByLabel.set(key, [...(usagesByLabel.get(key) ?? []), usage]);
+  }
+
+  const conflicts: string[] = [];
+  for (const groupedUsages of usagesByLabel.values()) {
+    const hasConflict = groupedUsages.some((first, firstIndex) =>
+      groupedUsages
+        .slice(firstIndex + 1)
+        .some(
+          (second) =>
+            usagesOverlapOn(first, second, usageProfileFields) &&
+            usagesOverlapOn(first, second, usageResourceFields) &&
+            usagesHaveDifferentDescriptions(first, second),
+        ),
+    );
+    if (hasConflict) {
+      conflicts.push(groupedUsages[0].nom);
+    }
+  }
+
+  return conflicts;
+};
 
 @Injectable()
 export class RestrictionService {
@@ -107,6 +190,7 @@ export class RestrictionService {
         | 'nomGroupementAep'
         | 'communes'
         | 'niveauGravite'
+        | 'usages'
       > & { isAep?: boolean }
     >,
     arreteCadreIds?: readonly number[],
@@ -119,6 +203,13 @@ export class RestrictionService {
     const communeIds = new Set<number>();
 
     for (const restriction of restrictions ?? []) {
+      for (const usageName of getConflictingUsageLabels(
+        restriction.usages ?? [],
+      )) {
+        errors.push(
+          `L'usage « ${usageName} » possède des consignes contradictoires pour des profils et ressources identiques dans une même zone.`,
+        );
+      }
       if (!restriction.niveauGravite) {
         errors.push(`Chaque zone de l'arrêté doit avoir un niveau de gravité.`);
       }
@@ -288,6 +379,14 @@ export class RestrictionService {
     const communeIds = new Set<number>();
 
     for (const restriction of restrictions) {
+      const [conflictingUsage] = getConflictingUsageLabels(
+        (restriction.usages ?? []) as Usage[],
+      );
+      if (conflictingUsage) {
+        throw new BadRequestException(
+          `L'usage « ${conflictingUsage} » possède des consignes contradictoires pour des profils et ressources identiques dans une même zone.`,
+        );
+      }
       if (
         restriction.arreteCadre?.id &&
         !arreteCadreIds.has(restriction.arreteCadre.id)

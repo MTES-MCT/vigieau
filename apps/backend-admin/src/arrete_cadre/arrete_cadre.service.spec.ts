@@ -115,6 +115,18 @@ function createHarness(
     createImmutable: jest.fn(),
     deleteById: jest.fn().mockResolvedValue(undefined),
   };
+  const restrictionService = {
+    deleteZonesByArreteCadreId: jest.fn().mockResolvedValue(undefined),
+  };
+  const usageService = {
+    findByArreteCadre: jest.fn().mockResolvedValue([]),
+    updateAllByArreteCadre: jest.fn().mockResolvedValue([]),
+    updateUsagesArByArreteCadreId: jest.fn().mockResolvedValue(undefined),
+    deleteUsagesArByArreteCadreId: jest.fn().mockResolvedValue(undefined),
+  };
+  const arreteCadreZoneAlerteCommunesService = {
+    updateAllByArreteCadre: jest.fn().mockResolvedValue([]),
+  };
   const service = new ArreteCadreService(
     repository as any,
     arreteRestrictionService as any,
@@ -123,9 +135,9 @@ function createHarness(
     {} as any,
     {} as any,
     fichierService as any,
-    {} as any,
-    {} as any,
-    {} as any,
+    restrictionService as any,
+    usageService as any,
+    arreteCadreZoneAlerteCommunesService as any,
     { get: jest.fn() } as any,
   );
   jest.spyOn(service, 'canUpdateArreteCadre').mockResolvedValue(true);
@@ -137,8 +149,10 @@ function createHarness(
     initial,
     lockQuery,
     repository,
+    restrictionService,
     service,
     transactionRepository,
+    usageService,
   };
 }
 
@@ -252,6 +266,140 @@ describe('ArreteCadreService.publish', () => {
     expect(
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
     ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.requestCurrentZoneRecompute,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('records a changed legal end without invalidating an unchanged effective period', async () => {
+    const successor = {
+      id: 201,
+      dateDebut: '2026-08-11',
+      statut: 'a_venir',
+      departements: [{ id: 53 }],
+    };
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-10',
+        dateFinSaisie: '2026-08-20',
+        dateFinCalculee: true,
+        dateFinSaisieConnue: true,
+        statut: 'a_venir',
+        arretesCadre: [successor],
+      },
+      currentOverrides: {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-31',
+        dateFinSaisie: null,
+        dateFinCalculee: false,
+        dateFinSaisieConnue: true,
+        statut: 'a_venir',
+        arretesCadre: [successor],
+      },
+    });
+
+    await harness.service.publish(
+      200,
+      null,
+      { dateDebut: '2026-08-05', dateFin: '2026-08-31' },
+      currentUser,
+    );
+
+    expect(
+      harness.arreteRestrictionService.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).toHaveBeenCalledWith(expect.anything(), [53], 'PUBLICATION AC');
+    expect(
+      harness.arreteRestrictionService.requestCurrentZoneRecompute,
+    ).toHaveBeenCalledWith(harness.initial.departements, 'PUBLICATION AC');
+  });
+
+  it('ignores a no-op PATCH on a published framework order', async () => {
+    const unchanged = {
+      dateDebut: '2026-08-05',
+      statut: 'a_venir',
+      arreteCadreAbroge: null,
+      usages: [],
+    };
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: unchanged,
+      currentOverrides: unchanged,
+    });
+    harness.transactionRepository.find.mockResolvedValue([{ id: 200 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 200 }]);
+
+    await harness.service.update(
+      200,
+      {
+        numero: 'AC_2',
+        departements: [{ id: 53 }],
+        zonesAlerte: [],
+        usages: [],
+        arreteCadreAbroge: null,
+      } as any,
+      currentUser,
+    );
+
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.requestCurrentZoneRecompute,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('records and invalidates a real PATCH on a published framework order', async () => {
+    const unchanged = {
+      dateDebut: '2026-08-05',
+      statut: 'a_venir',
+      arreteCadreAbroge: null,
+      usages: [],
+    };
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: unchanged,
+      currentOverrides: unchanged,
+    });
+    harness.transactionRepository.find.mockResolvedValue([{ id: 200 }]);
+    harness.lockQuery.getMany.mockResolvedValue([{ id: 200 }]);
+
+    await harness.service.update(
+      200,
+      {
+        numero: 'AC_2-modifie',
+        departements: [{ id: 53 }],
+        zonesAlerte: [],
+        usages: [],
+        arreteCadreAbroge: null,
+      } as any,
+      currentUser,
+    );
+
+    expect(harness.transactionRepository.save).toHaveBeenCalled();
+    expect(
+      harness.arreteRestrictionService.invalidateComputationsFromWithManager,
+    ).toHaveBeenCalledWith(expect.anything(), '2026-08-05');
+    expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).toHaveBeenCalledWith(expect.anything(), [53, 53], 'MODIFICATION AC');
+    expect(
+      harness.arreteRestrictionService.requestCurrentZoneRecompute,
+    ).toHaveBeenCalledWith(
+      [{ id: 53, code: '53' }, { id: 53 }],
+      'MODIFICATION AC',
+    );
   });
 
   it('keeps the previous PDF object available to existing publication snapshots', async () => {

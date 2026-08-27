@@ -130,6 +130,19 @@ export class ZonePublicationDto {
   @ApiProperty({ example: '42' })
   revision: string;
 
+  @ApiProperty({
+    example: '41',
+    description: 'Revision publique des donnees source de la publication',
+  })
+  sourceRevision: string;
+
+  @ApiProperty({
+    example: '9',
+    description: 'Epoch courant des calculs historiques',
+    required: false,
+  })
+  historicComputeEpoch?: string;
+
   @ApiProperty({ nullable: true })
   geojsonUrl: string | null;
 
@@ -154,6 +167,8 @@ export type ZoneAvailabilityStatus =
   | 'confirmed_none'
   | 'unavailable';
 
+export type ZoneAvailabilityFreshness = 'current' | 'updating';
+
 export class ZoneTypeAvailabilityDto {
   @ApiProperty({
     enum: ['available', 'confirmed_none', 'unavailable'],
@@ -166,6 +181,16 @@ export class ZoneTypeAvailabilityDto {
 
   @ApiProperty({ nullable: true, required: false })
   sourceRevision?: string | null;
+
+  @ApiProperty({
+    enum: ['current', 'updating'],
+    required: false,
+    example: 'updating',
+  })
+  freshness?: ZoneAvailabilityFreshness;
+
+  @ApiProperty({ nullable: true, required: false })
+  pendingSince?: string | null;
 
   @ApiProperty({ nullable: true, required: false })
   officialUrl?: string | null;

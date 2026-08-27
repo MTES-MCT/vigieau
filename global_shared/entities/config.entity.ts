@@ -24,6 +24,9 @@ export class Config extends BaseEntity {
   @Column({ type: "bigint", default: 0 })
   historicComputeEpoch: string;
 
+  @Column({ type: "bigint", default: 0 })
+  historicBackfillGlobalEpoch: string;
+
   @Column({ type: "timestamptz", nullable: true })
   computeStatsUpdatedAt: Date;
 
