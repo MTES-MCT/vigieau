@@ -2721,7 +2721,7 @@ describe('ZoneAlerteComputedService', () => {
     await service.computeAll([], false);
 
     expect(computeRegleAr).toHaveBeenCalledTimes(2);
-    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(3);
     expect(computeGeoJson).toHaveBeenCalledWith(
       false,
       '1',
@@ -2729,6 +2729,94 @@ describe('ZoneAlerteComputedService', () => {
       '7',
       true,
     );
+  });
+
+  it('abandons a national compute at the first department boundary after its source revision changes', async () => {
+    configService.getConfig.mockResolvedValue({ historicComputeEpoch: '7' });
+    zonePublicationService.getSourceRevision
+      .mockResolvedValueOnce('1')
+      .mockResolvedValueOnce('2');
+    const departments = [
+      {
+        id: 65,
+        code: '65',
+        nom: 'Hautes-Pyrenees',
+        parametres: [{ disabled: false, superpositionCommune: 'no' }],
+      },
+      {
+        id: 31,
+        code: '31',
+        nom: 'Haute-Garonne',
+        parametres: [{ disabled: false, superpositionCommune: 'no' }],
+      },
+    ];
+    (service as any).departementService = {
+      findAllLight: jest.fn().mockResolvedValue(departments),
+    };
+    const computeRegleAr = jest
+      .spyOn(service, 'computeRegleAr')
+      .mockResolvedValue([]);
+    const computeCommunesIntersected = jest
+      .spyOn(service, 'computeCommunesIntersected')
+      .mockResolvedValue(undefined);
+    const computeGeoJson = jest
+      .spyOn(service, 'computeGeoJson')
+      .mockResolvedValue(undefined);
+
+    await expect(service.computeAll([], false)).rejects.toThrow(
+      'Zone source revision changed during computation (1 -> 2)',
+    );
+
+    expect(computeRegleAr).toHaveBeenCalledTimes(1);
+    expect(computeCommunesIntersected).toHaveBeenCalledTimes(1);
+    expect(computeGeoJson).not.toHaveBeenCalled();
+  });
+
+  it('checks the source revision around every expensive publication stage', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'vigieau-current-versioned-'),
+    );
+    const generateEmptyPmtiles = jest
+      .spyOn(emptyPmtiles, 'generateEmptyPmtiles')
+      .mockImplementation(async ({ outputPath }) => {
+        await writeFile(outputPath, Buffer.from('PMTiles-empty'));
+      });
+    const enableQueryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const computePublicationStatistics = jest
+      .spyOn(service as any, 'computePublicationStatistics')
+      .mockResolvedValue(undefined);
+    const publishGeneratedZoneArtifacts = jest
+      .spyOn(service as any, 'publishGeneratedZoneArtifacts')
+      .mockResolvedValue({
+        geojsonUrl: 'https://immutable.test/zones.geojson',
+        pmtilesUrl: 'https://immutable.test/zones.pmtiles',
+      });
+    (service as any).zoneAlerteComputedRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn().mockReturnValue(enableQueryBuilder),
+    };
+    (service as any).nestConfigService = {
+      get: jest.fn().mockReturnValue(directory),
+    };
+
+    try {
+      await service.computeGeoJson(false, '1', '2026-08-11', '9', true);
+
+      expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(4);
+      expect(publishGeneratedZoneArtifacts).toHaveBeenCalledTimes(1);
+      expect(computePublicationStatistics).toHaveBeenCalledTimes(1);
+      expect(
+        zonePublicationService.buildCandidateFromCurrentComputed,
+      ).toHaveBeenCalledTimes(1);
+    } finally {
+      generateEmptyPmtiles.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('keeps the captured business date when a national compute crosses 02:00 in Paris', async () => {
@@ -2788,7 +2876,7 @@ describe('ZoneAlerteComputedService', () => {
 
     await service.computeAll([], false);
 
-    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(2);
     expect(computeGeoJson).toHaveBeenCalledWith(
       false,
       '1',
@@ -2821,7 +2909,7 @@ describe('ZoneAlerteComputedService', () => {
 
     await service.computeAll([65], false);
 
-    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(1);
+    expect(zonePublicationService.getSourceRevision).toHaveBeenCalledTimes(2);
     expect(computeGeoJson).toHaveBeenCalledWith(
       false,
       '1',

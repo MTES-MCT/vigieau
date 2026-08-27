@@ -608,6 +608,10 @@ export class ZoneAlerteComputedService {
         }
       }
       await this.computeCommunesIntersected(departement);
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
+    if (departements.length === 0) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
     }
     // On récupère toutes les restrictions en cours
     this.logger.log(`COMPUTING ZONES D'ALERTES - END`);
@@ -1352,6 +1356,9 @@ DELETE FROM zone_alerte_computed
     const geojsonChecksum = createHash('sha256')
       .update(dataGeojson)
       .digest('hex');
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
     let pmtilesChecksum: string | undefined;
     let fileToTransferPmtiles:
       | { originalname: string; buffer: Buffer }
@@ -1381,6 +1388,9 @@ DELETE FROM zone_alerte_computed
       throw e;
     }
 
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
     let immutableArtifacts: { geojsonUrl?: string; pmtilesUrl?: string } = {};
     if (publicationEnabled) {
       immutableArtifacts = await this.publishGeneratedZoneArtifacts({
@@ -1390,6 +1400,9 @@ DELETE FROM zone_alerte_computed
         pmtilesFile: fileToTransferPmtiles,
         pmtilesChecksum,
       });
+    }
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
     }
     await this.zoneAlerteComputedRepository
       .createQueryBuilder()
@@ -1434,6 +1447,9 @@ DELETE FROM zone_alerte_computed
         );
       }
     }
+    if (isNationalVersionedCompute) {
+      await this.assertSourceRevisionUnchanged(sourceRevision);
+    }
     const publicationId = await this.buildVersionedPublicationIfNational({
       sourceRevision: isNationalCompute ? sourceRevision : undefined,
       sourceComputedAt: date,
@@ -1444,6 +1460,21 @@ DELETE FROM zone_alerte_computed
       pmtilesChecksum,
     });
     return { publicationId, sourceRevision };
+  }
+
+  private async assertSourceRevisionUnchanged(
+    expectedSourceRevision?: string,
+  ): Promise<void> {
+    if (expectedSourceRevision === undefined) {
+      return;
+    }
+    const currentSourceRevision =
+      await this.zonePublicationService.getSourceRevision();
+    if (currentSourceRevision !== expectedSourceRevision) {
+      throw new Error(
+        `Zone source revision changed during computation (${expectedSourceRevision} -> ${currentSourceRevision})`,
+      );
+    }
   }
 
   private async computePublicationStatistics(
