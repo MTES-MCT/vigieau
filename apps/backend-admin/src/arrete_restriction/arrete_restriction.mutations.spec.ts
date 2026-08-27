@@ -346,10 +346,28 @@ describe('ArreteRestrictionService chain mutations', () => {
       [53, 53],
       'MODIFICATION AR',
     );
+    expect(harness.invalidateComputationsFromWithManager).toHaveBeenCalledWith(
+      harness.manager,
+      '2026-07-01',
+    );
+    expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
     expect(loggerError).toHaveBeenCalledWith(
       'ERREUR NOTIFICATION MODIFICATION AR',
       expect.objectContaining({ message: 'mail unavailable' }),
     );
+  });
+
+  it('ignores a no-op PATCH on a published restriction order', async () => {
+    const harness = createHarness([createState(300)], 300);
+
+    await harness.service.update(300, { numero: 'AR-300' } as any, currentUser);
+
+    expect(harness.transactionRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.invalidateComputationsFromWithManager,
+    ).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
   });
 
   it('valide les restrictions PATCH contre les arrêtés cadre persistés quand ils sont omis', async () => {

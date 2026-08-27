@@ -54,10 +54,12 @@ import {
   getPublicationEndDateProvenance,
   hasArreteComputationStateChanged,
   hasArreteMutationVersionChanged,
+  hasArretePublicationStateChanged,
   normalizeCivilDate,
   resolveArreteEndDate,
   UnknownArreteEndDateProvenanceError,
 } from '../shared/arrete-date-continuity';
+import { hasArreteRestrictionPublicUpdate } from '../shared/arrete-public-update';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
 import { UserService } from '../user/user.service';
 import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
@@ -621,6 +623,11 @@ export class ArreteRestrictionService {
       updateArreteRestrictionDto,
       'restrictions',
     );
+    const changesPublicContent = hasArreteRestrictionPublicUpdate(
+      oldAr,
+      updateArreteRestrictionDto,
+    );
+    let publicMutationRecorded = false;
     let arreteRestriction: ArreteRestriction;
     if (oldAr.statut === 'a_valider') {
       const initialArreteCadreIds = oldAr.arretesCadre.map(({ id }) => id);
@@ -800,11 +807,13 @@ export class ArreteRestrictionService {
                   HttpStatus.CONFLICT,
                 );
               }
-              const saved = await repository.save({
-                id,
-                updatedByHuman: new Date(),
-                ...updateArreteRestrictionDto,
-              });
+              const saved = changesPublicContent
+                ? await repository.save({
+                    id,
+                    updatedByHuman: new Date(),
+                    ...updateArreteRestrictionDto,
+                  })
+                : ({ ...oldAr } as ArreteRestriction);
               const savedCurrent = await this.findOneForContinuity(
                 repository,
                 id,
@@ -827,47 +836,70 @@ export class ArreteRestrictionService {
                   HttpStatus.CONFLICT,
                 );
               }
+              const continuityDirtyDates: string[] = [];
               for (const affectedId of affectedIds) {
+                const previous = before.find(
+                  (arrete) => arrete.id === affectedId,
+                );
                 const synchronized =
                   await this.synchronizeArreteRestrictionEndDate(
                     repository,
                     affectedId,
                     businessDate,
                   );
+                if (
+                  previous?.dateDebut &&
+                  hasArreteComputationStateChanged(previous, {
+                    dateDebut: previous.dateDebut,
+                    dateFin: synchronized.dateFin,
+                    statut: synchronized.statut ?? previous.statut,
+                  })
+                ) {
+                  continuityDirtyDates.push(
+                    normalizeCivilDate(previous.dateDebut),
+                  );
+                }
                 if (affectedId === id) {
                   Object.assign(saved, synchronized);
                 }
               }
               Object.assign(saved, {
-                restrictions: hasRestrictionsUpdate
-                  ? await this.restrictionService.updateAll(
-                      {
-                        ...updateArreteRestrictionDto,
-                        departement:
-                          updateArreteRestrictionDto.departement ??
-                          authorizationState.departement,
-                        arretesCadre: proposedArretesCadre,
-                      } as CreateUpdateArreteRestrictionDto,
-                      saved.id,
-                      manager,
-                    )
-                  : authorizationState.restrictions,
+                restrictions:
+                  changesPublicContent && hasRestrictionsUpdate
+                    ? await this.restrictionService.updateAll(
+                        {
+                          ...updateArreteRestrictionDto,
+                          departement:
+                            updateArreteRestrictionDto.departement ??
+                            authorizationState.departement,
+                          arretesCadre: proposedArretesCadre,
+                        } as CreateUpdateArreteRestrictionDto,
+                        saved.id,
+                        manager,
+                      )
+                    : authorizationState.restrictions,
               });
-              await this.invalidateComputationsFromWithManager(
-                manager,
-                before
-                  .map(({ dateDebut }) => normalizeCivilDate(dateDebut))
-                  .sort()[0],
-              );
-              await this.recordPublicMutation(
-                manager,
-                [
-                  oldAr.departement.id,
-                  updateArreteRestrictionDto.departement?.id ??
+              const dirtyDates = changesPublicContent
+                ? before.map(({ dateDebut }) => normalizeCivilDate(dateDebut))
+                : continuityDirtyDates;
+              if (dirtyDates.length > 0) {
+                await this.invalidateComputationsFromWithManager(
+                  manager,
+                  dirtyDates.sort()[0],
+                );
+              }
+              if (changesPublicContent || continuityDirtyDates.length > 0) {
+                await this.recordPublicMutation(
+                  manager,
+                  [
                     oldAr.departement.id,
-                ],
-                'MODIFICATION AR',
-              );
+                    updateArreteRestrictionDto.departement?.id ??
+                      oldAr.departement.id,
+                  ],
+                  'MODIFICATION AR',
+                );
+                publicMutationRecorded = true;
+              }
               return saved;
             },
           );
@@ -885,7 +917,9 @@ export class ArreteRestrictionService {
           !!departement &&
           all.findIndex(({ id }) => id === departement.id) === index,
       ) as Departement[];
-      this.requestCurrentZoneRecompute(departements, 'MODIFICATION AR');
+      if (publicMutationRecorded) {
+        this.requestCurrentZoneRecompute(departements, 'MODIFICATION AR');
+      }
     }
     void this.checkModifications(oldAr, arreteRestriction, currentUser).catch(
       (error) =>
@@ -982,6 +1016,7 @@ export class ArreteRestrictionService {
       statut: getArreteLifecycleStatus(dateDebut, dateFin, businessDate),
     };
     let toReturn: ArreteRestriction;
+    let publicMutationRecorded = false;
     try {
       toReturn = await this.arreteRestrictionRepository.manager.transaction(
         'SERIALIZABLE',
@@ -1054,6 +1089,17 @@ export class ArreteRestrictionService {
             businessDate,
           );
           Object.assign(saved, synchronized);
+          const publicationContentChanged =
+            !!newFile ||
+            !areCivilDatesEqual(current.dateSignature, dateSignature) ||
+            hasArretePublicationStateChanged(current, {
+              dateDebut,
+              dateFin: synchronized.dateFin,
+              dateFinSaisie: synchronized.dateFinSaisie,
+              dateFinCalculee: synchronized.dateFinCalculee,
+              dateFinSaisieConnue: synchronized.dateFinSaisieConnue,
+              statut: synchronized.statut ?? toSave.statut,
+            });
           const dirtyDates: string[] = [];
           if (
             hasArreteComputationStateChanged(current, {
@@ -1102,11 +1148,14 @@ export class ArreteRestrictionService {
               dirtyDates.sort()[0],
             );
           }
-          await this.recordPublicMutation(
-            manager,
-            [ar.departement.id],
-            'PUBLICATION AR',
-          );
+          if (publicationContentChanged || dirtyDates.length > 0) {
+            await this.recordPublicMutation(
+              manager,
+              [ar.departement.id],
+              'PUBLICATION AR',
+            );
+            publicMutationRecorded = true;
+          }
           return saved;
         },
       );
@@ -1129,7 +1178,9 @@ export class ArreteRestrictionService {
     if (!arreteRestrictionPdf) {
       toReturn.fichier = ar.fichier;
     }
-    this.requestCurrentZoneRecompute([ar.departement], 'PUBLICATION AR');
+    if (publicMutationRecorded) {
+      this.requestCurrentZoneRecompute([ar.departement], 'PUBLICATION AR');
+    }
     void this.checkModifications(ar, toReturn, currentUser, true).catch(
       (error) =>
         this.logger.error('ERREUR NOTIFICATION MODIFICATION AR', error),

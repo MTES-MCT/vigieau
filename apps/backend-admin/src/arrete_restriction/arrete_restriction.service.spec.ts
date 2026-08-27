@@ -181,7 +181,9 @@ function createHarness(
   jest
     .spyOn(service, 'enqueueCurrentZoneRecomputeWithManager')
     .mockResolvedValue(undefined);
-  jest.spyOn(service, 'recordPublicMutation').mockResolvedValue('43');
+  const recordPublicMutation = jest
+    .spyOn(service, 'recordPublicMutation')
+    .mockResolvedValue('43');
   jest.spyOn(service as any, 'checkModifications').mockResolvedValue(undefined);
   jest.spyOn(service, 'canUpdateArreteRestriction').mockResolvedValue(true);
   const checkBeforePublish = jest
@@ -197,6 +199,7 @@ function createHarness(
     manager,
     repository,
     requestCurrentZoneRecompute,
+    recordPublicMutation,
     restrictionService,
     service,
     transactionRepository,
@@ -384,6 +387,59 @@ describe('ArreteRestrictionService.publish', () => {
       }),
     );
     expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+    expect(harness.requestCurrentZoneRecompute).not.toHaveBeenCalled();
+  });
+
+  it('records a changed legal end without invalidating an unchanged effective period', async () => {
+    const framework = {
+      id: 30697,
+      dateFin: '2026-08-10',
+      statut: 'publie',
+    };
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-10',
+        dateFinSaisie: '2026-08-20',
+        dateFinCalculee: true,
+        dateFinSaisieConnue: true,
+        statut: 'a_venir',
+        arretesCadre: [framework],
+      },
+      currentOverrides: {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-31',
+        dateFinSaisie: null,
+        dateFinCalculee: false,
+        dateFinSaisieConnue: true,
+        statut: 'a_venir',
+        arretesCadre: [framework],
+      },
+    });
+
+    await harness.service.publish(
+      37577,
+      null,
+      {
+        dateDebut: '2026-08-05',
+        dateFin: '2026-08-31',
+        dateSignature: null,
+      },
+      currentUser,
+    );
+
+    expect(harness.manager.query).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).toHaveBeenCalledWith(
+      harness.manager,
+      [53],
+      'PUBLICATION AR',
+    );
+    expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledWith(
+      [harness.initial.departement],
+      'PUBLICATION AR',
+    );
   });
 
   it('replaces a PDF through an immutable key without breaking old snapshots', async () => {
