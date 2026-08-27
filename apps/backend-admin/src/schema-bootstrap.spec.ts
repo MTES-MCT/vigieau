@@ -56,6 +56,9 @@ describe('bootstrapSchema', () => {
     ]);
     expect(dataSource.synchronize).toHaveBeenCalledTimes(1);
     expect(dataSource.runMigrations).toHaveBeenCalledTimes(1);
+    expect(dataSource.runMigrations).toHaveBeenCalledWith({
+      transaction: 'each',
+    });
     expect(queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
@@ -74,6 +77,9 @@ describe('bootstrapSchema', () => {
     ]);
     expect(dataSource.synchronize).not.toHaveBeenCalled();
     expect(dataSource.runMigrations).toHaveBeenCalledTimes(1);
+    expect(dataSource.runMigrations).toHaveBeenCalledWith({
+      transaction: 'each',
+    });
     expect(queryRunner.release).toHaveBeenCalledTimes(1);
   });
 });

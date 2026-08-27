@@ -197,7 +197,9 @@ export interface HistoricBackfillBenchmarkPreflightClient extends QueryExecutor 
 
 export interface HistoricBackfillBenchmarkMigrationRunner extends QueryExecutor {
   initialize(): Promise<unknown>;
-  runMigrations(): Promise<Array<{ name?: string }>>;
+  runMigrations(options?: {
+    transaction?: 'all' | 'none' | 'each';
+  }): Promise<Array<{ name?: string }>>;
   destroy(): Promise<void>;
 }
 
@@ -625,7 +627,7 @@ export async function runHistoricBackfillCloneMigrations(
       await readHistoricBackfillBenchmarkSentinelNonces(runner),
       environment.sentinelNonce,
     );
-    const migrations = await runner.runMigrations();
+    const migrations = await runner.runMigrations({ transaction: 'each' });
     assertHistoricBackfillBenchmarkConnectedDatabase(
       await readHistoricBackfillBenchmarkDatabaseName(runner),
       environment.allowedDatabaseName,
