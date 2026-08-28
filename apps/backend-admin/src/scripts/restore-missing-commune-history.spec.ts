@@ -381,6 +381,18 @@ describePostgres('restore missing history PostgreSQL merge', () => {
       },
     ];
 
+    const [inspection] = await database.query(VALIDATE_TARGET_BATCH_SQL, [
+      JSON.stringify(source),
+    ]);
+    expect(inspection).toMatchObject({
+      sourceCommuneCount: 1,
+      targetCommuneCount: 1,
+      changedCommuneCount: 1,
+      missingDayCount: 2,
+      missingValueCount: 2,
+      invalidTargetCount: 0,
+    });
+
     const [first] = await database.query(TARGET_BATCH_SQL, [
       JSON.stringify(source),
       true,
@@ -428,6 +440,7 @@ describePostgres('restore missing history PostgreSQL merge', () => {
     expect(validation).toMatchObject({
       sourceCommuneCount: 1,
       targetCommuneCount: 1,
+      changedCommuneCount: 0,
       missingDayCount: 0,
       missingValueCount: 0,
       invalidTargetCount: 0,

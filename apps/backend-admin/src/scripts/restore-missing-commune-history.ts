@@ -72,6 +72,7 @@ interface TargetBatchResult {
 interface TargetValidationResult {
   sourceCommuneCount: number | string;
   targetCommuneCount: number | string;
+  changedCommuneCount: number | string;
   missingDayCount: number | string;
   missingValueCount: number | string;
   invalidTargetCount: number | string;
@@ -886,6 +887,9 @@ export const VALIDATE_TARGET_BATCH_SQL = `
   SELECT
     (SELECT COUNT(*) FROM source_communes)::integer AS "sourceCommuneCount",
     (SELECT COUNT(*) FROM target_statistics)::integer AS "targetCommuneCount",
+    (SELECT COUNT(DISTINCT code) FROM missing
+      WHERE "missingSOU" OR "missingSUP" OR "missingAEP")::integer
+      AS "changedCommuneCount",
     (SELECT COUNT(*) FROM missing
       WHERE "missingSOU" OR "missingSUP" OR "missingAEP")::integer
       AS "missingDayCount",
@@ -1105,9 +1109,21 @@ async function inspectOrApplyTargetBatch(
 ): Promise<TargetBatchResult> {
   return withSnapshotLock(target, options, async (runner) => {
     await assertExpectedContext(runner, expectedContext, options.apply);
+    if (!options.apply) {
+      const inspected = await validateTargetBatch(runner, rows, false);
+      return {
+        sourceCommuneCount: inspected.sourceCommuneCount,
+        targetCommuneCount: inspected.targetCommuneCount,
+        changedCommuneCount: inspected.changedCommuneCount,
+        restoredDayCount: inspected.missingDayCount,
+        restoredValueCount: inspected.missingValueCount,
+        affectedCommuneCount: 0,
+        invalidTargetCount: inspected.invalidTargetCount,
+      };
+    }
     const [result] = (await runner.query(TARGET_BATCH_SQL, [
       JSON.stringify(rows),
-      options.apply,
+      true,
     ])) as TargetBatchResult[];
     if (!result) throw new Error('Repair batch returned no result');
     const sourceCommunes = databaseCount(
@@ -1138,10 +1154,10 @@ async function inspectOrApplyTargetBatch(
       result.affectedCommuneCount,
       'affected commune count',
     );
-    if (options.apply && affected !== changed) {
+    if (affected !== changed) {
       throw new Error(`Repair batch write mismatch: ${affected}/${changed}`);
     }
-    if (options.apply) await validateTargetBatch(runner, rows, true);
+    await validateTargetBatch(runner, rows, true);
     return result;
   });
 }
@@ -1341,7 +1357,7 @@ export async function main(): Promise<void> {
   );
   const target = standaloneDataSource(
     requiredEnvironment(process.env, 'REPAIR_TARGET_DATABASE_URL'),
-    false,
+    !options.apply,
   );
   try {
     await source.initialize();
