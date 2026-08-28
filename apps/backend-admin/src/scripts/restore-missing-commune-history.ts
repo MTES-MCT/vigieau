@@ -14,9 +14,10 @@ const SEVERITIES = new Set([
 
 type Severity = 'vigilance' | 'alerte' | 'alerte_renforcee' | 'crise';
 
-export interface SparseSourceDay {
+export interface SparseSourceRun {
   code: string;
-  date: string;
+  startDate: string;
+  endDate: string;
   SOU: Severity | null;
   SUP: Severity | null;
   AEP: Severity | null;
@@ -56,7 +57,7 @@ export interface RepairPublicationContext {
 interface SourceBatch {
   cursor: string;
   communeCount: number;
-  rows: SparseSourceDay[];
+  runs: SparseSourceRun[];
 }
 
 interface TargetBatchResult {
@@ -383,40 +384,65 @@ function normalizeSeverity(
   return value as Severity;
 }
 
-export function validateSparseSourceRows(
+export function validateSparseSourceRuns(
   rows: Array<Record<string, unknown>>,
-): SparseSourceDay[] {
-  const seen = new Set<string>();
-  return rows.map((row) => {
+): SparseSourceRun[] {
+  const normalized = rows.map((row) => {
     const code = typeof row.code === 'string' ? row.code : '';
-    const date = assertCivilDate(
-      `source restriction date for ${code || 'unknown commune'}`,
-      typeof row.date === 'string' ? row.date : '',
+    const startDate = assertCivilDate(
+      `source restriction start date for ${code || 'unknown commune'}`,
+      typeof row.startDate === 'string' ? row.startDate : '',
+    );
+    const endDate = assertCivilDate(
+      `source restriction end date for ${code || 'unknown commune'}`,
+      typeof row.endDate === 'string' ? row.endDate : '',
     );
     if (!/^[0-9A-Z]{5}$/.test(code)) {
       throw new Error(`Invalid source commune code ${code}`);
     }
-    const normalized: SparseSourceDay = {
+    if (endDate < startDate) {
+      throw new Error(
+        `Invalid source restriction range ${code}/${startDate}/${endDate}`,
+      );
+    }
+    const run: SparseSourceRun = {
       code,
-      date,
-      SOU: normalizeSeverity(row.SOU, code, date, 'SOU'),
-      SUP: normalizeSeverity(row.SUP, code, date, 'SUP'),
-      AEP: normalizeSeverity(row.AEP, code, date, 'AEP'),
+      startDate,
+      endDate,
+      SOU: normalizeSeverity(row.SOU, code, startDate, 'SOU'),
+      SUP: normalizeSeverity(row.SUP, code, startDate, 'SUP'),
+      AEP: normalizeSeverity(row.AEP, code, startDate, 'AEP'),
     };
-    if (
-      normalized.SOU === null &&
-      normalized.SUP === null &&
-      normalized.AEP === null
-    ) {
-      throw new Error(`Empty source restriction for ${code}/${date}`);
+    if (run.SOU === null && run.SUP === null && run.AEP === null) {
+      throw new Error(
+        `Empty source restriction for ${code}/${startDate}/${endDate}`,
+      );
     }
-    const key = `${code}/${date}`;
-    if (seen.has(key)) {
-      throw new Error(`Duplicate source restriction ${key}`);
-    }
-    seen.add(key);
-    return normalized;
+    return run;
   });
+
+  const runsByCode = new Map<string, SparseSourceRun[]>();
+  for (const run of normalized) {
+    const communeRuns = runsByCode.get(run.code) ?? [];
+    communeRuns.push(run);
+    runsByCode.set(run.code, communeRuns);
+  }
+  for (const [code, communeRuns] of runsByCode) {
+    const sorted = [...communeRuns].sort(
+      (left, right) =>
+        left.startDate.localeCompare(right.startDate) ||
+        left.endDate.localeCompare(right.endDate),
+    );
+    for (let index = 1; index < sorted.length; index += 1) {
+      if (sorted[index].startDate <= sorted[index - 1].endDate) {
+        throw new Error(
+          `Overlapping source restriction runs for ${code}: ${sorted[index - 1].startDate}/${sorted[index - 1].endDate} and ${sorted[index].startDate}/${sorted[index].endDate}`,
+        );
+      }
+    }
+  }
+
+  return normalized;
 }
 
 export const SOURCE_BATCH_SQL = `
@@ -446,28 +472,49 @@ export const SOURCE_BATCH_SQL = `
       )
     ORDER BY commune.code
     LIMIT $3::integer
+  ), source_days AS MATERIALIZED (
+    SELECT
+      batch_communes.code,
+      restriction.ordinality,
+      (restriction.value ->> 'date')::date AS date,
+      restriction.value ->> 'SOU' AS "SOU",
+      restriction.value ->> 'SUP' AS "SUP",
+      restriction.value ->> 'AEP' AS "AEP"
+    FROM batch_communes
+    CROSS JOIN LATERAL jsonb_array_elements(
+      batch_communes.restrictions
+    ) WITH ORDINALITY AS restriction(value, ordinality)
+    WHERE CASE
+      WHEN restriction.value ->> 'date' ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        THEN (restriction.value ->> 'date')::date
+      ELSE NULL
+    END <= $2::date
+      AND (
+        restriction.value ->> 'SOU' IS NOT NULL
+        OR restriction.value ->> 'SUP' IS NOT NULL
+        OR restriction.value ->> 'AEP' IS NOT NULL
+      )
+  ), numbered_days AS MATERIALIZED (
+    SELECT
+      source_days.*,
+      date - (
+        ROW_NUMBER() OVER (
+          PARTITION BY code, "SOU", "SUP", "AEP"
+          ORDER BY date, ordinality
+        )
+      )::integer AS "runKey"
+    FROM source_days
   )
   SELECT
-    batch_communes.code,
-    restriction.value ->> 'date' AS date,
-    restriction.value ->> 'SOU' AS "SOU",
-    restriction.value ->> 'SUP' AS "SUP",
-    restriction.value ->> 'AEP' AS "AEP"
-  FROM batch_communes
-  CROSS JOIN LATERAL jsonb_array_elements(
-    batch_communes.restrictions
-  ) AS restriction(value)
-  WHERE CASE
-    WHEN restriction.value ->> 'date' ~ '^\\d{4}-\\d{2}-\\d{2}$'
-      THEN (restriction.value ->> 'date')::date
-    ELSE NULL
-  END <= $2::date
-    AND (
-      restriction.value ->> 'SOU' IS NOT NULL
-      OR restriction.value ->> 'SUP' IS NOT NULL
-      OR restriction.value ->> 'AEP' IS NOT NULL
-    )
-  ORDER BY batch_communes.code, restriction.value ->> 'date'
+    code,
+    MIN(date)::text AS "startDate",
+    MAX(date)::text AS "endDate",
+    "SOU",
+    "SUP",
+    "AEP"
+  FROM numbered_days
+  GROUP BY code, "runKey", "SOU", "SUP", "AEP"
+  ORDER BY code, MIN(date)
 `;
 
 export const REPAIR_PUBLICATION_CONTEXT_SQL = `
@@ -545,16 +592,37 @@ export const REPAIR_CURRENT_PRIORITY_SQL = `
   ) AS "priorityActive"
 `;
 
+export const SOURCE_SESSION_SAFETY_SQL = `
+  SELECT
+    current_setting('default_transaction_read_only') AS "readOnly",
+    current_setting('enable_seqscan') AS "sequentialScan",
+    current_setting('enable_bitmapscan') AS "bitmapScan"
+`;
+
 export const TARGET_BATCH_SQL = `
-  WITH source_input AS MATERIALIZED (
-    SELECT code, date, "SOU", "SUP", "AEP"
+  WITH source_runs AS MATERIALIZED (
+    SELECT code, "startDate", "endDate", "SOU", "SUP", "AEP"
     FROM jsonb_to_recordset($1::jsonb) AS source(
       code text,
-      date text,
+      "startDate" text,
+      "endDate" text,
       "SOU" text,
       "SUP" text,
       "AEP" text
     )
+  ), source_input AS MATERIALIZED (
+    SELECT
+      source.code,
+      day.value::date::text AS date,
+      source."SOU",
+      source."SUP",
+      source."AEP"
+    FROM source_runs source
+    CROSS JOIN LATERAL generate_series(
+      source."startDate"::date,
+      source."endDate"::date,
+      '1 day'::interval
+    ) AS day(value)
   ), source_communes AS MATERIALIZED (
     SELECT DISTINCT code FROM source_input
   ), target_statistics AS MATERIALIZED (
@@ -822,15 +890,29 @@ export const TARGET_BATCH_SQL = `
 `;
 
 export const VALIDATE_TARGET_BATCH_SQL = `
-  WITH source_input AS MATERIALIZED (
-    SELECT code, date, "SOU", "SUP", "AEP"
+  WITH source_runs AS MATERIALIZED (
+    SELECT code, "startDate", "endDate", "SOU", "SUP", "AEP"
     FROM jsonb_to_recordset($1::jsonb) AS source(
       code text,
-      date text,
+      "startDate" text,
+      "endDate" text,
       "SOU" text,
       "SUP" text,
       "AEP" text
     )
+  ), source_input AS MATERIALIZED (
+    SELECT
+      source.code,
+      day.value::date::text AS date,
+      source."SOU",
+      source."SUP",
+      source."AEP"
+    FROM source_runs source
+    CROSS JOIN LATERAL generate_series(
+      source."startDate"::date,
+      source."endDate"::date,
+      '1 day'::interval
+    ) AS day(value)
   ), source_communes AS MATERIALIZED (
     SELECT DISTINCT code FROM source_input
   ), target_statistics AS MATERIALIZED (
@@ -930,12 +1012,20 @@ async function assertDatabaseName(
   }
 }
 
-async function assertSourceReadOnly(source: DataSource): Promise<void> {
-  const [row] = (await source.query(
-    'SHOW default_transaction_read_only',
-  )) as Array<{ default_transaction_read_only: string }>;
-  if (row?.default_transaction_read_only !== 'on') {
-    throw new Error('Source database connection is not read-only');
+async function assertSourceSessionSafety(source: DataSource): Promise<void> {
+  const [row] = (await source.query(SOURCE_SESSION_SAFETY_SQL)) as Array<{
+    readOnly: string;
+    sequentialScan: string;
+    bitmapScan: string;
+  }>;
+  if (
+    row?.readOnly !== 'on' ||
+    row.sequentialScan !== 'off' ||
+    row.bitmapScan !== 'off'
+  ) {
+    throw new Error(
+      'Source database connection must be read-only with sequential and bitmap scans disabled',
+    );
   }
 }
 
@@ -1054,22 +1144,22 @@ async function readSourceBatch(
     options.communeCodes,
   ])) as Array<Record<string, unknown>>;
   if (rawRows.length === 0) return null;
-  const rows = validateSparseSourceRows(rawRows);
-  const codes = [...new Set(rows.map((row) => row.code))];
+  const runs = validateSparseSourceRuns(rawRows);
+  const codes = [...new Set(runs.map((run) => run.code))];
   return {
     cursor: codes.at(-1)!,
     communeCount: codes.length,
-    rows,
+    runs,
   };
 }
 
 async function validateTargetBatch(
   runner: QueryRunner,
-  rows: SparseSourceDay[],
+  runs: SparseSourceRun[],
   requireComplete: boolean,
 ): Promise<TargetValidationResult> {
   const [result] = (await runner.query(VALIDATE_TARGET_BATCH_SQL, [
-    JSON.stringify(rows),
+    JSON.stringify(runs),
   ])) as TargetValidationResult[];
   if (!result) throw new Error('Repair validation returned no result');
   const sourceCommunes = databaseCount(
@@ -1103,14 +1193,14 @@ async function validateTargetBatch(
 
 async function inspectOrApplyTargetBatch(
   target: DataSource,
-  rows: SparseSourceDay[],
+  runs: SparseSourceRun[],
   expectedContext: RepairPublicationContext,
   options: RestoreMissingHistoryOptions,
 ): Promise<TargetBatchResult> {
   return withSnapshotLock(target, options, async (runner) => {
     await assertExpectedContext(runner, expectedContext, options.apply);
     if (!options.apply) {
-      const inspected = await validateTargetBatch(runner, rows, false);
+      const inspected = await validateTargetBatch(runner, runs, false);
       return {
         sourceCommuneCount: inspected.sourceCommuneCount,
         targetCommuneCount: inspected.targetCommuneCount,
@@ -1122,7 +1212,7 @@ async function inspectOrApplyTargetBatch(
       };
     }
     const [result] = (await runner.query(TARGET_BATCH_SQL, [
-      JSON.stringify(rows),
+      JSON.stringify(runs),
       true,
     ])) as TargetBatchResult[];
     if (!result) throw new Error('Repair batch returned no result');
@@ -1157,7 +1247,7 @@ async function inspectOrApplyTargetBatch(
     if (affected !== changed) {
       throw new Error(`Repair batch write mismatch: ${affected}/${changed}`);
     }
-    await validateTargetBatch(runner, rows, true);
+    await validateTargetBatch(runner, runs, true);
     return result;
   });
 }
@@ -1176,7 +1266,7 @@ async function finalValidation(
     cursor = batch.cursor;
     await withSnapshotLock(target, options, async (runner) => {
       await assertExpectedContext(runner, expectedContext, options.apply);
-      await validateTargetBatch(runner, batch.rows, true);
+      await validateTargetBatch(runner, batch.runs, true);
     });
     validatedCommunes += batch.communeCount;
   }
@@ -1218,7 +1308,7 @@ export async function restoreMissingCommuneHistory(
 ): Promise<RestoreMissingHistorySummary> {
   await assertDatabaseName(source, options.expectedSourceDatabase, 'Source');
   await assertDatabaseName(target, options.expectedTargetDatabase, 'Target');
-  await assertSourceReadOnly(source);
+  await assertSourceSessionSafety(source);
 
   const expectedContext = await withSnapshotLock(target, options, (runner) =>
     publicationContext(runner, options.apply),
@@ -1252,7 +1342,7 @@ export async function restoreMissingCommuneHistory(
     cursor = batch.cursor;
     const result = await inspectOrApplyTargetBatch(
       target,
-      batch.rows,
+      batch.runs,
       expectedContext,
       options,
     );
@@ -1335,7 +1425,17 @@ function databaseSslEnabled(url: string): boolean {
 export function standaloneDataSource(
   url: string,
   readOnly: boolean,
+  sourceQueryPlannerGuard = false,
 ): DataSource {
+  if (sourceQueryPlannerGuard && !readOnly) {
+    throw new Error(
+      'Source query planner guard requires a read-only connection',
+    );
+  }
+  const parsedUrl = new URL(url);
+  if (sourceQueryPlannerGuard && parsedUrl.searchParams.has('options')) {
+    throw new Error('Source database URL must not override session options');
+  }
   const sslEnabled = databaseSslEnabled(url);
   return new DataSource({
     type: 'postgres',
@@ -1343,7 +1443,15 @@ export function standaloneDataSource(
     ssl: sslEnabled,
     extra: {
       max: 1,
-      ...(readOnly ? { options: '-c default_transaction_read_only=on' } : {}),
+      ...(readOnly
+        ? {
+            options: `-c default_transaction_read_only=on${
+              sourceQueryPlannerGuard
+                ? ' -c enable_seqscan=off -c enable_bitmapscan=off'
+                : ''
+            }`,
+          }
+        : {}),
       ...(sslEnabled ? { ssl: { rejectUnauthorized: false } } : {}),
     },
   });
@@ -1353,6 +1461,7 @@ export async function main(): Promise<void> {
   const options = parseRestoreMissingHistoryOptions();
   const source = standaloneDataSource(
     requiredEnvironment(process.env, 'REPAIR_SOURCE_DATABASE_URL'),
+    true,
     true,
   );
   const target = standaloneDataSource(

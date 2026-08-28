@@ -8,10 +8,11 @@ import {
   REPAIR_PUBLICATION_CONTEXT_SQL,
   RepairPublicationContext,
   SOURCE_BATCH_SQL,
+  SOURCE_SESSION_SAFETY_SQL,
   standaloneDataSource,
   TARGET_BATCH_SQL,
   VALIDATE_TARGET_BATCH_SQL,
-  validateSparseSourceRows,
+  validateSparseSourceRuns,
 } from './restore-missing-commune-history';
 
 const publicationContext: RepairPublicationContext = {
@@ -174,27 +175,56 @@ describe('restore-missing-commune-history safeguards', () => {
     const source = standaloneDataSource(
       'postgres://user:pass@localhost/source',
       true,
+      true,
     );
     const target = standaloneDataSource(
       'postgres://user:pass@localhost/target?sslmode=disable',
-      false,
+      true,
     );
     expect(source.options.extra).toMatchObject({
       max: 1,
-      options: '-c default_transaction_read_only=on',
+      options:
+        '-c default_transaction_read_only=on -c enable_seqscan=off -c enable_bitmapscan=off',
     });
     expect(source.options).toMatchObject({ ssl: false });
-    expect(target.options.extra).toEqual({ max: 1 });
+    expect(target.options.extra).toEqual({
+      max: 1,
+      options: '-c default_transaction_read_only=on',
+    });
+    expect(() =>
+      standaloneDataSource(
+        'postgres://user:pass@localhost/source',
+        false,
+        true,
+      ),
+    ).toThrow('Source query planner guard requires a read-only connection');
+    expect(() =>
+      standaloneDataSource(
+        'postgres://user:pass@localhost/source?options=-c%20enable_seqscan%3Don',
+        true,
+        true,
+      ),
+    ).toThrow('Source database URL must not override session options');
+    expect(SOURCE_SESSION_SAFETY_SQL).toContain(
+      "current_setting('default_transaction_read_only')",
+    );
+    expect(SOURCE_SESSION_SAFETY_SQL).toContain(
+      "current_setting('enable_seqscan')",
+    );
+    expect(SOURCE_SESSION_SAFETY_SQL).toContain(
+      "current_setting('enable_bitmapscan')",
+    );
   });
 });
 
 describe('sparse repair input and monotone SQL', () => {
-  it('accepts only unique non-null source days with known severities', () => {
+  it('accepts only disjoint non-null source runs with known severities', () => {
     expect(
-      validateSparseSourceRows([
+      validateSparseSourceRuns([
         {
           code: '77132',
-          date: '2021-01-01',
+          startDate: '2021-01-01',
+          endDate: '2021-01-03',
           SOU: null,
           SUP: 'vigilance',
           AEP: null,
@@ -203,17 +233,19 @@ describe('sparse repair input and monotone SQL', () => {
     ).toEqual([
       {
         code: '77132',
-        date: '2021-01-01',
+        startDate: '2021-01-01',
+        endDate: '2021-01-03',
         SOU: null,
         SUP: 'vigilance',
         AEP: null,
       },
     ]);
     expect(() =>
-      validateSparseSourceRows([
+      validateSparseSourceRuns([
         {
           code: '77132',
-          date: '2021-01-01',
+          startDate: '2021-01-01',
+          endDate: '2021-01-01',
           SOU: null,
           SUP: null,
           AEP: null,
@@ -221,10 +253,11 @@ describe('sparse repair input and monotone SQL', () => {
       ]),
     ).toThrow('Empty source restriction');
     expect(() =>
-      validateSparseSourceRows([
+      validateSparseSourceRuns([
         {
           code: '77132',
-          date: '2021-01-01',
+          startDate: '2021-01-01',
+          endDate: '2021-01-01',
           SOU: null,
           SUP: 'unknown',
           AEP: null,
@@ -232,16 +265,50 @@ describe('sparse repair input and monotone SQL', () => {
       ]),
     ).toThrow('Invalid source severity');
     expect(
-      validateSparseSourceRows([
+      validateSparseSourceRuns([
         {
           code: '2A004',
-          date: '2021-01-01',
+          startDate: '2021-01-01',
+          endDate: '2021-01-01',
           SOU: 'alerte',
           SUP: null,
           AEP: null,
         },
       ])[0].code,
     ).toBe('2A004');
+
+    expect(() =>
+      validateSparseSourceRuns([
+        {
+          code: '77132',
+          startDate: '2021-01-02',
+          endDate: '2021-01-01',
+          SOU: null,
+          SUP: 'vigilance',
+          AEP: null,
+        },
+      ]),
+    ).toThrow('Invalid source restriction range');
+    expect(() =>
+      validateSparseSourceRuns([
+        {
+          code: '77132',
+          startDate: '2021-01-01',
+          endDate: '2021-01-03',
+          SOU: null,
+          SUP: 'vigilance',
+          AEP: null,
+        },
+        {
+          code: '77132',
+          startDate: '2021-01-03',
+          endDate: '2021-01-04',
+          SOU: null,
+          SUP: 'alerte',
+          AEP: null,
+        },
+      ]),
+    ).toThrow('Overlapping source restriction runs');
   });
 
   it('keeps full JSON inside PostgreSQL and patches only null target fields', () => {
@@ -253,6 +320,9 @@ describe('sparse repair input and monotone SQL', () => {
     expect(SOURCE_BATCH_SQL).toContain(
       'CROSS JOIN LATERAL jsonb_array_elements',
     );
+    expect(SOURCE_BATCH_SQL).toContain('ROW_NUMBER() OVER');
+    expect(SOURCE_BATCH_SQL).toContain('MIN(date)::text AS "startDate"');
+    expect(TARGET_BATCH_SQL).toContain('CROSS JOIN LATERAL generate_series');
     expect(TARGET_BATCH_SQL).toContain('day.value\n        || CASE');
     expect(TARGET_BATCH_SQL).toContain(
       'day.value ->> \'SUP\' IS NULL AS "fillSUP"',
@@ -360,21 +430,16 @@ describePostgres('restore missing history PostgreSQL merge', () => {
     const source = [
       {
         code: '77132',
-        date: '2021-01-01',
+        startDate: '2021-01-01',
+        endDate: '2021-01-02',
         SOU: null,
         SUP: 'vigilance',
         AEP: null,
       },
       {
         code: '77132',
-        date: '2021-01-02',
-        SOU: null,
-        SUP: 'alerte',
-        AEP: null,
-      },
-      {
-        code: '77132',
-        date: '2021-01-03',
+        startDate: '2021-01-03',
+        endDate: '2021-01-03',
         SOU: null,
         SUP: 'crise',
         AEP: null,
@@ -432,6 +497,31 @@ describePostgres('restore missing history PostgreSQL merge', () => {
     ]);
     expect(row.restrictionsByMonth).toEqual([
       { date: '2021-01', ponderation: 8.5, label: 'keep' },
+    ]);
+
+    const sourceRuns = await database.query(SOURCE_BATCH_SQL, [
+      '',
+      '2021-01-03',
+      20,
+      null,
+    ]);
+    expect(sourceRuns).toEqual([
+      {
+        code: '77132',
+        startDate: '2021-01-01',
+        endDate: '2021-01-01',
+        SOU: null,
+        SUP: 'vigilance',
+        AEP: null,
+      },
+      {
+        code: '77132',
+        startDate: '2021-01-02',
+        endDate: '2021-01-03',
+        SOU: null,
+        SUP: 'crise',
+        AEP: null,
+      },
     ]);
 
     const [validation] = await database.query(VALIDATE_TARGET_BATCH_SQL, [
