@@ -10,6 +10,7 @@ import {
   getScheduledCivilDate,
   NATIONAL_COMPUTE_START_HOUR,
 } from '../core/scheduling/daily-job-schedule';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
 
 const HISTORIC_LOCK_TIMEOUT_MS_DEFAULT = 60 * 60 * 1000;
@@ -565,6 +566,7 @@ export async function runRecomputeCommuneStatistics(
   dependencies: RecomputeDependencies,
   options: RecomputeOptions,
 ): Promise<void> {
+  assertHistoricMutableGeometryReplayEnabled();
   assertNationalScopeIsConfirmed(options);
   if (!options.recomputeMonths) {
     throw new Error('Statistic recomputation requires RECOMPUTE_MONTHS=true');

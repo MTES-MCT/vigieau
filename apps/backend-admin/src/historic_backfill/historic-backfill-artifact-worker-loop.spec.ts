@@ -1,5 +1,6 @@
 import { HistoricBackfillArtifactYieldError } from './historic-backfill-artifact-builder.service';
 import { HistoricBackfillArtifactWorkerLoop } from './historic-backfill-artifact-worker-loop';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 
 describe('HistoricBackfillArtifactWorkerLoop', () => {
   const lease = {
@@ -13,6 +14,7 @@ describe('HistoricBackfillArtifactWorkerLoop', () => {
   };
   const environment = {
     HISTORIC_BACKFILL_ENABLED: 'true',
+    [HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV]: 'true',
     HISTORIC_BACKFILL_WORKER_CONCURRENCY: '1',
     HISTORIC_BACKFILL_ARTIFACT_CONCURRENCY: '1',
     HISTORIC_BACKFILL_LEASE_SECONDS: '60',

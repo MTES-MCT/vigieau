@@ -61,6 +61,7 @@ import {
   getScheduledCivilDate,
   NATIONAL_COMPUTE_START_HOUR,
 } from '../core/scheduling/daily-job-schedule';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 
 export const ZONE_COMPUTE_WORKER_TIMEOUT_MS = 60 * 60 * 1000;
 const ZONE_PUBLICATION_WATCHDOG_INTERVAL_MS = 30 * 1000;
@@ -1818,6 +1819,7 @@ DELETE FROM zone_alerte_computed
     assertBoundary?: HistoricBoundaryAssertion,
     expectedStatisticPublication?: HistoricStatisticPublicationTarget,
   ) {
+    assertHistoricMutableGeometryReplayEnabled();
     let historicSourceRevision: string | undefined;
     let historicDirtyFromForRetry: string | undefined;
     try {
@@ -2060,6 +2062,7 @@ DELETE FROM zone_alerte_computed
     requiredThrough: string,
     expectedSourceRevision: string,
   ): Promise<HistoricStatisticPreparation> {
+    assertHistoricMutableGeometryReplayEnabled();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(requiredThrough)) {
       throw new Error(`Invalid historic catch-up date: ${requiredThrough}`);
     }
@@ -2301,6 +2304,7 @@ DELETE FROM zone_alerte_computed
     requiredThrough: string,
     expectedSourceRevision: string,
   ): Promise<string[]> {
+    assertHistoricMutableGeometryReplayEnabled();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(requiredThrough)) {
       throw new Error(`Invalid historic recovery date: ${requiredThrough}`);
     }
@@ -2921,6 +2925,7 @@ DELETE FROM zone_alerte_computed
     assertBoundary?: HistoricBoundaryAssertion,
     expectedStatisticPublication?: HistoricStatisticPublicationTarget,
   ): Promise<HistoricCursorState> {
+    assertHistoricMutableGeometryReplayEnabled();
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     let locked = false;

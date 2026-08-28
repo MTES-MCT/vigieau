@@ -17,6 +17,9 @@ import {
   withHistoricBackfillDepartmentLock,
 } from './historic-backfill-task-handler';
 
+const previousHistoricMutableGeometryReplay =
+  process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED;
+
 const claim = (): HistoricBackfillTaskClaim => ({
   runId: '00000000-0000-4000-8000-000000000001',
   departementId: 65,
@@ -366,6 +369,34 @@ describe('historic backfill department lock', () => {
 });
 
 describe('HistoricBackfillTaskHandlerService', () => {
+  beforeEach(() => {
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED = 'true';
+  });
+
+  afterAll(() => {
+    if (previousHistoricMutableGeometryReplay === undefined) {
+      delete process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED;
+    } else {
+      process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED =
+        previousHistoricMutableGeometryReplay;
+    }
+  });
+
+  it('refuses a task before database or artifact access by default', async () => {
+    const harness = createHarness();
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED = 'false';
+
+    await expect(
+      harness.service.handle(claim(), harness.context),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    expect(harness.dataSource.query).not.toHaveBeenCalled();
+    expect(
+      harness.historicZoneService.computeZonesForDate,
+    ).not.toHaveBeenCalled();
+    expect(harness.payloadBuilder.build).not.toHaveBeenCalled();
+    expect(harness.mapArtifactBuilder.buildAndUpload).not.toHaveBeenCalled();
+  });
+
   it('computes stable segments sequentially and stages clipped statistic intervals', async () => {
     const harness = createHarness({
       boundaries: ['2024-04-29', '2024-05-01', '2024-05-10'],

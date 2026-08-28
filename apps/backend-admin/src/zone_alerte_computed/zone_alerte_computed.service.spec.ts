@@ -63,11 +63,14 @@ describe('ZoneAlerteComputedService', () => {
   const previousHistoricChunkDays = process.env.HISTORIC_COMPUTE_CHUNK_DAYS;
   const previousStatisticArtifactRequired =
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
+  const previousHistoricMutableGeometryReplay =
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED;
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
     process.env.HISTORIC_COMPUTE_CHUNK_DAYS = '3000';
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'false';
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED = 'true';
     jest.clearAllMocks();
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
@@ -176,6 +179,33 @@ describe('ZoneAlerteComputedService', () => {
       process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED =
         previousStatisticArtifactRequired;
     }
+    if (previousHistoricMutableGeometryReplay === undefined) {
+      delete process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED;
+    } else {
+      process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED =
+        previousHistoricMutableGeometryReplay;
+    }
+  });
+
+  it('refuses historic entrypoints before any database access by default', async () => {
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED = 'false';
+
+    await expect(service.computeHistoric()).rejects.toThrow(
+      'Historic replay from mutable geometries is disabled',
+    );
+    await expect(
+      service.computeHistoricPersistently('2026-06-22'),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    await expect(
+      service.prepareHistoricStatisticsPublication('2026-06-22', '1'),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    await expect(
+      service.recoverIncompleteHistoricSnapshots('2026-06-22', '1'),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(dataSource.query).not.toHaveBeenCalled();
+    expect(zonePublicationService.getSourceRevision).not.toHaveBeenCalled();
+    expect(configService.getConfig).not.toHaveBeenCalled();
   });
 
   it('uses a conservative historic chunk default and rejects invalid overrides', () => {
@@ -3746,6 +3776,8 @@ describe('ZoneAlerteComputedHistoricService', () => {
     process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED;
   const previousHistoricEmptyStatisticsRangeMaxDays =
     process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
+  const previousHistoricMutableGeometryReplay =
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED;
 
   beforeEach(() => {
     delete process.env.HISTORIC_DEPARTMENT_CONCURRENCY;
@@ -3753,6 +3785,7 @@ describe('ZoneAlerteComputedHistoricService', () => {
     delete process.env.HISTORIC_DEPARTMENT_CHECKPOINT_ENABLED;
     delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_ENABLED;
     delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED = 'true';
     jest.useFakeTimers().setSystemTime(new Date('2026-06-23T12:00:00Z'));
 
     statisticDepartementService = {
@@ -3920,6 +3953,31 @@ describe('ZoneAlerteComputedHistoricService', () => {
       process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS =
         previousHistoricEmptyStatisticsRangeMaxDays;
     }
+    if (previousHistoricMutableGeometryReplay === undefined) {
+      delete process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED;
+    } else {
+      process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED =
+        previousHistoricMutableGeometryReplay;
+    }
+  });
+
+  it('refuses historic map entrypoints before database access by default', async () => {
+    process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED = 'false';
+
+    await expect(service.computeHistoricMaps()).rejects.toThrow(
+      'Historic replay from mutable geometries is disabled',
+    );
+    await expect(service.computeHistoricMapsComputed()).rejects.toThrow(
+      'Historic replay from mutable geometries is disabled',
+    );
+    await expect(
+      service.computeZonesForDate(moment.utc('2026-06-22'), []),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    expect(dataSource.query).not.toHaveBeenCalled();
+    expect(zoneAlerteComputedHistoricRepository.delete).not.toHaveBeenCalled();
+    expect(
+      historicDepartmentCheckpointService.purgeStaleCheckpoints,
+    ).not.toHaveBeenCalled();
   });
 
   it('uses conservative historic acceleration defaults and validates overrides', () => {

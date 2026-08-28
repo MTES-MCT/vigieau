@@ -5,11 +5,14 @@ import {
   HistoricBackfillValidationError,
   validateHistoricBackfillRange,
 } from './historic-backfill-queue.service';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const LEASE_TOKEN = '22222222-2222-4222-8222-222222222222';
 const OUTPUT_SIGNATURE = 'a'.repeat(64);
 const NOW = new Date('2026-08-19T10:00:00.000Z');
+const previousMutableGeometryReplayEnabled =
+  process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
 
 function runRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -123,6 +126,41 @@ describe('validateHistoricBackfillRange', () => {
 });
 
 describe('HistoricBackfillQueueService', () => {
+  beforeEach(() => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
+  });
+
+  afterAll(() => {
+    if (previousMutableGeometryReplayEnabled === undefined) {
+      delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+        previousMutableGeometryReplayEnabled;
+    }
+  });
+
+  it('refuses prepare and resume before querying PostgreSQL by default', async () => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'false';
+    const dataSource = {
+      query: jest.fn(),
+      transaction: jest.fn(),
+    };
+    const service = new HistoricBackfillQueueService(dataSource as any);
+
+    await expect(
+      service.prepare({
+        mapDateFrom: '2012-01-01',
+        statisticDateFrom: '2019-01-01',
+        dateThrough: '2026-08-18',
+      }),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    await expect(service.resume(RUN_ID)).rejects.toThrow(
+      'Historic replay from mutable geometries is disabled',
+    );
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(dataSource.query).not.toHaveBeenCalled();
+  });
+
   it('prepares exactly one task per department in a serializable transaction', async () => {
     const manager = {
       query: jest.fn(async (sql: string, parameters?: unknown[]) => {

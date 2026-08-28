@@ -1,4 +1,5 @@
 import { parseDatabasePoolMax } from '../core/database-pool';
+import { isHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 
 export const HISTORIC_BACKFILL_ENABLED_ENV = 'HISTORIC_BACKFILL_ENABLED';
 export const HISTORIC_BACKFILL_ARTIFACT_ACL_ENV =
@@ -89,7 +90,9 @@ export function readHistoricBackfillWorkerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): HistoricBackfillWorkerConfig {
   const config: HistoricBackfillWorkerConfig = {
-    enabled: isHistoricBackfillEnabled(environment),
+    enabled:
+      isHistoricBackfillEnabled(environment) &&
+      isHistoricMutableGeometryReplayEnabled(environment),
     concurrency: readInteger(
       environment,
       'HISTORIC_BACKFILL_WORKER_CONCURRENCY',

@@ -14,6 +14,7 @@ import {
   isExactEmptyMultiPolygonGeometry,
   LEGACY_HISTORIC_EMPTY_GEOMETRY_ZONE_IDS,
 } from '../zone_alerte_computed/legacy-historic-empty-geometries';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 
 const STATISTIC_COMMUNE_SNAPSHOT_LOCK =
   'vigieau:statistic-commune:snapshot-computation';
@@ -542,6 +543,9 @@ export class StatisticCommuneService {
     departementCodes?: string[],
     hooks?: StatisticSnapshotHooks,
   ) {
+    if (historic === true) {
+      assertHistoricMutableGeometryReplayEnabled();
+    }
     const batchSize = parseCommuneStatisticsBatchSize(
       process.env.COMMUNE_STATISTICS_BATCH_SIZE,
     );
@@ -725,6 +729,7 @@ export class StatisticCommuneService {
     date: Date,
     options: HistoricCommuneStatisticStagingOptions,
   ): Promise<HistoricCommuneStatisticStagingResult> {
+    assertHistoricMutableGeometryReplayEnabled();
     this.validateHistoricStagingOptions(date, options);
     const batchSize = parseCommuneStatisticsBatchSize(
       process.env.COMMUNE_STATISTICS_BATCH_SIZE,
@@ -1140,6 +1145,7 @@ export class StatisticCommuneService {
     days: EmptyHistoricStatisticDay[],
     options: EmptyHistoricStatisticRangeOptions,
   ): Promise<void> {
+    assertHistoricMutableGeometryReplayEnabled();
     const maxDays = parseHistoricEmptyStatisticsRangeMaxDays();
     const dateStrings = this.validateEmptyHistoricStatisticRange(
       days,

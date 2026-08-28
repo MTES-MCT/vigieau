@@ -12,6 +12,7 @@ import {
   readHistoricBackfillFencedManifestUploadTimeout,
   readHistoricBackfillManifestUploadTimeout,
 } from './historic-backfill-map-finalizer.service';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 
 describe('HistoricBackfillMapFinalizerService', () => {
   const originalHeadConcurrency =
@@ -20,6 +21,8 @@ describe('HistoricBackfillMapFinalizerService', () => {
     process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS;
   const originalFencedManifestUploadTimeout =
     process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS;
+  const originalMutableGeometryReplayEnabled =
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
   const runId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const context = {
     id: runId,
@@ -264,6 +267,7 @@ describe('HistoricBackfillMapFinalizerService', () => {
   }
 
   beforeEach(() => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
     jest.clearAllMocks();
     delete process.env.HISTORIC_BACKFILL_ARTIFACT_HEAD_CONCURRENCY;
     delete process.env.HISTORIC_BACKFILL_MANIFEST_UPLOAD_TIMEOUT_MS;
@@ -289,6 +293,23 @@ describe('HistoricBackfillMapFinalizerService', () => {
       process.env.HISTORIC_BACKFILL_FENCED_MANIFEST_UPLOAD_TIMEOUT_MS =
         originalFencedManifestUploadTimeout;
     }
+    if (originalMutableGeometryReplayEnabled === undefined) {
+      delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+        originalMutableGeometryReplayEnabled;
+    }
+  });
+
+  it('blocks map apply before reading PostgreSQL when mutable replay is disabled', async () => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'false';
+    const { dataSource, service } = createHarness();
+
+    await expect(service.apply(runId)).rejects.toThrow(
+      'Historic replay from mutable geometries is disabled',
+    );
+    expect(dataSource.query).not.toHaveBeenCalled();
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
   });
 
   it('dry-runs without validating objects or writing the outbox', async () => {

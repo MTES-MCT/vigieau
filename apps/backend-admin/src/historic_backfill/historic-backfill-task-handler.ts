@@ -8,6 +8,7 @@ import { ZoneAlerteComputedHistoric } from '@shared/entities/zone_alerte_compute
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import moment = require('moment');
 import { DataSource, QueryRunner } from 'typeorm';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 import { DepartementService } from '../departement/departement.service';
 import {
   HistoricCommuneStatisticSegmentBatch,
@@ -582,6 +583,7 @@ export class HistoricBackfillTaskHandlerService {
     claim: HistoricBackfillTaskClaim,
     context: HistoricBackfillTaskContext,
   ): Promise<HistoricBackfillTaskOutput> {
+    assertHistoricMutableGeometryReplayEnabled();
     this.validateClaim(claim);
     await this.assertCanContinue(claim, context.signal);
     const departement = await this.loadDepartement(claim);

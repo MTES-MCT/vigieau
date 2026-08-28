@@ -5,11 +5,61 @@ import {
   runRecomputeCommuneStatistics,
   withHistoricRecomputeLock,
 } from './recompute-commune-statistics';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
+
+const previousMutableGeometryReplayEnabled =
+  process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
 
 describe('recompute-commune-statistics safeguards', () => {
+  beforeEach(() => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
+  });
+
   afterEach(() => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+  });
+
+  afterAll(() => {
+    if (previousMutableGeometryReplayEnabled === undefined) {
+      delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+        previousMutableGeometryReplayEnabled;
+    }
+  });
+
+  it('refuses recomputation before database or historic worker access by default', async () => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'false';
+    const dataSource = { query: jest.fn(), createQueryRunner: jest.fn() };
+    const findAllLight = jest.fn();
+    const computeZonesForDate = jest.fn();
+
+    await expect(
+      runRecomputeCommuneStatistics(
+        {
+          dataSource,
+          departementService: { findAllLight },
+          historicService: { computeZonesForDate },
+        } as any,
+        {
+          dates: ['2026-03-28'],
+          departementCodes: ['65'],
+          confirmNationalRecompute: false,
+          publishThrough: null,
+          publishLegacyRepair: false,
+          recomputeMonths: true,
+          sortAtEnd: true,
+          historicLockTimeoutMs: 1000,
+          historicLockRetryMs: 1,
+          maxDates: 100,
+        },
+      ),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    expect(dataSource.query).not.toHaveBeenCalled();
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(findAllLight).not.toHaveBeenCalled();
+    expect(computeZonesForDate).not.toHaveBeenCalled();
   });
 
   it('parses, validates and normalizes the maintenance options', () => {

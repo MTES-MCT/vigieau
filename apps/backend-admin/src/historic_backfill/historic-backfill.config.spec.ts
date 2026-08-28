@@ -6,6 +6,7 @@ import {
   readHistoricBackfillArtifactAcl,
   readHistoricBackfillWorkerConfig,
 } from './historic-backfill.config';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 
 describe('historic backfill worker config', () => {
   it('is strictly disabled by default', () => {
@@ -65,6 +66,7 @@ describe('historic backfill worker config', () => {
     expect(
       readHistoricBackfillWorkerConfig({
         HISTORIC_BACKFILL_ENABLED: 'true',
+        [HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV]: 'true',
         HISTORIC_BACKFILL_WORKER_CONCURRENCY: '8',
         HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY: '3',
         DATABASE_POOL_MAX: '20',
@@ -90,6 +92,14 @@ describe('historic backfill worker config', () => {
       retryMaxSeconds: 600,
       yieldDelaySeconds: 2,
     });
+  });
+
+  it('keeps workers disabled while replay would use mutable geometries', () => {
+    expect(
+      readHistoricBackfillWorkerConfig({
+        HISTORIC_BACKFILL_ENABLED: 'true',
+      }).enabled,
+    ).toBe(false);
   });
 
   it.each([

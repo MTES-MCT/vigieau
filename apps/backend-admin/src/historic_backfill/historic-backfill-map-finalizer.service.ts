@@ -6,6 +6,7 @@ import { S3Service } from '../shared/services/s3.service';
 import { HISTORIC_MAP_PUBLICATION_FENCE_LOCK } from '../zone_publication/public-mutation';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import { HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT } from './historic-backfill-queue.service';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -307,6 +308,9 @@ export class HistoricBackfillMapFinalizerService {
     apply = false,
   ): Promise<HistoricBackfillMapFinalizationResult> {
     assertUuid(runId);
+    if (apply) {
+      assertHistoricMutableGeometryReplayEnabled();
+    }
     const existingPublication = await this.findPublication(
       this.dataSource,
       runId,

@@ -4,6 +4,7 @@ import {
   HISTORIC_CATCHUP_ENABLED_ENV,
   isHistoricCatchupEnabled,
 } from './arrete_cadre.scheduler';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 import {
   BUSINESS_SCHEDULER_PROCESS_ENV,
   CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV,
@@ -179,6 +180,8 @@ describe('ArreteCadreScheduler', () => {
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
   const previousHistoricCatchupEnabled =
     process.env[HISTORIC_CATCHUP_ENABLED_ENV];
+  const previousMutableGeometryReplayEnabled =
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
   const previousCurrentZoneWorkerEnabled =
     process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
   const historicCursorState = {
@@ -198,6 +201,7 @@ describe('ArreteCadreScheduler', () => {
     process.env.ZONE_PUBLICATION_ENABLED = 'false';
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED = 'false';
     delete process.env[HISTORIC_CATCHUP_ENABLED_ENV];
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
     delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
   });
 
@@ -218,6 +222,12 @@ describe('ArreteCadreScheduler', () => {
     } else {
       process.env[HISTORIC_CATCHUP_ENABLED_ENV] =
         previousHistoricCatchupEnabled;
+    }
+    if (previousMutableGeometryReplayEnabled === undefined) {
+      delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+        previousMutableGeometryReplayEnabled;
     }
     if (previousCurrentZoneWorkerEnabled === undefined) {
       delete process.env[CURRENT_ZONE_RECOMPUTE_WORKER_ENABLED_ENV];
@@ -354,6 +364,21 @@ describe('ArreteCadreScheduler', () => {
       sourceRevision: '42',
       preferredPublicationId: 'publication-1',
     });
+  });
+
+  it('keeps the current publication running while mutable historic replay is blocked', async () => {
+    process.env[HISTORIC_CATCHUP_ENABLED_ENV] = 'true';
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'false';
+    const harness = createScheduler();
+
+    await harness.service.updateIfDue(new Date('2026-08-17T14:00:00Z'));
+
+    expect(
+      harness.arreteCadreService.updateArreteCadreStatut,
+    ).toHaveBeenCalled();
+    expect(
+      harness.arreteCadreService.catchUpHistoricComputations,
+    ).not.toHaveBeenCalled();
   });
 
   it('lets the clock enqueue once and records completion only after the dedicated worker finishes', async () => {

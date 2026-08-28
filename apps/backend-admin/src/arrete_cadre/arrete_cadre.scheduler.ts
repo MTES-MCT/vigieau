@@ -35,6 +35,7 @@ import {
   StatisticCacheReadinessService,
   type StatisticCacheReadyIdentity,
 } from '../statistic_cache/statistic_cache_readiness.service';
+import { isHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 
 interface DailyComputationContext {
   scheduledFor: string;
@@ -367,7 +368,10 @@ export class ArreteCadreScheduler implements OnApplicationBootstrap {
     current: DailyComputationContext,
     now: Date,
   ): Promise<void> {
-    if (!isHistoricCatchupEnabled()) {
+    if (
+      !isHistoricCatchupEnabled() ||
+      !isHistoricMutableGeometryReplayEnabled()
+    ) {
       return;
     }
     if (this.historicUpdateInFlight?.scheduledFor === current.scheduledFor) {

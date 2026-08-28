@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 import { shiftCivilDate } from '../core/scheduling/daily-job-schedule';
 import { getCurrentParisCivilDate } from '../shared/arrete-date-continuity';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
@@ -237,6 +238,7 @@ export class HistoricBackfillQueueService {
   async prepare(
     input: PrepareHistoricBackfillInput,
   ): Promise<HistoricBackfillRun> {
+    assertHistoricMutableGeometryReplayEnabled();
     validateHistoricBackfillRange(input);
     const runId = randomUUID();
 
@@ -1507,6 +1509,7 @@ export class HistoricBackfillQueueService {
   }
 
   async resume(runId: string): Promise<boolean> {
+    assertHistoricMutableGeometryReplayEnabled();
     assertUuid('runId', runId);
     const [result] = unwrapTypeOrmDmlReturningRows<{
       status: string;

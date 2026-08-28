@@ -1,4 +1,6 @@
 import {
+  HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_DEFAULT,
+  HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV,
   HISTORIC_BACKFILL_SHADOW_CONCURRENCY_DEFAULT,
   HISTORIC_BACKFILL_SHADOW_CONCURRENCY_MAX,
   HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_DEFAULT,
@@ -8,14 +10,32 @@ import {
   HistoricBackfillFinalizerValidationError,
   HistoricBackfillFinalizationInspection,
   HistoricDepartmentShadowResult,
+  readHistoricBackfillMinNonNullRetentionPercent,
   readHistoricBackfillShadowConcurrency,
   readHistoricBackfillShadowWorkMemMb,
 } from './historic-backfill-finalizer.service';
 import { DataSource } from 'typeorm';
 import { HISTORIC_MAP_PUBLICATION_FENCE_LOCK } from '../zone_publication/public-mutation';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const EXPECTED_DEPARTMENTS = 101;
+const SHADOW_VERSION_DIGEST = '1234567890abcdef1234567890abcdef';
+const previousMutableGeometryReplayEnabled =
+  process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+
+beforeEach(() => {
+  process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
+});
+
+afterAll(() => {
+  if (previousMutableGeometryReplayEnabled === undefined) {
+    delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+  } else {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+      previousMutableGeometryReplayEnabled;
+  }
+});
 
 function rebaseRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -114,6 +134,37 @@ function shadowRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function nonNullRetentionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    contextMatches: true,
+    expectedCommuneCount: '34935',
+    canonicalNonNullPointCount: '1000',
+    retainedCanonicalNonNullPointCount: '1000',
+    regressedCommuneCount: '0',
+    worstCommuneId: null,
+    worstCommuneCode: null,
+    worstCanonicalNonNullPointCount: null,
+    worstRetainedCanonicalNonNullPointCount: null,
+    ...overrides,
+  };
+}
+
+function shadowVersionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    contextMatches: true,
+    shadowCommuneCount: '34935',
+    shadowVersionDigest: SHADOW_VERSION_DIGEST,
+    ...overrides,
+  };
+}
+
+function shadowDepartmentRows() {
+  return Array.from({ length: EXPECTED_DEPARTMENTS }, (_, index) => ({
+    departementId: String(index + 1),
+    communeCount: String(index === 0 ? 34835 : 1),
+  }));
+}
+
 function materializationRows(
   sql: string,
   row: Record<string, unknown> = shadowRow(),
@@ -156,6 +207,7 @@ function shadowBuildPlanRow(
 
 function createRunner(options?: {
   inspection?: Record<string, unknown>;
+  nonNullRetention?: Record<string, unknown>;
   zoneLock?: boolean;
   statisticLock?: boolean;
   publicMutationFence?: boolean;
@@ -163,6 +215,7 @@ function createRunner(options?: {
   departmentWrite?: Record<string, unknown>;
   snapshotWrite?: Record<string, unknown>;
   publicationWrite?: Record<string, unknown>;
+  lockedShadowVersion?: Record<string, unknown>;
 }) {
   let statisticsPromotedAt = options?.inspection?.statisticsPromotedAt ?? null;
   const runner: any = {
@@ -196,6 +249,9 @@ function createRunner(options?: {
       }
       if (sql.includes('pg_advisory_unlock')) {
         return [{ unlocked: true }];
+      }
+      if (sql.includes('AS "shadowVersionDigest"')) {
+        return [shadowVersionRow(options?.lockedShadowVersion)];
       }
       if (sql.includes('WITH request AS MATERIALIZED')) {
         return [
@@ -265,17 +321,58 @@ function createRunner(options?: {
 function createFinalizeHarness(options?: Parameters<typeof createRunner>[0]): {
   service: HistoricBackfillFinalizerService;
   runner: ReturnType<typeof createRunner>;
-  dataSource: { query: jest.Mock; createQueryRunner: jest.Mock };
+  dataSource: {
+    query: jest.Mock;
+    transaction: jest.Mock;
+    createQueryRunner: jest.Mock;
+  };
+  preflightQuery: jest.Mock;
 } {
   const runner = createRunner(options);
+  const departments = shadowDepartmentRows();
+  const preflightQuery = jest.fn(
+    async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('AS "shadowVersionDigest"')) {
+        return [shadowVersionRow()];
+      }
+      if (
+        sql.includes('shadow."departementId" AS "departementId"') &&
+        sql.includes('GROUP BY shadow."departementId"')
+      ) {
+        return departments;
+      }
+      if (sql.includes('non_null_regressions AS MATERIALIZED')) {
+        const departementId = Number(parameters?.[1]);
+        const department = departments.find(
+          (candidate) => Number(candidate.departementId) === departementId,
+        );
+        return [
+          nonNullRetentionRow({
+            expectedCommuneCount: department?.communeCount ?? '0',
+            ...options?.nonNullRetention,
+          }),
+        ];
+      }
+      return [];
+    },
+  );
   const dataSource = {
-    query: jest.fn((...args: unknown[]) => runner.readInspection(...args)),
+    query: jest.fn((sql: string, ...args: unknown[]) =>
+      runner.readInspection(sql, ...args),
+    ),
+    transaction: jest.fn(
+      async (
+        _isolation: string,
+        operation: (manager: { query: jest.Mock }) => Promise<unknown>,
+      ) => operation({ query: preflightQuery }),
+    ),
     createQueryRunner: jest.fn(() => runner),
   };
   return {
     service: new HistoricBackfillFinalizerService(dataSource as any),
     runner,
     dataSource,
+    preflightQuery,
   };
 }
 
@@ -1162,6 +1259,42 @@ describe('historic shadow work_mem configuration', () => {
   );
 });
 
+describe('historic statistic non-null retention configuration', () => {
+  it('defaults to full retention and accepts the configured bounds', () => {
+    expect(readHistoricBackfillMinNonNullRetentionPercent({})).toBe(
+      HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_DEFAULT,
+    );
+    expect(
+      readHistoricBackfillMinNonNullRetentionPercent({
+        [HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV]: ' 1 ',
+      }),
+    ).toBe(1);
+    expect(
+      readHistoricBackfillMinNonNullRetentionPercent({
+        [HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV]: '90',
+      }),
+    ).toBe(90);
+    expect(
+      readHistoricBackfillMinNonNullRetentionPercent({
+        [HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV]: '100',
+      }),
+    ).toBe(100);
+  });
+
+  it.each(['0', '101', '-1', '1.5', '1e2', '0x5a', 'invalid'])(
+    'rejects invalid non-null retention percentage %s',
+    (value) => {
+      expect(() =>
+        readHistoricBackfillMinNonNullRetentionPercent({
+          [HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV]: value,
+        }),
+      ).toThrow(
+        'HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT must be an integer between 1 and 100',
+      );
+    },
+  );
+});
+
 describe('HistoricBackfillFinalizerService inspection', () => {
   it('reports all exact gates and efficient segment coverage checks', async () => {
     const query = jest.fn().mockResolvedValue([inspectionRow()]);
@@ -1261,6 +1394,17 @@ describe('HistoricBackfillFinalizerService inspection', () => {
 });
 
 describe('HistoricBackfillFinalizerService statistic finalization', () => {
+  it('blocks apply before reading PostgreSQL when mutable replay is disabled', async () => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'false';
+    const { service, dataSource } = createFinalizeHarness();
+
+    await expect(service.apply(RUN_ID)).rejects.toThrow(
+      'Historic replay from mutable geometries is disabled',
+    );
+    expect(dataSource.query).not.toHaveBeenCalled();
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+  });
+
   it.each(['dry-run', 'apply'])(
     'refuses %s while a map publication is pending',
     async (mode) => {
@@ -1280,8 +1424,32 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     },
   );
 
-  it('runs a write-free dry-run without a transaction or advisory and row locks', async () => {
-    const { service, runner, dataSource } = createFinalizeHarness();
+  it('rejects a same-count replacement on another date instead of treating it as retention', async () => {
+    const { service, preflightQuery } = createFinalizeHarness({
+      nonNullRetention: {
+        canonicalNonNullPointCount: '2',
+        retainedCanonicalNonNullPointCount: '1',
+        regressedCommuneCount: '1',
+        worstCommuneId: '30079',
+        worstCommuneCode: '77132',
+        worstCanonicalNonNullPointCount: '2',
+        worstRetainedCanonicalNonNullPointCount: '1',
+      },
+    });
+
+    await expect(service.dryRun(RUN_ID)).rejects.toThrow(
+      'commune 77132 (30079) retains 1/2 canonical non-null values',
+    );
+    const retentionSql = preflightQuery.mock.calls.find(([sql]: [string]) =>
+      sql.includes('non_null_regressions AS MATERIALIZED'),
+    )?.[0];
+    expect(retentionSql).toContain('candidate.type = canonical.type');
+    expect(retentionSql).toContain('candidate.date = canonical.date');
+  });
+
+  it('runs a bounded read-only dry-run without advisory or row locks', async () => {
+    const { service, runner, dataSource, preflightQuery } =
+      createFinalizeHarness();
 
     await expect(service.dryRun(RUN_ID)).resolves.toMatchObject({
       runId: RUN_ID,
@@ -1293,6 +1461,10 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     });
 
     expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+    expect(dataSource.transaction).toHaveBeenCalledWith(
+      'REPEATABLE READ',
+      expect.any(Function),
+    );
     expect(runner.startTransaction).not.toHaveBeenCalled();
     expect(runner.commitTransaction).not.toHaveBeenCalled();
     expect(runner.rollbackTransaction).not.toHaveBeenCalled();
@@ -1326,10 +1498,113 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     expect(inspectionSql).not.toContain(
       'FROM commune_segment_rows segment\n            WHERE segment."departementId" = task."departementId"',
     );
+
+    const preflightStatements = preflightQuery.mock.calls.map(
+      ([sql]: [string]) => sql,
+    );
+    expect(preflightStatements).toContain('SET TRANSACTION READ ONLY');
+    expect(preflightStatements).toContain(
+      "SET LOCAL statement_timeout = '15s'",
+    );
+    expect(preflightStatements).toContain(
+      'SET LOCAL max_parallel_workers_per_gather = 0',
+    );
+    const retentionSql = preflightStatements.find((sql) =>
+      sql.includes('non_null_regressions AS MATERIALIZED'),
+    );
+    expect(retentionSql).toContain(
+      'jsonb_path_query_array(\n              COALESCE(statistic."restrictions"',
+    );
+    expect(retentionSql).toContain(
+      'FROM "historic_backfill_commune_shadow" shadow',
+    );
+    expect(retentionSql).toContain('candidate.type = canonical.type');
+    expect(retentionSql).toContain('candidate.date = canonical.date');
+    expect(retentionSql).toContain('GROUP BY expected."communeId"');
+    expect(retentionSql).toContain(
+      'commune_counts."retainedCanonicalNonNullPointCount" * 100 <',
+    );
+    expect(retentionSql).not.toContain('jsonb_array_elements(\n');
+    expect(retentionSql).not.toContain('FOR UPDATE');
+    expect(retentionSql).not.toContain('pg_try_advisory_lock');
+    expect(
+      preflightStatements.filter((sql) =>
+        sql.includes('non_null_regressions AS MATERIALIZED'),
+      ),
+    ).toHaveLength(EXPECTED_DEPARTMENTS);
+  });
+
+  it.each(['dry-run', 'apply'])(
+    'refuses %s before locks when a commune massively loses non-null history',
+    async (mode) => {
+      const previousThreshold =
+        process.env[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV];
+      process.env[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV] = '90';
+      const { service, runner, dataSource } = createFinalizeHarness({
+        nonNullRetention: {
+          canonicalNonNullPointCount: '1070',
+          retainedCanonicalNonNullPointCount: '249',
+          regressedCommuneCount: '1',
+          worstCommuneId: '30079',
+          worstCommuneCode: '77132',
+          worstCanonicalNonNullPointCount: '1070',
+          worstRetainedCanonicalNonNullPointCount: '249',
+        },
+      });
+
+      try {
+        const operation =
+          mode === 'dry-run' ? service.dryRun(RUN_ID) : service.apply(RUN_ID);
+        await expect(operation).rejects.toThrow(
+          'commune 77132 (30079) retains 249/1070 canonical non-null values (23.27%), minimum is 90%',
+        );
+      } finally {
+        if (previousThreshold === undefined) {
+          delete process.env[
+            HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV
+          ];
+        } else {
+          process.env[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV] =
+            previousThreshold;
+        }
+      }
+
+      expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+      expect(runner.connect).not.toHaveBeenCalled();
+      expect(runner.startTransaction).not.toHaveBeenCalled();
+      expect(runner.query).not.toHaveBeenCalled();
+    },
+  );
+
+  it('passes the configured retention threshold to the read-only guard', async () => {
+    const previousThreshold =
+      process.env[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV];
+    process.env[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV] = '75';
+    const { service, preflightQuery } = createFinalizeHarness();
+
+    try {
+      await expect(service.dryRun(RUN_ID)).resolves.toMatchObject({
+        applied: false,
+      });
+    } finally {
+      if (previousThreshold === undefined) {
+        delete process.env[
+          HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV
+        ];
+      } else {
+        process.env[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV] =
+          previousThreshold;
+      }
+    }
+
+    const retentionCall = (
+      preflightQuery.mock.calls as Array<[string, unknown[]]>
+    ).find(([sql]) => sql.includes('non_null_regressions AS MATERIALIZED'));
+    expect(retentionCall?.[1]).toEqual([RUN_ID, 1, 75]);
   });
 
   it('atomically publishes statistics and snapshots without map/run completion writes', async () => {
-    const { service, runner } = createFinalizeHarness();
+    const { service, runner, dataSource } = createFinalizeHarness();
 
     await expect(service.apply(RUN_ID)).resolves.toMatchObject({
       runId: RUN_ID,
@@ -1374,6 +1649,14 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     const communeWrite = statements.findIndex((statement) =>
       statement.includes('upsertedCommuneCount'),
     );
+    const shadowLock = statements.findIndex((statement) =>
+      statement.includes(
+        'LOCK TABLE "historic_backfill_commune_shadow" IN SHARE MODE NOWAIT',
+      ),
+    );
+    const shadowVersion = statements.findIndex((statement) =>
+      statement.includes('AS "shadowVersionDigest"'),
+    );
     const departmentWrite = statements.findIndex((statement) =>
       statement.includes('upsertedDepartmentCount'),
     );
@@ -1386,6 +1669,8 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     const markerWrite = statements.findIndex((statement) =>
       statement.includes('SET "statisticsPromotedAt" = now()'),
     );
+    expect(shadowLock).toBeLessThan(shadowVersion);
+    expect(shadowVersion).toBeLessThan(communeWrite);
     expect(communeWrite).toBeLessThan(departmentWrite);
     expect(departmentWrite).toBeLessThan(snapshotWrite);
     expect(snapshotWrite).toBeLessThan(publicMutationFence);
@@ -1410,6 +1695,30 @@ describe('HistoricBackfillFinalizerService statistic finalization', () => {
     expect(statements[markerWrite]).not.toContain('"computeMapDate"');
     expect(statements[markerWrite]).not.toContain('"computeMapGeneration"');
     expect(runner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      dataSource.query.mock.invocationCallOrder[
+        dataSource.query.mock.invocationCallOrder.length - 1
+      ],
+    ).toBeLessThan(dataSource.createQueryRunner.mock.invocationCallOrder[0]);
+  });
+
+  it('rolls back before canonical writes when the locked shadow digest changed', async () => {
+    const { service, runner } = createFinalizeHarness({
+      lockedShadowVersion: {
+        shadowVersionDigest: 'abcdef1234567890abcdef1234567890',
+      },
+    });
+
+    await expect(service.apply(RUN_ID)).rejects.toThrow(
+      'Historic shadow changed after the non-null retention preflight',
+    );
+    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(runner.commitTransaction).not.toHaveBeenCalled();
+    expect(
+      runner.query.mock.calls.some(([sql]: [string]) =>
+        sql.includes('upsertedCommuneCount'),
+      ),
+    ).toBe(false);
   });
 
   it('keeps an already-ahead statistic cursor while applying the run', async () => {
@@ -1653,6 +1962,7 @@ describeWithPostgres(
       );
       CREATE TABLE "commune" (
         "id" integer PRIMARY KEY,
+        "code" varchar NOT NULL UNIQUE,
         "departementId" integer NOT NULL
       );
       CREATE TABLE "zone_publication_source_state" (
@@ -1812,8 +2122,9 @@ describeWithPostgres(
       INSERT INTO "departement" ("id", "code")
       SELECT value, lpad(value::text, 3, '0')
       FROM generate_series(1, 101) value;
-      INSERT INTO "commune" ("id", "departementId")
-      SELECT value, value FROM generate_series(1, 101) value;
+      INSERT INTO "commune" ("id", "code", "departementId")
+      SELECT value, lpad(value::text, 5, '0'), value
+      FROM generate_series(1, 101) value;
       INSERT INTO "historic_backfill_department_revision"
       SELECT value, 3 FROM generate_series(1, 101) value;
       INSERT INTO "historic_backfill_task"
@@ -1872,6 +2183,56 @@ describeWithPostgres(
           `DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`,
         );
         await adminDataSource.destroy();
+      }
+    });
+
+    it('rejects an equal non-null count shifted to a different date', async () => {
+      const [before] = await dataSource.query(`
+        SELECT "restrictions"
+        FROM "statistic_commune"
+        WHERE "communeId" = 1
+      `);
+      await dataSource.query(`
+        UPDATE "statistic_commune"
+        SET "restrictions" = '[
+          {"date":"2026-08-16","SUP":"alerte"},
+          {"date":"2026-08-17","SUP":"alerte"}
+        ]'::jsonb
+        WHERE "communeId" = 1;
+        INSERT INTO "historic_backfill_commune_shadow" (
+          "runId", "communeId", "departementId", "sourceGeneration",
+          "restrictions", "restrictionsByMonth"
+        ) VALUES (
+          '${RUN_ID}', 1, 1, 3,
+          '[
+            {"date":"2026-08-16","SUP":"alerte"},
+            {"date":"2026-08-18","SUP":"alerte"}
+          ]'::jsonb,
+          '[]'::jsonb
+        );
+      `);
+
+      try {
+        await expect(
+          (service as any).assertDepartmentNonNullPointRetention(
+            dataSource,
+            RUN_ID,
+            1,
+            1,
+            100,
+          ),
+        ).rejects.toThrow('retains 1/2 canonical non-null values');
+      } finally {
+        await dataSource.query(
+          `UPDATE "statistic_commune"
+           SET "restrictions" = $1::jsonb
+           WHERE "communeId" = 1`,
+          [JSON.stringify(before.restrictions)],
+        );
+        await dataSource.query(`
+          DELETE FROM "historic_backfill_commune_shadow"
+          WHERE "runId" = '${RUN_ID}' AND "communeId" = 1
+        `);
       }
     });
 

@@ -8,6 +8,7 @@ import {
 } from './statistic_commune.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import moment = require('moment');
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 
 describe('StatisticCommuneService', () => {
   const previousBatchSize = process.env.COMMUNE_STATISTICS_BATCH_SIZE;
@@ -17,12 +18,15 @@ describe('StatisticCommuneService', () => {
     process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
   const previousPublicSourceRevisionEnabled =
     process.env.PUBLIC_SOURCE_REVISION_ENABLED;
+  const previousMutableGeometryReplayEnabled =
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
 
   beforeEach(() => {
     delete process.env.COMMUNE_STATISTICS_BATCH_SIZE;
     delete process.env.HISTORIC_EMPTY_STATISTICS_RANGE_MAX_DAYS;
     delete process.env.CURRENT_COMMUNE_STATISTICS_LOCK_WAIT_TIMEOUT_MS;
     delete process.env.PUBLIC_SOURCE_REVISION_ENABLED;
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
   });
 
   afterAll(() => {
@@ -48,6 +52,12 @@ describe('StatisticCommuneService', () => {
     } else {
       process.env.PUBLIC_SOURCE_REVISION_ENABLED =
         previousPublicSourceRevisionEnabled;
+    }
+    if (previousMutableGeometryReplayEnabled === undefined) {
+      delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+        previousMutableGeometryReplayEnabled;
     }
   });
 
@@ -509,6 +519,28 @@ describe('StatisticCommuneService', () => {
       events,
     };
   }
+
+  it('blocks historic staging before opening a database connection by default', async () => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'false';
+    const harness = createComputationHarness();
+
+    await expect(
+      harness.service.stageHistoricCommuneStatisticsRestrictions(
+        [],
+        new Date('2025-07-13T00:00:00.000Z'),
+        {} as never,
+      ),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+
+    await expect(
+      harness.service.computeEmptyHistoricCommuneStatisticsRange(
+        [],
+        {} as never,
+      ),
+    ).rejects.toThrow('Historic replay from mutable geometries is disabled');
+    expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
+  });
 
   it('stages a stable historic interval in batches without snapshots or canonical JSONB writes', async () => {
     process.env.COMMUNE_STATISTICS_BATCH_SIZE = '1';

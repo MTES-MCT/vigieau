@@ -15,6 +15,7 @@ import { ArreteRestrictionService } from '../arrete_restriction/arrete_restricti
 import { CommuneService } from '../commune/commune.service';
 import { ConfigService } from '../config/config.service';
 import { Utils } from '../core/utils';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 import { DepartementService } from '../departement/departement.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { RestrictionService } from '../restriction/restriction.service';
@@ -196,6 +197,7 @@ export class ZoneAlerteComputedHistoricService {
     dateMax?: string,
     expectedHistoricComputeEpoch?: string | number,
   ) {
+    assertHistoricMutableGeometryReplayEnabled();
     const dateDebut = date ? date : moment();
     const dateFin = this.getBoundedHistoricEndDate(
       moment('2024-04-28'),
@@ -675,6 +677,7 @@ export class ZoneAlerteComputedHistoricService {
     dateMax?: string,
     expectedHistoricComputeEpoch?: string | number,
   ) {
+    assertHistoricMutableGeometryReplayEnabled();
     const requestedStartDate = date ? moment(date) : moment();
     const dateFin = this.getBoundedHistoricEndDate(
       moment().subtract(1, 'days'),
@@ -1128,6 +1131,7 @@ export class ZoneAlerteComputedHistoricService {
     departements?: Departement[],
     checkpointOptions?: Omit<HistoricDepartmentCheckpointOptions, 'date'>,
   ) {
+    assertHistoricMutableGeometryReplayEnabled();
     const departementsToCompute =
       departements ?? (await this.departementService.findAllLight());
 

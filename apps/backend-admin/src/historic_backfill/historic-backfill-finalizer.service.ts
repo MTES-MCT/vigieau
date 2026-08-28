@@ -4,15 +4,21 @@ import { DataSource, QueryRunner } from 'typeorm';
 import { HISTORIC_MAP_PUBLICATION_FENCE_LOCK } from '../zone_publication/public-mutation';
 import { unwrapTypeOrmDmlReturningRows } from '../zone_publication/typeorm-query-result';
 import { HISTORIC_BACKFILL_EXPECTED_DEPARTMENT_COUNT } from './historic-backfill-queue.service';
+import { assertHistoricMutableGeometryReplayEnabled } from '../core/historic-geometry-replay';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATION_PATTERN = /^\d+$/;
 const STATISTIC_COMMUNE_LOCK = 'vigieau:statistic-commune:snapshot-computation';
+const RETENTION_STATEMENT_TIMEOUT = '15s';
+const SHADOW_VERSION_STATEMENT_TIMEOUT = '5s';
 export const HISTORIC_BACKFILL_SHADOW_CONCURRENCY_DEFAULT = 4;
 export const HISTORIC_BACKFILL_SHADOW_CONCURRENCY_MAX = 8;
 export const HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_DEFAULT = 0;
 export const HISTORIC_BACKFILL_SHADOW_WORK_MEM_MB_MAX = 512;
+export const HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV =
+  'HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT';
+export const HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_DEFAULT = 100;
 
 type SqlExecutor = Pick<DataSource, 'query'> | Pick<QueryRunner, 'query'>;
 
@@ -207,6 +213,34 @@ interface StatisticWriteRow {
   upsertedCommuneCount: number | string;
 }
 
+interface NonNullRetentionRow {
+  contextMatches: boolean | string;
+  expectedCommuneCount: number | string;
+  canonicalNonNullPointCount: number | string;
+  retainedCanonicalNonNullPointCount: number | string;
+  regressedCommuneCount: number | string;
+  worstCommuneId: number | string | null;
+  worstCommuneCode: string | null;
+  worstCanonicalNonNullPointCount: number | string | null;
+  worstRetainedCanonicalNonNullPointCount: number | string | null;
+}
+
+interface ShadowVersionRow {
+  contextMatches: boolean | string;
+  shadowCommuneCount: number | string;
+  shadowVersionDigest: string | null;
+}
+
+interface ShadowVersion {
+  communeCount: number;
+  digest: string;
+}
+
+interface ShadowDepartmentRow {
+  departementId: number | string;
+  communeCount: number | string;
+}
+
 interface DepartmentWriteRow {
   expectedDepartmentCount: number | string;
   upsertedDepartmentCount: number | string;
@@ -329,6 +363,27 @@ export function readHistoricBackfillShadowWorkMemMb(
     );
   }
   return workMemMb;
+}
+
+export function readHistoricBackfillMinNonNullRetentionPercent(
+  environment: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw =
+    environment[HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV]?.trim();
+  if (!raw) return HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_DEFAULT;
+
+  const percentage = Number(raw);
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isSafeInteger(percentage) ||
+    percentage < 1 ||
+    percentage > 100
+  ) {
+    throw new Error(
+      `${HISTORIC_BACKFILL_MIN_NON_NULL_RETENTION_PERCENT_ENV} must be an integer between 1 and 100`,
+    );
+  }
+  return percentage;
 }
 
 @Injectable()
@@ -670,9 +725,25 @@ export class HistoricBackfillFinalizerService {
         'apply must be a boolean',
       );
     }
+    if (apply) {
+      assertHistoricMutableGeometryReplayEnabled();
+    }
 
     const inspection = await this.readInspection(this.dataSource, runId, false);
     this.assertReady(inspection);
+
+    let preflightShadowVersion: ShadowVersion | null = null;
+    if (inspection.statisticsPromotedAt === null) {
+      // The potentially expensive comparison is deliberately read-only and
+      // partitioned by department. It runs before publication locks so current
+      // daily work keeps priority. A cheap xmin digest is checked again after
+      // the finalizer freezes the historical-only shadow table.
+      preflightShadowVersion = await this.assertNonNullPointRetention(
+        runId,
+        inspection.expectedCommuneCount,
+        inspection.departmentCount,
+      );
+    }
 
     if (!apply) {
       return {
@@ -739,6 +810,30 @@ export class HistoricBackfillFinalizerService {
 
       await queryRunner.startTransaction('READ COMMITTED');
       await queryRunner.query(`SET LOCAL lock_timeout = '3s'`);
+      await queryRunner.query(`SET LOCAL statement_timeout = '30min'`);
+
+      await queryRunner.query(
+        `LOCK TABLE "historic_backfill_commune_shadow" IN SHARE MODE NOWAIT`,
+      );
+      await queryRunner.query(
+        `SET LOCAL statement_timeout = '${SHADOW_VERSION_STATEMENT_TIMEOUT}'`,
+      );
+      await queryRunner.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
+      const lockedShadowVersion = await this.readShadowVersion(
+        queryRunner,
+        runId,
+        inspection.expectedCommuneCount,
+      );
+      if (
+        preflightShadowVersion === null ||
+        lockedShadowVersion.communeCount !==
+          preflightShadowVersion.communeCount ||
+        lockedShadowVersion.digest !== preflightShadowVersion.digest
+      ) {
+        throw new HistoricBackfillFinalizerStateError(
+          'Historic shadow changed after the non-null retention preflight',
+        );
+      }
       await queryRunner.query(`SET LOCAL statement_timeout = '30min'`);
 
       const communeWrite = await this.writeCommuneStatistics(
@@ -1474,6 +1569,360 @@ export class HistoricBackfillFinalizerService {
         `Historic statistic finalization refused: ${inspection.gates.join(', ')}`,
       );
     }
+  }
+
+  private async assertNonNullPointRetention(
+    runId: string,
+    expectedCommuneCount: number,
+    expectedDepartmentCount: number,
+  ): Promise<ShadowVersion> {
+    const minimumRetentionPercent =
+      readHistoricBackfillMinNonNullRetentionPercent();
+
+    return this.dataSource.transaction(
+      'REPEATABLE READ',
+      async (manager): Promise<ShadowVersion> => {
+        await manager.query(`SET TRANSACTION READ ONLY`);
+        await manager.query(`SET LOCAL lock_timeout = '1s'`);
+        await manager.query(
+          `SET LOCAL statement_timeout = '${RETENTION_STATEMENT_TIMEOUT}'`,
+        );
+        await manager.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
+
+        const shadowVersion = await this.readShadowVersion(
+          manager,
+          runId,
+          expectedCommuneCount,
+        );
+        const departments = (await manager.query(
+          `
+            WITH run_context AS MATERIALIZED (
+              SELECT "id" AS "runId"
+              FROM "historic_backfill_run"
+              WHERE "id" = $1::uuid AND "status" = 'running'
+            )
+            SELECT
+              shadow."departementId" AS "departementId",
+              COUNT(*)::integer AS "communeCount"
+            FROM "historic_backfill_commune_shadow" shadow
+            JOIN "commune" commune ON commune."id" = shadow."communeId"
+            CROSS JOIN run_context
+            WHERE shadow."runId" = run_context."runId"
+              AND commune."departementId" = shadow."departementId"
+            GROUP BY shadow."departementId"
+            ORDER BY shadow."departementId"
+          `,
+          [runId],
+        )) as ShadowDepartmentRow[];
+        const plannedCommuneCount = departments.reduce(
+          (total, department) =>
+            total +
+            databaseCount(
+              department.communeCount,
+              'department retention commune count',
+            ),
+          0,
+        );
+        if (
+          departments.length !== expectedDepartmentCount ||
+          plannedCommuneCount !== expectedCommuneCount
+        ) {
+          throw new HistoricBackfillFinalizerStateError(
+            `Historic non-null retention partitioning has ` +
+              `${departments.length}/${expectedDepartmentCount} departments and ` +
+              `${plannedCommuneCount}/${expectedCommuneCount} communes`,
+          );
+        }
+
+        for (const department of departments) {
+          const departementId = databaseCount(
+            department.departementId,
+            'non-null retention department id',
+          );
+          const departmentCommuneCount = databaseCount(
+            department.communeCount,
+            'department retention commune count',
+          );
+          await this.assertDepartmentNonNullPointRetention(
+            manager,
+            runId,
+            departementId,
+            departmentCommuneCount,
+            minimumRetentionPercent,
+          );
+        }
+        return shadowVersion;
+      },
+    );
+  }
+
+  private async readShadowVersion(
+    executor: SqlExecutor,
+    runId: string,
+    expectedCommuneCount: number,
+  ): Promise<ShadowVersion> {
+    const [row] = (await executor.query(
+      `
+        WITH run_context AS MATERIALIZED (
+          SELECT "id" AS "runId"
+          FROM "historic_backfill_run"
+          WHERE "id" = $1::uuid AND "status" = 'running'
+        )
+        SELECT
+          EXISTS(SELECT 1 FROM run_context) AS "contextMatches",
+          COUNT(shadow."communeId")::integer AS "shadowCommuneCount",
+          md5(COALESCE(string_agg(
+            shadow."communeId"::text || ':' || shadow.xmin::text,
+            '|' ORDER BY shadow."communeId"
+          ), '')) AS "shadowVersionDigest"
+        FROM run_context
+        LEFT JOIN "historic_backfill_commune_shadow" shadow
+          ON shadow."runId" = run_context."runId"
+      `,
+      [runId],
+    )) as ShadowVersionRow[];
+    if (!row || !databaseBoolean(row.contextMatches)) {
+      throw new HistoricBackfillFinalizerStateError(
+        'Historic shadow version check lost its run context',
+      );
+    }
+    const communeCount = databaseCount(
+      row.shadowCommuneCount,
+      'shadow version commune count',
+    );
+    if (communeCount !== expectedCommuneCount) {
+      throw new HistoricBackfillFinalizerStateError(
+        `Historic shadow version has ${communeCount}/${expectedCommuneCount} communes`,
+      );
+    }
+    const digest = row.shadowVersionDigest;
+    if (!digest || !/^[0-9a-f]{32}$/.test(digest)) {
+      throw new HistoricBackfillFinalizerStateError(
+        'Historic shadow version digest is invalid',
+      );
+    }
+    return { communeCount, digest };
+  }
+
+  private async assertDepartmentNonNullPointRetention(
+    executor: SqlExecutor,
+    runId: string,
+    departementId: number,
+    expectedCommuneCount: number,
+    minimumRetentionPercent: number,
+  ): Promise<void> {
+    const [row] = (await executor.query(
+      `
+        WITH run_context AS MATERIALIZED (
+          SELECT
+            run."id" AS "runId",
+            jsonb_build_object(
+              'dateFrom', run."statisticDateFrom"::text,
+              'dateThrough', run."dateThrough"::text
+            ) AS "pathVariables"
+          FROM "historic_backfill_run" run
+          WHERE run."id" = $1::uuid AND run."status" = 'running'
+        ), expected_communes AS MATERIALIZED (
+          SELECT
+            shadow."communeId",
+            commune."code" AS "communeCode",
+            shadow."restrictions" AS "candidateRestrictions"
+          FROM "historic_backfill_commune_shadow" shadow
+          JOIN "commune" commune ON commune."id" = shadow."communeId"
+          CROSS JOIN run_context
+          WHERE shadow."runId" = run_context."runId"
+            AND shadow."departementId" = $2::integer
+            AND commune."departementId" = $2::integer
+        ), canonical_date_arrays AS MATERIALIZED (
+          SELECT
+            expected."communeId",
+            expected."communeCode",
+            jsonb_path_query_array(
+              COALESCE(statistic."restrictions", '[]'::jsonb),
+              '$[*] ? (@.date >= $dateFrom && @.date <= $dateThrough && @.SOU != null).date'::jsonpath,
+              run_context."pathVariables"
+            ) AS "SOU",
+            jsonb_path_query_array(
+              COALESCE(statistic."restrictions", '[]'::jsonb),
+              '$[*] ? (@.date >= $dateFrom && @.date <= $dateThrough && @.SUP != null).date'::jsonpath,
+              run_context."pathVariables"
+            ) AS "SUP",
+            jsonb_path_query_array(
+              COALESCE(statistic."restrictions", '[]'::jsonb),
+              '$[*] ? (@.date >= $dateFrom && @.date <= $dateThrough && @.AEP != null).date'::jsonpath,
+              run_context."pathVariables"
+            ) AS "AEP"
+          FROM expected_communes expected
+          LEFT JOIN "statistic_commune" statistic
+            ON statistic."communeId" = expected."communeId"
+          CROSS JOIN run_context
+        ), candidate_date_arrays AS MATERIALIZED (
+          SELECT
+            expected."communeId",
+            jsonb_path_query_array(
+              COALESCE(expected."candidateRestrictions", '[]'::jsonb),
+              '$[*] ? (@.date >= $dateFrom && @.date <= $dateThrough && @.SOU != null).date'::jsonpath,
+              run_context."pathVariables"
+            ) AS "SOU",
+            jsonb_path_query_array(
+              COALESCE(expected."candidateRestrictions", '[]'::jsonb),
+              '$[*] ? (@.date >= $dateFrom && @.date <= $dateThrough && @.SUP != null).date'::jsonpath,
+              run_context."pathVariables"
+            ) AS "SUP",
+            jsonb_path_query_array(
+              COALESCE(expected."candidateRestrictions", '[]'::jsonb),
+              '$[*] ? (@.date >= $dateFrom && @.date <= $dateThrough && @.AEP != null).date'::jsonpath,
+              run_context."pathVariables"
+            ) AS "AEP"
+          FROM expected_communes expected
+          CROSS JOIN run_context
+        ), canonical_points AS MATERIALIZED (
+          SELECT
+            canonical."communeId",
+            canonical."communeCode",
+            typed.type,
+            day.value AS date
+          FROM canonical_date_arrays canonical
+          CROSS JOIN LATERAL (VALUES
+            ('SOU'::text, canonical."SOU"),
+            ('SUP'::text, canonical."SUP"),
+            ('AEP'::text, canonical."AEP")
+          ) AS typed(type, dates)
+          CROSS JOIN LATERAL jsonb_array_elements_text(typed.dates)
+            AS day(value)
+          GROUP BY canonical."communeId", canonical."communeCode",
+                   typed.type, day.value
+        ), candidate_points AS MATERIALIZED (
+          SELECT candidate."communeId", typed.type, day.value AS date
+          FROM candidate_date_arrays candidate
+          CROSS JOIN LATERAL (VALUES
+            ('SOU'::text, candidate."SOU"),
+            ('SUP'::text, candidate."SUP"),
+            ('AEP'::text, candidate."AEP")
+          ) AS typed(type, dates)
+          CROSS JOIN LATERAL jsonb_array_elements_text(typed.dates)
+            AS day(value)
+          GROUP BY candidate."communeId", typed.type, day.value
+        ), commune_counts AS MATERIALIZED (
+          SELECT
+            expected."communeId",
+            expected."communeCode",
+            COUNT(canonical.date)::bigint AS "canonicalNonNullPointCount",
+            COUNT(candidate.date)::bigint
+              AS "retainedCanonicalNonNullPointCount"
+          FROM expected_communes expected
+          LEFT JOIN canonical_points canonical
+            ON canonical."communeId" = expected."communeId"
+          LEFT JOIN candidate_points candidate
+            ON candidate."communeId" = canonical."communeId"
+           AND candidate.type = canonical.type
+           AND candidate.date = canonical.date
+          GROUP BY expected."communeId", expected."communeCode"
+        ), non_null_regressions AS MATERIALIZED (
+          SELECT
+            commune_counts.*,
+            commune_counts."canonicalNonNullPointCount" -
+              commune_counts."retainedCanonicalNonNullPointCount"
+                AS "lostPointCount"
+          FROM commune_counts
+          WHERE commune_counts."canonicalNonNullPointCount" > 0
+            AND commune_counts."retainedCanonicalNonNullPointCount" * 100 <
+                commune_counts."canonicalNonNullPointCount" * $3::bigint
+        ), worst_regression AS MATERIALIZED (
+          SELECT *
+          FROM non_null_regressions
+          ORDER BY
+            "retainedCanonicalNonNullPointCount"::numeric /
+              "canonicalNonNullPointCount" ASC,
+            "lostPointCount" DESC,
+            "communeId"
+          LIMIT 1
+        )
+        SELECT
+          EXISTS(SELECT 1 FROM run_context) AS "contextMatches",
+          (SELECT COUNT(*)::integer FROM expected_communes)
+            AS "expectedCommuneCount",
+          COALESCE(
+            (SELECT SUM("canonicalNonNullPointCount") FROM commune_counts),
+            0
+          )::bigint AS "canonicalNonNullPointCount",
+          COALESCE(
+            (
+              SELECT SUM("retainedCanonicalNonNullPointCount")
+              FROM commune_counts
+            ),
+            0
+          )::bigint AS "retainedCanonicalNonNullPointCount",
+          (SELECT COUNT(*)::integer FROM non_null_regressions)
+            AS "regressedCommuneCount",
+          (SELECT "communeId" FROM worst_regression) AS "worstCommuneId",
+          (SELECT "communeCode" FROM worst_regression) AS "worstCommuneCode",
+          (SELECT "canonicalNonNullPointCount" FROM worst_regression)
+            AS "worstCanonicalNonNullPointCount",
+          (
+            SELECT "retainedCanonicalNonNullPointCount"
+            FROM worst_regression
+          ) AS "worstRetainedCanonicalNonNullPointCount"
+      `,
+      [runId, departementId, minimumRetentionPercent],
+    )) as NonNullRetentionRow[];
+
+    if (!row || !databaseBoolean(row.contextMatches)) {
+      throw new HistoricBackfillFinalizerStateError(
+        `Historic non-null retention check lost its run context for department ${departementId}`,
+      );
+    }
+    const actualCommuneCount = databaseCount(
+      row.expectedCommuneCount,
+      'non-null retention commune count',
+    );
+    if (actualCommuneCount !== expectedCommuneCount) {
+      throw new HistoricBackfillFinalizerStateError(
+        `Historic non-null retention check has ${actualCommuneCount}/${expectedCommuneCount} communes ` +
+          `for department ${departementId}`,
+      );
+    }
+
+    const canonicalNonNullPointCount = databaseCount(
+      row.canonicalNonNullPointCount,
+      'canonical non-null point count',
+    );
+    const retainedCanonicalNonNullPointCount = databaseCount(
+      row.retainedCanonicalNonNullPointCount,
+      'retained canonical non-null point count',
+    );
+    const regressedCommuneCount = databaseCount(
+      row.regressedCommuneCount,
+      'non-null regressed commune count',
+    );
+    if (regressedCommuneCount === 0) return;
+
+    const worstCommuneId = databaseCount(
+      row.worstCommuneId,
+      'worst non-null regression commune id',
+    );
+    const worstCanonicalCount = databaseCount(
+      row.worstCanonicalNonNullPointCount,
+      'worst canonical non-null point count',
+    );
+    const worstRetainedCount = databaseCount(
+      row.worstRetainedCanonicalNonNullPointCount,
+      'worst retained canonical non-null point count',
+    );
+    const retentionPercent =
+      worstCanonicalCount === 0
+        ? 100
+        : (worstRetainedCount * 100) / worstCanonicalCount;
+    const commune = row.worstCommuneCode
+      ? `${row.worstCommuneCode} (${worstCommuneId})`
+      : String(worstCommuneId);
+    throw new HistoricBackfillFinalizerStateError(
+      `Historic statistic promotion non-null retention refused: commune ${commune} ` +
+        `retains ${worstRetainedCount}/${worstCanonicalCount} canonical non-null values ` +
+        `(${retentionPercent.toFixed(2)}%), minimum is ${minimumRetentionPercent}%; ` +
+        `${regressedCommuneCount} commune(s) are below the threshold in department ${departementId} ` +
+        `(retained/canonical points=${retainedCanonicalNonNullPointCount}/${canonicalNonNullPointCount})`,
+    );
   }
 
   private async writeCommuneStatistics(

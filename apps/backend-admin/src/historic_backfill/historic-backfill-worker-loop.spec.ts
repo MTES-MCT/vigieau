@@ -1,4 +1,5 @@
 import { readHistoricBackfillWorkerConfig } from './historic-backfill.config';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 import {
   HistoricBackfillSleep,
   HistoricBackfillWorkerLoop,
@@ -51,6 +52,7 @@ function output() {
 function workerConfig() {
   return readHistoricBackfillWorkerConfig({
     HISTORIC_BACKFILL_ENABLED: 'true',
+    [HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV]: 'true',
   });
 }
 
@@ -117,6 +119,7 @@ describe('HistoricBackfillWorkerLoop', () => {
     const result = await loop.run(jest.fn(), {
       environment: {
         HISTORIC_BACKFILL_ENABLED: 'true',
+        [HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV]: 'true',
         HISTORIC_BACKFILL_WORKER_CONCURRENCY: '2',
         HISTORIC_BACKFILL_DURING_CURRENT_CONCURRENCY: '1',
       },
@@ -142,7 +145,10 @@ describe('HistoricBackfillWorkerLoop', () => {
     const handler = jest.fn().mockResolvedValue(output());
 
     const result = await loop.run(handler, {
-      environment: { HISTORIC_BACKFILL_ENABLED: 'true' },
+      environment: {
+        HISTORIC_BACKFILL_ENABLED: 'true',
+        [HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV]: 'true',
+      },
       workerId: 'container-a',
       maxIdlePolls: 1,
     });
@@ -306,7 +312,10 @@ describe('HistoricBackfillWorkerLoop', () => {
     const stopSleep = jest.fn().mockResolvedValue(false);
 
     const result = await loop.run(jest.fn(), {
-      environment: { HISTORIC_BACKFILL_ENABLED: 'true' },
+      environment: {
+        HISTORIC_BACKFILL_ENABLED: 'true',
+        [HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV]: 'true',
+      },
       workerId: 'container-a',
       maxIdlePolls: 1,
       sleep: stopSleep,
