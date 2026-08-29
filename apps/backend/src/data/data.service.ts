@@ -53,9 +53,49 @@ interface StatisticPublicationState {
   historicStatsCursor?: string | null;
   sourceRevision?: string | null;
   historicComputeEpoch?: string | null;
+  certifiedHistoryRepairId?: string | null;
+  certifiedHistoryRepairFrom?: string | null;
+  certifiedHistoryRepairThrough?: string | null;
+  certifiedHistoryRepairSourceRunId?: string | null;
+  certifiedHistoryRepairActivatedAt?: string | null;
+  certifiedHistoryRepairRevision?: string | null;
 }
 
 type StatisticCacheMode = 'legacy-bootstrap' | 'versioned';
+
+export function statisticDeltaMaterializationStrategy(
+  activeStrategy: StatisticCacheMaterializationStrategy,
+  certifiedHistoryRepairActive: boolean,
+  sparseCurrent: boolean,
+  appendOnly: boolean,
+): StatisticCacheMaterializationStrategy {
+  if (
+    activeStrategy === 'certified-history-overlay' &&
+    certifiedHistoryRepairActive
+  ) {
+    return 'certified-history-overlay';
+  }
+  if (sparseCurrent) return 'sparse-current';
+  return appendOnly ? 'daily-delta' : 'current-replace';
+}
+
+export function isCertifiedHistoryOverlayCompatible(
+  strategy: StatisticCacheMaterializationStrategy,
+  artifactRevision: string,
+  certifiedRepairActive: boolean,
+  certifiedRepairRevision: string | null | undefined,
+): boolean {
+  if (strategy !== 'certified-history-overlay') return true;
+  if (
+    !certifiedRepairActive ||
+    !/^\d+$/.test(artifactRevision) ||
+    !certifiedRepairRevision ||
+    !/^\d+$/.test(certifiedRepairRevision)
+  ) {
+    return false;
+  }
+  return BigInt(artifactRevision) >= BigInt(certifiedRepairRevision);
+}
 
 interface ReferenceDataCache {
   departements: any[];
@@ -114,6 +154,14 @@ export type StatisticCacheStatus = {
   lagDays: number | null;
   historicDirtyFrom: string | null;
   historicDirtyThrough: string | null;
+  certifiedHistoryRepair: {
+    id: string;
+    from: string;
+    through: string;
+    sourceRunId: string;
+    activatedAt: string;
+    publicationRevision: string;
+  } | null;
   firstDate: string | null;
   latestDate: string | null;
   dateCount: number;
@@ -662,13 +710,54 @@ export class DataService implements OnModuleInit {
             "currentPublishedDate",
             "historicDirtyFrom",
             "historicDirtyThrough",
+            statistic_publication_state.revision,
+            config."historicComputeEpoch",
+            certified_repair.id AS "certifiedHistoryRepairId",
             (
               SELECT "activePublicationId"
               FROM zone_publication_state
               WHERE id = 1
             ) AS "activePublicationId"
           FROM statistic_publication_state
-          WHERE id = 1
+          CROSS JOIN config
+          LEFT JOIN LATERAL (
+            SELECT repair.id
+            FROM "certified_history_repair_audit" repair
+            WHERE repair."activationKind" = 'statistics-only'
+              AND repair."dateFrom" =
+                  statistic_publication_state."historicDirtyFrom"
+              AND repair."dateThrough" =
+                  statistic_publication_state."historicDirtyThrough"
+              AND repair."historicComputeEpoch" =
+                  config."historicComputeEpoch"
+              AND repair."publicationRevisionAfter" <=
+                  statistic_publication_state.revision
+              AND NOT EXISTS (
+                SELECT 1
+                FROM generate_series(
+                  repair."dateFrom", repair."dateThrough", '1 day'::interval
+                ) repaired_day(value)
+                WHERE NOT EXISTS (
+                  SELECT 1
+                  FROM "statistic_commune_snapshot" certified_snapshot
+                  WHERE certified_snapshot."snapshotDate" =
+                        repaired_day.value::date
+                    AND certified_snapshot.scope = 'national'
+                    AND certified_snapshot.status = 'completed'
+                    AND certified_snapshot."expectedCommuneCount" =
+                        repair."communeCount"
+                    AND certified_snapshot."processedCommuneCount" =
+                        repair."communeCount"
+                    AND certified_snapshot."sourceRevision" IS NULL
+                    AND certified_snapshot."certifiedHistoryRepairId" =
+                        repair.id
+                )
+              )
+            ORDER BY repair."promotedAt" DESC
+            LIMIT 1
+          ) certified_repair ON true
+          WHERE statistic_publication_state.id = 1
+            AND config.id = 1
         ), filtered_restrictions AS MATERIALIZED (
           SELECT restriction.value, restriction.ordinality
           FROM statistic_commune statistic
@@ -690,6 +779,11 @@ export class DataService implements OnModuleInit {
               OR (restriction.value->>'date')::date > COALESCE(
                 state."historicDirtyThrough",
                 state."currentPublishedDate"
+              )
+              OR (
+                state."certifiedHistoryRepairId" IS NOT NULL
+                AND (restriction.value ->> 'date')::date BETWEEN
+                    state."historicDirtyFrom" AND state."historicDirtyThrough"
               )
             )
             AND NOT EXISTS (
@@ -740,6 +834,16 @@ export class DataService implements OnModuleInit {
       try {
         let publicationState =
           requestedPublicationState ?? (await this.getPublicationState(true));
+        if (
+          this.certifiedDataCache &&
+          this.isCertifiedOverlayInvalid(
+            this.certifiedDataCache,
+            publicationState,
+          )
+        ) {
+          this.certifiedDataCache = null;
+          this.candidateDataCache = null;
+        }
         attemptedPublicationStateToken =
           this.getPublicationStateToken(publicationState);
         for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -780,7 +884,7 @@ export class DataService implements OnModuleInit {
             ? await this.loadArtifactBackedData(publicationState)
             : await this.loadDataOnce(publicationState);
           const stateAfter = await this.getPublicationState(true);
-          if (this.isSamePublicationState(publicationState, stateAfter)) {
+          if (this.isSameMaterializationState(publicationState, stateAfter)) {
             const certifiedDataCache = {
               ...candidateCache,
               revision: candidateCache.artifactPublicationId
@@ -872,13 +976,28 @@ export class DataService implements OnModuleInit {
         publicationState.statisticCachePublicationId
           ? this.candidateDataCache
           : null;
-      if (promotedCandidate) {
+      if (
+        promotedCandidate?.artifactIdentity &&
+        this.isArtifactIdentityForState(
+          promotedCandidate.artifactIdentity,
+          publicationState,
+        ) &&
+        isCertifiedHistoryOverlayCompatible(
+          promotedCandidate.artifactIdentity.materializationStrategy,
+          promotedCandidate.artifactIdentity.statisticRevision,
+          this.hasCertifiedHistoryRepair(publicationState),
+          publicationState.certifiedHistoryRepairRevision,
+        )
+      ) {
         this.candidateDataCache = null;
         return {
           ...promotedCandidate,
           publicationState,
           loadedAt: new Date(),
         };
+      }
+      if (promotedCandidate) {
+        this.candidateDataCache = null;
       }
       const active = await artifactService.loadActive();
       if (!active) {
@@ -891,7 +1010,13 @@ export class DataService implements OnModuleInit {
     const active = await artifactService.loadActive();
     if (
       active &&
-      this.isArtifactIdentityForState(active.identity, publicationState)
+      this.isArtifactIdentityForState(active.identity, publicationState) &&
+      isCertifiedHistoryOverlayCompatible(
+        active.identity.materializationStrategy,
+        active.identity.statisticRevision,
+        this.hasCertifiedHistoryRepair(publicationState),
+        publicationState.certifiedHistoryRepairRevision,
+      )
     ) {
       await this.ensureReferenceDataCache();
       return this.hydrateArtifactPayload(active, publicationState);
@@ -921,6 +1046,39 @@ export class DataService implements OnModuleInit {
   ): Promise<StatisticCacheArtifactCandidate> {
     const currentPublishedDate = publicationState.currentPublishedDate!;
     const mode = this.getStatisticCacheMode(publicationState);
+    const certifiedHistoryRepairActivated =
+      this.hasCertifiedHistoryRepair(publicationState);
+    const activeCertifiedOverlay =
+      active?.identity.materializationStrategy === 'certified-history-overlay';
+    if (activeCertifiedOverlay && !certifiedHistoryRepairActivated) {
+      if (mode === 'versioned' && publicationState.historicDirtyFrom !== null) {
+        return this.createSparseCurrentArtifactCandidate(
+          publicationState,
+          manager,
+        );
+      }
+      if (publicationState.historicDirtyFrom === null) {
+        return this.createFullArtifactCandidate(
+          publicationState,
+          'full-clean',
+          manager,
+        );
+      }
+      throw new Error(
+        'A certified history overlay cannot transition to a dirty legacy cache',
+      );
+    }
+    const overlayPredatesCertifiedRepair = Boolean(
+      activeCertifiedOverlay &&
+      (active!.identity.certifiedHistoryRepairId !==
+        (publicationState.certifiedHistoryRepairId ?? null) ||
+        !isCertifiedHistoryOverlayCompatible(
+          active!.identity.materializationStrategy,
+          active!.identity.statisticRevision,
+          certifiedHistoryRepairActivated,
+          publicationState.certifiedHistoryRepairRevision,
+        )),
+    );
     const historicStatisticsBoundaryClosed = Boolean(
       active &&
       publicationState.historicDirtyFrom === null &&
@@ -939,12 +1097,17 @@ export class DataService implements OnModuleInit {
       !active ||
       (active.identity.mode !== mode && !legacyToVersionedTransition) ||
       currentPublishedDate < active.identity.latestDate ||
-      historicStatisticsBoundaryClosed,
+      historicStatisticsBoundaryClosed ||
+      overlayPredatesCertifiedRepair ||
+      (certifiedHistoryRepairActivated &&
+        active.identity.materializationStrategy !==
+          'certified-history-overlay'),
     );
     if (
       !active &&
       mode === 'versioned' &&
-      publicationState.historicDirtyFrom !== null
+      publicationState.historicDirtyFrom !== null &&
+      !certifiedHistoryRepairActivated
     ) {
       return this.createSparseCurrentArtifactCandidate(
         publicationState,
@@ -954,16 +1117,19 @@ export class DataService implements OnModuleInit {
     if (requiresFullBuild) {
       if (
         publicationState.historicDirtyFrom !== null &&
-        mode !== 'legacy-bootstrap'
+        mode !== 'legacy-bootstrap' &&
+        !certifiedHistoryRepairActivated
       ) {
         throw new Error(
           'A versioned statistic cache cannot bootstrap from a dirty historic range',
         );
       }
       const strategy: StatisticCacheMaterializationStrategy =
-        publicationState.historicDirtyFrom === null
-          ? 'full-clean'
-          : 'legacy-safe-boundary';
+        certifiedHistoryRepairActivated
+          ? 'certified-history-overlay'
+          : publicationState.historicDirtyFrom === null
+            ? 'full-clean'
+            : 'legacy-safe-boundary';
       return this.createFullArtifactCandidate(
         publicationState,
         strategy,
@@ -1137,11 +1303,12 @@ export class DataService implements OnModuleInit {
       : appendOnly
         ? nextDate
         : active.identity.latestDate;
-    const strategy: StatisticCacheMaterializationStrategy = sparseCurrent
-      ? 'sparse-current'
-      : appendOnly
-        ? 'daily-delta'
-        : 'current-replace';
+    const strategy = statisticDeltaMaterializationStrategy(
+      active.identity.materializationStrategy,
+      this.hasCertifiedHistoryRepair(publicationState),
+      sparseCurrent,
+      appendOnly,
+    );
     if (!snapshotCoverageValidated) {
       await this.assertDeltaSnapshotCoverage(
         startDate,
@@ -1240,6 +1407,8 @@ export class DataService implements OnModuleInit {
       historicStatsCursor: publicationState.historicStatsCursor,
       sourceRevision: publicationState.sourceRevision,
       historicComputeEpoch: publicationState.historicComputeEpoch,
+      certifiedHistoryRepairId:
+        publicationState.certifiedHistoryRepairId ?? null,
     };
   }
 
@@ -1544,6 +1713,20 @@ export class DataService implements OnModuleInit {
     payload: StatisticCacheArtifactPayload,
     publicationState: StatisticPublicationState,
   ): CertifiedDataCache {
+    if (
+      payload.identity.certifiedHistoryRepairId !==
+        (publicationState.certifiedHistoryRepairId ?? null) ||
+      !isCertifiedHistoryOverlayCompatible(
+        payload.identity.materializationStrategy,
+        payload.identity.statisticRevision,
+        this.hasCertifiedHistoryRepair(publicationState),
+        publicationState.certifiedHistoryRepairRevision,
+      )
+    ) {
+      throw new Error(
+        'Statistic certified history overlay does not match the active repair',
+      );
+    }
     const referenceData = this.referenceDataCache;
     if (!referenceData) {
       throw new Error(
@@ -1560,6 +1743,7 @@ export class DataService implements OnModuleInit {
       historicStatsCursor: payload.identity.historicStatsCursor,
       sourceRevision: payload.identity.sourceRevision,
       historicComputeEpoch: payload.identity.historicComputeEpoch,
+      certifiedHistoryRepairId: payload.identity.certifiedHistoryRepairId,
     };
     const cacheWithoutFingerprint: Omit<CertifiedDataCache, 'fingerprint'> = {
       ...referenceData,
@@ -2020,6 +2204,8 @@ export class DataService implements OnModuleInit {
       historicStatsCursor: publicationState.historicStatsCursor ?? null,
       sourceRevision: publicationState.sourceRevision ?? null,
       historicComputeEpoch: publicationState.historicComputeEpoch ?? null,
+      certifiedHistoryRepairId:
+        publicationState.certifiedHistoryRepairId ?? null,
     };
   }
 
@@ -2037,7 +2223,8 @@ export class DataService implements OnModuleInit {
       identity.historicMapCursor === target.historicMapCursor &&
       identity.historicStatsCursor === target.historicStatsCursor &&
       identity.sourceRevision === target.sourceRevision &&
-      identity.historicComputeEpoch === target.historicComputeEpoch
+      identity.historicComputeEpoch === target.historicComputeEpoch &&
+      identity.certifiedHistoryRepairId === target.certifiedHistoryRepairId
     );
   }
 
@@ -2318,6 +2505,23 @@ export class DataService implements OnModuleInit {
       lagDays,
       historicDirtyFrom: availableState?.historicDirtyFrom ?? null,
       historicDirtyThrough: availableState?.historicDirtyThrough ?? null,
+      certifiedHistoryRepair:
+        availableState?.certifiedHistoryRepairId &&
+        availableState.certifiedHistoryRepairFrom &&
+        availableState.certifiedHistoryRepairThrough &&
+        availableState.certifiedHistoryRepairSourceRunId &&
+        availableState.certifiedHistoryRepairActivatedAt &&
+        availableState.certifiedHistoryRepairRevision
+          ? {
+              id: availableState.certifiedHistoryRepairId,
+              from: availableState.certifiedHistoryRepairFrom,
+              through: availableState.certifiedHistoryRepairThrough,
+              sourceRunId: availableState.certifiedHistoryRepairSourceRunId,
+              activatedAt: availableState.certifiedHistoryRepairActivatedAt,
+              publicationRevision:
+                availableState.certifiedHistoryRepairRevision,
+            }
+          : null,
       firstDate: cache?.firstDate ?? null,
       latestDate: cache?.latestDate ?? null,
       dateCount: cache?.dateCount ?? 0,
@@ -2779,6 +2983,34 @@ export class DataService implements OnModuleInit {
     return configuredMode;
   }
 
+  private hasCertifiedHistoryRepair(
+    publicationState: StatisticPublicationState | null,
+  ): boolean {
+    return Boolean(
+      publicationState?.certifiedHistoryRepairId &&
+      publicationState.certifiedHistoryRepairFrom &&
+      publicationState.certifiedHistoryRepairThrough &&
+      publicationState.certifiedHistoryRepairSourceRunId &&
+      publicationState.certifiedHistoryRepairActivatedAt &&
+      publicationState.certifiedHistoryRepairRevision &&
+      publicationState.historicDirtyFrom ===
+        publicationState.certifiedHistoryRepairFrom &&
+      publicationState.historicDirtyThrough ===
+        publicationState.certifiedHistoryRepairThrough,
+    );
+  }
+
+  private isCertifiedHistoryRepairDate(
+    date: string,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    return Boolean(
+      this.hasCertifiedHistoryRepair(publicationState) &&
+      date >= publicationState.certifiedHistoryRepairFrom! &&
+      date <= publicationState.certifiedHistoryRepairThrough!,
+    );
+  }
+
   private async assertSnapshotCoverage(
     publicationState: StatisticPublicationState,
     manager: EntityManager,
@@ -3132,6 +3364,12 @@ export class DataService implements OnModuleInit {
       historicStatsCursor: string | Date | null;
       sourceRevision: string | number | null;
       historicComputeEpoch: string | number | null;
+      certifiedHistoryRepairId: string | null;
+      certifiedHistoryRepairFrom: string | Date | null;
+      certifiedHistoryRepairThrough: string | Date | null;
+      certifiedHistoryRepairSourceRunId: string | null;
+      certifiedHistoryRepairActivatedAt: string | Date | null;
+      certifiedHistoryRepairRevision: string | number | null;
     }> = await queryable.query(`
       SELECT
         statistic_state.revision::text AS revision,
@@ -3148,13 +3386,52 @@ export class DataService implements OnModuleInit {
         config."computeMapDate"::text AS "historicMapCursor",
         config."computeStatsDate"::text AS "historicStatsCursor",
         ${sourceRevisionSql}::text AS "sourceRevision",
-        config."historicComputeEpoch"::text AS "historicComputeEpoch"
+        config."historicComputeEpoch"::text AS "historicComputeEpoch",
+        certified_repair.id::text AS "certifiedHistoryRepairId",
+        certified_repair."dateFrom"::text AS "certifiedHistoryRepairFrom",
+        certified_repair."dateThrough"::text
+          AS "certifiedHistoryRepairThrough",
+        certified_repair."sourceRunId" AS "certifiedHistoryRepairSourceRunId",
+        certified_repair."promotedAt" AS "certifiedHistoryRepairActivatedAt",
+        certified_repair."publicationRevisionAfter"::text
+          AS "certifiedHistoryRepairRevision"
       FROM "statistic_publication_state" statistic_state
       LEFT JOIN "zone_publication_state" zone_state ON zone_state."id" = 1
       LEFT JOIN "statistic_cache_state" cache_state ON cache_state."id" = 1
       LEFT JOIN "config" config ON config."id" = 1
       LEFT JOIN "zone_publication_source_state" source_state
         ON source_state."id" = 1
+      LEFT JOIN LATERAL (
+        SELECT repair.*
+        FROM "certified_history_repair_audit" repair
+        WHERE repair."activationKind" = 'statistics-only'
+          AND repair."dateFrom" = statistic_state."historicDirtyFrom"
+          AND repair."dateThrough" = statistic_state."historicDirtyThrough"
+          AND repair."historicComputeEpoch" = config."historicComputeEpoch"
+          AND repair."publicationRevisionAfter" <= statistic_state.revision
+          AND NOT EXISTS (
+            SELECT 1
+            FROM generate_series(
+              repair."dateFrom", repair."dateThrough", '1 day'::interval
+            ) repaired_day(value)
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM "statistic_commune_snapshot" certified_snapshot
+              WHERE certified_snapshot."snapshotDate" =
+                    repaired_day.value::date
+                AND certified_snapshot.scope = 'national'
+                AND certified_snapshot.status = 'completed'
+                AND certified_snapshot."expectedCommuneCount" =
+                    repair."communeCount"
+                AND certified_snapshot."processedCommuneCount" =
+                    repair."communeCount"
+                AND certified_snapshot."sourceRevision" IS NULL
+                AND certified_snapshot."certifiedHistoryRepairId" = repair.id
+            )
+          )
+        ORDER BY repair."promotedAt" DESC
+        LIMIT 1
+      ) certified_repair ON true
       WHERE statistic_state."id" = 1
       LIMIT 1
     `);
@@ -3190,6 +3467,32 @@ export class DataService implements OnModuleInit {
         rows[0].historicComputeEpoch === undefined
           ? null
           : String(rows[0].historicComputeEpoch),
+      ...(rows[0].certifiedHistoryRepairId
+        ? {
+            certifiedHistoryRepairId: String(rows[0].certifiedHistoryRepairId),
+            certifiedHistoryRepairFrom: this.normalizeDate(
+              rows[0].certifiedHistoryRepairFrom,
+            ),
+            certifiedHistoryRepairThrough: this.normalizeDate(
+              rows[0].certifiedHistoryRepairThrough,
+            ),
+            certifiedHistoryRepairSourceRunId: rows[0]
+              .certifiedHistoryRepairSourceRunId
+              ? String(rows[0].certifiedHistoryRepairSourceRunId)
+              : null,
+            certifiedHistoryRepairActivatedAt:
+              rows[0].certifiedHistoryRepairActivatedAt instanceof Date
+                ? rows[0].certifiedHistoryRepairActivatedAt.toISOString()
+                : rows[0].certifiedHistoryRepairActivatedAt
+                  ? String(rows[0].certifiedHistoryRepairActivatedAt)
+                  : null,
+            certifiedHistoryRepairRevision:
+              rows[0].certifiedHistoryRepairRevision === null ||
+              rows[0].certifiedHistoryRepairRevision === undefined
+                ? null
+                : String(rows[0].certifiedHistoryRepairRevision),
+          }
+        : {}),
     };
   }
 
@@ -3223,6 +3526,15 @@ export class DataService implements OnModuleInit {
     cache: CertifiedDataCache,
     publicationState: StatisticPublicationState,
   ): boolean {
+    const cachedCertifiedRepairId = this.getCertifiedCacheRepairId(cache);
+    const certifiedRepairActive =
+      this.hasCertifiedHistoryRepair(publicationState);
+    if (this.isCertifiedOverlayInvalid(cache, publicationState)) {
+      return false;
+    }
+    if (certifiedRepairActive && cachedCertifiedRepairId === null) {
+      return false;
+    }
     if (
       !this.isSamePublicationState(cache.publicationState, publicationState)
     ) {
@@ -3236,6 +3548,34 @@ export class DataService implements OnModuleInit {
       return true;
     }
     return this.isHistoricArtifactStateCurrent(cache, publicationState);
+  }
+
+  private isCertifiedOverlayInvalid(
+    cache: CertifiedDataCache,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    const cachedCertifiedRepairId = this.getCertifiedCacheRepairId(cache);
+    const certifiedRepairActive =
+      this.hasCertifiedHistoryRepair(publicationState);
+    return Boolean(
+      cachedCertifiedRepairId !== null &&
+      (!certifiedRepairActive ||
+        cachedCertifiedRepairId !== publicationState.certifiedHistoryRepairId),
+    );
+  }
+
+  private getCertifiedCacheRepairId(cache: CertifiedDataCache): string | null {
+    if (cache.artifactIdentity) {
+      return cache.artifactIdentity.materializationStrategy ===
+        'certified-history-overlay'
+        ? (cache.artifactIdentity.certifiedHistoryRepairId ??
+            cache.publicationState.certifiedHistoryRepairId ??
+            'invalid-certified-history-overlay')
+        : null;
+    }
+    return this.hasCertifiedHistoryRepair(cache.publicationState)
+      ? (cache.publicationState.certifiedHistoryRepairId ?? null)
+      : null;
   }
 
   private isHistoricArtifactStateCurrent(
@@ -3266,7 +3606,19 @@ export class DataService implements OnModuleInit {
       left.historicMapCursor === right.historicMapCursor &&
       left.historicStatsCursor === right.historicStatsCursor &&
       left.sourceRevision === right.sourceRevision &&
-      left.historicComputeEpoch === right.historicComputeEpoch
+      left.historicComputeEpoch === right.historicComputeEpoch &&
+      (left.certifiedHistoryRepairId ?? null) ===
+        (right.certifiedHistoryRepairId ?? null) &&
+      (left.certifiedHistoryRepairFrom ?? null) ===
+        (right.certifiedHistoryRepairFrom ?? null) &&
+      (left.certifiedHistoryRepairThrough ?? null) ===
+        (right.certifiedHistoryRepairThrough ?? null) &&
+      (left.certifiedHistoryRepairSourceRunId ?? null) ===
+        (right.certifiedHistoryRepairSourceRunId ?? null) &&
+      (left.certifiedHistoryRepairActivatedAt ?? null) ===
+        (right.certifiedHistoryRepairActivatedAt ?? null) &&
+      (left.certifiedHistoryRepairRevision ?? null) ===
+        (right.certifiedHistoryRepairRevision ?? null)
     );
   }
 
@@ -3283,6 +3635,12 @@ export class DataService implements OnModuleInit {
       state.historicStatsCursor,
       state.sourceRevision,
       state.historicComputeEpoch,
+      state.certifiedHistoryRepairId,
+      state.certifiedHistoryRepairFrom,
+      state.certifiedHistoryRepairThrough,
+      state.certifiedHistoryRepairSourceRunId,
+      state.certifiedHistoryRepairActivatedAt,
+      state.certifiedHistoryRepairRevision,
     ]);
   }
 
@@ -3500,7 +3858,8 @@ export class DataService implements OnModuleInit {
         if (
           entry.date >= publicationState.historicDirtyFrom &&
           dirtyThrough !== null &&
-          entry.date <= dirtyThrough
+          entry.date <= dirtyThrough &&
+          !this.isCertifiedHistoryRepairDate(entry.date, publicationState)
         ) {
           unavailableDates.add(entry.date);
         }
@@ -3768,6 +4127,7 @@ export class DataService implements OnModuleInit {
         ) AS dirty_month(value)
         WHERE state.id = 1
           AND $1::boolean
+          AND NOT $2::boolean
           AND state."historicDirtyFrom" IS NOT NULL
           AND COALESCE(
             state."historicDirtyThrough",
@@ -3775,7 +4135,10 @@ export class DataService implements OnModuleInit {
           ) IS NOT NULL
       ) unavailable
     `,
-      [this.getStatisticCacheMode(publicationState) === 'versioned'],
+      [
+        this.getStatisticCacheMode(publicationState) === 'versioned',
+        this.hasCertifiedHistoryRepair(publicationState),
+      ],
     );
     return new Set(rows.map(({ month }) => month));
   }

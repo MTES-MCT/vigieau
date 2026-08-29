@@ -1031,7 +1031,10 @@ describe('DataService', () => {
       expect(query).toContain('WHERE statistic_state."id" = 1');
       expect(query).toContain('LIMIT 1');
       expect(query).not.toContain('md5');
-      expect(query).not.toContain('statistic_commune_snapshot');
+      expect(query).toContain(
+        'certified_snapshot."certifiedHistoryRepairId" = repair.id',
+      );
+      expect(query).toContain('certified_snapshot."sourceRevision" IS NULL');
       expect(mockDataSource.query).toHaveBeenCalledWith(query);
     });
 
@@ -1897,6 +1900,137 @@ describe('DataService', () => {
       expect(service['failedPublicationAt']).toBe(160_001);
     });
 
+    it('discards an overlay loaded while its certified repair is revoked', async () => {
+      process.env.STATISTIC_CACHE_ARTIFACT_MODE = 'read-write';
+      (service as any).statisticCacheArtifactService = {};
+      service['certifiedDataCache'] = null;
+      const repairId = '00000000-0000-4000-8000-000000000048';
+      const artifactPublicationId = '00000000-0000-4000-8000-000000000049';
+      const activeState = {
+        ...stablePublicationState,
+        revision: '48',
+        statisticCachePublicationId: artifactPublicationId,
+        historicDirtyFrom: '2026-07-11',
+        historicDirtyThrough: '2026-08-27',
+        historicComputeEpoch: '9',
+        certifiedHistoryRepairId: repairId,
+        certifiedHistoryRepairFrom: '2026-07-11',
+        certifiedHistoryRepairThrough: '2026-08-27',
+        certifiedHistoryRepairSourceRunId: 'certified-source-run',
+        certifiedHistoryRepairActivatedAt: '2026-08-29T12:00:00.000Z',
+        certifiedHistoryRepairRevision: '48',
+      };
+      const revokedState = {
+        ...activeState,
+        certifiedHistoryRepairId: null,
+        certifiedHistoryRepairFrom: null,
+        certifiedHistoryRepairThrough: null,
+        certifiedHistoryRepairSourceRunId: null,
+        certifiedHistoryRepairActivatedAt: null,
+        certifiedHistoryRepairRevision: null,
+      };
+      const overlayCandidate = {
+        ...service['referenceDataCache'],
+        revision: activeState.revision,
+        publicationState: activeState,
+        dataArea: [],
+        dataCommune: [],
+        dataDepartement: [],
+        artifactPublicationId,
+        artifactIdentity: {
+          materializationStrategy: 'certified-history-overlay',
+          certifiedHistoryRepairId: repairId,
+        },
+      };
+      const sparseCandidate = {
+        ...overlayCandidate,
+        publicationState: revokedState,
+        artifactIdentity: {
+          materializationStrategy: 'sparse-current',
+          certifiedHistoryRepairId: null,
+        },
+      };
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValueOnce(activeState)
+        .mockResolvedValueOnce(revokedState)
+        .mockResolvedValueOnce(revokedState);
+      const loadArtifact = jest
+        .spyOn(service as any, 'loadArtifactBackedData')
+        .mockResolvedValueOnce(overlayCandidate)
+        .mockResolvedValueOnce(sparseCandidate);
+      const publish = jest
+        .spyOn(service as any, 'publishCertifiedDataCache')
+        .mockImplementation();
+
+      await service.loadData();
+
+      expect(loadArtifact).toHaveBeenCalledTimes(2);
+      expect(publish).toHaveBeenCalledTimes(1);
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          publicationState: revokedState,
+          artifactIdentity: expect.objectContaining({
+            materializationStrategy: 'sparse-current',
+          }),
+        }),
+      );
+    });
+
+    it('rebuilds a hot non-artifact cache when its repair is revoked', async () => {
+      const repairId = '00000000-0000-4000-8000-000000000048';
+      const activeState = {
+        ...stablePublicationState,
+        revision: '48',
+        historicDirtyFrom: '2026-07-11',
+        historicDirtyThrough: '2026-08-27',
+        historicComputeEpoch: '9',
+        certifiedHistoryRepairId: repairId,
+        certifiedHistoryRepairFrom: '2026-07-11',
+        certifiedHistoryRepairThrough: '2026-08-27',
+        certifiedHistoryRepairSourceRunId: 'certified-source-run',
+        certifiedHistoryRepairActivatedAt: '2026-08-29T12:00:00.000Z',
+        certifiedHistoryRepairRevision: '48',
+      };
+      const revokedState = {
+        ...activeState,
+        certifiedHistoryRepairId: null,
+        certifiedHistoryRepairFrom: null,
+        certifiedHistoryRepairThrough: null,
+        certifiedHistoryRepairSourceRunId: null,
+        certifiedHistoryRepairActivatedAt: null,
+        certifiedHistoryRepairRevision: null,
+      };
+      certifyData({ publicationState: activeState, revision: '48' });
+      service['publicationState'] = activeState;
+      service['publicationStateCheckedAt'] = 0;
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValueOnce(revokedState)
+        .mockResolvedValueOnce(revokedState);
+      const loadDataOnce = jest
+        .spyOn(service as any, 'loadDataOnce')
+        .mockResolvedValue({
+          ...service['referenceDataCache'],
+          revision: revokedState.revision,
+          publicationState: revokedState,
+          dataArea: [],
+          dataCommune: [],
+          dataDepartement: [],
+        });
+
+      await service.loadData();
+
+      expect(loadDataOnce).toHaveBeenCalledTimes(1);
+      expect(service['certifiedDataCache']?.publicationState).toEqual(
+        revokedState,
+      );
+      expect(
+        service['certifiedDataCache']?.publicationState
+          .certifiedHistoryRepairId,
+      ).toBeNull();
+    });
+
     it('bypasses a cold reconstruction cooldown for a new publication revision', async () => {
       const nextRevision = { ...stablePublicationState, revision: 'next' };
       service['certifiedDataCache'] = null;
@@ -2005,6 +2139,7 @@ describe('DataService', () => {
       historicStatsCursor: '2015-01-01',
       sourceRevision: '42',
       historicComputeEpoch: '7',
+      certifiedHistoryRepairId: null,
     };
     const activeArtifact = {
       identity: {
@@ -2020,6 +2155,7 @@ describe('DataService', () => {
         historicStatsCursor: '2015-01-01',
         sourceRevision: '42',
         historicComputeEpoch: '7',
+        certifiedHistoryRepairId: null,
         contentFingerprint: 'a'.repeat(64),
         firstDate: '2026-08-31',
         latestDate: '2026-08-31',
@@ -3152,6 +3288,7 @@ describe('DataService', () => {
           historicStatsCursor: currentDate,
           sourceRevision: state.sourceRevision,
           historicComputeEpoch: state.historicComputeEpoch,
+          certifiedHistoryRepairId: null,
         },
         expect.any(Function),
       );
@@ -3651,6 +3788,84 @@ describe('DataService', () => {
         (service as any).loadArtifactBackedData(distributedState),
       ).resolves.toBe(hydrated);
       expect(artifactService.materialize).not.toHaveBeenCalled();
+    });
+
+    it('rejects a preloaded overlay promoted after its repair was revoked', async () => {
+      const activeId = '00000000-0000-4000-8000-000000000048';
+      const repairId = '00000000-0000-4000-8000-000000000049';
+      const repairedState = {
+        ...distributedState,
+        revision: '48',
+        statisticCachePublicationId: activeId,
+        historicDirtyFrom: '2026-07-11',
+        historicDirtyThrough: '2026-08-27',
+        historicComputeEpoch: '9',
+        certifiedHistoryRepairId: repairId,
+        certifiedHistoryRepairFrom: '2026-07-11',
+        certifiedHistoryRepairThrough: '2026-08-27',
+        certifiedHistoryRepairSourceRunId: 'certified-source-run',
+        certifiedHistoryRepairActivatedAt: '2026-08-29T12:00:00.000Z',
+        certifiedHistoryRepairRevision: '48',
+      };
+      const revokedState = {
+        ...repairedState,
+        certifiedHistoryRepairId: null,
+        certifiedHistoryRepairFrom: null,
+        certifiedHistoryRepairThrough: null,
+        certifiedHistoryRepairSourceRunId: null,
+        certifiedHistoryRepairActivatedAt: null,
+        certifiedHistoryRepairRevision: null,
+      };
+      const overlayIdentity = {
+        id: activeId,
+        statisticRevision: repairedState.revision,
+        currentPublishedDate: repairedState.currentPublishedDate,
+        protocolVersion: 1,
+        mode: 'versioned',
+        materializationStrategy: 'certified-history-overlay',
+        historicDirtyFrom: repairedState.historicDirtyFrom,
+        historicDirtyThrough: repairedState.historicDirtyThrough,
+        historicMapCursor: repairedState.historicMapCursor,
+        historicStatsCursor: repairedState.historicStatsCursor,
+        sourceRevision: repairedState.sourceRevision,
+        historicComputeEpoch: repairedState.historicComputeEpoch,
+        certifiedHistoryRepairId: repairId,
+      };
+      const overlayCandidate = {
+        ...service['referenceDataCache'],
+        revision: repairedState.revision,
+        publicationState: repairedState,
+        dataArea: [],
+        dataCommune: [],
+        dataDepartement: [],
+        artifactPublicationId: activeId,
+        artifactIdentity: overlayIdentity,
+      };
+      const activePayload = { identity: { id: activeId } };
+      const sparseCache = {
+        ...overlayCandidate,
+        publicationState: revokedState,
+        artifactIdentity: {
+          ...overlayIdentity,
+          materializationStrategy: 'sparse-current',
+          certifiedHistoryRepairId: null,
+        },
+      };
+      const artifactService = {
+        loadActive: jest.fn().mockResolvedValue(activePayload),
+      };
+      (service as any).statisticCacheArtifactService = artifactService;
+      service['candidateDataCache'] = overlayCandidate as any;
+      jest
+        .spyOn(service as any, 'hydrateArtifactPayload')
+        .mockReturnValue(sparseCache);
+
+      await expect(
+        (service as any).loadArtifactBackedData(revokedState),
+      ).resolves.toBe(sparseCache);
+
+      expect(artifactService.loadActive).toHaveBeenCalledTimes(1);
+      expect(service['candidateDataCache']).toBeNull();
     });
 
     it('classifies a publication drift as superseded instead of throwing', async () => {

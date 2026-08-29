@@ -15,14 +15,11 @@ export type StatisticCacheMaterializationStrategy =
   | "legacy-safe-boundary"
   | "daily-delta"
   | "current-replace"
-  | "sparse-current";
+  | "sparse-current"
+  | "certified-history-overlay";
 
 export type StatisticCachePublicationStatus =
-  | "building"
-  | "ready"
-  | "active"
-  | "retired"
-  | "failed";
+  "building" | "ready" | "active" | "retired" | "failed";
 
 @Entity({ name: "statistic_cache_publication" })
 @Unique("UQ_statistic_cache_publication_instance_identity", [
@@ -44,7 +41,7 @@ export type StatisticCachePublicationStatus =
   `
     "materializationStrategy" IN (
       'full-clean', 'legacy-safe-boundary', 'daily-delta', 'current-replace',
-      'sparse-current'
+      'sparse-current', 'certified-history-overlay'
     )
   `,
 )
@@ -137,6 +134,18 @@ export type StatisticCachePublicationStatus =
     )
   `,
 )
+@Check(
+  "CHK_statistic_cache_publication_certified_repair",
+  `
+    (
+      "materializationStrategy" = 'certified-history-overlay'
+      AND "certifiedHistoryRepairId" IS NOT NULL
+    ) OR (
+      "materializationStrategy" <> 'certified-history-overlay'
+      AND "certifiedHistoryRepairId" IS NULL
+    )
+  `,
+)
 export class StatisticCachePublication extends BaseEntity {
   @PrimaryColumn({ type: "uuid" })
   id: string;
@@ -179,6 +188,9 @@ export class StatisticCachePublication extends BaseEntity {
 
   @Column({ type: "bigint", nullable: true })
   historicComputeEpoch: string | null;
+
+  @Column({ type: "uuid", nullable: true })
+  certifiedHistoryRepairId: string | null;
 
   @Column({ type: "date" })
   firstDate: string;

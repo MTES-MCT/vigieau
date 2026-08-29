@@ -20,6 +20,7 @@ describe('StatisticCacheArtifactService', () => {
     historicStatsCursor: '2015-01-01',
     sourceRevision: '42',
     historicComputeEpoch: '7',
+    certifiedHistoryRepairId: null,
     contentFingerprint: fingerprint,
     firstDate: '2026-08-15',
     latestDate: '2026-08-15',
@@ -41,6 +42,7 @@ describe('StatisticCacheArtifactService', () => {
     historicStatsCursor: candidate.historicStatsCursor,
     sourceRevision: candidate.sourceRevision,
     historicComputeEpoch: candidate.historicComputeEpoch,
+    certifiedHistoryRepairId: candidate.certifiedHistoryRepairId,
   };
 
   const createService = () => {
@@ -99,6 +101,7 @@ describe('StatisticCacheArtifactService', () => {
       historicStatsCursor: candidate.historicStatsCursor,
       sourceRevision: candidate.sourceRevision,
       historicComputeEpoch: candidate.historicComputeEpoch,
+      certifiedHistoryRepairId: candidate.certifiedHistoryRepairId,
       contentFingerprint: candidate.contentFingerprint,
       firstDate: candidate.firstDate,
       latestDate: candidate.latestDate,
@@ -217,6 +220,7 @@ describe('StatisticCacheArtifactService', () => {
               legacyBoundaryEligible: true,
               pendingCurrentQueueCount: 0,
               currentSnapshotCertified: true,
+              certifiedRepairCoverageValid: true,
               invalidSnapshotCount: 0,
             },
           ];
@@ -254,10 +258,65 @@ describe('StatisticCacheArtifactService', () => {
     expect(index('DELETE FROM "statistic_cache_publication" publication')).toBe(
       -1,
     );
-    expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBe(false);
+    expect(manager.query.mock.calls[0]?.[1]?.at(-2)).toBe(false);
+    expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBeNull();
     expect(manager.query.mock.calls[0]?.[0]).toContain(
       "'daily-delta', 'current-replace', 'sparse-current'",
     );
+  });
+
+  it('binds a certified overlay to the exact immutable repair identity', async () => {
+    const { service } = createService();
+    const repairId = '00000000-0000-4000-8000-000000000099';
+    const overlay = {
+      ...candidate,
+      mode: 'versioned' as const,
+      materializationStrategy: 'certified-history-overlay' as const,
+      certifiedHistoryRepairId: repairId,
+    };
+    const manager = {
+      query: jest.fn(async (sql: string, parameters?: unknown[]) => {
+        void parameters;
+        if (sql.includes('AS "invalidSnapshotCount"')) {
+          return [
+            {
+              revision: overlay.statisticRevision,
+              currentPublishedDate: overlay.currentPublishedDate,
+              historicDirtyFrom: overlay.historicDirtyFrom,
+              historicDirtyThrough: overlay.historicDirtyThrough,
+              historicMapCursor: overlay.historicMapCursor,
+              historicStatsCursor: overlay.historicStatsCursor,
+              sourceRevision: overlay.sourceRevision,
+              historicComputeEpoch: overlay.historicComputeEpoch,
+              legacyBoundaryEligible: true,
+              pendingCurrentQueueCount: 0,
+              currentSnapshotCertified: true,
+              certifiedRepairCoverageValid: true,
+              invalidSnapshotCount: 0,
+            },
+          ];
+        }
+        if (sql.includes('SELECT "activePublicationId"')) {
+          return [{ activePublicationId: previousPublicationId }];
+        }
+        return [];
+      }),
+    };
+
+    await (service as any).persistPublication(
+      manager,
+      publicationId,
+      overlay,
+      (service as any).encodeArtifacts(overlay),
+    );
+
+    expect(manager.query.mock.calls[0][0]).toContain('repair.id = $7::uuid');
+    expect(manager.query.mock.calls[0][1]?.at(-1)).toBe(repairId);
+    const insert = manager.query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO "statistic_cache_publication"'),
+    );
+    expect(insert?.[0]).toContain('"certifiedHistoryRepairId"');
+    expect(insert?.[1]?.at(-1)).toBe(repairId);
   });
 
   it('garbage collects only detached and unreferenced ready or retired publications', async () => {
@@ -336,6 +395,7 @@ describe('StatisticCacheArtifactService', () => {
               legacyBoundaryEligible: true,
               pendingCurrentQueueCount: 0,
               currentSnapshotCertified: true,
+              certifiedRepairCoverageValid: true,
               invalidSnapshotCount: 0,
             },
           ];
@@ -357,6 +417,9 @@ describe('StatisticCacheArtifactService', () => {
     expect(manager.query.mock.calls[0][0]).toContain(
       'source_state."publicRevision"::text AS "sourceRevision"',
     );
+    expect(manager.query.mock.calls[0][0]).toContain(
+      'certified_snapshot."sourceRevision" IS NULL',
+    );
   });
 
   it.each([
@@ -365,6 +428,10 @@ describe('StatisticCacheArtifactService', () => {
     [
       'a missing certified national snapshot',
       { currentSnapshotCertified: false },
+    ],
+    [
+      'a certified repair without snapshot provenance',
+      { certifiedRepairCoverageValid: false },
     ],
     ['a pending current queue', { pendingCurrentQueueCount: 1 }],
     ['an unprepared previous-day boundary', { legacyBoundaryEligible: false }],
@@ -390,6 +457,7 @@ describe('StatisticCacheArtifactService', () => {
                 legacyBoundaryEligible: true,
                 pendingCurrentQueueCount: 0,
                 currentSnapshotCertified: true,
+                certifiedRepairCoverageValid: true,
                 invalidSnapshotCount: 0,
                 ...override,
               },
@@ -415,7 +483,8 @@ describe('StatisticCacheArtifactService', () => {
       'AS "legacyBoundaryEligible"',
     );
     if ('legacyBoundaryEligible' in override) {
-      expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBe(true);
+      expect(manager.query.mock.calls[0]?.[1]?.at(-2)).toBe(true);
+      expect(manager.query.mock.calls[0]?.[1]?.at(-1)).toBeNull();
     }
   });
 
@@ -626,6 +695,7 @@ describe('StatisticCacheArtifactService', () => {
         historicStatsCursor: candidate.historicStatsCursor,
         sourceRevision: candidate.sourceRevision,
         historicComputeEpoch: candidate.historicComputeEpoch,
+        certifiedHistoryRepairId: candidate.certifiedHistoryRepairId,
       };
       const request =
         operation === 'materialize'
@@ -664,6 +734,7 @@ describe('StatisticCacheArtifactService', () => {
       historicStatsCursor: candidate.historicStatsCursor,
       sourceRevision: candidate.sourceRevision,
       historicComputeEpoch: candidate.historicComputeEpoch,
+      certifiedHistoryRepairId: candidate.certifiedHistoryRepairId,
     };
     const staged = {
       id: publicationId,
@@ -757,6 +828,7 @@ describe('StatisticCacheArtifactService', () => {
         historicStatsCursor: candidate.historicStatsCursor,
         sourceRevision: candidate.sourceRevision,
         historicComputeEpoch: candidate.historicComputeEpoch,
+        certifiedHistoryRepairId: candidate.certifiedHistoryRepairId,
       };
       const manager = { query: jest.fn().mockResolvedValue([]) };
       const queryRunner = {
@@ -787,6 +859,7 @@ describe('StatisticCacheArtifactService', () => {
                 historicStatsCursor: target.historicStatsCursor,
                 sourceRevision: target.sourceRevision,
                 historicComputeEpoch: target.historicComputeEpoch,
+                certifiedHistoryRepairId: target.certifiedHistoryRepairId,
                 availableRevision: target.statisticRevision,
                 availablePublishedDate: target.currentPublishedDate,
                 availableHistoricDirtyFrom: target.historicDirtyFrom,
@@ -797,6 +870,7 @@ describe('StatisticCacheArtifactService', () => {
                 availableHistoricComputeEpoch: target.historicComputeEpoch,
                 pendingCurrentQueueCount: 0,
                 currentSnapshotCertified,
+                certifiedRepairCoverageValid: true,
                 invalidSnapshotCount: 0,
               },
             ];

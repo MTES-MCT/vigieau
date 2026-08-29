@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { StatisticCachePublication1786744800000 } from '../../../backend-admin/src/migrations/1786744800000-StatisticCachePublication';
+import { CertifiedHistoryRepairAudit1787910600000 } from '../../../backend-admin/src/migrations/1787910600000-CertifiedHistoryRepairAudit';
 import {
   StatisticCacheArtifactCandidate,
   StatisticCacheArtifactService,
@@ -45,6 +46,7 @@ describeWithPostgres(
       historicStatsCursor: previousDate(currentPublishedDate),
       sourceRevision: '42',
       historicComputeEpoch: '7',
+      certifiedHistoryRepairId: null,
       contentFingerprint: fingerprint(
         `${statisticRevision}:${currentPublishedDate}:${value}`,
       ),
@@ -76,6 +78,7 @@ describeWithPostgres(
       historicStatsCursor: value.historicStatsCursor,
       sourceRevision: value.sourceRevision,
       historicComputeEpoch: value.historicComputeEpoch,
+      certifiedHistoryRepairId: value.certifiedHistoryRepairId,
     });
 
     async function setBoundary(
@@ -190,6 +193,7 @@ describeWithPostgres(
       await runner.connect();
       try {
         await new StatisticCachePublication1786744800000().up(runner);
+        await new CertifiedHistoryRepairAudit1787910600000().up(runner);
       } finally {
         await runner.release();
       }

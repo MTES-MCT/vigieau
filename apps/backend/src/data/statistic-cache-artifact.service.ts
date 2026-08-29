@@ -23,7 +23,8 @@ export type StatisticCacheMaterializationStrategy =
   | 'legacy-safe-boundary'
   | 'daily-delta'
   | 'current-replace'
-  | 'sparse-current';
+  | 'sparse-current'
+  | 'certified-history-overlay';
 
 export type StatisticCacheLatestCommuneWeight = [code: string, weight: number];
 
@@ -40,6 +41,7 @@ export interface StatisticCacheMaterializationTarget extends StatisticCacheArtif
   historicStatsCursor: string | null;
   sourceRevision: string | null;
   historicComputeEpoch: string | null;
+  certifiedHistoryRepairId: string | null;
 }
 
 export type StatisticCacheCandidateTarget = StatisticCacheMaterializationTarget;
@@ -74,6 +76,7 @@ export interface StatisticCacheArtifactIdentity extends StatisticCacheArtifactTa
   historicStatsCursor: string | null;
   sourceRevision: string | null;
   historicComputeEpoch: string | null;
+  certifiedHistoryRepairId: string | null;
   contentFingerprint: string;
   firstDate: string;
   latestDate: string;
@@ -101,6 +104,7 @@ export interface StatisticCacheArtifactCandidate extends StatisticCacheArtifactT
   historicStatsCursor: string | null;
   sourceRevision: string | null;
   historicComputeEpoch: string | null;
+  certifiedHistoryRepairId: string | null;
   contentFingerprint: string;
   firstDate: string;
   latestDate: string;
@@ -127,6 +131,7 @@ type ArtifactRow = {
   historicStatsCursor: string | Date | null;
   sourceRevision: string | number | null;
   historicComputeEpoch: string | number | null;
+  certifiedHistoryRepairId: string | null;
   contentFingerprint: string;
   firstDate: string | Date;
   latestDate: string | Date;
@@ -256,7 +261,8 @@ function hasCandidateIdentityTarget(
     identity.historicMapCursor === target.historicMapCursor &&
     identity.historicStatsCursor === target.historicStatsCursor &&
     identity.sourceRevision === target.sourceRevision &&
-    identity.historicComputeEpoch === target.historicComputeEpoch,
+    identity.historicComputeEpoch === target.historicComputeEpoch &&
+    identity.certifiedHistoryRepairId === target.certifiedHistoryRepairId,
   );
 }
 
@@ -273,7 +279,8 @@ function candidateMatchesTarget(
     candidate.historicMapCursor === target.historicMapCursor &&
     candidate.historicStatsCursor === target.historicStatsCursor &&
     candidate.sourceRevision === target.sourceRevision &&
-    candidate.historicComputeEpoch === target.historicComputeEpoch
+    candidate.historicComputeEpoch === target.historicComputeEpoch &&
+    candidate.certifiedHistoryRepairId === target.certifiedHistoryRepairId
   );
 }
 
@@ -342,6 +349,8 @@ export class StatisticCacheArtifactService {
           publication."historicMapCursor"::text AS "historicMapCursor",
           publication."historicStatsCursor"::text AS "historicStatsCursor",
           publication."sourceRevision", publication."historicComputeEpoch",
+          publication."certifiedHistoryRepairId"::text
+            AS "certifiedHistoryRepairId",
           publication."contentFingerprint",
           publication."firstDate"::text AS "firstDate",
           publication."latestDate"::text AS "latestDate",
@@ -374,6 +383,10 @@ export class StatisticCacheArtifactService {
         row.historicComputeEpoch === null
           ? null
           : String(row.historicComputeEpoch),
+      certifiedHistoryRepairId:
+        row.certifiedHistoryRepairId === null
+          ? null
+          : String(row.certifiedHistoryRepairId),
       contentFingerprint: String(row.contentFingerprint),
       firstDate: normalizeDate(row.firstDate)!,
       latestDate: normalizeDate(row.latestDate)!,
@@ -428,6 +441,8 @@ export class StatisticCacheArtifactService {
           publication."historicMapCursor"::text AS "historicMapCursor",
           publication."historicStatsCursor"::text AS "historicStatsCursor",
           publication."sourceRevision", publication."historicComputeEpoch",
+          publication."certifiedHistoryRepairId"::text
+            AS "certifiedHistoryRepairId",
           publication."contentFingerprint",
           publication."firstDate"::text AS "firstDate",
           publication."latestDate"::text AS "latestDate",
@@ -491,6 +506,10 @@ export class StatisticCacheArtifactService {
         first.historicComputeEpoch === null
           ? null
           : String(first.historicComputeEpoch),
+      certifiedHistoryRepairId:
+        first.certifiedHistoryRepairId === null
+          ? null
+          : String(first.certifiedHistoryRepairId),
       contentFingerprint: String(first.contentFingerprint),
       firstDate: normalizeDate(first.firstDate)!,
       latestDate: normalizeDate(first.latestDate)!,
@@ -873,6 +892,7 @@ export class StatisticCacheArtifactService {
             publication."historicStatsCursor"::text,
             publication."sourceRevision"::text,
             publication."historicComputeEpoch"::text,
+            publication."certifiedHistoryRepairId"::text,
             statistic_state."revision"::text AS "availableRevision",
             statistic_state."currentPublishedDate"::text
               AS "availablePublishedDate",
@@ -900,16 +920,77 @@ export class StatisticCacheArtifactService {
                   ${sourceRevisionSql}
             ) AS "currentSnapshotCertified",
             (
+              (
+                publication."materializationStrategy" <>
+                    'certified-history-overlay'
+                AND publication."certifiedHistoryRepairId" IS NULL
+              ) OR (
+                publication."materializationStrategy" =
+                    'certified-history-overlay'
+                AND publication."certifiedHistoryRepairId" IS NOT NULL
+                AND EXISTS (
+                SELECT 1
+                FROM "certified_history_repair_audit" repair
+                WHERE repair.id = publication."certifiedHistoryRepairId"
+                  AND repair."activationKind" = 'statistics-only'
+                  AND repair."dateFrom" =
+                      statistic_state."historicDirtyFrom"
+                  AND repair."dateThrough" =
+                      statistic_state."historicDirtyThrough"
+                  AND repair."historicComputeEpoch" =
+                      config."historicComputeEpoch"
+                  AND repair."publicationRevisionAfter" <=
+                      statistic_state.revision
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM generate_series(
+                      repair."dateFrom", repair."dateThrough",
+                      '1 day'::interval
+                    ) repaired_day(value)
+                    WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM "statistic_commune_snapshot" certified_snapshot
+                      WHERE certified_snapshot."snapshotDate" =
+                            repaired_day.value::date
+                        AND certified_snapshot.scope = 'national'
+                        AND certified_snapshot.status = 'completed'
+                        AND certified_snapshot."expectedCommuneCount" =
+                            repair."communeCount"
+                        AND certified_snapshot."processedCommuneCount" =
+                            repair."communeCount"
+                        AND certified_snapshot."sourceRevision" IS NULL
+                        AND certified_snapshot."certifiedHistoryRepairId" =
+                            repair.id
+                    )
+                  )
+                )
+              )
+            ) AS "certifiedRepairCoverageValid",
+            (
               SELECT COUNT(*)::integer
               FROM "statistic_commune_snapshot" snapshot
-              WHERE snapshot."snapshotDate" =
-                  statistic_state."currentPublishedDate"
-                AND (
-                  snapshot."status" <> 'completed'
-                  OR snapshot."processedCommuneCount" <>
-                    snapshot."expectedCommuneCount"
-                  OR snapshot."sourceRevision" IS DISTINCT FROM
-                    ${sourceRevisionSql}
+              WHERE snapshot."scope" = 'bootstrap'
+                 OR (
+                   snapshot."scope" <> 'bootstrap'
+                   AND snapshot."snapshotDate" BETWEEN
+                     CASE
+                       WHEN publication."materializationStrategy" =
+                            'certified-history-overlay'
+                         THEN publication."firstDate"
+                       ELSE statistic_state."currentPublishedDate"
+                     END
+                     AND statistic_state."currentPublishedDate"
+                   AND (
+                     snapshot."status" <> 'completed'
+                     OR snapshot."processedCommuneCount" <>
+                        snapshot."expectedCommuneCount"
+                     OR (
+                       snapshot."snapshotDate" =
+                           statistic_state."currentPublishedDate"
+                       AND snapshot."sourceRevision" IS DISTINCT FROM
+                           ${sourceRevisionSql}
+                     )
+                   )
                 )
             ) AS "invalidSnapshotCount"
           FROM "statistic_cache_state" cache_state
@@ -955,6 +1036,8 @@ export class StatisticCacheArtifactService {
           String(target.sourceRevision ?? '') &&
         String(state.historicComputeEpoch ?? '') ===
           String(target.historicComputeEpoch ?? '') &&
+        String(state.certifiedHistoryRepairId ?? '') ===
+          String(target.certifiedHistoryRepairId ?? '') &&
         String(state.availableRevision) === target.statisticRevision &&
         normalizeDate(state.availablePublishedDate) ===
           target.currentPublishedDate &&
@@ -972,6 +1055,7 @@ export class StatisticCacheArtifactService {
           String(target.historicComputeEpoch ?? '') &&
         Number(state.pendingCurrentQueueCount) === 0 &&
         state.currentSnapshotCertified === true &&
+        state.certifiedRepairCoverageValid === true &&
         Number(state.invalidSnapshotCount) === 0;
       if (!boundaryMatches) {
         await this.discardCandidate(queryRunner.manager, candidateId);
@@ -1411,6 +1495,51 @@ export class StatisticCacheArtifactService {
                   source_guard."sourceRevision"::bigint
             ) AS "currentSnapshotCertified",
             (
+              (
+                $4::varchar <> 'certified-history-overlay'
+                AND $7::uuid IS NULL
+              ) OR (
+                $4::varchar = 'certified-history-overlay'
+                AND $7::uuid IS NOT NULL
+                AND EXISTS (
+                SELECT 1
+                FROM "certified_history_repair_audit" repair
+                WHERE repair.id = $7::uuid
+                  AND repair."activationKind" = 'statistics-only'
+                  AND repair."dateFrom" =
+                      statistic_state."historicDirtyFrom"
+                  AND repair."dateThrough" =
+                      statistic_state."historicDirtyThrough"
+                  AND repair."historicComputeEpoch" =
+                      config_guard."historicComputeEpoch"::bigint
+                  AND repair."publicationRevisionAfter" <=
+                      statistic_state.revision
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM generate_series(
+                      repair."dateFrom", repair."dateThrough",
+                      '1 day'::interval
+                    ) repaired_day(value)
+                    WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM "statistic_commune_snapshot" certified_snapshot
+                      WHERE certified_snapshot."snapshotDate" =
+                            repaired_day.value::date
+                        AND certified_snapshot.scope = 'national'
+                        AND certified_snapshot.status = 'completed'
+                        AND certified_snapshot."expectedCommuneCount" =
+                            repair."communeCount"
+                        AND certified_snapshot."processedCommuneCount" =
+                            repair."communeCount"
+                        AND certified_snapshot."sourceRevision" IS NULL
+                        AND certified_snapshot."certifiedHistoryRepairId" =
+                            repair.id
+                    )
+                  )
+                )
+              )
+            ) AS "certifiedRepairCoverageValid",
+            (
               SELECT COUNT(*)::integer
               FROM "statistic_commune_snapshot" snapshot
               WHERE snapshot."scope" = 'bootstrap'
@@ -1449,6 +1578,7 @@ export class StatisticCacheArtifactService {
         candidate.materializationStrategy,
         candidate.mode,
         isPreparedLegacyBoundaryRequired(),
+        candidate.certifiedHistoryRepairId,
       ],
     );
     if (
@@ -1478,6 +1608,7 @@ export class StatisticCacheArtifactService {
       publicationState?.legacyBoundaryEligible !== true ||
       Number(publicationState?.pendingCurrentQueueCount ?? -1) !== 0 ||
       publicationState?.currentSnapshotCertified !== true ||
+      publicationState?.certifiedRepairCoverageValid !== true ||
       Number(publicationState?.invalidSnapshotCount ?? -1) !== 0
     ) {
       throw new Error(
@@ -1525,11 +1656,13 @@ export class StatisticCacheArtifactService {
             "protocolVersion", "status",
             "contentFingerprint", "firstDate", "latestDate", "dateCount",
             "areaCount", "departmentCount", "communeCount",
-            "compressedByteLength", "uncompressedByteLength"
+            "compressedByteLength", "uncompressedByteLength",
+            "certifiedHistoryRepairId"
           ) VALUES (
             $1::uuid, $2::bigint, $3::date, $4, $5, $6::date, $7::date,
             $8::date, $9::date, $10::bigint, $11::bigint, $12, $13, 'building',
-            $14, $15::date, $16::date, $17, $18, $19, $20, $21, $22
+            $14, $15::date, $16::date, $17, $18, $19, $20, $21, $22,
+            $23::uuid
           )
         `,
       [
@@ -1555,6 +1688,7 @@ export class StatisticCacheArtifactService {
         candidate.communeCount,
         totalCompressedByteLength,
         totalUncompressedByteLength,
+        candidate.certifiedHistoryRepairId,
       ],
     );
     for (const artifact of artifacts) {

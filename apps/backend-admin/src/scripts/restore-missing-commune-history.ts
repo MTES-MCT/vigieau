@@ -12,7 +12,7 @@ const SEVERITIES = new Set([
   'crise',
 ]);
 
-type Severity = 'vigilance' | 'alerte' | 'alerte_renforcee' | 'crise';
+export type Severity = 'vigilance' | 'alerte' | 'alerte_renforcee' | 'crise';
 
 export interface SparseSourceRun {
   code: string;
@@ -109,7 +109,7 @@ export interface RestoreMissingHistorySummary {
 class CurrentStatisticPriorityError extends Error {}
 class PublicationContextChangedError extends Error {}
 
-function requiredEnvironment(
+export function requiredEnvironment(
   environment: NodeJS.ProcessEnv,
   name: string,
 ): string {
@@ -118,7 +118,7 @@ function requiredEnvironment(
   return value;
 }
 
-function parseBoolean(name: string, value: string | undefined): boolean {
+export function parseBoolean(name: string, value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase() || 'false';
   if (normalized !== 'true' && normalized !== 'false') {
     throw new Error(`${name} must be true or false`);
@@ -126,7 +126,7 @@ function parseBoolean(name: string, value: string | undefined): boolean {
   return normalized === 'true';
 }
 
-function parseInteger(
+export function parseInteger(
   name: string,
   value: string | undefined,
   fallback: number,
@@ -145,7 +145,7 @@ function parseInteger(
   return parsed;
 }
 
-function assertCivilDate(name: string, value: string): string {
+export function assertCivilDate(name: string, value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     throw new Error(`${name} must use YYYY-MM-DD`);
   }
@@ -159,7 +159,7 @@ function assertCivilDate(name: string, value: string): string {
   return value;
 }
 
-function assertPublicationContextToken(value: string): string {
+export function assertPublicationContextToken(value: string): string {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) {
     throw new Error('REPAIR_EXPECTED_PUBLICATION_CONTEXT is invalid');
   }
@@ -265,11 +265,11 @@ export function parseRestoreMissingHistoryOptions(
   };
 }
 
-function databaseBoolean(value: unknown): boolean {
+export function databaseBoolean(value: unknown): boolean {
   return value === true || value === 'true' || value === 't';
 }
 
-function databaseCount(value: unknown, name: string): number {
+export function databaseCount(value: unknown, name: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new Error(`Invalid ${name}: ${String(value)}`);
@@ -369,7 +369,7 @@ export function assertRepairRangeAgainstPublicationContext(
   }
 }
 
-function normalizeSeverity(
+export function normalizeSeverity(
   value: unknown,
   code: string,
   date: string,
@@ -997,7 +997,7 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function assertDatabaseName(
+export async function assertDatabaseName(
   database: Pick<DataSource, 'query'>,
   expected: string,
   role: string,
@@ -1012,7 +1012,9 @@ async function assertDatabaseName(
   }
 }
 
-async function assertSourceSessionSafety(source: DataSource): Promise<void> {
+export async function assertSourceSessionSafety(
+  source: DataSource,
+): Promise<void> {
   const [row] = (await source.query(SOURCE_SESSION_SAFETY_SQL)) as Array<{
     readOnly: string;
     sequentialScan: string;
@@ -1029,14 +1031,16 @@ async function assertSourceSessionSafety(source: DataSource): Promise<void> {
   }
 }
 
-async function currentPriorityActive(runner: QueryRunner): Promise<boolean> {
+export async function currentPriorityActive(
+  runner: QueryRunner,
+): Promise<boolean> {
   const [row] = (await runner.query(REPAIR_CURRENT_PRIORITY_SQL)) as Array<{
     priorityActive: boolean | string;
   }>;
   return databaseBoolean(row?.priorityActive);
 }
 
-async function publicationContext(
+export async function publicationContext(
   runner: QueryRunner,
   lockRows = false,
 ): Promise<RepairPublicationContext> {
@@ -1054,7 +1058,7 @@ async function publicationContext(
   return normalizePublicationContext(row);
 }
 
-async function withSnapshotLock<T>(
+export async function withSnapshotLock<T>(
   target: DataSource,
   options: RestoreMissingHistoryOptions,
   operation: (runner: QueryRunner) => Promise<T>,
@@ -1117,7 +1121,7 @@ async function withSnapshotLock<T>(
   throw lastError;
 }
 
-async function assertExpectedContext(
+export async function assertExpectedContext(
   runner: QueryRunner,
   expected: RepairPublicationContext,
   lockRows: boolean,
