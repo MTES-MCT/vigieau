@@ -10,6 +10,7 @@ import {
   buildStatisticApplySql,
   buildStatisticInspectionSql,
   certifiedCompletionContextSql,
+  chunkCertifiedValidationRows,
   encodeCertifiedCompletionContext,
   parseCertifiedHistoryCompletionOptions,
   validateCertifiedDepartmentDays,
@@ -121,6 +122,17 @@ describe('certified history completion options', () => {
 });
 
 describe('certified completion short validation transactions', () => {
+  it('bounds target validation batches independently from source reads', () => {
+    expect(chunkCertifiedValidationRows([1, 2, 3, 4, 5], 2)).toEqual([
+      [1, 2],
+      [3, 4],
+      [5],
+    ]);
+    expect(() => chunkCertifiedValidationRows([1], 0)).toThrow(
+      'batch size must be positive',
+    );
+  });
+
   it('keeps one snapshot lock while committing every validation batch separately', async () => {
     const query = jest.fn(async (sql: string) => {
       if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];

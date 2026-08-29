@@ -1308,6 +1308,20 @@ async function validateTargetStatisticExact(
   }
 }
 
+export function chunkCertifiedValidationRows<T>(
+  rows: T[],
+  batchSize: number,
+): T[][] {
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1) {
+    throw new Error('Certified validation batch size must be positive');
+  }
+  const batches: T[][] = [];
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    batches.push(rows.slice(offset, offset + batchSize));
+  }
+  return batches;
+}
+
 const SOURCE_COMMUNE_DIGEST_BATCH_SQL = `
   WITH codes AS MATERIALIZED (
     SELECT DISTINCT day.code
@@ -1449,7 +1463,7 @@ async function readCertifiedCommuneDigests(
       );
       firstDigestEntry = false;
     }
-    batches.push(rows);
+    batches.push(...chunkCertifiedValidationRows(rows, options.batchSize));
     cursor = rows.at(-1)!.code;
     validated += rows.length;
   }
