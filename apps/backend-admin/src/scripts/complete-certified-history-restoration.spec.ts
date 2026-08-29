@@ -1,3 +1,4 @@
+import { DataSource, QueryRunner } from 'typeorm';
 import {
   CERTIFIED_COMPLETION_APPLY_DEPARTMENT_BATCH_SQL,
   CERTIFIED_COMPLETION_INSPECT_DEPARTMENT_BATCH_SQL,
@@ -13,6 +14,8 @@ import {
   parseCertifiedHistoryCompletionOptions,
   validateCertifiedDepartmentDays,
   validateCertifiedStatisticDays,
+  withShortRunnerTransaction,
+  withTargetSnapshotLock,
 } from './complete-certified-history-restoration';
 
 const requiredEnvironment = {
@@ -114,6 +117,57 @@ describe('certified history completion options', () => {
         provenanceDigest: 'f'.repeat(64),
       },
     });
+  });
+});
+
+describe('certified completion short validation transactions', () => {
+  it('keeps one snapshot lock while committing every validation batch separately', async () => {
+    const query = jest.fn(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    const runner = {
+      connect: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+      query,
+      startTransaction: jest.fn(async () => undefined),
+      commitTransaction: jest.fn(async () => undefined),
+      rollbackTransaction: jest.fn(async () => undefined),
+      isTransactionActive: false,
+    } as unknown as QueryRunner;
+    const target = {
+      createQueryRunner: jest.fn(() => runner),
+    } as unknown as DataSource;
+    const options = parseCertifiedHistoryCompletionOptions(requiredEnvironment);
+
+    await withTargetSnapshotLock(target, options, async (lockedRunner) => {
+      await withShortRunnerTransaction(
+        lockedRunner,
+        options,
+        async () => undefined,
+      );
+      await withShortRunnerTransaction(
+        lockedRunner,
+        options,
+        async () => undefined,
+      );
+    });
+
+    expect(target.createQueryRunner).toHaveBeenCalledTimes(1);
+    expect(runner.startTransaction).toHaveBeenCalledTimes(2);
+    expect(runner.commitTransaction).toHaveBeenCalledTimes(2);
+    expect(
+      query.mock.calls.filter(([sql]) =>
+        String(sql).includes('pg_try_advisory_lock'),
+      ),
+    ).toHaveLength(1);
+    expect(
+      query.mock.calls.filter(([sql]) =>
+        String(sql).includes('pg_advisory_unlock'),
+      ),
+    ).toHaveLength(1);
+    expect(runner.release).toHaveBeenCalledTimes(1);
   });
 });
 

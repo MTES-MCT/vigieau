@@ -1091,7 +1091,7 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function withShortTargetTransaction<T>(
+export async function withTargetSnapshotLock<T>(
   target: DataSource,
   options: CertifiedHistoryCompletionOptions,
   operation: (runner: QueryRunner) => Promise<T>,
@@ -1108,16 +1108,7 @@ async function withShortTargetTransaction<T>(
       )) as Array<{ locked: unknown }>;
       locked = bool(lock?.locked);
       if (!locked) throw new CurrentPriorityError('Snapshot lock is busy');
-      await runner.startTransaction('SERIALIZABLE');
-      await runner.query("SELECT set_config('lock_timeout', $1, true)", [
-        `${options.lockTimeoutMs}ms`,
-      ]);
-      await runner.query("SELECT set_config('statement_timeout', $1, true)", [
-        `${options.statementTimeoutMs}ms`,
-      ]);
-      const result = await operation(runner);
-      await runner.commitTransaction();
-      return result;
+      return await operation(runner);
     } catch (error) {
       lastError = error;
       if (runner.isTransactionActive) await runner.rollbackTransaction();
@@ -1136,6 +1127,38 @@ async function withShortTargetTransaction<T>(
     await delay(Math.min(1_000, 50 * 2 ** (attempt - 1)));
   }
   throw lastError;
+}
+
+export async function withShortRunnerTransaction<T>(
+  runner: QueryRunner,
+  options: CertifiedHistoryCompletionOptions,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await runner.startTransaction('SERIALIZABLE');
+  try {
+    await runner.query("SELECT set_config('lock_timeout', $1, true)", [
+      `${options.lockTimeoutMs}ms`,
+    ]);
+    await runner.query("SELECT set_config('statement_timeout', $1, true)", [
+      `${options.statementTimeoutMs}ms`,
+    ]);
+    const result = await operation();
+    await runner.commitTransaction();
+    return result;
+  } catch (error) {
+    if (runner.isTransactionActive) await runner.rollbackTransaction();
+    throw error;
+  }
+}
+
+async function withShortTargetTransaction<T>(
+  target: DataSource,
+  options: CertifiedHistoryCompletionOptions,
+  operation: (runner: QueryRunner) => Promise<T>,
+): Promise<T> {
+  return withTargetSnapshotLock(target, options, (runner) =>
+    withShortRunnerTransaction(runner, options, () => operation(runner)),
+  );
 }
 
 async function assertContext(
@@ -1690,7 +1713,7 @@ async function promote(
   source: QueryRunner,
   target: DataSource,
   sourceScope: CertifiedCompletionSourceScope,
-  departmentRows: CertifiedDepartmentDay[],
+  departmentBatches: CertifiedDepartmentDay[][],
   statisticRows: CertifiedStatisticDay[],
   expectedContext: RepairPublicationContext,
   executionContext: string,
@@ -1727,10 +1750,22 @@ async function promote(
       options,
       expectedContext,
     );
+    for (const rows of departmentBatches) {
+      await assertContext(runner, expectedContext, false);
+      await validateTargetDepartmentExact(runner, rows, options);
+    }
+    for (
+      let offset = 0;
+      offset < statisticRows.length;
+      offset += options.batchSize
+    ) {
+      await assertContext(runner, expectedContext, false);
+      await validateTargetStatisticExact(
+        runner,
+        statisticRows.slice(offset, offset + options.batchSize),
+      );
+    }
     await assertContext(runner, expectedContext, false);
-    await validateTargetDepartmentExact(runner, departmentRows, options);
-    await assertContext(runner, expectedContext, false);
-    await validateTargetStatisticExact(runner, statisticRows);
 
     await runner.startTransaction('SERIALIZABLE');
     transactionStarted = true;
@@ -1902,7 +1937,6 @@ export async function completeCertifiedHistoryRestoration(
     };
 
     let departmentCursor = '';
-    const allDepartmentRows: CertifiedDepartmentDay[] = [];
     const departmentBatches: CertifiedDepartmentDay[][] = [];
     while (true) {
       const raw = (await source.query(
@@ -1922,7 +1956,6 @@ export async function completeCertifiedHistoryRestoration(
         options.through,
       );
       departmentCursor = rows.at(-1)!.code;
-      allDepartmentRows.push(...rows);
       departmentBatches.push(rows);
       summary.departments += new Set(rows.map(({ code }) => code)).size;
       summary.departmentDays += rows.length;
@@ -1980,14 +2013,27 @@ export async function completeCertifiedHistoryRestoration(
         summary.batches += 1;
       }
       if (options.apply) {
-        await withShortTargetTransaction(target, options, async (runner) => {
-          await assertContext(runner, expectedContext, false);
-          await validateTargetDepartmentExact(
-            runner,
-            allDepartmentRows,
-            options,
-          );
-          await validateTargetStatisticExact(runner, statisticRows);
+        await withTargetSnapshotLock(target, options, async (runner) => {
+          for (const rows of departmentBatches) {
+            await withShortRunnerTransaction(runner, options, async () => {
+              await assertContext(runner, expectedContext, true);
+              await validateTargetDepartmentExact(runner, rows, options);
+            });
+          }
+          for (
+            let offset = 0;
+            offset < statisticRows.length;
+            offset += options.batchSize
+          ) {
+            const rows = statisticRows.slice(
+              offset,
+              offset + options.batchSize,
+            );
+            await withShortRunnerTransaction(runner, options, async () => {
+              await assertContext(runner, expectedContext, true);
+              await validateTargetStatisticExact(runner, rows);
+            });
+          }
         });
       }
     } else {
@@ -1995,7 +2041,7 @@ export async function completeCertifiedHistoryRestoration(
         source,
         target,
         sourceScope,
-        allDepartmentRows,
+        departmentBatches,
         statisticRows,
         expectedContext,
         executionContext,
