@@ -11,6 +11,7 @@ import {
   buildStatisticApplySql,
   buildStatisticInspectionSql,
   certifiedCompletionContextSql,
+  certifiedCompletionRepairAuditSql,
 } from './complete-certified-history-restoration';
 
 const postgresUrl = process.env.REPAIR_CERTIFIED_HISTORY_POSTGRES_URL;
@@ -225,7 +226,7 @@ describePostgres('complete certified history PostgreSQL', () => {
     }).initialize();
   });
 
-  it('runs promotion context preflight in a read-only transaction', async () => {
+  it('runs promotion and attestation preflight in a read-only transaction', async () => {
     const runner = readOnly.createQueryRunner();
     await runner.connect();
     await runner.startTransaction('SERIALIZABLE');
@@ -239,6 +240,20 @@ describePostgres('complete certified history PostgreSQL', () => {
         historicDirtyThrough: '2026-07-12',
         priorityActive: false,
       });
+      await expect(
+        runner.query(certifiedCompletionRepairAuditSql(false), [
+          'missing-source-run',
+          '2026-07-11',
+          '2026-07-12',
+          34_943,
+          101,
+          2,
+          'a'.repeat(64),
+          'b'.repeat(64),
+          'c'.repeat(64),
+          'd'.repeat(64),
+        ]),
+      ).resolves.toEqual([]);
       await runner.commitTransaction();
     } catch (error) {
       if (runner.isTransactionActive) await runner.rollbackTransaction();
@@ -247,7 +262,6 @@ describePostgres('complete certified history PostgreSQL', () => {
       await runner.release();
     }
   });
-
   afterAll(async () => {
     if (readOnly?.isInitialized) await readOnly.destroy();
     if (database?.isInitialized) await database.destroy();

@@ -13,6 +13,7 @@ import {
   buildStatisticApplySql,
   buildStatisticInspectionSql,
   certifiedCompletionContextSql,
+  certifiedCompletionRepairAuditSql,
   chunkCertifiedValidationRows,
   encodeCertifiedCompletionContext,
   parseCertifiedHistoryCompletionOptions,
@@ -377,6 +378,8 @@ describe('exact SQL and promotion barriers', () => {
     expect(certifiedCompletionContextSql(true)).toContain(
       'FOR SHARE OF statistic_state, source_state, config',
     );
+    expect(certifiedCompletionRepairAuditSql(false)).not.toContain('FOR SHARE');
+    expect(certifiedCompletionRepairAuditSql(true)).toContain('FOR SHARE');
   });
 
   it('blocks stale current state but does not require repaired maps', () => {

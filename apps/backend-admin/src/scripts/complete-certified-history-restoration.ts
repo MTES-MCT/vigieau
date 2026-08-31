@@ -780,6 +780,25 @@ export function certifiedCompletionContextSql(lock: boolean): string {
   }`;
 }
 
+export function certifiedCompletionRepairAuditSql(lock: boolean): string {
+  return `
+    SELECT repair.*
+    FROM "certified_history_repair_audit" repair
+    WHERE repair."sourceRunId" = $1::text
+      AND repair."dateFrom" = $2::date
+      AND repair."dateThrough" = $3::date
+      AND repair."activationKind" = 'statistics-only'
+      AND repair."communeCount" = $4::integer
+      AND repair."departmentCount" = $5::integer
+      AND repair."dayCount" = $6::integer
+      AND repair."communeHistoryDigest" = $7::text
+      AND repair."departmentHistoryDigest" = $8::text
+      AND repair."statisticDigest" = $9::text
+      AND repair."provenanceDigest" = $10::text
+    ${lock ? 'FOR SHARE' : ''}
+  `;
+}
+
 function normalizeContext(
   row: Record<string, unknown>,
 ): RepairPublicationContext {
@@ -2086,22 +2105,7 @@ async function attestExistingRepair(
     assertPromotionPreflight(preflight);
 
     const repairs = (await runner.query(
-      `
-        SELECT repair.*
-        FROM "certified_history_repair_audit" repair
-        WHERE repair."sourceRunId" = $1::text
-          AND repair."dateFrom" = $2::date
-          AND repair."dateThrough" = $3::date
-          AND repair."activationKind" = 'statistics-only'
-          AND repair."communeCount" = $4::integer
-          AND repair."departmentCount" = $5::integer
-          AND repair."dayCount" = $6::integer
-          AND repair."communeHistoryDigest" = $7::text
-          AND repair."departmentHistoryDigest" = $8::text
-          AND repair."statisticDigest" = $9::text
-          AND repair."provenanceDigest" = $10::text
-        FOR SHARE
-      `,
+      certifiedCompletionRepairAuditSql(options.apply),
       [
         options.sourceRunId,
         options.from,
