@@ -29,7 +29,7 @@ cp env.example .env
 - MAIL_MTE : Mail générique à renseigner pour l'envoi de mail systématique à une adresse
 - DOMAIN_NAME : Domaine du frontend (localhost:3000 en local)
 - PATH_TO_WRITE_FILE : Dossier pour stocker les fichiers temporaires ou le serveur peut lire / écrire
-- CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS : Durée maximale pendant laquelle un nouveau processus `clock` attend la libération du verrou PostgreSQL lors d'un rolling deploy (90 secondes par défaut)
+- CLOCK_LEADERSHIP_ACQUIRE_TIMEOUT_SECONDS : Durée maximale pendant laquelle un nouveau processus `clock` attend la libération du verrou PostgreSQL lors d'un rolling deploy (600 secondes par défaut)
 - CLOCK_LEADERSHIP_RETRY_SECONDS : Intervalle entre deux tentatives d'acquisition du verrou du `clock` (2 secondes par défaut)
 - COMMUNE_STATISTICS_BATCH_SIZE : Nombre de communes traitées par transaction lors du calcul des statistiques (250 par défaut, entier compris entre 1 et 1000)
 - HISTORIC_COMPUTE_CHUNK_DAYS : Nombre maximal de jours traités par un worker de rattrapage historique (7 par défaut, entier compris entre 1 et 3660)

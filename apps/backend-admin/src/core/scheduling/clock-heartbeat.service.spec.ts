@@ -188,6 +188,30 @@ describe('ClockHeartbeatService', () => {
     expect(second.queryRunner.release).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps waiting through a rolling deploy with the ten-minute default', async () => {
+    jest.useFakeTimers();
+    process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
+    delete process.env[DISABLE_SCHEDULED_JOBS_ENV];
+    const clock = createService(
+      jest.fn(),
+      { CLOCK_LEADERSHIP_RETRY_SECONDS: '300' },
+      false,
+    );
+
+    const initialization = clock.service.onModuleInit();
+    const rejection = expect(initialization).rejects.toThrow(
+      'still owns the lock after 600 seconds',
+    );
+    await Promise.resolve();
+
+    await jest.advanceTimersByTimeAsync(90_000);
+    expect(clock.queryRunner.release).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(510_000);
+    await rejection;
+    expect(clock.queryRunner.release).toHaveBeenCalledTimes(1);
+  });
+
   it('cancels a pending leadership wait during shutdown', async () => {
     jest.useFakeTimers();
     process.env[BUSINESS_SCHEDULER_PROCESS_ENV] = 'true';
