@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV } from '../core/historic-geometry-replay';
 import { ZoneAlerteComputedService } from './zone_alerte_computed.service';
 
 jest.mock('moment', () => {
@@ -8,6 +9,8 @@ jest.mock('moment', () => {
 
 const postgresUrl = process.env.STATISTIC_CACHE_ARTIFACT_POSTGRES_URL;
 const describeWithPostgres = postgresUrl ? describe : describe.skip;
+const previousMutableGeometryReplayEnabled =
+  process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
 
 describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
   const schemaName = `statistic_boundary_${process.pid}_${Date.now()}`;
@@ -19,6 +22,7 @@ describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
   };
 
   beforeAll(async () => {
+    process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] = 'true';
     bootstrapDataSource = await new DataSource({
       type: 'postgres',
       url: postgresUrl,
@@ -183,6 +187,12 @@ describeWithPostgres('Historic statistic boundary PostgreSQL recovery', () => {
         `DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`,
       );
       await bootstrapDataSource.destroy();
+    }
+    if (previousMutableGeometryReplayEnabled === undefined) {
+      delete process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV];
+    } else {
+      process.env[HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED_ENV] =
+        previousMutableGeometryReplayEnabled;
     }
   });
 

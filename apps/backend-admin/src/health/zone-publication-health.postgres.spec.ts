@@ -79,6 +79,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
       ) ON COMMIT DROP;
       CREATE TEMP TABLE "statistic_publication_state" (
         "id" integer PRIMARY KEY,
+        "revision" bigint NOT NULL,
         "currentPublishedDate" date,
         "historicPublishedThrough" date,
         "historicDirtyFrom" date,
@@ -154,7 +155,7 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
     `);
     await queryRunner.query(`
         INSERT INTO "statistic_publication_state" VALUES (
-          1, date '2026-08-03', date '2026-08-02', NULL, NULL,
+          1, 10, date '2026-08-03', date '2026-08-02', NULL, NULL,
           timestamptz '2026-08-03 00:20:00+00'
         )
     `);

@@ -125,6 +125,7 @@ describeWithPostgres(
         "expectedCommuneCount" integer NOT NULL,
         "processedCommuneCount" integer NOT NULL DEFAULT 0,
         "sourceRevision" bigint,
+        "certifiedHistoryRepairId" uuid,
         PRIMARY KEY ("snapshotDate", "scope")
       );
     `);
@@ -140,7 +141,8 @@ describeWithPostgres(
       ]);
       await legacyDataSource.query(`
         ALTER TABLE "statistic_cache_publication"
-          ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1;
+          ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1,
+          ADD COLUMN "certifiedHistoryRepairId" uuid;
         ALTER TABLE "statistic_cache_state"
           ADD COLUMN "candidatePublicationId" uuid
       `);
