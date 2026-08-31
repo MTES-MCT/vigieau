@@ -17,7 +17,7 @@ concurrency:
 jobs:
   statistics:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     env:
       VIGIEAU_STATISTICS_DEADLINE: "06:00"
       VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT: "3"
@@ -32,12 +32,18 @@ jobs:
           package-manager-cache: false
       - name: Verify statistics smoke deadline policy
         run: npm run test:smoke-statistics
+      - name: Verify publication convergence policy
+        run: node --test scripts/wait-zone-publication-policy.test.mjs
+      - name: Verify certified history canary policy
+        run: node --test scripts/smoke-certified-history-policy.test.mjs
+      - name: Wait for an atomic publication to converge
+        run: node scripts/wait-zone-publication.mjs
       - name: Public statistics consistency
         run: node scripts/smoke-statistics.mjs
 
   public:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     env:
       VIGIEAU_MIN_ZONE_COUNT: 1
       VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: healthy
@@ -51,12 +57,14 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Wait for an atomic publication to converge
+        run: node scripts/wait-zone-publication.mjs
       - name: Public application and Tarbes
         run: node scripts/smoke-public.mjs
 
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     env:
       VIGIEAU_BROWSER_SMOKE_TIMEOUT_MS: "90000"
       VIGIEAU_BROWSER_TARBES_MODE: adaptive
@@ -68,12 +76,14 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Wait for an atomic publication to converge
+        run: node scripts/wait-zone-publication.mjs
       - name: Public map rendering and real PMTiles ranges
         run: node scripts/smoke-browser.mjs
 
   admin:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 65
     env:
       VIGIEAU_EXPECT_ZONE_PUBLICATION_MODE: healthy
       VIGIEAU_EXPECT_SANDRE_MODES: safe
@@ -87,12 +97,34 @@ jobs:
           package-manager-cache: false
       - name: Verify admin smoke zone publication policy
         run: node --test scripts/smoke-admin.test.mjs
+      - name: Wait for an atomic publication to converge
+        run: node scripts/wait-zone-publication.mjs
+      - name: Wait for certified external publications to converge
+        run: node scripts/wait-external-publications.mjs
       - name: Admin API, clock and external publications
         run: node scripts/smoke-admin.mjs
 
+  sandre:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VIGIEAU_EXPECT_SANDRE_MODES: safe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify checked-out revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify SANDRE smoke policy
+        run: node --test scripts/smoke-sandre-policy.test.mjs
+      - name: SANDRE references and synchronization
+        run: node scripts/smoke-sandre.mjs
+
   datagouv:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 70
     env:
       VIGIEAU_EXPECT_MAP_ARCHIVES: disabled
     steps:
@@ -103,5 +135,27 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Wait for an atomic publication to converge
+        run: node scripts/wait-zone-publication.mjs
+      - name: Verify external publication convergence policy
+        run: node --test scripts/wait-external-publications-policy.test.mjs
+      - name: Wait for certified external publications to converge
+        run: node scripts/wait-external-publications.mjs
       - name: data.gouv.fr resources
         run: node scripts/smoke-datagouv.mjs
+
+  diagnostics:
+    if: ${{ always() }}
+    needs: [statistics, public, browser, admin, sandre, datagouv]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify checked-out revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Collect production health without changing job outcomes
+        run: node scripts/collect-production-health.mjs

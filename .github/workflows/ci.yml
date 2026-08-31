@@ -139,6 +139,13 @@ jobs:
           src/zone_alerte/sandre-zone-durability.postgres.spec.ts
         env:
           SANDRE_RECONCILIATION_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify certified history repair and attestation
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/config/historic-range-aware-certified-repair.postgres.spec.ts
+          src/scripts/complete-certified-history-restoration.postgres.spec.ts
+        env:
+          REPAIR_CERTIFIED_HISTORY_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - run: npm --prefix apps/backend-admin run build
       - name: Verify a fresh database
         run: node scripts/verify-admin-migrations.mjs

@@ -40,6 +40,16 @@ describe('HealthController', () => {
         checks: { activeCurrent: true },
       }),
     };
+    const historicExportReadiness = {
+      getHealthStatus: jest.fn().mockResolvedValue({
+        status: 'ready',
+        scheduledFor: '2026-08-01',
+        observedAt: '2026-08-01T12:00:00.000Z',
+        blockingSince: null,
+        blockingAgeSeconds: 0,
+        identity: { historicReadinessMode: 'certified-repair' },
+      }),
+    };
     return {
       controller: new HealthController(
         dataSource as any,
@@ -47,12 +57,14 @@ describe('HealthController', () => {
         clockHeartbeat as any,
         config as any,
         zonePublicationHealth as any,
+        historicExportReadiness as any,
       ),
       dataSource,
       registry,
       clockHeartbeat,
       config,
       zonePublicationHealth,
+      historicExportReadiness,
     };
   }
 
@@ -62,6 +74,14 @@ describe('HealthController', () => {
     await expect(controller.externalPublications()).resolves.toEqual({
       status: 'healthy',
       lastSuccessAt: '2026-08-01T06:00:00.000Z',
+      historicExport: {
+        status: 'ready',
+        scheduledFor: '2026-08-01',
+        observedAt: '2026-08-01T12:00:00.000Z',
+        blockingSince: null,
+        blockingAgeSeconds: 0,
+        identity: { historicReadinessMode: 'certified-repair' },
+      },
     });
   });
 

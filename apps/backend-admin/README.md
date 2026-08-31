@@ -54,11 +54,21 @@ La publication quotidienne met à jour la ressource cumulative `Historique Commu
 npm run datagouv:publish-historique-communes
 ```
 
+Cette commande est fail-closed : elle utilise la journée planifiée à partir de
+06:00 (heure de Paris), exige une frontière historique complète et certifiée,
+puis vérifie que son identité n'a changé ni avant ni après l'envoi.
+
 Pour initialiser la ressource d'une nouvelle année, exécuter la commande suivante puis renseigner l'identifiant retourné dans `API_DATAGOUV_COMMUNES_<ANNEE>_RESOURCE_ID`. Elle sera ensuite mise à jour par la publication quotidienne :
 
 ```bash
 npm run datagouv:publish-communes -- 2026
 ```
+
+Pour une année passée, la date source autoritaire est le 31 décembre de cette
+année, mais la commande exige toujours la frontière historique certifiée de la
+journée planifiée courante. La plage annuelle doit être incluse dans cette
+frontière ; une plage dirty non certifiée bloque donc la publication avant tout
+envoi vers data.gouv.fr.
 
 ### Installation des dépendances
 

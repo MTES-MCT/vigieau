@@ -12,6 +12,8 @@ import { RegleauLogger } from '../logger/regleau.logger';
 const STALE_RUN_MS = 2 * 60 * 60 * 1000;
 const BASE_RETRY_MS = 5 * 60 * 1000;
 const MAX_RETRY_MS = 60 * 60 * 1000;
+const TRANSIENT_NETWORK_ERROR_PATTERN =
+  '(ETIMEDOUT|ECONNREFUSED|ECONNRESET|ECONNABORTED|EAI_AGAIN|ENETUNREACH|ERR_NETWORK|UND_ERR_CONNECT_TIMEOUT|socket hang up|timeout|(HTTP |status code )(408|429|5[0-9][0-9]))';
 const IMMEDIATE_ORPHAN_RECOVERY_JOB_KEYS = new Set([
   DATAGOUV_DAILY_JOB_KEY,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
@@ -39,6 +41,13 @@ export interface PublicationRunIdentity {
   statisticRevision?: string;
   statisticPublishedDate?: string;
   statisticFingerprint?: string;
+  historicFirstDate?: string;
+  historicLatestDate?: string;
+  historicDateCount?: number;
+  historicComputeEpoch?: string;
+  historicReadinessMode?: 'clean' | 'certified-repair';
+  certifiedHistoryRepairId?: string;
+  certifiedHistoryRepairAttestationId?: string;
 }
 
 export interface ExecuteDailyRunOptions {
@@ -71,6 +80,13 @@ export interface ExternalPublicationHealth {
   lastFailureAt: string | null;
   successAgeSeconds: number | null;
   failedResourceCount: number;
+  networkRetry: {
+    status: 'network_retry';
+    resourceKeys: string[];
+    lastFailureAt: string;
+    failureAgeSeconds: number;
+    retryAfter: string;
+  } | null;
 }
 
 @Injectable()
@@ -85,27 +101,51 @@ export class ExternalPublicationRegistryService {
   ) {}
 
   async getHealthStatus(now = new Date()): Promise<ExternalPublicationHealth> {
-    const [[lastRun], [runSummary], [resourceSummary]] = await Promise.all([
-      this.dataSource.query(`
-        SELECT "scheduledFor", "status", "attempt", "finishedAt"
+    const [[lastRun], [runSummary], [resourceSummary], [networkSummary]] =
+      await Promise.all([
+        this.dataSource.query(`
+        SELECT "scheduledFor", "status", "attempt", "finishedAt", "retryAfter"
         FROM "external_publication_run"
         WHERE "jobKey" = 'datagouv:daily'
         ORDER BY "scheduledFor" DESC
         LIMIT 1
       `),
-      this.dataSource.query(`
+        this.dataSource.query(`
         SELECT
           max("finishedAt") FILTER (WHERE "status" = 'succeeded') AS "lastSuccessAt",
           max("finishedAt") FILTER (WHERE "status" = 'failed') AS "lastFailureAt"
         FROM "external_publication_run"
         WHERE "jobKey" = 'datagouv:daily'
       `),
-      this.dataSource.query(`
+        this.dataSource.query(`
         SELECT count(*) FILTER (WHERE "status" = 'failed') AS "failedResourceCount"
         FROM "external_publication_resource"
         WHERE "updatedAt" >= now() - interval '30 hours'
       `),
-    ]);
+        this.dataSource.query(
+          `
+        WITH current_failure AS (
+          SELECT "key", "lastError", "lastFailureAt"
+          FROM "external_publication_resource"
+          WHERE "status" = 'failed'
+            AND "updatedAt" >= now() - interval '30 hours'
+        )
+        SELECT
+          array_agg("key" ORDER BY "key") FILTER (
+            WHERE "lastError" ~* $1
+          ) AS "networkResourceKeys",
+          count(*) FILTER (
+            WHERE "lastError" ~* $1
+          ) AS "networkFailureCount",
+          count(*) AS "currentFailureCount",
+          max("lastFailureAt") FILTER (
+            WHERE "lastError" ~* $1
+          ) AS "lastNetworkFailureAt"
+        FROM current_failure
+      `,
+          [TRANSIENT_NETWORK_ERROR_PATTERN],
+        ),
+      ]);
     const lastSuccessAt = runSummary?.lastSuccessAt
       ? new Date(runSummary.lastSuccessAt)
       : null;
@@ -121,6 +161,40 @@ export class ExternalPublicationRegistryService {
     const failedResourceCount = Number(
       resourceSummary?.failedResourceCount || 0,
     );
+    const networkFailureCount = Number(
+      networkSummary?.networkFailureCount || 0,
+    );
+    const currentFailureCount = Number(
+      networkSummary?.currentFailureCount || 0,
+    );
+    const lastNetworkFailureAt = networkSummary?.lastNetworkFailureAt
+      ? new Date(networkSummary.lastNetworkFailureAt)
+      : null;
+    const runRetryAfter =
+      lastRun?.status === 'failed' && lastRun.retryAfter
+        ? new Date(lastRun.retryAfter)
+        : null;
+    const networkRetry =
+      networkFailureCount > 0 &&
+      networkFailureCount === currentFailureCount &&
+      lastNetworkFailureAt &&
+      runRetryAfter &&
+      !Number.isNaN(runRetryAfter.getTime())
+        ? {
+            status: 'network_retry' as const,
+            resourceKeys: Array.isArray(networkSummary.networkResourceKeys)
+              ? networkSummary.networkResourceKeys.map(String)
+              : [],
+            lastFailureAt: lastNetworkFailureAt.toISOString(),
+            failureAgeSeconds: Math.max(
+              0,
+              Math.floor(
+                (now.getTime() - lastNetworkFailureAt.getTime()) / 1_000,
+              ),
+            ),
+            retryAfter: runRetryAfter.toISOString(),
+          }
+        : null;
 
     let status: ExternalPublicationHealth['status'] = 'healthy';
     if (!lastSuccessAt) {
@@ -153,6 +227,7 @@ export class ExternalPublicationRegistryService {
       lastFailureAt: lastFailureAt?.toISOString() || null,
       successAgeSeconds,
       failedResourceCount,
+      networkRetry,
     };
   }
 
@@ -241,10 +316,7 @@ export class ExternalPublicationRegistryService {
         return 'succeeded';
       } catch (error) {
         const failedAt = new Date();
-        const retryDelay = Math.min(
-          BASE_RETRY_MS * 2 ** Math.max(0, attempt - 1),
-          MAX_RETRY_MS,
-        );
+        const retryDelay = this.retryDelay(jobKey, scheduledFor, attempt);
         await queryRunner.query(
           `
             UPDATE "external_publication_run"
@@ -534,5 +606,27 @@ export class ExternalPublicationRegistryService {
 
   private errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private retryDelay(
+    jobKey: string,
+    scheduledFor: string,
+    attempt: number,
+  ): number {
+    const exponential = Math.min(
+      BASE_RETRY_MS * 2 ** Math.max(0, attempt - 1),
+      MAX_RETRY_MS,
+    );
+    if (exponential >= MAX_RETRY_MS) return MAX_RETRY_MS;
+
+    // Stable per run identity: workers do not synchronize their retries, while
+    // tests and incident timelines remain reproducible.
+    const seed = `${jobKey}:${scheduledFor}:${attempt}`;
+    let hash = 0;
+    for (const character of seed) {
+      hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+    }
+    const jitter = Math.floor(exponential * 0.2 * ((hash % 1_001) / 1_000));
+    return Math.min(MAX_RETRY_MS, exponential + jitter);
   }
 }

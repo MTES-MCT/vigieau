@@ -68,11 +68,15 @@ const createService = (askCompute: jest.Mock) => {
         ];
         return [];
       }
-      if (sql.includes('information_schema.columns')) {
-        return [{ exists: true }];
-      }
-      if (sql.includes('UPDATE "config"')) {
-        return [{ id: 1 }];
+      if (sql.includes('record_historic_compute_invalidation')) {
+        return [
+          {
+            historicComputeEpoch: '8',
+            computeMapDate: '2026-07-01',
+            computeStatsDate: '2026-07-01',
+            changed: true,
+          },
+        ];
       }
       throw new Error(`Unexpected query: ${sql}`);
     }),
@@ -385,7 +389,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     ).not.toHaveProperty('dateDebut');
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE "config"'),
+        sql.includes('record_historic_compute_invalidation'),
       ),
     ).toBe(false);
   });
@@ -426,9 +430,27 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.find(([sql]) =>
-        sql.includes('UPDATE "config"'),
+        sql.includes('record_historic_compute_invalidation'),
       ),
-    ).toEqual([expect.stringContaining('UPDATE "config"'), ['2026-07-01']]);
+    ).toEqual([
+      expect.stringContaining('record_historic_compute_invalidation'),
+      [
+        '2026-07-01',
+        null,
+        true,
+        true,
+        'published-source-mutation',
+        null,
+        '{}',
+        '2026-07-01',
+        '2026-07-01',
+        false,
+        false,
+        false,
+        true,
+        false,
+      ],
+    ]);
     const publicMutationCalls = harness.manager.query.mock.calls;
     const fenceCallIndexes = publicMutationCalls.flatMap(([sql], index) =>
       sql.includes('pg_advisory_xact_lock_shared') ? [index] : [],
@@ -525,7 +547,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE "config"'),
+        sql.includes('record_historic_compute_invalidation'),
       ),
     ).toBe(false);
   });
@@ -563,7 +585,7 @@ describe('ArreteRestrictionService scheduled status update', () => {
     );
     expect(
       harness.manager.query.mock.calls.some(([sql]) =>
-        sql.includes('UPDATE "config"'),
+        sql.includes('record_historic_compute_invalidation'),
       ),
     ).toBe(false);
   });

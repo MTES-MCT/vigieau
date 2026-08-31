@@ -1,6 +1,9 @@
 import { DataSource, QueryRunner } from 'typeorm';
 import {
   CERTIFIED_COMPLETION_APPLY_DEPARTMENT_BATCH_SQL,
+  CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL,
+  CERTIFIED_COMPLETION_ATTESTATION_SQL,
+  CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
   CERTIFIED_COMPLETION_INSPECT_DEPARTMENT_BATCH_SQL,
   CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
   CERTIFIED_COMPLETION_PROMOTION_SQL,
@@ -76,6 +79,14 @@ describe('certified history completion options', () => {
           'RESTORE_CERTIFIED_DEPARTMENT_NATIONAL_HISTORY',
       }),
     ).toThrow('PROMOTE_CERTIFIED_HISTORY');
+    expect(() =>
+      parseCertifiedHistoryCompletionOptions({
+        ...requiredEnvironment,
+        CERTIFIED_HISTORY_COMPLETION_MODE: 'attest',
+        CERTIFIED_HISTORY_COMPLETION_APPLY: 'true',
+        CERTIFIED_HISTORY_COMPLETION_CONFIRMATION: 'PROMOTE_CERTIFIED_HISTORY',
+      }),
+    ).toThrow('ATTEST_CERTIFIED_HISTORY');
   });
 
   it('cannot be repointed to another 48-day window', () => {
@@ -286,6 +297,48 @@ describe('exact SQL and promotion barriers', () => {
     );
     expect(CERTIFIED_COMPLETION_PROMOTION_SQL).not.toContain(
       '"computeStatsDate" =',
+    );
+  });
+
+  it('prepares attestation with a visible retag followed by a revision CAS', () => {
+    expect(CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL).toContain(
+      'snapshot."certifiedHistoryRepairId" IS NULL',
+    );
+    expect(CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL).not.toContain(
+      'statistic_publication_state',
+    );
+    expect(CERTIFIED_COMPLETION_ATTESTATION_SQL).toContain(
+      'publication.revision = $5::bigint',
+    );
+    expect(CERTIFIED_COMPLETION_ATTESTATION_SQL).not.toContain(
+      'certified_history_repair_attestation',
+    );
+    expect(CERTIFIED_COMPLETION_ATTESTATION_SQL).not.toContain(
+      '"historicDirtyFrom" = NULL',
+    );
+    expect(CERTIFIED_COMPLETION_ATTESTATION_SQL).not.toContain(
+      '"computeStatsDate" =',
+    );
+  });
+
+  it('creates the initial attestation only after promotion is visible', () => {
+    expect(CERTIFIED_COMPLETION_PROMOTION_SQL).not.toContain(
+      'certified_history_repair_attestation',
+    );
+    expect(CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL).toContain(
+      'FROM "certified_history_repair_audit" repair',
+    );
+    expect(CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL).toContain(
+      'config."historicComputeEpoch" = $3::bigint',
+    );
+    expect(CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL).toContain(
+      'publication.revision = $4::bigint',
+    );
+    expect(CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL).toContain(
+      'repair."sourceRevision"',
+    );
+    expect(CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL).toContain(
+      'repair."publicationContext" || $5::jsonb',
     );
   });
 

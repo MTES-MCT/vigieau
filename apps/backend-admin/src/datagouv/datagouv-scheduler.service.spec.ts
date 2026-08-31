@@ -9,20 +9,23 @@ describe('DatagouvSchedulerService', () => {
   const previousZonePublicationEnabled = process.env.ZONE_PUBLICATION_ENABLED;
   const previousStatisticCacheRequired =
     process.env.STATISTIC_CACHE_ARTIFACT_REQUIRED;
-  const historicConfig = {
-    computeMapDate: new Date('2026-07-31T00:00:00.000Z'),
-    computeStatsDate: '2026-07-31T12:00:00.000Z',
-    computeMapGeneration: 12,
-    computeStatsGeneration: '8',
-  };
-  const historicIdentity = {
+  const exportIdentity = (scheduledFor: string) => ({
+    publicationMode: 'versioned' as const,
+    publicationId: 'publication-1',
     sourceRevision: '42',
     materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
-    historicMapCursor: '2026-07-31',
-    historicStatsCursor: '2026-07-31',
-    historicMapGeneration: '12',
-    historicStatsGeneration: '8',
-  };
+    statisticCachePublicationId: 'statistic-publication-1',
+    statisticRevision: '12',
+    statisticPublishedDate: scheduledFor,
+    statisticFingerprint: 'c'.repeat(64),
+    historicFirstDate: '2013-01-01',
+    historicLatestDate: scheduledFor,
+    historicDateCount: 1,
+    historicComputeEpoch: '8',
+    historicReadinessMode: 'certified-repair' as const,
+    certifiedHistoryRepairId: 'repair-1',
+    certifiedHistoryRepairAttestationId: 'attestation-1',
+  });
 
   beforeEach(() => {
     process.env.ZONE_PUBLICATION_ENABLED = 'true';
@@ -65,9 +68,6 @@ describe('DatagouvSchedulerService', () => {
         pmtilesChecksum: 'b'.repeat(64),
       }),
     };
-    const configService = {
-      getConfig: jest.fn().mockResolvedValue(historicConfig),
-    };
     const statisticCacheReadiness = {
       getReadyPublication: jest.fn().mockResolvedValue({
         publicationId: 'statistic-publication-1',
@@ -78,19 +78,32 @@ describe('DatagouvSchedulerService', () => {
       }),
       assertReadyPublication: jest.fn().mockResolvedValue(undefined),
     };
+    const historicExportReadiness = {
+      evaluate: jest.fn(
+        async (scheduledFor: string, gate?: { publicationId: string }) => ({
+          status: 'ready',
+          scheduledFor,
+          identity: {
+            ...exportIdentity(scheduledFor),
+            publicationId: gate?.publicationId ?? 'publication-1',
+          },
+        }),
+      ),
+      assertReady: jest.fn().mockResolvedValue(undefined),
+    };
     return {
       service: new DatagouvSchedulerService(
         datagouvService as any,
         registry as any,
         zonePublicationService as any,
-        configService as any,
         statisticCacheReadiness as any,
+        historicExportReadiness as any,
       ),
       datagouvService,
       registry,
       zonePublicationService,
-      configService,
       statisticCacheReadiness,
+      historicExportReadiness,
     };
   };
 
@@ -106,16 +119,14 @@ describe('DatagouvSchedulerService', () => {
       new Date('2026-08-01T03:59:00Z'),
       {
         identity: {
-          publicationId: 'publication-1',
-          ...historicIdentity,
+          ...exportIdentity('2026-07-31'),
         },
       },
     );
     expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
       '2026-07-31',
       expect.objectContaining({
-        publicationId: 'publication-1',
-        ...historicIdentity,
+        ...exportIdentity('2026-07-31'),
         verifyCurrent: expect.any(Function),
       }),
     );
@@ -133,16 +144,14 @@ describe('DatagouvSchedulerService', () => {
       new Date('2026-08-01T04:01:00Z'),
       {
         identity: {
-          publicationId: 'publication-1',
-          ...historicIdentity,
+          ...exportIdentity('2026-08-01'),
         },
       },
     );
     expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
       '2026-08-01',
       expect.objectContaining({
-        publicationId: 'publication-1',
-        ...historicIdentity,
+        ...exportIdentity('2026-08-01'),
         verifyCurrent: expect.any(Function),
       }),
     );
@@ -181,7 +190,7 @@ describe('DatagouvSchedulerService', () => {
     expect(
       harness.zonePublicationService.getActivePublicationGate,
     ).not.toHaveBeenCalled();
-    expect(harness.configService.getConfig).not.toHaveBeenCalled();
+    expect(harness.historicExportReadiness.evaluate).not.toHaveBeenCalled();
   });
 
   it('waits for the national computation in legacy mode', async () => {
@@ -299,24 +308,24 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
   });
 
-  it('waits for the national computation of the same civil day', async () => {
+  it('waits for the certified export boundary without requiring a catch-up run', async () => {
     const harness = createService();
-    harness.registry.hasSucceeded.mockResolvedValue(false);
+    harness.historicExportReadiness.evaluate.mockResolvedValue({
+      status: 'blocked',
+      scheduledFor: '2026-08-01',
+      blocker: 'current_daily_not_ready',
+    } as any);
 
     await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
 
-    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
-      'compute:national-daily',
+    expect(harness.historicExportReadiness.evaluate).toHaveBeenCalledWith(
       '2026-08-01',
-      {
-        sourceRevision: '42',
-        materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
-      },
+      expect.objectContaining({ publicationId: 'publication-1' }),
     );
-    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
+    expect(harness.registry.hasSucceeded).not.toHaveBeenCalledWith(
       'compute:historic-catchup',
-      '2026-08-01',
-      historicIdentity,
+      expect.anything(),
+      expect.anything(),
     );
     expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
     expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
@@ -369,14 +378,6 @@ describe('DatagouvSchedulerService', () => {
 
     await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
 
-    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
-      'compute:national-daily',
-      '2026-08-01',
-      {
-        sourceRevision: '42',
-        materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
-      },
-    );
     expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
       'datagouv:daily',
       '2026-08-01',
@@ -384,32 +385,26 @@ describe('DatagouvSchedulerService', () => {
       expect.any(Date),
       {
         identity: {
+          ...exportIdentity('2026-08-01'),
           publicationId: 'publication-replacement',
-          ...historicIdentity,
         },
       },
     );
   });
 
-  it('fails when an equal-date historic invalidation changes a generation', async () => {
+  it('fails when the certified export boundary changes during publication', async () => {
     const harness = createService();
-    harness.configService.getConfig
-      .mockResolvedValueOnce(historicConfig)
-      .mockResolvedValueOnce(historicConfig)
-      .mockResolvedValueOnce({
-        ...historicConfig,
-        computeMapGeneration: 13,
-      });
+    harness.historicExportReadiness.assertReady.mockRejectedValueOnce(
+      new Error('Historic export boundary changed'),
+    );
 
     await expect(
       harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z')),
-    ).rejects.toThrow('Historic computation gate changed during Datagouv run');
+    ).rejects.toThrow('Historic export boundary changed');
 
-    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
-    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
-      'compute:historic-catchup',
-      '2026-08-01',
-      historicIdentity,
+    expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+    expect(harness.historicExportReadiness.assertReady).toHaveBeenCalledWith(
+      exportIdentity('2026-08-01'),
     );
   });
 

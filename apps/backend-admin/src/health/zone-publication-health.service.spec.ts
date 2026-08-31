@@ -25,6 +25,8 @@ describe('ZonePublicationHealthService', () => {
       historicPublishedThrough: '2026-08-02',
       historicDirtyFrom: null,
       historicDirtyThrough: null,
+      certifiedHistoricRepair: false,
+      certifiedHistoricThrough: null,
       statisticStateUpdatedAt: '2026-08-03T00:00:00.000Z',
       computeMapDate: '2026-08-02',
       computeStatsDate: '2026-08-02',
@@ -99,6 +101,7 @@ describe('ZonePublicationHealthService', () => {
         currentStatistics: true,
         currentSnapshot: true,
         historicStatistics: true,
+        certifiedHistoricRepair: false,
         historicClean: true,
         historicCursors: true,
         certifiedRun: true,
@@ -121,7 +124,13 @@ describe('ZonePublicationHealthService', () => {
       expect.stringContaining(
         'instance."contentFingerprint" = active."contentFingerprint"',
       ),
-      [now, 30, ZONE_PUBLICATION_MATERIALIZATION_VERSION, '2026-08-03'],
+      [
+        now,
+        30,
+        ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+        '2026-08-03',
+        '2026-08-02',
+      ],
     );
     const sql = dataSource.query.mock.calls[0][0];
     expect(sql).toContain("'historicMapGeneration'");
@@ -147,6 +156,34 @@ describe('ZonePublicationHealthService', () => {
       'candidate."sourceRevision" = source_state."revision"',
     );
     expect(sql).toContain('candidate."materializationVersion" = $3');
+    expect(sql).toContain('"active_certified_history_repair" repair');
+  });
+
+  it('reports attested dirty history as certified without hiding its debt', async () => {
+    const { service } = createHarness(
+      healthyRow({
+        historicPublishedThrough: '2026-07-10',
+        historicDirtyFrom: '2026-07-11',
+        historicDirtyThrough: '2026-08-02',
+        computeMapDate: '2026-07-11',
+        computeStatsDate: '2026-07-11',
+        certifiedHistoricRepair: true,
+        certifiedHistoricThrough: '2026-08-02',
+        certifiedHistoricRun: false,
+      }),
+    );
+
+    await expect(service.getHealthStatus(now)).resolves.toMatchObject({
+      status: 'healthy',
+      historicStatus: 'certified',
+      checks: {
+        historicStatistics: true,
+        certifiedHistoricRepair: true,
+        historicClean: false,
+        historicCursors: false,
+        historicRun: false,
+      },
+    });
   });
 
   it('uses the previous Paris civil day before the 02:00 business cutoff', async () => {

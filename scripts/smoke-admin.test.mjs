@@ -19,7 +19,9 @@ const zoneCheckKeys = [
   "historicStatistics",
   "historicClean",
   "historicCursors",
+  "certifiedHistoricRepair",
   "certifiedRun",
+  "historicRun",
   "snapshotsComplete",
   "recentProgress",
 ];
@@ -27,16 +29,21 @@ const zoneCheckKeys = [
 function healthyZonePublication() {
   return {
     status: "healthy",
+    historicStatus: "complete",
     serving: true,
     businessDate: "2026-08-14",
     requiredHistoricThrough: "2026-08-13",
-    checks: Object.fromEntries(zoneCheckKeys.map((key) => [key, true])),
+    checks: {
+      ...Object.fromEntries(zoneCheckKeys.map((key) => [key, true])),
+      certifiedHistoricRepair: false,
+    },
   };
 }
 
 function legacyZonePublication() {
   return {
     status: "stale",
+    historicStatus: "incomplete",
     serving: false,
     businessDate: "2026-08-14",
     requiredHistoricThrough: "2026-08-13",
@@ -53,7 +60,9 @@ function legacyZonePublication() {
       historicStatistics: false,
       historicClean: false,
       historicCursors: false,
+      certifiedHistoricRepair: false,
       certifiedRun: false,
+      historicRun: false,
       snapshotsComplete: false,
       recentProgress: true,
     },
@@ -196,6 +205,22 @@ test("admin smoke keeps the healthy zone publication contract by default", async
 
   assert.equal(result.exitCode, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).zonePublication.mode, "healthy");
+});
+
+test("admin smoke accepts an intact certified overlay without claiming clean cursors", async () => {
+  const zonePublication = healthyZonePublication();
+  zonePublication.historicStatus = "certified";
+  zonePublication.checks.certifiedHistoricRepair = true;
+  zonePublication.checks.historicClean = false;
+  zonePublication.checks.historicCursors = false;
+  zonePublication.checks.historicRun = false;
+  const result = await runSmoke({
+    expectedMode: "healthy",
+    zoneStatus: 200,
+    zonePublication,
+  });
+
+  assert.equal(result.exitCode, 0, result.stderr);
 });
 
 test("admin smoke accepts only the explicit disabled legacy profile", async () => {

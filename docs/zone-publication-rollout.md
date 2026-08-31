@@ -257,14 +257,19 @@ le processus `clock` s'arrête pour que Scalingo le remplace et libère ses verr
 La ressource annuelle des communes est recherchée puis créée automatiquement au
 changement d'année; son identifiant est conservé dans le registre PostgreSQL.
 L'export refuse de démarrer tant que le recalcul communal du jour n'a pas atteint
-son checkpoint persistant de complétude. Le calcul courant et le rattrapage
-historique sont deux jobs persistants distincts; data.gouv.fr attend leur succès,
-puis une publication active du même jour dont les promotions S3 et data.gouv.fr
-sont terminées. Le gate data.gouv.fr utilise la même identité historique
-(curseurs et générations) avant et après les uploads ; une invalidation force la
-republication du run et de ses ressources. Chaque commune doit contenir
-exactement un enregistrement par jour depuis le 1er janvier jusqu'à la date
-métier attendue.
+son checkpoint persistant de complétude et que l'artefact statistique immuable du
+même jour n'est pas chargé par tout le quorum vivant. Il exige trois fichiers
+d'artefact, une couverture continue depuis le 1er janvier 2013 et les nombres
+exacts de communes et départements. La frontière historique est recevable soit
+après un rattrapage global propre et des curseurs à jour, soit par une réparation
+certifiée active couvrant exactement la plage sale, dont l'attestation reste
+active selon le ledger range-aware, avec tous les snapshots postérieurs
+complets. Le gate fige cette identité, y
+compris l'attestation éventuelle, et la revalide avant et après chaque ressource ;
+une invalidation force donc la republication du run et de ses ressources.
+L'archive cumulative conserve les dates valides antérieures à 2013, mais chaque
+commune doit contenir exactement une entrée par jour du 1er janvier 2013 à la
+date métier attendue, sans doublon, trou, date invalide ni date future.
 
 Une ligne de calcul national restée `running` est reprise immédiatement après
 l'acquisition d'un nouveau verrou de registre. En régime nominal, ce verrou est
@@ -575,21 +580,20 @@ contrôler les doublons, un département témoin déjà complet et l'absence de
 modification hors plage. Le script recalcule ensuite une fois chaque agrégat
 mensuel concerné et effectue un tri final sous le verrou communal.
 
-La ressource annuelle des communes peut être republiée après un recalcul
-national ciblé sans attendre le rattrapage multiannuel uniquement lorsqu'aucune
-barrière `bootstrap` n'existe. Tous les snapshots des dates réparées doivent être
-`completed` sous la révision attendue, aucun snapshot non terminé ne doit
-concerner l'année, et le générateur doit confirmer pour chaque commune la
-couverture quotidienne exacte du 1er janvier à la date source attendue.
-Contrôler le contenu et la date de la ressource annuelle, puis redémarrer le
-`clock` et lever le gel. Une réparation départementale ne constitue jamais
-cette autorisation.
+Les commandes opérateur de republication annuelle et cumulative appliquent le
+même gate historique que le scheduler. Même pour une année antérieure, elles
+refusent toute écriture externe si la frontière courante est sale sans
+attestation active ou si son identité change pendant l'opération. Le générateur
+doit en plus confirmer pour chaque commune la couverture quotidienne exacte du
+1er janvier à la date source attendue. Une réparation départementale ne
+constitue jamais cette autorisation.
 
-La ressource historique multiannuelle reste bloquée jusqu'à la certification du
-rattrapage global : `historicDirtyFrom` et `historicDirtyThrough` sont `NULL`,
-les deux curseurs `computeMapDate` et `computeStatsDate` couvrent la date requise,
-aucun snapshot n'est `running`, `failed` ou `partial`, et la barrière `bootstrap`
-a été levée par la chaîne historique normale.
+La ressource historique multiannuelle reste bloquée jusqu'à l'une des deux
+preuves suivantes : soit le rattrapage global est propre, les deux curseurs
+couvrent la date requise et aucun snapshot n'est incomplet ; soit une attestation
+certifiée active couvre exactement la plage sale et tous les snapshots entre sa
+borne haute et la date métier sont complets. La présence d'une ligne d'audit
+seule, de tags incomplets ou d'une attestation révoquée ne suffit jamais.
 
 En cas d'échec, ne rien publier et ne pas redémarrer le `clock`. Contrôler les
 snapshots `running`, `failed` et `partial`, puis soit rejouer idempotemment le
@@ -607,12 +611,16 @@ Reprendre strictement la séquence preprod après son succès, avec :
 - `https://api.vigieau.beta.gouv.fr/api/health/*` et
   `https://api.vigieau.beta.gouv.fr/api/zones/publication`.
 
-Scaler d'abord l'ancien `web` admin à zéro, puis créer et contrôler le backup
-PostgreSQL post-gel. Retirer `NODE_TLS_REJECT_UNAUTHORIZED=0` uniquement après la
-validation preprod. La première publication doit être observée jusqu'à `active`, puis jusqu'à un
-`legacyPromotedAt` non nul avant de clore l'intervention. Un
-`dataGouvPromotedAt` nul signale une mise à jour data.gouv.fr encore en reprise et
-doit rester supervisé.
+Ne pas arrêter le `web` admin. Déployer d'abord le backend admin en rolling et
+attendre la nouvelle révision sur `web`, `clock`, `currentzoneworker` ainsi que
+sur tout worker historique actif ; contrôler ensuite la migration, la vue
+d'attestation et l'absence de job ou verrou en cours. Déployer alors le backend
+public en rolling et attendre la nouvelle révision sur `statcache` et tous les
+`web`, puis l'expiration des anciens heartbeats. Une réparation certifiée ne peut
+être attestée qu'après ces deux convergences : faire un dry-run complet, appliquer
+avec le même contexte d'exécution, puis attendre l'artefact statistique stable sur
+toutes les instances. Cette séquence conserve l'ancienne réponse utilisable à
+chaque étape et évite toute réponse mixte entre anciens et nouveaux lecteurs.
 
 En production, le succès et la fraîcheur de data.gouv.fr sont obligatoires. Le
 smoke public, le smoke admin strict, le smoke data.gouv.fr et les contrôles dans
@@ -637,16 +645,16 @@ conservé. `/api/health/cache` passe à `503` si le pointeur, le préchargement 
 contrôle de version n'est pas à jour. Le diagnostic n'expose ni erreur brute, ni
 identifiant d'instance.
 
-`/api/health/zone-publication` synthétise la chaîne complète sans exposer
+`/api/health/zone-publication` synthétise la chaîne courante sans exposer
 d'identifiant, de révision numérique, de version ni d'erreur brute. `healthy`
 exige l'activation du mécanisme, l'absence de pause et de candidate, une active
 du jour et de la révision source courante sur la version de matérialisation du
 code, toutes les instances publiques vivantes prêtes avec le minimum configuré,
 la promotion legacy, les statistiques courantes du jour métier Paris avec un
-snapshot national complet de la même révision source,
-l'historique et les deux curseurs au moins à J-1, aucune plage sale et aucun
-snapshot incomplet. Il revalide aussi le succès exact des runs quotidien et
-historique avec les dates, curseurs et générations toujours présents en base.
+snapshot national complet de la même révision source et le run quotidien exact.
+Le champ `historicStatus` distingue séparément `complete`, `certified` et
+`incomplete` : `certified` ne prétend ni que la plage sale est vide ni que les
+curseurs historiques ont rattrapé la date.
 `updating` reste un `200` uniquement pendant une progression récente et
 vérifiable alors qu'une active continue d'être servie; le smoke de sortie la
 refuse. Sans progrès récent, l'endpoint répond `503 stale`. Le health

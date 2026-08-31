@@ -815,7 +815,15 @@ describe('ExternalPublicationRegistryService', () => {
           lastFailureAt: '2026-08-01T06:10:00Z',
         },
       ])
-      .mockResolvedValueOnce([{ failedResourceCount: '1' }]);
+      .mockResolvedValueOnce([{ failedResourceCount: '1' }])
+      .mockResolvedValueOnce([
+        {
+          networkResourceKeys: null,
+          networkFailureCount: '0',
+          currentFailureCount: '1',
+          lastNetworkFailureAt: null,
+        },
+      ]);
 
     const health = await harness.service.getHealthStatus(
       new Date('2026-08-01T07:00:00Z'),
@@ -833,6 +841,7 @@ describe('ExternalPublicationRegistryService', () => {
       lastFailureAt: '2026-08-01T06:10:00.000Z',
       successAgeSeconds: 3600,
       failedResourceCount: 1,
+      networkRetry: null,
     });
     expect(JSON.stringify(health)).not.toContain('must not be exposed');
   });
@@ -847,7 +856,15 @@ describe('ExternalPublicationRegistryService', () => {
           lastFailureAt: null,
         },
       ])
-      .mockResolvedValueOnce([{ failedResourceCount: '0' }]);
+      .mockResolvedValueOnce([{ failedResourceCount: '0' }])
+      .mockResolvedValueOnce([
+        {
+          networkResourceKeys: null,
+          networkFailureCount: '0',
+          currentFailureCount: '0',
+          lastNetworkFailureAt: null,
+        },
+      ]);
 
     const health = await harness.service.getHealthStatus(
       new Date('2026-08-01T13:00:00Z'),
@@ -855,5 +872,102 @@ describe('ExternalPublicationRegistryService', () => {
 
     expect(health.status).toBe('stale');
     expect(health.successAgeSeconds).toBe(55 * 60 * 60);
+  });
+
+  it('exposes a sanitized network-only retry window', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query
+      .mockResolvedValueOnce([
+        {
+          scheduledFor: '2026-08-01',
+          status: 'failed',
+          attempt: 2,
+          finishedAt: '2026-08-01T06:55:00Z',
+          retryAfter: '2026-08-01T07:07:34Z',
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          lastSuccessAt: '2026-08-01T06:00:00Z',
+          lastFailureAt: null,
+        },
+      ])
+      .mockResolvedValueOnce([{ failedResourceCount: '1' }])
+      .mockResolvedValueOnce([
+        {
+          networkResourceKeys: ['geojson'],
+          networkFailureCount: '1',
+          currentFailureCount: '1',
+          lastNetworkFailureAt: '2026-08-01T06:55:00Z',
+        },
+      ]);
+
+    const health = await harness.service.getHealthStatus(
+      new Date('2026-08-01T07:00:00Z'),
+    );
+
+    expect(health.networkRetry).toEqual({
+      status: 'network_retry',
+      resourceKeys: ['geojson'],
+      lastFailureAt: '2026-08-01T06:55:00.000Z',
+      failureAgeSeconds: 300,
+      retryAfter: '2026-08-01T07:07:34.000Z',
+    });
+    expect(JSON.stringify(health.networkRetry)).not.toContain('ETIMEDOUT');
+    expect(harness.dataSource.query.mock.calls[3][0]).toContain(
+      '"updatedAt" >= now() - interval \'30 hours\'',
+    );
+    const [transientPattern] = harness.dataSource.query.mock.calls[3][1];
+    expect(transientPattern).toContain('status code');
+    expect(
+      new RegExp(transientPattern, 'i').test(
+        'Request failed with status code 429',
+      ),
+    ).toBe(true);
+    expect(
+      new RegExp(transientPattern, 'i').test(
+        'Request failed with status code 503',
+      ),
+    ).toBe(true);
+  });
+
+  it('ignores stale failed resources outside the health window', async () => {
+    const harness = createHarness(jest.fn());
+    harness.dataSource.query
+      .mockResolvedValueOnce([
+        {
+          scheduledFor: '2026-08-01',
+          status: 'succeeded',
+          attempt: 1,
+          finishedAt: '2026-08-01T06:00:00Z',
+          retryAfter: null,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          lastSuccessAt: '2026-08-01T06:00:00Z',
+          lastFailureAt: null,
+        },
+      ])
+      .mockResolvedValueOnce([{ failedResourceCount: '0' }])
+      .mockResolvedValueOnce([
+        {
+          networkResourceKeys: null,
+          networkFailureCount: '0',
+          currentFailureCount: '0',
+          lastNetworkFailureAt: null,
+        },
+      ]);
+
+    const health = await harness.service.getHealthStatus(
+      new Date('2026-08-01T07:00:00Z'),
+    );
+
+    expect(health.status).toBe('healthy');
+    expect(health.failedResourceCount).toBe(0);
+    expect(health.networkRetry).toBeNull();
+    expect(harness.dataSource.query.mock.calls[3][0]).toContain(
+      '"updatedAt" >= now() - interval \'30 hours\'',
+    );
   });
 });

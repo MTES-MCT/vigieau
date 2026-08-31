@@ -930,15 +930,13 @@ export class StatisticCacheArtifactService {
                 AND publication."certifiedHistoryRepairId" IS NOT NULL
                 AND EXISTS (
                 SELECT 1
-                FROM "certified_history_repair_audit" repair
+                FROM "active_certified_history_repair" repair
                 WHERE repair.id = publication."certifiedHistoryRepairId"
                   AND repair."activationKind" = 'statistics-only'
                   AND repair."dateFrom" =
                       statistic_state."historicDirtyFrom"
                   AND repair."dateThrough" =
                       statistic_state."historicDirtyThrough"
-                  AND repair."historicComputeEpoch" =
-                      config."historicComputeEpoch"
                   AND repair."publicationRevisionAfter" <=
                       statistic_state.revision
                   AND NOT EXISTS (
@@ -1503,15 +1501,13 @@ export class StatisticCacheArtifactService {
                 AND $7::uuid IS NOT NULL
                 AND EXISTS (
                 SELECT 1
-                FROM "certified_history_repair_audit" repair
+                FROM "active_certified_history_repair" repair
                 WHERE repair.id = $7::uuid
                   AND repair."activationKind" = 'statistics-only'
                   AND repair."dateFrom" =
                       statistic_state."historicDirtyFrom"
                   AND repair."dateThrough" =
                       statistic_state."historicDirtyThrough"
-                  AND repair."historicComputeEpoch" =
-                      config_guard."historicComputeEpoch"::bigint
                   AND repair."publicationRevisionAfter" <=
                       statistic_state.revision
                   AND NOT EXISTS (

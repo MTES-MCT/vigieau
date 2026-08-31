@@ -26,6 +26,7 @@ export type PublicZonePublicationHealthStatus =
 
 export type PublicZonePublicationHistoricStatus =
   | 'complete'
+  | 'certified'
   | 'incomplete'
   | 'unknown';
 
@@ -40,6 +41,7 @@ export interface PublicZonePublicationHealthChecks {
   currentStatistics: boolean;
   currentSnapshot: boolean;
   historicStatistics: boolean;
+  certifiedHistoricRepair: boolean;
   historicClean: boolean;
   historicCursors: boolean;
   certifiedRun: boolean;
@@ -126,6 +128,10 @@ export class ZonePublicationHealthService {
               statistic_state."historicDirtyThrough"::text
                 AS "historicDirtyThrough",
               statistic_state."updatedAt" AS "statisticStateUpdatedAt",
+              certified_repair.id IS NOT NULL
+                AS "certifiedHistoricRepair",
+              certified_repair."dateThrough"::text
+                AS "certifiedHistoricThrough",
               config."computeMapDate"::text AS "computeMapDate",
               config."computeStatsDate"::text AS "computeStatsDate",
               CASE
@@ -219,6 +225,35 @@ export class ZonePublicationHealthService {
               ON statistic_state."id" = 1
             LEFT JOIN "config" config ON config."id" = 1
             LEFT JOIN LATERAL (
+              SELECT repair.id, repair."dateThrough"
+              FROM "active_certified_history_repair" repair
+              WHERE repair."activationKind" = 'statistics-only'
+                AND repair."dateFrom" = statistic_state."historicDirtyFrom"
+                AND repair."dateThrough" =
+                    statistic_state."historicDirtyThrough"
+                AND repair."publicationRevisionAfter" <=
+                    statistic_state.revision
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM generate_series(
+                    repair."dateThrough" + 1,
+                    $5::date,
+                    '1 day'::interval
+                  ) required_day(value)
+                  WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM "statistic_commune_snapshot" snapshot
+                    WHERE snapshot."snapshotDate" = required_day.value::date
+                      AND snapshot.scope = 'national'
+                      AND snapshot.status = 'completed'
+                      AND snapshot."processedCommuneCount" =
+                          snapshot."expectedCommuneCount"
+                  )
+                )
+              ORDER BY repair."attestedThroughEpoch" DESC
+              LIMIT 1
+            ) certified_repair ON true
+            LEFT JOIN LATERAL (
               SELECT
                 COUNT(*)::integer AS "liveInstances",
                 COUNT(*) FILTER (
@@ -305,6 +340,7 @@ export class ZonePublicationHealthService {
             leaseSeconds,
             ZONE_PUBLICATION_MATERIALIZATION_VERSION,
             businessDate,
+            requiredHistoricThrough,
           ],
         ),
         this.clockHeartbeat.getHealthStatus(now),
@@ -333,9 +369,15 @@ export class ZonePublicationHealthService {
       const legacyPromotion = Boolean(state.legacyPromotedAt);
       const currentStatistics = state.currentPublishedDate === businessDate;
       const currentSnapshot = state.currentSnapshot === true;
+      const certifiedHistoricRepair =
+        state.certifiedHistoricRepair === true &&
+        typeof state.certifiedHistoricThrough === 'string' &&
+        typeof state.historicDirtyThrough === 'string' &&
+        state.certifiedHistoricThrough >= state.historicDirtyThrough;
       const historicStatistics =
-        typeof state.historicPublishedThrough === 'string' &&
-        state.historicPublishedThrough >= requiredHistoricThrough;
+        (typeof state.historicPublishedThrough === 'string' &&
+          state.historicPublishedThrough >= requiredHistoricThrough) ||
+        certifiedHistoricRepair;
       const historicClean =
         !state.historicDirtyFrom && !state.historicDirtyThrough;
       const historicCursors =
@@ -354,7 +396,11 @@ export class ZonePublicationHealthService {
         historicRun &&
         snapshotsComplete;
       const historicStatus: PublicZonePublicationHistoricStatus =
-        historicComplete ? 'complete' : 'incomplete';
+        historicComplete
+          ? 'complete'
+          : certifiedHistoricRepair
+            ? 'certified'
+            : 'incomplete';
       const candidateRequestedAt = this.toDate(state.candidateRequestedAt);
       const candidateHeartbeatAt =
         candidateRequestedAt &&
@@ -392,6 +438,7 @@ export class ZonePublicationHealthService {
         currentStatistics,
         currentSnapshot,
         historicStatistics,
+        certifiedHistoricRepair,
         historicClean,
         historicCursors,
         certifiedRun,

@@ -385,10 +385,17 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         ) {
           return [{ exists: true }];
         }
-        if (query.includes('UPDATE "config"')) {
+        if (query.includes('record_historic_compute_invalidation')) {
           return options?.historicInvalidationSucceeds === false
-            ? [[], 0]
-            : [[{ id: 1 }], 1];
+            ? []
+            : [
+                {
+                  historicComputeEpoch: '10',
+                  computeMapDate: parameters?.[7] ?? null,
+                  computeStatsDate: parameters?.[8] ?? null,
+                  changed: true,
+                },
+              ];
         }
         if (
           query.includes('UPDATE "zone_publication_source_state"') &&
@@ -1430,7 +1437,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
     const historicInvalidationCallIndex =
       harness.manager.query.mock.calls.findIndex(([query]) =>
-        query.includes('UPDATE "config"'),
+        query.includes('record_historic_compute_invalidation'),
       );
     const historicBoundaryCallIndex =
       harness.manager.query.mock.calls.findIndex(([query]) =>
@@ -1454,15 +1461,24 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     const [historicInvalidationSql, historicInvalidationParameters] =
       harness.manager.query.mock.calls[historicInvalidationCallIndex];
     expect(historicInvalidationSql).toContain(
-      '"historicComputeEpoch" = "historicComputeEpoch" + 1',
+      'record_historic_compute_invalidation',
     );
-    expect(historicInvalidationSql).toContain(
-      '"computeMapGeneration" = "computeMapGeneration" + 1',
-    );
-    expect(historicInvalidationSql).toContain(
-      '"computeStatsGeneration" = "computeStatsGeneration" + 1',
-    );
-    expect(historicInvalidationParameters).toEqual(['2011-06-07']);
+    expect(historicInvalidationParameters).toEqual([
+      '2011-06-07',
+      null,
+      true,
+      true,
+      'published-source-mutation',
+      null,
+      '{}',
+      '2011-06-07',
+      '2011-06-07',
+      false,
+      false,
+      false,
+      true,
+      false,
+    ]);
     expect(harness.manager.query).toHaveBeenCalledWith(
       expect.stringContaining(
         'INSERT INTO "historic_backfill_department_revision"',
@@ -1805,7 +1821,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
 
     expect(
       harness.manager.query.mock.calls.some(([query]) =>
-        query.includes('UPDATE "config"'),
+        query.includes('record_historic_compute_invalidation'),
       ),
     ).toBe(false);
     expect(
@@ -3895,7 +3911,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
     expect(
       harness.manager.query.mock.calls.some(([query]) =>
-        query.includes('UPDATE "config"'),
+        query.includes('record_historic_compute_invalidation'),
       ),
     ).toBe(false);
     expect(

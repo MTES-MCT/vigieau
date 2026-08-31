@@ -19,11 +19,20 @@ describe('ConfigService historic cursor advancement', () => {
     const repository = {
       count: jest.fn().mockResolvedValue(1),
       save: jest.fn(),
+      query: jest.fn().mockResolvedValue([
+        {
+          historicComputeEpoch: '8',
+          computeMapDate: '2026-07-30',
+          computeStatsDate: '2026-07-30',
+          changed: true,
+        },
+      ]),
       createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
     };
     return {
       service: new ConfigService(repository as any),
       queryBuilder,
+      repository,
     };
   };
 
@@ -120,22 +129,24 @@ describe('ConfigService historic cursor advancement', () => {
 
     await harness.service.setConfig('2026-07-30', '2026-07-30');
 
-    const invalidation = harness.queryBuilder.set.mock.calls[0][0];
-    expect(invalidation.computeMapDate()).toContain('LEAST');
-    expect(invalidation.computeMapGeneration()).toBe(
-      '"computeMapGeneration" + 1',
-    );
-    expect(invalidation.computeStatsDate()).toContain('LEAST');
-    expect(invalidation.computeStatsGeneration()).toBe(
-      '"computeStatsGeneration" + 1',
-    );
-    expect(invalidation.historicComputeEpoch()).toBe(
-      '"historicComputeEpoch" + 1',
-    );
-    expect(invalidation.historicBackfillGlobalEpoch()).toBe(
-      '"historicBackfillGlobalEpoch" + 1',
-    );
-    expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
+    const [sql, parameters] = harness.repository.query.mock.calls[0];
+    expect(sql).toContain('"record_historic_compute_invalidation"');
+    expect(parameters).toEqual([
+      '2026-07-30',
+      null,
+      true,
+      true,
+      'config-cursor-rewind',
+      null,
+      JSON.stringify({ force: false }),
+      '2026-07-30',
+      '2026-07-30',
+      false,
+      false,
+      true,
+      true,
+      false,
+    ]);
   });
 
   it.each([
@@ -148,14 +159,11 @@ describe('ConfigService historic cursor advancement', () => {
 
       await harness.service.setConfig(computeMapDate, computeStatsDate);
 
-      const invalidation = harness.queryBuilder.set.mock.calls[0][0];
-      expect(invalidation.historicComputeEpoch()).toBe(
-        '"historicComputeEpoch" + 1',
-      );
-      expect(invalidation.historicBackfillGlobalEpoch()).toBe(
-        '"historicBackfillGlobalEpoch" + 1',
-      );
-      expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
+      const [, parameters] = harness.repository.query.mock.calls[0];
+      expect(parameters[2]).toBe(Boolean(computeStatsDate));
+      expect(parameters[3]).toBe(Boolean(computeMapDate));
+      expect(parameters[11]).toBe(true);
+      expect(parameters[12]).toBe(true);
     },
   );
 
@@ -180,12 +188,11 @@ describe('ConfigService historic cursor advancement', () => {
 
     await harness.service.resetConfig();
 
-    const reset = harness.queryBuilder.set.mock.calls[0][0];
-    expect(reset.historicComputeEpoch()).toBe('"historicComputeEpoch" + 1');
-    expect(reset.historicBackfillGlobalEpoch()).toBe(
-      '"historicBackfillGlobalEpoch" + 1',
-    );
-    expect(harness.queryBuilder.execute).toHaveBeenCalledTimes(1);
+    const [sql, parameters] = harness.repository.query.mock.calls[0];
+    expect(sql).toContain('"record_historic_compute_invalidation"');
+    expect(parameters[4]).toBe('config-reset');
+    expect(parameters[10]).toBe(true);
+    expect(parameters[11]).toBe(true);
   });
 });
 

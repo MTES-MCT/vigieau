@@ -12,6 +12,7 @@ import { ExternalPublicationRegistryService } from './external-publication-regis
 import { ZonePublicationModule } from '../zone_publication/zone_publication.module';
 import { ConfigModule } from '../config/config.module';
 import { StatisticCacheModule } from '../statistic_cache/statistic_cache.module';
+import { HistoricExportReadinessService } from './historic-export-readiness.service';
 
 @Module({
   imports: [
@@ -31,7 +32,12 @@ import { StatisticCacheModule } from '../statistic_cache/statistic_cache.module'
     DatagouvService,
     DatagouvSchedulerService,
     ExternalPublicationRegistryService,
+    HistoricExportReadinessService,
   ],
-  exports: [DatagouvService, ExternalPublicationRegistryService],
+  exports: [
+    DatagouvService,
+    ExternalPublicationRegistryService,
+    HistoricExportReadinessService,
+  ],
 })
 export class DatagouvModule {}

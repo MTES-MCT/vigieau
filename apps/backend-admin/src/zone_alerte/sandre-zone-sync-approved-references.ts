@@ -1,3 +1,4 @@
+import { recordHistoricComputeInvalidation } from '../config/historic-computation-invalidation';
 import { fingerprint } from './sandre-zone-reconciliation';
 
 export interface SandreSyncApprovalQueryExecutor {
@@ -28,30 +29,35 @@ export interface SandreApprovedReferenceEvidence {
   fingerprint: string;
 }
 
-export function fingerprintSandreApprovedPostApplyEvidence(
+export const SANDRE_APPROVED_LINEAGE_VERSION = 1;
+
+/**
+ * Fingerprints only the immutable lineage created by an approved migration.
+ *
+ * The target operational state is deliberately excluded: orders can be
+ * published or revoked after the migration and computed rows are disposable
+ * materializations. Their inclusion made every successful migration expire
+ * as soon as normal business data evolved.
+ *
+ * The database lineage itself is checked by assertPostApplyLineage before an
+ * evidence object is returned. This projection then proves that the lineage
+ * used by the audit and by the safe application is the same one.
+ */
+export function fingerprintSandreApprovedPostApplyLineage(
   evidence: SandreApprovedReferenceEvidence,
 ): string {
-  const targetState = evidence.targetState.map((target) => ({
-    ...target,
-    restrictions: target.restrictions.map(
-      ({ computedIds, historicIds, ...restriction }) => ({
-        ...restriction,
-        computedCount: computedIds.length,
-        historicCount: historicIds.length,
-      }),
-    ),
-  }));
   return fingerprint({
+    version: SANDRE_APPROVED_LINEAGE_VERSION,
     sourceZoneId: evidence.sourceZoneId,
     lifecycle: evidence.lifecycle,
     sourceOperationalEmpty: evidence.sourceOperationalEmpty,
-    arreteCadreLinks: evidence.arreteCadreLinks,
-    restrictions: evidence.restrictions,
+    arreteCadreIds: evidence.arreteCadreLinks.map((link) => link.arreteCadreId),
+    restrictions: evidence.restrictions.map((restriction) => ({
+      restrictionId: restriction.restrictionId,
+      arreteRestrictionId: restriction.arreteRestrictionId,
+    })),
     customizationCount: evidence.customizationCount,
     aliasCount: evidence.aliasCount,
-    targetCollisionFingerprint: evidence.targetCollisionFingerprint,
-    targetStateFingerprint: fingerprint(targetState),
-    targetState,
   });
 }
 
@@ -450,8 +456,8 @@ export async function applySandreApprovedPartitionReferences(
     if (
       expected.lifecycle === 'post_apply' &&
       current.fingerprint !== expected.fingerprint &&
-      fingerprintSandreApprovedPostApplyEvidence(current) !==
-        fingerprintSandreApprovedPostApplyEvidence(expected)
+      fingerprintSandreApprovedPostApplyLineage(current) !==
+        fingerprintSandreApprovedPostApplyLineage(expected)
     ) {
       throw new Error(
         `Approved Sandre partition post-apply state changed for zone ${expected.sourceZoneId}`,
@@ -572,36 +578,16 @@ export async function markSandreApprovedHistoricalRecomputeDebt(
   if (lock?.locked !== true) {
     throw new Error('Historic zone compute is running during Sandre split');
   }
-  const [result] = await executor.query(
-    `
-      WITH changed AS (
-        UPDATE config
-        SET
-          "computeMapDate" = CASE
-            WHEN "computeMapDate" IS NULL OR "computeMapDate" > $1::date
-            THEN $1::date ELSE "computeMapDate" END,
-          "computeStatsDate" = CASE
-            WHEN "computeStatsDate" IS NULL OR "computeStatsDate" > $1::date
-            THEN $1::date ELSE "computeStatsDate" END,
-          "computeMapGeneration" = "computeMapGeneration" + CASE
-            WHEN "computeMapDate" IS NULL OR "computeMapDate" > $1::date
-            THEN 1 ELSE 0 END,
-          "computeStatsGeneration" = "computeStatsGeneration" + CASE
-            WHEN "computeStatsDate" IS NULL OR "computeStatsDate" > $1::date
-            THEN 1 ELSE 0 END,
-          "historicComputeEpoch" = "historicComputeEpoch" + 1
-        WHERE id = 1
-          AND (
-            "computeMapDate" IS NULL OR "computeMapDate" > $1::date
-            OR "computeStatsDate" IS NULL OR "computeStatsDate" > $1::date
-          )
-        RETURNING id
-      )
-      SELECT count(*)::integer AS count FROM changed
-    `,
-    [date],
-  );
-  if (!result || ![0, 1].includes(Number(result.count))) {
+  const result = await recordHistoricComputeInvalidation(executor, {
+    affectedFrom: date,
+    invalidatesStatistics: true,
+    invalidatesMaps: true,
+    cause: 'sandre-approved-reference-split',
+    requestedMapDate: date,
+    requestedStatsDate: date,
+    onlyIfCursorRewinds: true,
+  });
+  if (result.length > 1) {
     throw new Error('Invalid historic cursor state');
   }
 }
@@ -843,6 +829,20 @@ async function assertPostApplyLineage(
   if (targetZoneIds.length === 0) {
     throw new Error('Approved Sandre post-apply state has no target');
   }
+  if (lineage.lifecycle === 'post_apply') {
+    const targetIndexes = lineage.targetState.map(
+      (target) => target.targetIndex,
+    );
+    if (
+      targetIndexes.length !== targetZoneIds.length ||
+      new Set(targetIndexes).size !== targetIndexes.length ||
+      targetIndexes.some(
+        (targetIndex) => targetIndex < 0 || targetIndex >= targetZoneIds.length,
+      )
+    ) {
+      throw new Error('Approved Sandre target lineage changed');
+    }
+  }
   const allRestrictions = await loadRestrictionPayloadRows(
     executor,
     targetZoneIds,
@@ -864,9 +864,9 @@ async function assertPostApplyLineage(
             (target) => target.targetIndex === targetIndex,
           ) ?? null)
         : null;
-    const requiredLinks = requiredState
-      ? requiredState.arreteCadreIds
-      : lineage.arreteCadreLinks.map((link) => link.arreteCadreId);
+    const requiredLinks = lineage.arreteCadreLinks.map(
+      (link) => link.arreteCadreId,
+    );
     const actualLinks = new Set(
       allLinks
         .filter((link) => Number(link.zoneAlerteId) === targetZoneId)
@@ -875,24 +875,27 @@ async function assertPostApplyLineage(
     if (requiredLinks.some((id) => !actualLinks.has(id))) {
       throw new Error('Approved Sandre framework lineage is incomplete');
     }
-    const requiredRestrictions = requiredState
-      ? requiredState.restrictions
-      : lineage.restrictions;
-    for (const required of requiredRestrictions) {
+    for (const required of lineage.restrictions) {
+      const capturedTargetRestrictions =
+        requiredState?.restrictions.filter(
+          (restriction) =>
+            restriction.arreteRestrictionId === required.arreteRestrictionId,
+        ) ?? [];
+      if (capturedTargetRestrictions.length > 1) {
+        throw new Error('Approved Sandre restriction lineage is ambiguous');
+      }
+      const capturedTargetRestriction = capturedTargetRestrictions[0] ?? null;
       const parentRows = allRestrictions.filter(
         (row) =>
           row.zoneAlerteId === targetZoneId &&
           row.arreteRestrictionId === required.arreteRestrictionId,
       );
-      const matches = parentRows.filter(
-        (row) =>
-          (requiredState
+      const matches = parentRows.filter((row) =>
+        capturedTargetRestriction
+          ? row.restrictionId === capturedTargetRestriction.restrictionId
+          : targetIndex === 0
             ? row.restrictionId === required.restrictionId
-            : targetIndex === 0
-              ? row.restrictionId === required.restrictionId
-              : row.arreteRestrictionId === required.arreteRestrictionId) &&
-          (requiredState !== null ||
-            row.payloadFingerprint === required.payloadFingerprint),
+            : row.arreteRestrictionId === required.arreteRestrictionId,
       );
       if (parentRows.length !== 1 || matches.length !== 1) {
         throw new Error('Approved Sandre restriction lineage is incomplete');

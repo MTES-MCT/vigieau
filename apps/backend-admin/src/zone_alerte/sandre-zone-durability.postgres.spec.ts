@@ -18,7 +18,7 @@ import {
 } from './sandre-zone-sync-approvals';
 import {
   applySandreApprovedPartitionReferences,
-  fingerprintSandreApprovedPostApplyEvidence,
+  fingerprintSandreApprovedPostApplyLineage,
   loadSandreApprovedReferenceEvidence,
   lockSandreApprovedSyncReferences,
   markSandreApprovedHistoricalRecomputeDebt,
@@ -63,7 +63,8 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         "computeMapGeneration" bigint NOT NULL DEFAULT 0,
         "computeStatsDate" date,
         "computeStatsGeneration" bigint NOT NULL DEFAULT 0,
-        "historicComputeEpoch" bigint NOT NULL DEFAULT 0
+        "historicComputeEpoch" bigint NOT NULL DEFAULT 0,
+        "historicBackfillGlobalEpoch" bigint NOT NULL DEFAULT 0
       );
       CREATE TABLE sandre_zone_sync_state (
         id serial PRIMARY KEY,
@@ -168,6 +169,109 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         "communeId" integer NOT NULL,
         PRIMARY KEY ("arreteCadreZoneAlerteCommunesId", "communeId")
       )
+    `);
+    await runner.query(`
+      CREATE OR REPLACE FUNCTION "record_historic_compute_invalidation"(
+        affected_from date,
+        affected_through date,
+        invalidates_statistics boolean,
+        invalidates_maps boolean,
+        event_cause text,
+        source_revision bigint DEFAULT NULL,
+        event_context jsonb DEFAULT '{}'::jsonb,
+        requested_map_date date DEFAULT NULL,
+        requested_stats_date date DEFAULT NULL,
+        force_cursor boolean DEFAULT false,
+        reset_cursors boolean DEFAULT false,
+        bump_backfill_epoch boolean DEFAULT false,
+        bump_historic_epoch boolean DEFAULT true,
+        only_if_cursor_rewinds boolean DEFAULT false
+      )
+      RETURNS TABLE (
+        "historicComputeEpoch" bigint,
+        "computeMapDate" date,
+        "computeStatsDate" date,
+        "changed" boolean
+      )
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF event_cause IS NULL OR length(trim(event_cause)) = 0 THEN
+          RAISE EXCEPTION 'historic invalidation cause is required';
+        END IF;
+        IF jsonb_typeof(COALESCE(event_context, '{}'::jsonb)) <> 'object' THEN
+          RAISE EXCEPTION 'historic invalidation context must be an object';
+        END IF;
+        RETURN QUERY
+        WITH updated AS MATERIALIZED (
+          UPDATE config
+          SET
+            "computeMapDate" = CASE
+              WHEN reset_cursors THEN NULL
+              WHEN requested_map_date IS NULL THEN config."computeMapDate"
+              WHEN force_cursor THEN requested_map_date
+              ELSE LEAST(
+                COALESCE(config."computeMapDate", requested_map_date),
+                requested_map_date
+              )
+            END,
+            "computeStatsDate" = CASE
+              WHEN reset_cursors THEN NULL
+              WHEN requested_stats_date IS NULL THEN config."computeStatsDate"
+              WHEN force_cursor THEN requested_stats_date
+              ELSE LEAST(
+                COALESCE(config."computeStatsDate", requested_stats_date),
+                requested_stats_date
+              )
+            END,
+            "computeMapGeneration" = config."computeMapGeneration" + CASE
+              WHEN reset_cursors OR requested_map_date IS NOT NULL THEN 1
+              ELSE 0
+            END,
+            "computeStatsGeneration" =
+              config."computeStatsGeneration" + CASE
+                WHEN reset_cursors OR requested_stats_date IS NOT NULL THEN 1
+                ELSE 0
+              END,
+            "historicComputeEpoch" = config."historicComputeEpoch" + CASE
+              WHEN bump_historic_epoch THEN 1 ELSE 0
+            END,
+            "historicBackfillGlobalEpoch" =
+              config."historicBackfillGlobalEpoch" + CASE
+                WHEN bump_backfill_epoch THEN 1 ELSE 0
+              END
+          WHERE config.id = 1
+            AND (
+              NOT only_if_cursor_rewinds
+              OR reset_cursors
+              OR (
+                requested_map_date IS NOT NULL
+                AND (
+                  config."computeMapDate" IS NULL
+                  OR config."computeMapDate" > requested_map_date
+                )
+              )
+              OR (
+                requested_stats_date IS NOT NULL
+                AND (
+                  config."computeStatsDate" IS NULL
+                  OR config."computeStatsDate" > requested_stats_date
+                )
+              )
+            )
+          RETURNING
+            config."historicComputeEpoch",
+            config."computeMapDate",
+            config."computeStatsDate"
+        )
+        SELECT
+          updated."historicComputeEpoch",
+          updated."computeMapDate",
+          updated."computeStatsDate",
+          true
+        FROM updated;
+      END;
+      $$
     `);
     await new SandreZoneDurability1786395600000().up(runner);
   }, 30_000);
@@ -880,6 +984,9 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       `DELETE FROM zone_alerte_computed WHERE id IN (91300, 91301)`,
     );
     await runner.query(
+      `DELETE FROM zone_alerte_computed_historic WHERE id IN (92300, 92301)`,
+    );
+    await runner.query(
       `
         INSERT INTO zone_alerte_computed (id, "restrictionId") VALUES
           (91310, $1), (91311, $2)
@@ -896,8 +1003,8 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       initialLineage.fingerprint,
     );
     expect(
-      fingerprintSandreApprovedPostApplyEvidence(rematerializedLineage),
-    ).toBe(fingerprintSandreApprovedPostApplyEvidence(initialLineage));
+      fingerprintSandreApprovedPostApplyLineage(rematerializedLineage),
+    ).toBe(fingerprintSandreApprovedPostApplyLineage(initialLineage));
     await expect(
       applySandreApprovedPartitionReferences(
         runner,
@@ -923,7 +1030,7 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         ],
         '2026-06-30',
       ),
-    ).rejects.toThrow('post-apply state changed');
+    ).resolves.toEqual({ applied: false });
     await runner.query(`DELETE FROM zone_alerte_computed WHERE id = 91312`);
     const [cursor] = await runner.query(`
       SELECT
@@ -1020,7 +1127,7 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
         ],
         '2026-06-30',
       ),
-    ).rejects.toThrow('post-apply state changed');
+    ).resolves.toEqual({ applied: false });
     await runner.query(
       `UPDATE restriction SET "niveauGravite" = 'alerte' WHERE id = $1`,
       [futureRestriction.id],
@@ -1030,16 +1137,25 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
       `UPDATE restriction SET "niveauGravite" = 'crise' WHERE id = $1`,
       [cloneRestrictionIds[0]],
     );
-    const evolvedLineage = await loadSandreApprovedReferenceEvidence(
-      runner,
-      20582,
-      [20583, 20584],
-      initialLineage,
-    );
-    expect(evolvedLineage).toEqual(
-      expect.objectContaining({ lifecycle: 'post_apply' }),
-    );
-    expect(evolvedLineage.fingerprint).not.toBe(initialLineage.fingerprint);
+    await expect(
+      loadSandreApprovedReferenceEvidence(
+        runner,
+        20582,
+        [20583, 20584],
+        initialLineage,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ lifecycle: 'post_apply' }));
+    await expect(
+      applySandreApprovedPartitionReferences(
+        runner,
+        initialLineage,
+        [
+          { codeSandre: '3947', zoneAlerteId: 20583 },
+          { codeSandre: '3948', zoneAlerteId: 20584 },
+        ],
+        '2026-06-30',
+      ),
+    ).resolves.toEqual({ applied: false });
     await runner.query(
       `UPDATE restriction SET "niveauGravite" = 'alerte_renforcee' WHERE id = $1`,
       [cloneRestrictionIds[0]],
@@ -1064,6 +1180,24 @@ describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
           initialLineage,
         ),
       ).rejects.toThrow('restriction lineage is incomplete');
+    } finally {
+      await runner.rollbackTransaction();
+    }
+
+    await runner.startTransaction('SERIALIZABLE');
+    try {
+      await runner.query(
+        `DELETE FROM arrete_cadre_zone_alerte
+         WHERE "arreteCadreId" = 130 AND "zoneAlerteId" = 20584`,
+      );
+      await expect(
+        loadSandreApprovedReferenceEvidence(
+          runner,
+          20582,
+          [20583, 20584],
+          initialLineage,
+        ),
+      ).rejects.toThrow('framework lineage is incomplete');
     } finally {
       await runner.rollbackTransaction();
     }

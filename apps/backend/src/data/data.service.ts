@@ -722,14 +722,12 @@ export class DataService implements OnModuleInit {
           CROSS JOIN config
           LEFT JOIN LATERAL (
             SELECT repair.id
-            FROM "certified_history_repair_audit" repair
+            FROM "active_certified_history_repair" repair
             WHERE repair."activationKind" = 'statistics-only'
               AND repair."dateFrom" =
                   statistic_publication_state."historicDirtyFrom"
               AND repair."dateThrough" =
                   statistic_publication_state."historicDirtyThrough"
-              AND repair."historicComputeEpoch" =
-                  config."historicComputeEpoch"
               AND repair."publicationRevisionAfter" <=
                   statistic_publication_state.revision
               AND NOT EXISTS (
@@ -3403,11 +3401,10 @@ export class DataService implements OnModuleInit {
         ON source_state."id" = 1
       LEFT JOIN LATERAL (
         SELECT repair.*
-        FROM "certified_history_repair_audit" repair
+        FROM "active_certified_history_repair" repair
         WHERE repair."activationKind" = 'statistics-only'
           AND repair."dateFrom" = statistic_state."historicDirtyFrom"
           AND repair."dateThrough" = statistic_state."historicDirtyThrough"
-          AND repair."historicComputeEpoch" = config."historicComputeEpoch"
           AND repair."publicationRevisionAfter" <= statistic_state.revision
           AND NOT EXISTS (
             SELECT 1

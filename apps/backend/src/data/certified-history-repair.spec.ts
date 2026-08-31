@@ -248,9 +248,9 @@ describe('certified statistic-only historic repair', () => {
     await service.commune('77132');
 
     const sql = query.mock.calls[0][0] as string;
-    expect(sql).toContain('"certified_history_repair_audit" repair');
+    expect(sql).toContain('"active_certified_history_repair" repair');
     expect(sql).toContain('repair."activationKind" = \'statistics-only\'');
-    expect(sql).toContain('repair."historicComputeEpoch" =');
+    expect(sql).not.toContain('repair."historicComputeEpoch" =');
     expect(sql).toContain('repair."publicationRevisionAfter" <=');
     expect(sql).toContain('generate_series(');
     expect(sql).toContain('certified_snapshot."sourceRevision" IS NULL');

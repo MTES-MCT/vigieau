@@ -1,40 +1,36 @@
 import { fingerprint } from './sandre-zone-reconciliation';
 import {
-  fingerprintSandreApprovedPostApplyEvidence,
+  fingerprintSandreApprovedPostApplyLineage,
+  SANDRE_APPROVED_LINEAGE_VERSION,
   SandreApprovedReferenceEvidence,
   SandreApprovedTargetOperationalState,
 } from './sandre-zone-sync-approved-references';
 
-function postApplyEvidence(
-  updateTarget?: (
-    target: SandreApprovedTargetOperationalState,
-  ) => SandreApprovedTargetOperationalState,
-): SandreApprovedReferenceEvidence {
-  const targetState = [
+function postApplyEvidence(): SandreApprovedReferenceEvidence {
+  const migratedRestriction = {
+    restrictionId: 900,
+    arreteRestrictionId: 800,
+    parentStatus: 'publie',
+    parentDateDebut: '2026-08-22',
+    payloadFingerprint: '1'.repeat(64),
+    computedIds: [1000],
+    historicIds: [2000],
+  };
+  const targetState: SandreApprovedTargetOperationalState[] = [
     {
       targetIndex: 0,
       arreteCadreIds: [700],
-      restrictions: [
-        {
-          restrictionId: 900,
-          arreteRestrictionId: 800,
-          parentStatus: 'publie',
-          parentDateDebut: '2026-08-22',
-          payloadFingerprint: '1'.repeat(64),
-          computedIds: [1000],
-          historicIds: [2000],
-        },
-      ],
+      restrictions: [migratedRestriction],
       customizationCount: 0,
       aliasCount: 0,
     },
-  ].map((target) => (updateTarget ? updateTarget(target) : target));
+  ];
   const unsigned = {
     sourceZoneId: 600,
     lifecycle: 'post_apply' as const,
     sourceOperationalEmpty: true,
     arreteCadreLinks: [{ arreteCadreId: 700, parentStatus: 'publie' }],
-    restrictions: [],
+    restrictions: [migratedRestriction],
     customizationCount: 0,
     aliasCount: 0,
     targetCollisionFingerprint: fingerprint([]),
@@ -44,21 +40,83 @@ function postApplyEvidence(
   return { ...unsigned, fingerprint: fingerprint(unsigned) };
 }
 
-describe('approved Sandre post-apply evidence fingerprint', () => {
-  it('ignores only rematerialized computed and historic identifiers', () => {
-    const audited = postApplyEvidence();
-    const rematerialized = postApplyEvidence((target) => ({
-      ...target,
-      restrictions: target.restrictions.map((restriction) => ({
-        ...restriction,
-        computedIds: [1001],
-        historicIds: [2001],
-      })),
-    }));
+describe('approved Sandre immutable post-apply lineage', () => {
+  it('versions the derived lineage without requiring persisted evidence migration', () => {
+    expect(SANDRE_APPROVED_LINEAGE_VERSION).toBe(1);
+    expect(
+      fingerprintSandreApprovedPostApplyLineage(postApplyEvidence()),
+    ).toMatch(/^[a-f0-9]{64}$/);
+  });
 
-    expect(rematerialized.fingerprint).not.toBe(audited.fingerprint);
-    expect(fingerprintSandreApprovedPostApplyEvidence(rematerialized)).toBe(
-      fingerprintSandreApprovedPostApplyEvidence(audited),
+  it('accepts department 85 derived cache disappearance and rematerialization', () => {
+    const audited = postApplyEvidence();
+    const evolved = {
+      ...audited,
+      restrictions: audited.restrictions.map((restriction) => ({
+        ...restriction,
+        parentStatus: 'abroge',
+        payloadFingerprint: '2'.repeat(64),
+        computedIds: [],
+        historicIds: [],
+      })),
+      targetState: audited.targetState.map((target) => ({
+        ...target,
+        restrictions: target.restrictions.map((restriction) => ({
+          ...restriction,
+          parentStatus: 'abroge',
+          payloadFingerprint: '3'.repeat(64),
+          computedIds: [3000, 3001],
+          historicIds: [],
+        })),
+      })),
+    };
+
+    expect(fingerprintSandreApprovedPostApplyLineage(evolved)).toBe(
+      fingerprintSandreApprovedPostApplyLineage(audited),
+    );
+  });
+
+  it('accepts department 24 revocation and a later order on only one target', () => {
+    const audited = postApplyEvidence();
+    const evolvedTargetState: SandreApprovedTargetOperationalState[] = [
+      {
+        targetIndex: 0,
+        arreteCadreIds: [701],
+        restrictions: [
+          {
+            restrictionId: 901,
+            arreteRestrictionId: 801,
+            parentStatus: 'publie',
+            parentDateDebut: '2026-08-29',
+            payloadFingerprint: '2'.repeat(64),
+            computedIds: [3000],
+            historicIds: [],
+          },
+        ],
+        customizationCount: 1,
+        aliasCount: 1,
+      },
+    ];
+    const evolved = {
+      ...audited,
+      arreteCadreLinks: audited.arreteCadreLinks.map((link) => ({
+        ...link,
+        parentStatus: 'abroge',
+      })),
+      restrictions: audited.restrictions.map((restriction) => ({
+        ...restriction,
+        parentStatus: 'abroge',
+        parentDateDebut: '2026-08-29',
+        payloadFingerprint: '3'.repeat(64),
+        computedIds: [],
+        historicIds: [],
+      })),
+      targetStateFingerprint: fingerprint(evolvedTargetState),
+      targetState: evolvedTargetState,
+    };
+
+    expect(fingerprintSandreApprovedPostApplyLineage(evolved)).toBe(
+      fingerprintSandreApprovedPostApplyLineage(audited),
     );
   });
 
@@ -66,63 +124,42 @@ describe('approved Sandre post-apply evidence fingerprint', () => {
     [
       string,
       (
-        target: SandreApprovedTargetOperationalState,
-      ) => SandreApprovedTargetOperationalState,
+        evidence: SandreApprovedReferenceEvidence,
+      ) => SandreApprovedReferenceEvidence,
     ]
   >([
     [
-      'payload',
-      (target: SandreApprovedTargetOperationalState) => ({
-        ...target,
-        restrictions: target.restrictions.map((restriction) => ({
-          ...restriction,
-          payloadFingerprint: '2'.repeat(64),
-        })),
-      }),
-    ],
-    [
-      'restriction identity',
-      (target: SandreApprovedTargetOperationalState) => ({
-        ...target,
-        restrictions: target.restrictions.map((restriction) => ({
+      'migrated restriction identity',
+      (evidence) => ({
+        ...evidence,
+        restrictions: evidence.restrictions.map((restriction) => ({
           ...restriction,
           restrictionId: restriction.restrictionId + 1,
         })),
       }),
     ],
     [
-      'framework link',
-      (target: SandreApprovedTargetOperationalState) => ({
-        ...target,
-        arreteCadreIds: [701],
+      'migrated framework lineage',
+      (evidence) => ({
+        ...evidence,
+        arreteCadreLinks: [{ arreteCadreId: 701, parentStatus: 'publie' }],
       }),
     ],
     [
-      'computed cardinality',
-      (target: SandreApprovedTargetOperationalState) => ({
-        ...target,
-        restrictions: target.restrictions.map((restriction) => ({
-          ...restriction,
-          computedIds: [...restriction.computedIds, 1002],
-        })),
+      'source identity',
+      (evidence) => ({
+        ...evidence,
+        sourceZoneId: evidence.sourceZoneId + 1,
       }),
     ],
     [
-      'historic cardinality',
-      (target: SandreApprovedTargetOperationalState) => ({
-        ...target,
-        restrictions: target.restrictions.map((restriction) => ({
-          ...restriction,
-          historicIds: [],
-        })),
-      }),
+      'source reference state',
+      (evidence) => ({ ...evidence, sourceOperationalEmpty: false }),
     ],
-  ])('keeps %s drift sealed', (_label, updateTarget) => {
+  ])('keeps %s sealed', (_label, evolve) => {
     const audited = postApplyEvidence();
-    const drifted = postApplyEvidence(updateTarget);
-
-    expect(fingerprintSandreApprovedPostApplyEvidence(drifted)).not.toBe(
-      fingerprintSandreApprovedPostApplyEvidence(audited),
+    expect(fingerprintSandreApprovedPostApplyLineage(evolve(audited))).not.toBe(
+      fingerprintSandreApprovedPostApplyLineage(audited),
     );
   });
 });

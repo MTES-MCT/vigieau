@@ -5,6 +5,8 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { DataSource } from 'typeorm';
 import { ClockHeartbeatService } from '../core/scheduling/clock-heartbeat.service';
 import { ExternalPublicationRegistryService } from '../datagouv/external-publication-registry.service';
+import { HistoricExportReadinessService } from '../datagouv/historic-export-readiness.service';
+import { getScheduledCivilDate } from '../core/scheduling/daily-job-schedule';
 import {
   parseSandreForceFullAuditAfter,
   parseSandreZoneSyncMode,
@@ -60,6 +62,7 @@ export class HealthController {
     private readonly clockHeartbeat: ClockHeartbeatService,
     private readonly configService: ConfigService,
     private readonly zonePublicationHealth: ZonePublicationHealthService,
+    private readonly historicExportReadiness: HistoricExportReadinessService,
   ) {}
 
   @Get()
@@ -89,8 +92,13 @@ export class HealthController {
   }
 
   @Get('external-publications')
-  externalPublications() {
-    return this.externalPublicationRegistry.getHealthStatus();
+  async externalPublications() {
+    const scheduledFor = getScheduledCivilDate(new Date(), 6);
+    const [health, historicExport] = await Promise.all([
+      this.externalPublicationRegistry.getHealthStatus(),
+      this.historicExportReadiness.getHealthStatus(scheduledFor),
+    ]);
+    return { ...health, historicExport };
   }
 
   @Get('zone-publication')

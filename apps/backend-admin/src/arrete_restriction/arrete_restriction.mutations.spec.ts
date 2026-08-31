@@ -181,11 +181,19 @@ function createHarness(initialStates: MutableArreteState[], targetId: number) {
       }
       return transactionRepository;
     }),
-    query: jest.fn(async (sql: string) =>
-      sql.includes('information_schema.columns')
-        ? [{ exists: true }]
-        : [[{ id: 1 }], 1],
-    ),
+    query: jest.fn(async (sql: string) => {
+      if (sql.includes('record_historic_compute_invalidation')) {
+        return [
+          {
+            historicComputeEpoch: '8',
+            computeMapDate: '2026-07-01',
+            computeStatsDate: '2026-07-01',
+            changed: true,
+          },
+        ];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    }),
   };
   const repository = {
     manager: {
@@ -595,7 +603,7 @@ describe('ArreteRestrictionService chain mutations', () => {
       statut: 'publie',
     });
     expect(harness.restrictionService.updateAll).toHaveBeenCalledTimes(1);
-    expect(harness.manager.query).toHaveBeenCalledTimes(2);
+    expect(harness.manager.query).toHaveBeenCalledTimes(1);
   });
 
   it('keeps an explicit repeal end behind the earliest successor boundary', async () => {
@@ -630,7 +638,7 @@ describe('ArreteRestrictionService chain mutations', () => {
       statut: 'publie',
     });
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
-    expect(harness.manager.query).toHaveBeenCalledTimes(2);
+    expect(harness.manager.query).toHaveBeenCalledTimes(1);
   });
 
   it('restores the predecessor after deleting its published successor', async () => {
@@ -671,8 +679,23 @@ describe('ArreteRestrictionService chain mutations', () => {
       'SUPPRESSION AR',
     );
     expect(harness.manager.query).toHaveBeenLastCalledWith(
-      expect.stringContaining('UPDATE "config"'),
-      ['2026-07-01'],
+      expect.stringContaining('record_historic_compute_invalidation'),
+      [
+        '2026-07-01',
+        null,
+        true,
+        true,
+        'published-source-mutation',
+        null,
+        '{}',
+        '2026-07-01',
+        '2026-07-01',
+        false,
+        false,
+        false,
+        true,
+        false,
+      ],
     );
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
   });

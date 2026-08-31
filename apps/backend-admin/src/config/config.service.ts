@@ -4,6 +4,16 @@ import { Brackets, Repository } from 'typeorm';
 import { Config } from '@shared/entities/config.entity';
 import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 import { sourceRevisionColumn } from '../zone_publication/zone_publication.config';
+import { recordHistoricComputeInvalidation } from './historic-computation-invalidation';
+
+export interface ConfigHistoricInvalidationOptions {
+  cause?: string;
+  affectedFrom?: string | null;
+  affectedThrough?: string | null;
+  invalidatesStatistics?: boolean;
+  invalidatesMaps?: boolean;
+  context?: Record<string, unknown>;
+}
 
 @Injectable()
 export class ConfigService {
@@ -107,46 +117,31 @@ export class ConfigService {
     computeStatsDate?: string,
     computeZoneAlerteComputedDate?: Date,
     force?: boolean,
+    historicInvalidation?: ConfigHistoricInvalidationOptions,
   ) {
     if (computeMapDate || computeStatsDate) {
-      // Cursor generations protect daily CAS updates. This separate epoch only
-      // changes when the historic input range is invalidated.
-      const invalidation = {
-        ...(computeMapDate
-          ? {
-              computeMapDate: force
-                ? computeMapDate
-                : () =>
-                    'LEAST(COALESCE("computeMapDate", CAST(:computeMapDate AS date)), CAST(:computeMapDate AS date))',
-              computeMapGeneration: () => '"computeMapGeneration" + 1',
-            }
-          : {}),
-        ...(computeStatsDate
-          ? {
-              computeStatsDate: force
-                ? computeStatsDate
-                : () =>
-                    'LEAST(COALESCE("computeStatsDate", CAST(:computeStatsDate AS date)), CAST(:computeStatsDate AS date))',
-              computeStatsGeneration: () => '"computeStatsGeneration" + 1',
-            }
-          : {}),
-        historicComputeEpoch: () => '"historicComputeEpoch" + 1',
-        historicBackfillGlobalEpoch: () => '"historicBackfillGlobalEpoch" + 1',
-      };
-      const qb = this.configRepository
-        .createQueryBuilder()
-        .update()
-        .set(invalidation)
-        .where('id = 1');
-      if (!force) {
-        if (computeMapDate) {
-          qb.setParameter('computeMapDate', computeMapDate);
-        }
-        if (computeStatsDate) {
-          qb.setParameter('computeStatsDate', computeStatsDate);
-        }
-      }
-      await qb.execute();
+      const requestedDates = [computeMapDate, computeStatsDate].filter(
+        (date): date is string => Boolean(date),
+      );
+      await recordHistoricComputeInvalidation(this.configRepository, {
+        affectedFrom:
+          historicInvalidation?.affectedFrom ?? requestedDates.sort()[0],
+        affectedThrough: historicInvalidation?.affectedThrough,
+        invalidatesStatistics:
+          historicInvalidation?.invalidatesStatistics ??
+          Boolean(computeStatsDate),
+        invalidatesMaps:
+          historicInvalidation?.invalidatesMaps ?? Boolean(computeMapDate),
+        cause: historicInvalidation?.cause ?? 'config-cursor-rewind',
+        context: {
+          force: Boolean(force),
+          ...(historicInvalidation?.context ?? {}),
+        },
+        requestedMapDate: computeMapDate ?? null,
+        requestedStatsDate: computeStatsDate ?? null,
+        forceCursor: Boolean(force),
+        bumpBackfillEpoch: true,
+      });
     }
 
     if (computeZoneAlerteComputedDate) {
@@ -170,18 +165,13 @@ export class ConfigService {
   }
 
   async resetConfig() {
-    return this.configRepository
-      .createQueryBuilder()
-      .update()
-      .set({
-        computeMapDate: null,
-        computeStatsDate: null,
-        computeMapGeneration: () => '"computeMapGeneration" + 1',
-        computeStatsGeneration: () => '"computeStatsGeneration" + 1',
-        historicComputeEpoch: () => '"historicComputeEpoch" + 1',
-        historicBackfillGlobalEpoch: () => '"historicBackfillGlobalEpoch" + 1',
-      })
-      .where('id = 1')
-      .execute();
+    return recordHistoricComputeInvalidation(this.configRepository, {
+      affectedFrom: null,
+      invalidatesStatistics: true,
+      invalidatesMaps: true,
+      cause: 'config-reset',
+      resetCursors: true,
+      bumpBackfillEpoch: true,
+    });
   }
 }

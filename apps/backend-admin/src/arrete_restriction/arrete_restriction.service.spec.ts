@@ -140,10 +140,14 @@ function createHarness(
     getRepository: jest.fn((entity) =>
       entity === ArreteCadre ? arreteCadreRepository : transactionRepository,
     ),
-    query: jest
-      .fn()
-      .mockResolvedValueOnce([{ exists: true }])
-      .mockResolvedValueOnce([[{ id: 1 }], 1]),
+    query: jest.fn().mockResolvedValue([
+      {
+        historicComputeEpoch: '8',
+        computeMapDate: '2026-08-04',
+        computeStatsDate: '2026-08-04',
+        changed: true,
+      },
+    ]),
   };
   const repository = {
     find: jest.fn().mockResolvedValue([]),
@@ -250,7 +254,7 @@ describe('ArreteRestrictionService.publish', () => {
         statut: 'publie',
       }),
     );
-    expect(harness.manager.query).toHaveBeenCalledTimes(2);
+    expect(harness.manager.query).toHaveBeenCalledTimes(1);
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledWith(
       [harness.initial.departement],
       'PUBLICATION AR',
@@ -259,10 +263,7 @@ describe('ArreteRestrictionService.publish', () => {
 
   it('rejects the publication when historic invalidation updates no config row', async () => {
     const harness = createHarness();
-    harness.manager.query
-      .mockReset()
-      .mockResolvedValueOnce([{ exists: true }])
-      .mockResolvedValueOnce([[], 0]);
+    harness.manager.query.mockReset().mockResolvedValueOnce([]);
 
     await expect(
       harness.service.publish(

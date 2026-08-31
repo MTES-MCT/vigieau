@@ -2,6 +2,15 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import {
+  HistoricExportReadinessIdentity,
+  HistoricExportReadinessService,
+} from '../datagouv/historic-export-readiness.service';
+import {
+  HistoricExportReadinessGate,
+  publishWithHistoricExportReadiness,
+} from './datagouv-historic-export-operator';
+
+import {
   getCivilDateAtUtcNoon,
   getScheduledCivilDate,
 } from '../core/scheduling/daily-job-schedule';
@@ -10,6 +19,7 @@ import { DatagouvService } from '../datagouv/datagouv.service';
 export interface AnnualCommunesPublicationOptions {
   year: number;
   expectedSourceDate: string;
+  scheduledFor: string;
 }
 
 interface AnnualCommunesPublisher {
@@ -65,6 +75,7 @@ export function resolveAnnualCommunesPublicationOptions(
   const year = parseYear(yearValue, scheduledCivilDate);
   return {
     year,
+    scheduledFor: scheduledCivilDate,
     expectedSourceDate: resolveExpectedSourceDate(
       expectedSourceDateValue,
       year,
@@ -75,12 +86,35 @@ export function resolveAnnualCommunesPublicationOptions(
 
 export async function publishAnnualCommunesResource(
   datagouvService: AnnualCommunesPublisher,
+  readinessService: HistoricExportReadinessGate,
   options: AnnualCommunesPublicationOptions,
 ): Promise<string> {
-  return datagouvService.createOrUpdateCommunesResource(
-    options.year,
-    options.expectedSourceDate,
+  return publishWithHistoricExportReadiness(
+    readinessService,
+    options.scheduledFor,
+    async (identity) => {
+      assertHistoricIdentityCoversAnnualRange(options, identity);
+      return datagouvService.createOrUpdateCommunesResource(
+        options.year,
+        options.expectedSourceDate,
+      );
+    },
   );
+}
+
+export function assertHistoricIdentityCoversAnnualRange(
+  options: AnnualCommunesPublicationOptions,
+  identity: HistoricExportReadinessIdentity,
+): void {
+  const firstAnnualDate = `${options.year}-01-01`;
+  if (
+    identity.historicFirstDate > firstAnnualDate ||
+    identity.historicLatestDate < options.expectedSourceDate
+  ) {
+    throw new Error(
+      `La frontière historique certifiée ${identity.historicFirstDate}/${identity.historicLatestDate} ne couvre pas l'archive communes ${options.year} (${firstAnnualDate}/${options.expectedSourceDate})`,
+    );
+  }
 }
 
 async function main(): Promise<void> {
@@ -98,8 +132,10 @@ async function main(): Promise<void> {
 
   try {
     const datagouvService = app.get(DatagouvService);
+    const readinessService = app.get(HistoricExportReadinessService);
     const resourceId = await publishAnnualCommunesResource(
       datagouvService,
+      readinessService,
       options,
     );
     process.stdout.write(

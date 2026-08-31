@@ -58,6 +58,7 @@ describe('HealthController', () => {
     lagDays: 0,
     historicDirtyFrom: null,
     historicDirtyThrough: null,
+    certifiedHistoryRepair: null,
     firstDate: '2013-01-01',
     latestDate: '2026-08-11',
     dateCount: 4971,

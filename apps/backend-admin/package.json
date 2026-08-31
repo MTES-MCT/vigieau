@@ -28,6 +28,7 @@
     "repair:missing-commune-history": "node dist/apps/backend-admin/src/scripts/restore-missing-commune-history.js",
     "repair:certified-commune-history": "node dist/apps/backend-admin/src/scripts/restore-certified-commune-history.js",
     "repair:complete-certified-history": "node dist/apps/backend-admin/src/scripts/complete-certified-history-restoration.js",
+    "repair:attest-certified-history": "CERTIFIED_HISTORY_COMPLETION_MODE=attest node dist/apps/backend-admin/src/scripts/complete-certified-history-restoration.js",
     "zones:sandre:reconcile": "node dist/apps/backend-admin/src/scripts/reconcile-sandre-zones.js",
     "arretes:confirm-open-ended-predecessor": "node dist/apps/backend-admin/src/scripts/confirm-open-ended-predecessor.js",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",

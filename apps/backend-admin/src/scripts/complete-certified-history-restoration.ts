@@ -7,6 +7,7 @@ const SNAPSHOT_LOCK = 'vigieau:statistic-commune:snapshot-computation';
 const ZONE_PROMOTION_LOCK = 'vigieau:zone-publication-stable-promotion';
 const RESTORE_CONFIRMATION = 'RESTORE_CERTIFIED_DEPARTMENT_NATIONAL_HISTORY';
 const PROMOTE_CONFIRMATION = 'PROMOTE_CERTIFIED_HISTORY';
+const ATTEST_CONFIRMATION = 'ATTEST_CERTIFIED_HISTORY';
 const EXPECTED_COMMUNE_COUNT = 34_943;
 const EXPECTED_DEPARTMENT_COUNT = 101;
 const EXPECTED_DAY_COUNT = 48;
@@ -14,7 +15,7 @@ const EXPECTED_FROM = '2026-07-11';
 const EXPECTED_THROUGH = '2026-08-27';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
-export type CertifiedHistoryCompletionMode = 'restore' | 'promote';
+export type CertifiedHistoryCompletionMode = 'restore' | 'promote' | 'attest';
 
 export interface CertifiedHistoryCompletionOptions {
   mode: CertifiedHistoryCompletionMode;
@@ -74,7 +75,13 @@ export interface CertifiedStatisticDay {
 }
 
 export interface CertifiedHistoryCompletionSummary {
-  status: 'DRY_RUN' | 'APPLIED' | 'PROMOTION_READY' | 'PROMOTED';
+  status:
+    | 'DRY_RUN'
+    | 'APPLIED'
+    | 'PROMOTION_READY'
+    | 'PROMOTED'
+    | 'ATTESTATION_READY'
+    | 'ATTESTED';
   mode: CertifiedHistoryCompletionMode;
   from: string;
   through: string;
@@ -90,6 +97,7 @@ export interface CertifiedHistoryCompletionSummary {
   provenanceDigest: string;
   executionContext: string;
   auditId: string | null;
+  attestationId: string | null;
   publicationRevision: string;
 }
 
@@ -251,9 +259,9 @@ export function parseCertifiedHistoryCompletionOptions(
   const rawMode =
     environment.CERTIFIED_HISTORY_COMPLETION_MODE?.trim().toLowerCase() ||
     'restore';
-  if (rawMode !== 'restore' && rawMode !== 'promote') {
+  if (rawMode !== 'restore' && rawMode !== 'promote' && rawMode !== 'attest') {
     throw new Error(
-      'CERTIFIED_HISTORY_COMPLETION_MODE must be restore or promote',
+      'CERTIFIED_HISTORY_COMPLETION_MODE must be restore, promote or attest',
     );
   }
   const mode = rawMode as CertifiedHistoryCompletionMode;
@@ -262,7 +270,11 @@ export function parseCertifiedHistoryCompletionOptions(
     environment.CERTIFIED_HISTORY_COMPLETION_APPLY,
   );
   const expectedConfirmation =
-    mode === 'restore' ? RESTORE_CONFIRMATION : PROMOTE_CONFIRMATION;
+    mode === 'restore'
+      ? RESTORE_CONFIRMATION
+      : mode === 'promote'
+        ? PROMOTE_CONFIRMATION
+        : ATTEST_CONFIRMATION;
   if (
     apply &&
     environment.CERTIFIED_HISTORY_COMPLETION_CONFIRMATION?.trim() !==
@@ -1723,6 +1735,81 @@ export const CERTIFIED_COMPLETION_PROMOTION_SQL = `
     (SELECT revision::text FROM publication_update) AS revision
 `;
 
+export const CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL = `
+  INSERT INTO "certified_history_repair_attestation" (
+    id, "repairId", "attestedThroughEpoch", "sourceRevision",
+    "statisticRevision", "communeHistoryDigest",
+    "departmentHistoryDigest", "statisticDigest", "provenanceDigest",
+    context
+  )
+  SELECT
+    $1::uuid, repair.id, config."historicComputeEpoch",
+    repair."sourceRevision", publication.revision,
+    repair."communeHistoryDigest", repair."departmentHistoryDigest",
+    repair."statisticDigest", repair."provenanceDigest",
+    repair."publicationContext" || $5::jsonb
+  FROM "certified_history_repair_audit" repair
+  CROSS JOIN "config" config
+  CROSS JOIN "statistic_publication_state" publication
+  WHERE repair.id = $2::uuid
+    AND config.id = 1
+    AND config."historicComputeEpoch" = $3::bigint
+    AND publication.id = 1
+    AND publication.revision = $4::bigint
+  RETURNING id::text AS "attestationId",
+            "statisticRevision"::text AS revision
+`;
+
+export const CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL = `
+  WITH retagged AS MATERIALIZED (
+    UPDATE "statistic_commune_snapshot" snapshot
+    SET "certifiedHistoryRepairId" = $1::uuid,
+        "updatedAt" = now()
+    WHERE snapshot."snapshotDate" BETWEEN $2::date AND $3::date
+      AND snapshot.scope = 'national'
+      AND snapshot.status = 'completed'
+      AND snapshot."expectedCommuneCount" = $4::integer
+      AND snapshot."processedCommuneCount" = $4::integer
+      AND snapshot."sourceRevision" IS NULL
+      AND snapshot."certifiedHistoryRepairId" IS NULL
+    RETURNING snapshot."snapshotDate"
+  )
+  SELECT COUNT(*)::integer AS "retaggedSnapshotCount"
+  FROM retagged
+`;
+
+export const CERTIFIED_COMPLETION_ATTESTATION_SQL = `
+  WITH snapshot_coverage AS MATERIALIZED (
+    SELECT
+      COUNT(DISTINCT snapshot."snapshotDate")::integer AS count,
+      COUNT(*) FILTER (
+        WHERE snapshot.status IS DISTINCT FROM 'completed'
+           OR snapshot."expectedCommuneCount" IS DISTINCT FROM $3::integer
+           OR snapshot."processedCommuneCount" IS DISTINCT FROM $3::integer
+           OR snapshot."sourceRevision" IS NOT NULL
+           OR snapshot."certifiedHistoryRepairId" IS DISTINCT FROM $4::uuid
+      )::integer AS invalid
+    FROM "statistic_commune_snapshot" snapshot
+    WHERE snapshot."snapshotDate" BETWEEN $1::date AND $2::date
+      AND snapshot.scope = 'national'
+  ), publication_update AS MATERIALIZED (
+    UPDATE "statistic_publication_state" publication
+    SET revision = publication.revision + 1,
+        "updatedAt" = now()
+    FROM snapshot_coverage
+    WHERE publication.id = 1
+      AND publication.revision = $5::bigint
+      AND snapshot_coverage.count = ($2::date - $1::date + 1)
+      AND snapshot_coverage.invalid = 0
+    RETURNING publication.revision
+  )
+  SELECT
+    snapshot_coverage.count AS "snapshotDayCount",
+    snapshot_coverage.invalid AS "invalidSnapshotCount",
+    (SELECT revision::text FROM publication_update) AS revision
+  FROM snapshot_coverage
+`;
+
 async function promote(
   source: QueryRunner,
   target: DataSource,
@@ -1732,7 +1819,11 @@ async function promote(
   expectedContext: RepairPublicationContext,
   executionContext: string,
   options: CertifiedHistoryCompletionOptions,
-): Promise<{ auditId: string | null; revision: string }> {
+): Promise<{
+  auditId: string | null;
+  attestationId: string | null;
+  revision: string;
+}> {
   const communeDigestBatches = await readCertifiedCommuneDigests(
     source,
     options,
@@ -1811,14 +1902,25 @@ async function promote(
     if (!options.apply) {
       await runner.commitTransaction();
       transactionStarted = false;
-      return { auditId: null, revision: expectedContext.statisticRevision };
+      return {
+        auditId: null,
+        attestationId: null,
+        revision: expectedContext.statisticRevision,
+      };
     }
     const auditId = randomUUID();
+    const attestationId = randomUUID();
     await runner.query(
       `SELECT set_config(
          'vigieau.certified_history_promotion_id', $1, true
        )`,
       [auditId],
+    );
+    await runner.query(
+      `SELECT set_config(
+         'vigieau.certified_history_attestation_id', $1, true
+       )`,
+      [attestationId],
     );
     const [result] = (await runner.query(CERTIFIED_COMPLETION_PROMOTION_SQL, [
       auditId,
@@ -1842,21 +1944,307 @@ async function promote(
         sourceFingerprint: sourceScope.sourceFingerprint,
       }),
     ])) as Array<Record<string, unknown>>;
+    const promotedRevision = String(
+      BigInt(expectedContext.statisticRevision) + 1n,
+    );
     if (
       count(result?.auditCount, 'audit insert count') !== 1 ||
       count(result?.snapshotDayCount, 'snapshot day count') !==
         EXPECTED_DAY_COUNT ||
       count(result?.invalidSnapshotCount, 'invalid snapshot count') !== 0 ||
-      String(result?.revision) !==
-        String(BigInt(expectedContext.statisticRevision) + 1n)
+      String(result?.revision) !== promotedRevision
     ) {
       throw new PublicationContextChangedError(
         'Atomic certified history promotion lost its CAS precondition',
       );
     }
+    const [attestation] = (await runner.query(
+      CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
+      [
+        attestationId,
+        auditId,
+        expectedContext.historicComputeEpoch,
+        promotedRevision,
+        JSON.stringify({
+          attestationMethod: 'initial-certified-promotion',
+        }),
+      ],
+    )) as Array<Record<string, unknown>>;
+    if (
+      String(attestation?.attestationId) !== attestationId ||
+      String(attestation?.revision) !== promotedRevision
+    ) {
+      throw new PublicationContextChangedError(
+        'Atomic certified history promotion lost its attestation boundary',
+      );
+    }
     await runner.commitTransaction();
     transactionStarted = false;
-    return { auditId, revision: String(result.revision) };
+    return {
+      auditId,
+      attestationId,
+      revision: promotedRevision,
+    };
+  } catch (error) {
+    if (transactionStarted) await runner.rollbackTransaction();
+    throw error;
+  } finally {
+    if (snapshotLocked) {
+      await runner.query('SELECT pg_advisory_unlock(hashtext($1))', [
+        SNAPSHOT_LOCK,
+      ]);
+    }
+    await runner.release();
+  }
+}
+
+async function attestExistingRepair(
+  source: QueryRunner,
+  target: DataSource,
+  sourceScope: CertifiedCompletionSourceScope,
+  departmentBatches: CertifiedDepartmentDay[][],
+  statisticRows: CertifiedStatisticDay[],
+  expectedContext: RepairPublicationContext,
+  executionContext: string,
+  options: CertifiedHistoryCompletionOptions,
+): Promise<{
+  auditId: string;
+  attestationId: string | null;
+  revision: string;
+}> {
+  const communeDigestBatches = await readCertifiedCommuneDigests(
+    source,
+    options,
+    sourceScope,
+  );
+  const runner = target.createQueryRunner();
+  let snapshotLocked = false;
+  let transactionStarted = false;
+  try {
+    await runner.connect();
+    const [snapshotLock] = (await runner.query(
+      'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+      [SNAPSHOT_LOCK],
+    )) as Array<{ locked: unknown }>;
+    snapshotLocked = bool(snapshotLock?.locked);
+    if (!snapshotLocked) {
+      throw new CurrentPriorityError('Snapshot lock is busy');
+    }
+    await runner.query("SELECT set_config('statement_timeout', $1, false)", [
+      `${options.statementTimeoutMs}ms`,
+    ]);
+    await assertContext(runner, expectedContext, false);
+    await validateAllCommunesExact(
+      runner,
+      communeDigestBatches,
+      options,
+      expectedContext,
+    );
+    for (const rows of departmentBatches) {
+      await assertContext(runner, expectedContext, false);
+      await validateTargetDepartmentExact(runner, rows, options);
+    }
+    for (
+      let offset = 0;
+      offset < statisticRows.length;
+      offset += options.batchSize
+    ) {
+      await assertContext(runner, expectedContext, false);
+      await validateTargetStatisticExact(
+        runner,
+        statisticRows.slice(offset, offset + options.batchSize),
+      );
+    }
+    await assertContext(runner, expectedContext, false);
+
+    await runner.startTransaction('SERIALIZABLE');
+    transactionStarted = true;
+    await runner.query("SELECT set_config('lock_timeout', $1, true)", [
+      `${options.lockTimeoutMs}ms`,
+    ]);
+    await runner.query("SELECT set_config('statement_timeout', $1, true)", [
+      `${options.statementTimeoutMs}ms`,
+    ]);
+    const [zoneLock] = (await runner.query(
+      `SELECT pg_try_advisory_xact_lock(
+         hashtext('vigieau'), hashtext('zone-compute-global')
+       ) AS locked`,
+    )) as Array<{ locked: unknown }>;
+    const [promotionLock] = (await runner.query(
+      'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
+      [ZONE_PROMOTION_LOCK],
+    )) as Array<{ locked: unknown }>;
+    if (!bool(zoneLock?.locked) || !bool(promotionLock?.locked)) {
+      throw new CurrentPriorityError('Zone publication lock is busy');
+    }
+    await assertContext(runner, expectedContext, options.apply);
+    const [preflight] = (await runner.query(
+      CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
+      [options.from, options.through, EXPECTED_COMMUNE_COUNT],
+    )) as PromotionPreflight[];
+    if (!preflight) throw new Error('Attestation preflight is unavailable');
+    assertPromotionPreflight(preflight);
+
+    const repairs = (await runner.query(
+      `
+        SELECT repair.*
+        FROM "certified_history_repair_audit" repair
+        WHERE repair."sourceRunId" = $1::text
+          AND repair."dateFrom" = $2::date
+          AND repair."dateThrough" = $3::date
+          AND repair."activationKind" = 'statistics-only'
+          AND repair."communeCount" = $4::integer
+          AND repair."departmentCount" = $5::integer
+          AND repair."dayCount" = $6::integer
+          AND repair."communeHistoryDigest" = $7::text
+          AND repair."departmentHistoryDigest" = $8::text
+          AND repair."statisticDigest" = $9::text
+          AND repair."provenanceDigest" = $10::text
+        FOR SHARE
+      `,
+      [
+        options.sourceRunId,
+        options.from,
+        options.through,
+        sourceScope.communeCount,
+        sourceScope.departmentCount,
+        sourceScope.dayCount,
+        sourceScope.communeHistoryDigest,
+        sourceScope.departmentHistoryDigest,
+        sourceScope.statisticDigest,
+        sourceScope.provenanceDigest,
+      ],
+    )) as Array<{ id: string }>;
+    if (repairs.length !== 1) {
+      throw new Error(
+        `Expected one matching certified repair audit, found ${repairs.length}`,
+      );
+    }
+    const auditId = String(repairs[0].id);
+    const [existing] = (await runner.query(
+      `
+        SELECT repair."attestationId"::text AS id,
+               repair."attestationStatisticRevision"::text AS revision
+        FROM "active_certified_history_repair" repair
+        WHERE repair.id = $1::uuid
+          AND repair."attestedThroughEpoch" = $2::bigint
+        LIMIT 1
+      `,
+      [auditId, expectedContext.historicComputeEpoch],
+    )) as Array<{ id: string; revision: string }>;
+    if (existing) {
+      await runner.commitTransaction();
+      transactionStarted = false;
+      return {
+        auditId,
+        attestationId: existing.id,
+        revision: existing.revision,
+      };
+    }
+    if (!options.apply) {
+      await runner.commitTransaction();
+      transactionStarted = false;
+      return {
+        auditId,
+        attestationId: null,
+        revision: expectedContext.statisticRevision,
+      };
+    }
+
+    const [foreignTag] = (await runner.query(
+      `
+        SELECT snapshot."snapshotDate"::text AS date
+        FROM "statistic_commune_snapshot" snapshot
+        WHERE snapshot."snapshotDate" BETWEEN $1::date AND $2::date
+          AND snapshot.scope = 'national'
+          AND snapshot."certifiedHistoryRepairId" IS NOT NULL
+          AND snapshot."certifiedHistoryRepairId" <> $3::uuid
+        ORDER BY snapshot."snapshotDate"
+        LIMIT 1
+      `,
+      [options.from, options.through, auditId],
+    )) as Array<{ date: string }>;
+    if (foreignTag) {
+      throw new Error(
+        `Certified snapshot ${foreignTag.date} belongs to another repair`,
+      );
+    }
+    const attestationId = randomUUID();
+    await runner.query(
+      `SELECT set_config(
+         'vigieau.certified_history_promotion_id', $1, true
+       )`,
+      [auditId],
+    );
+    await runner.query(
+      `SELECT set_config(
+         'vigieau.certified_history_attestation_id', $1, true
+       )`,
+      [attestationId],
+    );
+    const [retagged] = (await runner.query(
+      CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL,
+      [auditId, options.from, options.through, sourceScope.communeCount],
+    )) as Array<Record<string, unknown>>;
+    const retaggedSnapshotCount = count(
+      retagged?.retaggedSnapshotCount,
+      'retagged snapshot count',
+    );
+    if (retaggedSnapshotCount > sourceScope.dayCount) {
+      throw new PublicationContextChangedError(
+        'Atomic certified history attestation retagged too many snapshots',
+      );
+    }
+    const [result] = (await runner.query(CERTIFIED_COMPLETION_ATTESTATION_SQL, [
+      options.from,
+      options.through,
+      sourceScope.communeCount,
+      auditId,
+      expectedContext.statisticRevision,
+    ])) as Array<Record<string, unknown>>;
+    const attestedRevision = String(
+      BigInt(expectedContext.statisticRevision) + 1n,
+    );
+    if (
+      count(result?.snapshotDayCount, 'snapshot day count') !==
+        sourceScope.dayCount ||
+      count(result?.invalidSnapshotCount, 'invalid snapshot count') !== 0 ||
+      String(result?.revision) !== attestedRevision
+    ) {
+      throw new PublicationContextChangedError(
+        'Atomic certified history attestation preparation lost its CAS precondition',
+      );
+    }
+    const [attestation] = (await runner.query(
+      CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
+      [
+        attestationId,
+        auditId,
+        expectedContext.historicComputeEpoch,
+        attestedRevision,
+        JSON.stringify({
+          attestationMethod: 'certified-backup-reattestation',
+          executionContext,
+          sourceFingerprint: sourceScope.sourceFingerprint,
+          currentSourceRevision: expectedContext.sourcePublicRevision,
+        }),
+      ],
+    )) as Array<Record<string, unknown>>;
+    if (
+      String(attestation?.attestationId) !== attestationId ||
+      String(attestation?.revision) !== attestedRevision
+    ) {
+      throw new PublicationContextChangedError(
+        'Atomic certified history attestation lost its attestation boundary',
+      );
+    }
+    await runner.commitTransaction();
+    transactionStarted = false;
+    return {
+      auditId,
+      attestationId,
+      revision: attestedRevision,
+    };
   } catch (error) {
     if (transactionStarted) await runner.rollbackTransaction();
     throw error;
@@ -1947,6 +2335,7 @@ export async function completeCertifiedHistoryRestoration(
       provenanceDigest: sourceScope.provenanceDigest,
       executionContext,
       auditId: null,
+      attestationId: null,
       publicationRevision: expectedContext.statisticRevision,
     };
 
@@ -2050,7 +2439,7 @@ export async function completeCertifiedHistoryRestoration(
           }
         });
       }
-    } else {
+    } else if (options.mode === 'promote') {
       const promoted = await promote(
         source,
         target,
@@ -2062,8 +2451,25 @@ export async function completeCertifiedHistoryRestoration(
         options,
       );
       summary.auditId = promoted.auditId;
+      summary.attestationId = promoted.attestationId;
       summary.publicationRevision = promoted.revision;
       summary.status = options.apply ? 'PROMOTED' : 'PROMOTION_READY';
+      summary.batches = 1;
+    } else {
+      const attested = await attestExistingRepair(
+        source,
+        target,
+        sourceScope,
+        departmentBatches,
+        statisticRows,
+        expectedContext,
+        executionContext,
+        options,
+      );
+      summary.auditId = attested.auditId;
+      summary.attestationId = attested.attestationId;
+      summary.publicationRevision = attested.revision;
+      summary.status = options.apply ? 'ATTESTED' : 'ATTESTATION_READY';
       summary.batches = 1;
     }
     await source.commitTransaction();

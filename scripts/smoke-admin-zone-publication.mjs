@@ -13,6 +13,7 @@ const zonePublicationCheckKeys = [
   "historicStatistics",
   "historicClean",
   "historicCursors",
+  "certifiedHistoricRepair",
   "certifiedRun",
   "snapshotsComplete",
   "recentProgress",
@@ -94,13 +95,48 @@ export function assertZonePublicationResponse({ body, httpStatus, mode }) {
       true,
       "The active zone publication is not served by every live public instance",
     );
-    for (const key of zonePublicationCheckKeys.filter(
-      (key) => key !== "recentProgress",
-    )) {
+    for (const key of [
+      "enabled",
+      "automaticPublishing",
+      "clock",
+      "activeServing",
+      "activeCurrent",
+      "candidateClear",
+      "legacyPromotion",
+      "currentStatistics",
+      "currentSnapshot",
+      "historicStatistics",
+      "certifiedRun",
+      "snapshotsComplete",
+    ]) {
       assert.equal(
         body.checks[key],
         true,
         `Zone publication check ${key} is not healthy`,
+      );
+    }
+    assert.ok(
+      ["complete", "certified"].includes(body.historicStatus),
+      `Unsupported healthy historic status ${body.historicStatus}`,
+    );
+    if (body.historicStatus === "complete") {
+      for (const key of ["historicClean", "historicCursors", "historicRun"]) {
+        assert.equal(
+          body.checks[key],
+          true,
+          `Complete history check ${key} is not healthy`,
+        );
+      }
+    } else {
+      assert.equal(
+        body.checks.certifiedHistoricRepair,
+        true,
+        "Certified history has no active range-aware repair",
+      );
+      assert.equal(
+        body.checks.historicClean,
+        false,
+        "Certified history unexpectedly reports a clean mutable range",
       );
     }
     return;

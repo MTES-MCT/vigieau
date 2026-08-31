@@ -657,7 +657,7 @@ describe('DatagouvService', () => {
     await expect(
       harness.service.updateCommunes(2026, '2026-07-31'),
     ).rejects.toThrow(
-      'Historique incomplet pour la commune 65440: 1/212 jours',
+      'Historique incomplet pour la commune 65440: 0/212 jours',
     );
     expect(upload).not.toHaveBeenCalled();
   });
@@ -1062,6 +1062,106 @@ describe('DatagouvService', () => {
     await expect(
       stat(join(directory, 'historique_communes.zip')),
     ).rejects.toThrow();
+  });
+
+  it('rejects a historical archive with a gap inside the certified full range', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    harness.queryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('snapshot."expectedCommuneCount"')) {
+        return [
+          {
+            status: 'completed',
+            expectedCommuneCount: 1,
+            processedCommuneCount: 1,
+            snapshotSourceRevision: '42',
+            currentSourceRevision: '42',
+            communeCount: 1,
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '01001',
+          commune_nom: 'Commune avec trou',
+          sc_restrictions: [
+            { date: '2013-01-01', SOU: null, SUP: null, AEP: null },
+            { date: '2013-01-03', SOU: null, SUP: null, AEP: null },
+          ],
+        },
+      ]),
+    );
+    const upload = jest.spyOn(harness.service, 'uploadToDatagouv');
+
+    await expect(
+      harness.service.updateHistoriqueCommunes(
+        '2013-01-03',
+        '42',
+        '2013-01-01',
+      ),
+    ).rejects.toThrow(
+      'Historique incomplet pour la commune 01001: 2/3 jours entre 2013-01-01 et 2013-01-03',
+    );
+
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it('allows pre-2013 rows while certifying exact continuity from 2013', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const harness = createHarness(directory);
+    harness.queryRunner.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql.includes('snapshot."expectedCommuneCount"')) {
+        return [
+          {
+            status: 'completed',
+            expectedCommuneCount: 1,
+            processedCommuneCount: 1,
+            snapshotSourceRevision: '42',
+            currentSourceRevision: '42',
+            communeCount: 1,
+          },
+        ];
+      }
+      if (sql.includes('pg_advisory_unlock')) return [{ unlocked: true }];
+      return [];
+    });
+    harness.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '77132',
+          commune_nom: 'Coupvray',
+          sc_restrictions: [
+            { date: '2010-05-01', SOU: null, SUP: null, AEP: null },
+            ...dailyRestrictions('2013-01-01', '2013-01-03'),
+          ],
+        },
+      ]),
+    );
+    const upload = jest
+      .spyOn(harness.service, 'uploadToDatagouv')
+      .mockResolvedValue();
+
+    await harness.service.updateHistoriqueCommunes(
+      '2013-01-03',
+      '42',
+      '2013-01-01',
+    );
+
+    expect(upload).toHaveBeenCalledWith(
+      'historique_communes',
+      'historique_communes.zip',
+      'Historique Communes',
+      false,
+      { sourceDate: '2013-01-03' },
+    );
   });
 
   it('does not upload when the source identity drifts during archive generation', async () => {

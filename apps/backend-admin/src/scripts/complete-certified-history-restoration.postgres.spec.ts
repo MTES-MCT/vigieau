@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import {
   CERTIFIED_COMPLETION_APPLY_DEPARTMENT_BATCH_SQL,
+  CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL,
+  CERTIFIED_COMPLETION_ATTESTATION_SQL,
+  CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
   CERTIFIED_COMPLETION_INSPECT_DEPARTMENT_BATCH_SQL,
   CERTIFIED_COMPLETION_PROMOTION_SQL,
   TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
@@ -164,6 +167,18 @@ describePostgres('complete certified history PostgreSQL', () => {
         "updatedAt" timestamptz NOT NULL DEFAULT now(),
         "certifiedHistoryRepairId" uuid,
         PRIMARY KEY ("snapshotDate", scope)
+      );
+      CREATE TABLE certified_history_repair_attestation (
+        id uuid PRIMARY KEY,
+        "repairId" uuid NOT NULL,
+        "attestedThroughEpoch" bigint NOT NULL,
+        "sourceRevision" bigint NOT NULL,
+        "statisticRevision" bigint NOT NULL,
+        "communeHistoryDigest" text NOT NULL,
+        "departmentHistoryDigest" text NOT NULL,
+        "statisticDigest" text NOT NULL,
+        "provenanceDigest" text NOT NULL,
+        context jsonb NOT NULL
       );
       INSERT INTO departement VALUES (1, '01'), (2, '77');
       INSERT INTO statistic_departement VALUES
@@ -386,6 +401,7 @@ describePostgres('complete certified history PostgreSQL', () => {
       )
     `);
     const auditId = randomUUID();
+    const attestationId = randomUUID();
     const parameters = [
       auditId,
       'certified-test-source-run',
@@ -412,6 +428,22 @@ describePostgres('complete certified history PostgreSQL', () => {
       auditCount: 1,
       snapshotDayCount: 2,
       invalidSnapshotCount: 0,
+      revision: '6',
+    });
+    const [attestation] = await database.query(
+      CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
+      [
+        attestationId,
+        auditId,
+        7,
+        6,
+        JSON.stringify({
+          attestationMethod: 'initial-certified-promotion',
+        }),
+      ],
+    );
+    expect(attestation).toEqual({
+      attestationId,
       revision: '6',
     });
     const [state] = await database.query(
@@ -470,5 +502,54 @@ describePostgres('complete certified history PostgreSQL', () => {
       `SELECT revision::text FROM statistic_publication_state WHERE id = 1`,
     );
     expect(unchanged.revision).toBe('6');
+
+    await database.query(
+      `UPDATE statistic_commune_snapshot
+       SET "certifiedHistoryRepairId" = NULL
+       WHERE scope = 'national'`,
+    );
+    const [retagged] = await database.query(
+      CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL,
+      [auditId, '2026-07-11', '2026-07-12', 34_943],
+    );
+    expect(retagged.retaggedSnapshotCount).toBe(2);
+    const [prepared] = await database.query(
+      CERTIFIED_COMPLETION_ATTESTATION_SQL,
+      ['2026-07-11', '2026-07-12', 34_943, auditId, 6],
+    );
+    expect(prepared).toEqual({
+      snapshotDayCount: 2,
+      invalidSnapshotCount: 0,
+      revision: '7',
+    });
+    const reattestationId = randomUUID();
+    const [reattestation] = await database.query(
+      CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
+      [
+        reattestationId,
+        auditId,
+        7,
+        7,
+        JSON.stringify({
+          attestationMethod: 'certified-backup-reattestation',
+          currentSourceRevision: '999',
+        }),
+      ],
+    );
+    expect(reattestation).toEqual({
+      attestationId: reattestationId,
+      revision: '7',
+    });
+    const [reattestedRow] = await database.query(
+      `SELECT "sourceRevision"::text AS "sourceRevision",
+              context ->> 'currentSourceRevision' AS "currentSourceRevision"
+       FROM certified_history_repair_attestation
+       WHERE id = $1`,
+      [reattestationId],
+    );
+    expect(reattestedRow).toEqual({
+      sourceRevision: '42',
+      currentSourceRevision: '999',
+    });
   });
 });

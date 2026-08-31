@@ -78,7 +78,7 @@ import {
 import {
   applySandreApprovedPartitionReferences,
   assertSandreApprovedOneToOneApplied,
-  fingerprintSandreApprovedPostApplyEvidence,
+  fingerprintSandreApprovedPostApplyLineage,
   loadSandreApprovedReferenceEvidence,
   lockSandreApprovedSyncReferences,
   parseSandreApprovedReferenceEvidence,
@@ -3381,8 +3381,8 @@ export class ZoneAlerteService {
           currentReferences.fingerprint === expectedReferences.fingerprint ||
           (currentReferences.lifecycle === 'post_apply' &&
             expectedReferences.lifecycle === 'post_apply' &&
-            fingerprintSandreApprovedPostApplyEvidence(currentReferences) ===
-              fingerprintSandreApprovedPostApplyEvidence(expectedReferences));
+            fingerprintSandreApprovedPostApplyLineage(currentReferences) ===
+              fingerprintSandreApprovedPostApplyLineage(expectedReferences));
         auditedSourceIdentity = parseSandreApprovedSourceIdentityEvidence(
           audited.observedSourceIdentity,
         );

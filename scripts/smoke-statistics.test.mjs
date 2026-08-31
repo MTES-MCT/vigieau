@@ -133,6 +133,7 @@ async function runSmoke({
         VIGIEAU_STATISTICS_SAMPLE_COUNT: "2",
         VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT: String(minimumInstanceCount),
         VIGIEAU_EXPECT_STATISTIC_ARTIFACT: expectArtifact ? "true" : "false",
+        VIGIEAU_CERTIFIED_HISTORY_CANARY: "disabled",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

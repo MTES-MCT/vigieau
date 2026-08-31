@@ -3,6 +3,7 @@ import {
   DEFAULT_STATISTICS_DEADLINE,
   getStatisticFreshnessPolicy,
 } from "./smoke-statistics-policy.mjs";
+import { assertCertifiedHistoryCanary } from "./smoke-certified-history-policy.mjs";
 
 const apiBase = (
   process.env.VIGIEAU_API_URL || "https://api.vigieau.beta.gouv.fr"
@@ -40,6 +41,17 @@ const allowMissingHealth =
   process.env.VIGIEAU_ALLOW_MISSING_STATISTICS_HEALTH === "true";
 const expectStatisticArtifact =
   process.env.VIGIEAU_EXPECT_STATISTIC_ARTIFACT === "true";
+const certifiedHistoryCanaryEnabled =
+  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY !== "disabled";
+const certifiedHistoryCanaryCommune =
+  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_COMMUNE || "77132";
+const certifiedHistoryCanaryFrom =
+  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_FROM || "2026-07-11";
+const certifiedHistoryCanaryThrough =
+  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_THROUGH || "2026-08-27";
+const certifiedHistoryCanaryDigest =
+  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_SHA256 ||
+  "9a79da0dcea956455e1da05e271504f6163ef9d47be86dbe35ff6dfd1df1b255";
 const runningSnapshotMaximumAgeMs = 15 * 60 * 1000;
 
 function assertInteger(value, minimum, name) {
@@ -427,6 +439,29 @@ assert.ok(
   `Commune statistics do not include certified date ${reference.latestDate}`,
 );
 
+let certifiedHistoryCanary = null;
+if (certifiedHistoryCanaryEnabled) {
+  assert.match(
+    certifiedHistoryCanaryCommune,
+    /^[0-9AB]{5}$/,
+    "VIGIEAU_CERTIFIED_HISTORY_CANARY_COMMUNE must be an INSEE commune code",
+  );
+  const canaryQuery = new URLSearchParams({
+    dateDebut: certifiedHistoryCanaryFrom.slice(0, 7),
+    dateFin: certifiedHistoryCanaryThrough.slice(0, 7),
+  });
+  const { body: canaryPayload } = await requestJson(
+    `${apiBase}/api/data/commune/${certifiedHistoryCanaryCommune}?${canaryQuery}`,
+  );
+  certifiedHistoryCanary = assertCertifiedHistoryCanary({
+    payload: canaryPayload,
+    communeCode: certifiedHistoryCanaryCommune,
+    dateFrom: certifiedHistoryCanaryFrom,
+    dateThrough: certifiedHistoryCanaryThrough,
+    expectedDigest: certifiedHistoryCanaryDigest,
+  });
+}
+
 console.log(
   JSON.stringify({
     status: "ok",
@@ -445,5 +480,6 @@ console.log(
     departmentCount: expectedDepartmentCount,
     communeCount: expectedCommuneCount,
     communeCode,
+    certifiedHistoryCanary,
   }),
 );

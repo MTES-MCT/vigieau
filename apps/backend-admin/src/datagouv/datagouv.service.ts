@@ -48,6 +48,26 @@ const DEFAULT_ARRETES_ARCHIVE_YEARS = [
   2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024,
 ];
 const MAP_ARCHIVE_LOCK_RETRY_MS = 1_000;
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function isCivilDate(value: string): boolean {
+  if (value.length !== 10 || value[4] !== '-' || value[7] !== '-') return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (index === 4 || index === 7) continue;
+    const digit = value.charCodeAt(index) - 48;
+    if (digit < 0 || digit > 9) return false;
+  }
+  const year =
+    (value.charCodeAt(0) - 48) * 1_000 +
+    (value.charCodeAt(1) - 48) * 100 +
+    (value.charCodeAt(2) - 48) * 10 +
+    (value.charCodeAt(3) - 48);
+  const month = (value.charCodeAt(5) - 48) * 10 + (value.charCodeAt(6) - 48);
+  const day = (value.charCodeAt(8) - 48) * 10 + (value.charCodeAt(9) - 48);
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const maximumDay = month === 2 && isLeapYear ? 29 : DAYS_IN_MONTH[month - 1];
+  return month >= 1 && month <= 12 && day >= 1 && day <= maximumDay;
+}
 
 @Injectable()
 export class DatagouvService {
@@ -227,6 +247,7 @@ export class DatagouvService {
         this.updateHistoriqueCommunes(
           scheduledFor,
           publicationContext?.sourceRevision,
+          publicationContext?.historicFirstDate,
         ),
       failures,
       publicationContext,
@@ -1045,7 +1066,8 @@ export class DatagouvService {
     timeoutMs?: number,
   ): Promise<{ id: string; title: string; url?: string; filesize?: number }> {
     let lastError: unknown;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const maximumAttempts = 4;
+    for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
       try {
         return await this.verifyDataGouvResource(
           resourceId,
@@ -1056,8 +1078,8 @@ export class DatagouvService {
         );
       } catch (error) {
         lastError = error;
-        if (attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        if (attempt < maximumAttempts) {
+          await this.waitForReadAfterWrite(250 * 3 ** (attempt - 1));
         }
       }
     }
@@ -1175,6 +1197,7 @@ export class DatagouvService {
   async updateHistoriqueCommunes(
     expectedSourceDate?: string,
     expectedSourceRevision?: string,
+    expectedStartDate?: string,
   ): Promise<void> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
@@ -1228,7 +1251,9 @@ export class DatagouvService {
         'historique_communes.zip',
         expectedSourceDate
           ? {
+              ...(expectedStartDate ? { startDate: expectedStartDate } : {}),
               endDate: expectedSourceDate,
+              allowDatesBeforeStart: true,
               requireEndDateForEveryRecord: true,
               expectedRecordCount: expectedCommuneCount,
             }
@@ -1595,6 +1620,7 @@ export class DatagouvService {
     expectedCoverage?: {
       startDate?: string;
       endDate: string;
+      allowDatesBeforeStart?: boolean;
       requireEndDateForEveryRecord?: boolean;
       expectedRecordCount?: number;
     },
@@ -1671,6 +1697,7 @@ export class DatagouvService {
     expectedCoverage?: {
       startDate?: string;
       endDate: string;
+      allowDatesBeforeStart?: boolean;
       requireEndDateForEveryRecord?: boolean;
       expectedRecordCount?: number;
     },
@@ -1691,42 +1718,71 @@ export class DatagouvService {
         `Plage de dates communales invalide: ${expectedCoverage?.startDate} à ${expectedCoverage?.endDate}`,
       );
     }
+    const expectedCivilDates = expectedCoverage?.startDate
+      ? new Set(
+          Array.from({ length: expectedDayCount! }, (_value, offset) => {
+            const date = new Date(
+              Date.parse(`${expectedCoverage.startDate}T00:00:00Z`) +
+                offset * 86_400_000,
+            );
+            return date.toISOString().slice(0, 10);
+          }),
+        )
+      : undefined;
     return new Transform({
       writableObjectMode: true,
       transform(chunk: any, _encoding, callback) {
         stats.recordCount += 1;
         const restrictions = chunk.sc_restrictions || [];
         const restrictionDates = new Set<string>();
+        const certifiedRestrictionDates = new Set<string>();
+        let certifiedRestrictionCount = 0;
         let hasOutOfRangeDate = false;
+        let hasInvalidDate = false;
         for (const restriction of restrictions) {
+          if (typeof restriction.date !== 'string') {
+            hasInvalidDate = true;
+            continue;
+          }
+          const isCertifiedDate =
+            expectedCivilDates?.has(restriction.date) ?? false;
           if (
-            typeof restriction.date === 'string' &&
-            (!stats.sourceDate || restriction.date > stats.sourceDate)
+            expectedCivilDates &&
+            !isCertifiedDate &&
+            !isCivilDate(restriction.date)
           ) {
+            hasInvalidDate = true;
+            continue;
+          }
+          if (!stats.sourceDate || restriction.date > stats.sourceDate) {
             stats.sourceDate = restriction.date;
           }
-          if (typeof restriction.date === 'string') {
-            restrictionDates.add(restriction.date);
-            if (
-              expectedCoverage?.startDate &&
-              (restriction.date < expectedCoverage.startDate ||
-                restriction.date > expectedCoverage.endDate)
-            ) {
-              hasOutOfRangeDate = true;
-            }
+          restrictionDates.add(restriction.date);
+          if (!expectedCoverage?.startDate) continue;
+          if (
+            restriction.date > expectedCoverage.endDate ||
+            (!expectedCoverage.allowDatesBeforeStart &&
+              restriction.date < expectedCoverage.startDate)
+          ) {
+            hasOutOfRangeDate = true;
+          }
+          if (isCertifiedDate) {
+            certifiedRestrictionCount += 1;
+            certifiedRestrictionDates.add(restriction.date);
           }
         }
         if (
           expectedCoverage?.startDate &&
-          (restrictions.length !== expectedDayCount ||
-            restrictionDates.size !== expectedDayCount ||
+          (certifiedRestrictionCount !== expectedDayCount ||
+            certifiedRestrictionDates.size !== expectedDayCount ||
+            hasInvalidDate ||
             hasOutOfRangeDate ||
-            !restrictionDates.has(expectedCoverage.startDate) ||
-            !restrictionDates.has(expectedCoverage.endDate))
+            !certifiedRestrictionDates.has(expectedCoverage.startDate) ||
+            !certifiedRestrictionDates.has(expectedCoverage.endDate))
         ) {
           callback(
             new Error(
-              `Historique incomplet pour la commune ${chunk.commune_code}: ${restrictionDates.size}/${expectedDayCount} jours entre ${expectedCoverage.startDate} et ${expectedCoverage.endDate}`,
+              `Historique incomplet pour la commune ${chunk.commune_code}: ${certifiedRestrictionDates.size}/${expectedDayCount} jours entre ${expectedCoverage.startDate} et ${expectedCoverage.endDate}`,
             ),
           );
           return;
@@ -1800,6 +1856,23 @@ export class DatagouvService {
 
   private throwIfDeadlineExceeded(): void {
     this.deadlineContext.getStore()?.throwIfAborted();
+  }
+
+  private async waitForReadAfterWrite(delayMs: number): Promise<void> {
+    const signal = this.deadlineContext.getStore();
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, delayMs);
+      const abort = () => {
+        clearTimeout(timer);
+        reject(signal?.reason || new Error('Datagouv publication aborted'));
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      timer.unref();
+    });
   }
 
   private resolveHttpTimeout(timeoutMs?: number): number {
