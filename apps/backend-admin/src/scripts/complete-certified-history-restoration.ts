@@ -2128,6 +2128,12 @@ export const CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL = `
             "statisticRevision"::text AS revision
 `;
 
+export const CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL = `
+  SELECT set_config(
+    'vigieau.certified_history_revocation_in_progress', $1, true
+  )
+`;
+
 export const CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL = `
   WITH retagged AS MATERIALIZED (
     UPDATE "statistic_commune_snapshot" snapshot
@@ -2296,6 +2302,13 @@ async function promote(
        )`,
       [attestationId],
     );
+    // Retagging snapshots from an older certified repair to this newly
+    // validated repair is an atomic supersession, not a data invalidation.
+    // Keep the revocation trigger from clearing the new provenance tags while
+    // the promotion transaction replaces the previous repair boundary.
+    await runner.query(CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL, [
+      'on',
+    ]);
     const [result] = (await runner.query(CERTIFIED_COMPLETION_PROMOTION_SQL, [
       auditId,
       options.sourceRunId,
@@ -2320,6 +2333,9 @@ async function promote(
       expectedContext.historicDirtyFrom,
       expectedContext.historicDirtyThrough,
     ])) as Array<Record<string, unknown>>;
+    await runner.query(CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL, [
+      '',
+    ]);
     const promotedRevision = String(
       BigInt(expectedContext.statisticRevision) + 1n,
     );

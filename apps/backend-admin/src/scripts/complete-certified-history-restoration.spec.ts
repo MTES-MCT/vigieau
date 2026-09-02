@@ -6,6 +6,7 @@ import {
   CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
   CERTIFIED_COMPLETION_INSPECT_DEPARTMENT_BATCH_SQL,
   CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
+  CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL,
   CERTIFIED_COMPLETION_PROMOTION_SQL,
   CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL,
   CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST,
@@ -556,6 +557,16 @@ describe('exact SQL and promotion barriers', () => {
     );
     expect(CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL).toContain(
       'repair."publicationContext" || $5::jsonb',
+    );
+  });
+
+  it('treats replacement of an older certified repair as an atomic supersession', () => {
+    expect(CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL).toContain(
+      'vigieau.certified_history_revocation_in_progress',
+    );
+    expect(CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL).toContain('$1');
+    expect(CERTIFIED_COMPLETION_PROMOTION_REVOCATION_GUARD_SQL).toContain(
+      'true',
     );
   });
 
