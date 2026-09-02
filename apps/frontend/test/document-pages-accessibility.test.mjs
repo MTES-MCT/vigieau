@@ -233,7 +233,11 @@ test('preserves the corrected institutional labels', () => {
 
   assert.doesNotMatch(
     sources.legalNotice,
-    /par intérim|newsletter est géré(?:\s|<)/,
+    /Cohésion des territoires|Négociations\s+internationales|par intérim|newsletter est géré(?:\s|<)/,
+  );
+  assert.match(
+    sources.legalNotice,
+    /Ministères\s+Transition écologique, Aménagement du Territoire, Transports, Ville et\s+Logement/,
   );
   assert.match(sources.legalNotice, /directeur général de/);
   assert.match(sources.legalNotice, /newsletter est gérée/);

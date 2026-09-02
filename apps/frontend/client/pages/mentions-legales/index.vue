@@ -24,10 +24,10 @@ const links: Ref<any[]> = ref([
       <h1>Mentions légales</h1>
       <h2>Éditeur</h2>
       <p>
-        {{ appName }} est édité par la Fabrique Numérique du Ministère de la
-        Transition écologique, de la Biodiversité et des Négociations
-        internationales sur le climat et la nature (Grande Arche de la Défense,
-        92055 La Défense CEDEX), avec l’appui de
+        {{ appName }} est édité par la Fabrique Numérique des Ministères
+        Transition écologique, Aménagement du Territoire, Transports, Ville et
+        Logement (Grande Arche de la Défense, 92055 La Défense CEDEX), avec
+        l’appui de
         <a
           href="https://beta.gouv.fr/"
           title="https://beta.gouv.fr/ (nouvelle fenêtre)"
