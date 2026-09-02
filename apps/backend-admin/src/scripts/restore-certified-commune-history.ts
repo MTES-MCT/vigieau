@@ -3,6 +3,19 @@ import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { DataSource, QueryRunner } from 'typeorm';
 import {
+  CERTIFIED_HISTORY_SOURCE_RUN_ID as V1_SOURCE_RUN_ID,
+  CERTIFIED_HISTORY_V2_CODE_COMMIT as V2_CODE_COMMIT,
+  CERTIFIED_HISTORY_V2_CORRECTIONS as V2_CORRECTIONS,
+  CERTIFIED_HISTORY_V2_CORRECTION_SOURCE as V2_CORRECTION_SOURCE,
+  CERTIFIED_HISTORY_V2_GEOMETRY_EVIDENCE as V2_GEOMETRY_EVIDENCE,
+  CERTIFIED_HISTORY_V2_GEOMETRY_EVIDENCE_FINGERPRINT as V2_GEOMETRY_EVIDENCE_FINGERPRINT,
+  CERTIFIED_HISTORY_V2_PARENT_COMMUNE_DELTA as V2_PARENT_DELTA,
+  CERTIFIED_HISTORY_V2_PARENT_PROVENANCE_DIGEST as V2_PARENT_PROVENANCE_DIGEST,
+  CERTIFIED_HISTORY_V2_PARENT_SOURCE_FINGERPRINT as V2_PARENT_SOURCE_FINGERPRINT,
+  CERTIFIED_HISTORY_V2_SOURCE_RUN_ID as V2_SOURCE_RUN_ID,
+  CERTIFIED_HISTORY_V2_VARIANT as V2_VARIANT,
+} from './build-certified-history-source';
+import {
   RepairPublicationContext,
   RestoreMissingHistoryOptions,
   Severity,
@@ -24,6 +37,31 @@ import {
 const APPLY_CONFIRMATION = 'RESTORE_CERTIFIED_COMMUNE_HISTORY';
 const PROMOTION_BLOCKED =
   'BLOCKED_PENDING_DEPARTMENT_NATIONAL_AND_PROVENANCE_VALIDATION';
+const V2_FROM = '2026-07-11';
+const V2_THROUGH = '2026-08-31';
+const V2_INITIAL_DIRTY_THROUGH = '2026-08-27';
+
+export const CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST = {
+  communeCount: 34_943,
+  communeDayCount: 1_817_036,
+  communeDigest:
+    '95e3081ffb5360dc80835ee9cbf218bb5ca17848622b625f05a3d19faca6af40',
+  communeHistoryDigest:
+    'cbc27b27356244017c067e9829347627d80fe9a225c3742706b2d1b71c52a63b',
+  departmentCount: 101,
+  departmentDayCount: 5_252,
+  departmentDigest:
+    '3c80bb8dc3cd50abae598358247a012d8ec787aa40d408b049b7e8d39d4c6097',
+  departmentHistoryDigest:
+    'e033ca3df6240901c87e99d00469aa1c07da1cab6f1825f0b29069550852e205',
+  statisticDayCount: 52,
+  statisticDigest:
+    '622f931af5db040a330441f98f5872eae0f508a13a3fd695d96b52fae8f8e0d2',
+  provenanceDigest:
+    'ed51a780628597d085433cfd02dcf5c700027ebc86ff6a0ec9a8b62c02feb0cf',
+  sourceFingerprint:
+    '18634d2cee5c23198429c034dad3f574ab9f8f94695b4fd5ff184f0a9717091b',
+} as const;
 
 export interface CertifiedSourceDay {
   code: string;
@@ -44,6 +82,7 @@ interface CertifiedSourceScopeRow {
   manifestHistoryDigest: string | null;
   provenanceValid: boolean | string | null;
   provenanceDigest: string | null;
+  invalidProvenanceCount: number | string;
   communeCount: number | string;
   distinctCommuneCount: number | string;
   statisticCount: number | string;
@@ -51,6 +90,7 @@ interface CertifiedSourceScopeRow {
   invalidCommuneCount: number | string;
   communeDigest: string | null;
   sourceFingerprint: string | null;
+  manifestSourceFingerprint: string | null;
 }
 
 export interface CertifiedSourceScope {
@@ -60,6 +100,22 @@ export interface CertifiedSourceScope {
   communeDigest: string;
   sourceFingerprint: string;
   provenanceDigest: string;
+}
+
+export function assertPinnedV2CertifiedSource(
+  source: CertifiedSourceScope,
+): void {
+  if (source.sourceRunId !== V2_SOURCE_RUN_ID) return;
+  const expected = CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST;
+  if (
+    source.communeCount !== expected.communeCount ||
+    source.dayCount !== expected.communeDayCount ||
+    source.communeDigest !== expected.communeDigest ||
+    source.provenanceDigest !== expected.provenanceDigest ||
+    source.sourceFingerprint !== expected.sourceFingerprint
+  ) {
+    throw new Error('Certified v2 source does not match the audited manifest');
+  }
 }
 
 interface TargetScopeRow {
@@ -263,21 +319,34 @@ export function assertCertifiedRangeAgainstPublicationContext(
   from: string,
   through: string,
   context: RepairPublicationContext,
+  sourceRunId?: string,
 ): void {
   assertCivilDate('CERTIFIED_HISTORY_FROM', from);
   assertCivilDate('CERTIFIED_HISTORY_THROUGH', through);
+  const isV2 = sourceRunId === V2_SOURCE_RUN_ID;
+  if (isV2 && (from !== V2_FROM || through !== V2_THROUGH)) {
+    throw new Error(
+      `Certified v2 commune repair is restricted to ${V2_FROM}/${V2_THROUGH}`,
+    );
+  }
   if (
     context.historicDirtyFrom === null ||
     context.historicDirtyThrough === null
   ) {
     throw new Error('Target has no complete historic dirty window');
   }
+  const expectedDirtyThrough = isV2 ? V2_INITIAL_DIRTY_THROUGH : through;
   if (
     from !== context.historicDirtyFrom ||
-    through !== context.historicDirtyThrough
+    expectedDirtyThrough !== context.historicDirtyThrough
   ) {
+    if (!isV2) {
+      throw new Error(
+        `Certified range must equal target dirty window ${context.historicDirtyFrom}/${context.historicDirtyThrough}`,
+      );
+    }
     throw new Error(
-      `Certified range must equal target dirty window ${context.historicDirtyFrom}/${context.historicDirtyThrough}`,
+      `Certified range requires target dirty window ${from}/${expectedDirtyThrough}, found ${context.historicDirtyFrom}/${context.historicDirtyThrough}`,
     );
   }
   if (
@@ -350,7 +419,39 @@ export function validateCertifiedSourceDays(
 }
 
 export const CERTIFIED_SOURCE_SCOPE_SQL = `
-  WITH source_run AS MATERIALIZED (
+  WITH parent_candidate AS MATERIALIZED (
+    SELECT
+      parent.*,
+      encode(sha256(convert_to(parent.provenance::text, 'UTF8')), 'hex')
+        AS "provenanceDigest",
+      encode(sha256(convert_to(
+        '{"communeDigest":"' || parent."communeDigest" ||
+        '","communeHistoryDigest":"' || parent."communeHistoryDigest" ||
+        '","departmentDigest":"' || parent."departmentDigest" ||
+        '","departmentHistoryDigest":"' ||
+          parent."departmentHistoryDigest" ||
+        '","statisticDigest":"' || parent."statisticDigest" ||
+        '","provenanceDigest":"' ||
+          encode(sha256(convert_to(parent.provenance::text, 'UTF8')), 'hex') ||
+        '"}',
+        'UTF8'
+      )), 'hex') AS "sourceFingerprint"
+    FROM certified_history_source_run parent
+    WHERE parent.id::text = '${V1_SOURCE_RUN_ID}'
+      AND parent.status = 'certified'
+      AND parent."dateFrom" = '2026-07-11'::date
+      AND parent."dateThrough" = '2026-08-27'::date
+      AND jsonb_typeof(parent.provenance) = 'object'
+      AND parent.provenance ->> 'method' =
+          'scheduled-logical-backup-before-mutable-replay'
+      AND parent.provenance ->> 'communeDailyObjectKeyPolicy' =
+          'exact-date-SOU-SUP-AEP'
+  ), parent_run AS MATERIALIZED (
+    SELECT parent.*
+    FROM parent_candidate parent
+    WHERE parent."provenanceDigest" = '${V2_PARENT_PROVENANCE_DIGEST}'
+      AND parent."sourceFingerprint" = '${V2_PARENT_SOURCE_FINGERPRINT}'
+  ), source_run AS MATERIALIZED (
     SELECT
       run.id::text AS id,
       run.status,
@@ -360,14 +461,217 @@ export const CERTIFIED_SOURCE_SCOPE_SQL = `
       run."communeDayCount" AS "manifestDayCount",
       run."communeDigest" AS "manifestCommuneDigest",
       run."communeHistoryDigest" AS "manifestHistoryDigest",
-      jsonb_typeof(run.provenance) = 'object'
-        AND run.provenance <> '{}'::jsonb
-        AND run.provenance ->> 'communeDailyObjectKeyPolicy'
-          = 'exact-date-SOU-SUP-AEP' AS "provenanceValid",
+      run.provenance,
+      CASE
+        WHEN run.id::text = '${V1_SOURCE_RUN_ID}' THEN
+          jsonb_typeof(run.provenance) = 'object'
+          AND run.provenance <> '{}'::jsonb
+          AND run.provenance ->> 'communeDailyObjectKeyPolicy'
+            = 'exact-date-SOU-SUP-AEP'
+        WHEN run.id::text = '${V2_SOURCE_RUN_ID}' THEN
+          jsonb_typeof(run.provenance) = 'object'
+          AND run.provenance ->> 'method' = '${V2_VARIANT}'
+          AND run.provenance -> 'planVersion' = '2'::jsonb
+          AND run.provenance ->> 'parentSourceRunId' =
+              '${V1_SOURCE_RUN_ID}'
+          AND run.provenance ->> 'parentSourceFingerprint' =
+              '${V2_PARENT_SOURCE_FINGERPRINT}'
+          AND run.provenance ->> 'codeCommit' = '${V2_CODE_COMMIT}'
+          AND run.provenance ->> 'digestPolicy' =
+              'postgresql-sha256-jsonb-text-v1'
+          AND run.provenance ->> 'communeDailyObjectKeyPolicy' =
+              'exact-date-SOU-SUP-AEP'
+          AND run.provenance ->> 'departmentPayloadPolicy' =
+              'complete-daily-restriction-object'
+          AND run.provenance ->> 'statisticPayloadPolicy' =
+              'complete-to-jsonb-row'
+          AND run.provenance - ARRAY[
+            'method', 'planVersion', 'parentSourceRunId',
+            'parentSourceFingerprint', 'parentDigests', 'codeCommit',
+            'corrections', 'parentDelta', 'correctionSource',
+            'geometryEvidence', 'digestPolicy',
+            'communeDailyObjectKeyPolicy', 'departmentPayloadPolicy',
+            'statisticPayloadPolicy', 'dateSources'
+          ]::text[] = '{}'::jsonb
+          AND (SELECT COUNT(*) FROM parent_run) = 1
+          AND run.provenance -> 'parentDigests' = (
+            SELECT jsonb_build_object(
+              'communeDigest', parent."communeDigest",
+              'communeHistoryDigest', parent."communeHistoryDigest",
+              'departmentDigest', parent."departmentDigest",
+              'departmentHistoryDigest', parent."departmentHistoryDigest",
+              'statisticDigest', parent."statisticDigest",
+              'provenanceDigest', parent."provenanceDigest"
+            )
+            FROM parent_run parent
+          )
+          AND run.provenance -> 'corrections' =
+              $v2_corrections$${JSON.stringify(V2_CORRECTIONS)}$v2_corrections$::jsonb
+          AND run.provenance -> 'parentDelta' =
+              $v2_parent_delta$${JSON.stringify(V2_PARENT_DELTA)}$v2_parent_delta$::jsonb
+          AND run.provenance -> 'correctionSource' =
+              $v2_correction_source$${JSON.stringify(V2_CORRECTION_SOURCE)}$v2_correction_source$::jsonb
+          AND run.provenance -> 'geometryEvidence' =
+              $v2_geometry_evidence$${JSON.stringify(V2_GEOMETRY_EVIDENCE)}$v2_geometry_evidence$::jsonb
+          AND run.provenance -> 'correctionSource' ->>
+                'geometryEvidenceFingerprint' =
+              '${V2_GEOMETRY_EVIDENCE_FINGERPRINT}'
+          AND run."communeCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeCount}
+          AND run."communeDayCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeDayCount}
+          AND run."communeDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeDigest}'
+          AND run."communeHistoryDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeHistoryDigest}'
+          AND run."departmentCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentCount}
+          AND run."departmentDayCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentDayCount}
+          AND run."departmentDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentDigest}'
+          AND run."departmentHistoryDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentHistoryDigest}'
+          AND run."statisticDayCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.statisticDayCount}
+          AND run."statisticDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.statisticDigest}'
+          AND encode(
+                sha256(convert_to(run.provenance::text, 'UTF8')),
+                'hex'
+              ) = '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.provenanceDigest}'
+          AND encode(sha256(convert_to(
+            '{"communeDigest":"' || run."communeDigest" ||
+            '","communeHistoryDigest":"' || run."communeHistoryDigest" ||
+            '","departmentDigest":"' || run."departmentDigest" ||
+            '","departmentHistoryDigest":"' ||
+              run."departmentHistoryDigest" ||
+            '","statisticDigest":"' || run."statisticDigest" ||
+            '","provenanceDigest":"' ||
+              encode(
+                sha256(convert_to(run.provenance::text, 'UTF8')),
+                'hex'
+              ) ||
+            '"}',
+            'UTF8'
+          )), 'hex') =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.sourceFingerprint}'
+          AND CASE
+            WHEN jsonb_typeof(run.provenance -> 'dateSources') = 'object'
+              THEN (
+                SELECT COUNT(*)
+                FROM jsonb_object_keys(
+                  run.provenance -> 'dateSources'
+                ) source_date(value)
+              ) = ($2::date - $1::date + 1)
+            ELSE false
+          END
+          AND NOT EXISTS (
+            SELECT 1
+            FROM generate_series(
+              $1::date, $2::date, '1 day'::interval
+            ) expected_date(value)
+            WHERE CASE
+              WHEN expected_date.value::date <= '2026-08-27'::date
+                THEN
+                  run.provenance -> 'dateSources' ->
+                      expected_date.value::date::text ->> 'backupId'
+                    IS DISTINCT FROM (
+                      SELECT parent.provenance -> 'dateSources' ->
+                        expected_date.value::date::text ->> 'backupId'
+                      FROM parent_run parent
+                    )
+                  OR run.provenance -> 'dateSources' ->
+                      expected_date.value::date::text ->> 'dumpSha256'
+                    IS DISTINCT FROM (
+                      SELECT parent.provenance -> 'dateSources' ->
+                        expected_date.value::date::text ->> 'dumpSha256'
+                      FROM parent_run parent
+                    )
+              ELSE
+                run.provenance -> 'dateSources' ->
+                    expected_date.value::date::text ->> 'backupId'
+                  IS DISTINCT FROM '6a97672299826944b38141dd'
+                OR run.provenance -> 'dateSources' ->
+                    expected_date.value::date::text ->> 'dumpSha256'
+                  IS DISTINCT FROM '${V2_CORRECTION_SOURCE.dumpSha256}'
+            END
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_each(
+              CASE
+                WHEN jsonb_typeof(run.provenance -> 'dateSources') = 'object'
+                  THEN run.provenance -> 'dateSources'
+                ELSE '{}'::jsonb
+              END
+            ) date_source(date, payload)
+            WHERE jsonb_typeof(date_source.payload) IS DISTINCT FROM 'object'
+               OR NOT (date_source.payload ?& ARRAY[
+                 'backupId', 'dumpSha256', 'communeHistoryDigest',
+                 'departmentHistoryDigest', 'statisticDigest'
+               ])
+               OR date_source.payload - ARRAY[
+                 'backupId', 'dumpSha256', 'communeHistoryDigest',
+                 'departmentHistoryDigest', 'statisticDigest',
+                 'correctionSource'
+               ]::text[] <> '{}'::jsonb
+               OR (
+                 date_source.date < '2026-07-17'
+                 AND date_source.payload ? 'correctionSource'
+               )
+               OR (
+                 date_source.date >= '2026-07-17'
+                 AND date_source.payload -> 'correctionSource'
+                   IS DISTINCT FROM jsonb_build_object(
+                     'method', '${V2_CORRECTION_SOURCE.method}',
+                     'backupId', '${V2_CORRECTION_SOURCE.backupId}',
+                     'dumpSha256', '${V2_CORRECTION_SOURCE.dumpSha256}',
+                     'codeCommit', '${V2_CODE_COMMIT}',
+                     'departmentCodes', CASE
+                       WHEN date_source.date = '2026-08-31'
+                         THEN '["15","64","68"]'::jsonb
+                       ELSE '["64"]'::jsonb
+                     END,
+                     'correctionIds', CASE
+                       WHEN date_source.date = '2026-08-12'
+                         THEN '["pa64-level-37316","d64-late-import-37695"]'::jsonb
+                       WHEN date_source.date = '2026-08-31'
+                         THEN '["pa64-level-37316","d15-late-import-37897","d68-late-import-37898"]'::jsonb
+                       ELSE '["pa64-level-37316"]'::jsonb
+                     END,
+                     'geometryEvidenceFingerprint',
+                       '${V2_GEOMETRY_EVIDENCE_FINGERPRINT}',
+                     'correctedOutputDigestMethod',
+                       '${V2_CORRECTION_SOURCE.correctedOutputDigests.method}'
+                   )
+               )
+               OR date_source.payload ->> 'dumpSha256' !~ '^[a-f0-9]{64}$'
+               OR date_source.payload ->> 'communeHistoryDigest'
+                    !~ '^[a-f0-9]{64}$'
+               OR date_source.payload ->> 'departmentHistoryDigest'
+                    !~ '^[a-f0-9]{64}$'
+               OR date_source.payload ->> 'statisticDigest'
+                    !~ '^[a-f0-9]{64}$'
+          )
+        ELSE false
+      END AS "provenanceValid",
       encode(
         sha256(convert_to(run.provenance::text, 'UTF8')),
         'hex'
-      ) AS "provenanceDigest"
+      ) AS "provenanceDigest",
+      encode(sha256(convert_to(
+        '{"communeDigest":"' || run."communeDigest" ||
+        '","communeHistoryDigest":"' || run."communeHistoryDigest" ||
+        '","departmentDigest":"' || run."departmentDigest" ||
+        '","departmentHistoryDigest":"' ||
+          run."departmentHistoryDigest" ||
+        '","statisticDigest":"' || run."statisticDigest" ||
+        '","provenanceDigest":"' ||
+          encode(sha256(convert_to(run.provenance::text, 'UTF8')), 'hex') ||
+        '"}',
+        'UTF8'
+      )), 'hex') AS "manifestSourceFingerprint"
     FROM certified_history_source_run run
     WHERE run.id::text = $3::text
   ), expected_dates AS MATERIALIZED (
@@ -384,7 +688,9 @@ export const CERTIFIED_SOURCE_SCOPE_SQL = `
       day.date::text AS date,
       day."SOU",
       day."SUP",
-      day."AEP"
+      day."AEP",
+      day."backupId",
+      day."dumpSha256"
     FROM certified_history_commune_day day
     WHERE day."sourceRunId"::text = $3::text
       AND day.date BETWEEN $1::date AND $2::date
@@ -417,6 +723,18 @@ export const CERTIFIED_SOURCE_SCOPE_SQL = `
       ) AS digest
     FROM source_days day
     GROUP BY day.code
+  ), provenance_errors AS MATERIALIZED (
+    SELECT day.date
+    FROM source_days day
+    CROSS JOIN source_run run
+    WHERE run.id = '${V2_SOURCE_RUN_ID}'
+      AND (
+        run.provenance -> 'dateSources' -> day.date ->> 'backupId'
+          IS DISTINCT FROM day."backupId"
+        OR run.provenance -> 'dateSources' -> day.date ->> 'dumpSha256'
+          IS DISTINCT FROM day."dumpSha256"
+        OR day."dumpSha256" !~ '^[a-f0-9]{64}$'
+      )
   )
   SELECT
     (SELECT COUNT(*) FROM source_run)::integer AS "runCount",
@@ -429,6 +747,10 @@ export const CERTIFIED_SOURCE_SCOPE_SQL = `
     (SELECT "manifestHistoryDigest" FROM source_run) AS "manifestHistoryDigest",
     (SELECT "provenanceValid" FROM source_run) AS "provenanceValid",
     (SELECT "provenanceDigest" FROM source_run) AS "provenanceDigest",
+    (SELECT "manifestSourceFingerprint" FROM source_run)
+      AS "manifestSourceFingerprint",
+    (SELECT COUNT(*) FROM provenance_errors)::integer
+      AS "invalidProvenanceCount",
     COUNT(*)::integer AS "communeCount",
     COUNT(DISTINCT coverage.code)::integer AS "distinctCommuneCount",
     COUNT(*)::integer AS "statisticCount",
@@ -796,6 +1118,10 @@ async function certifiedSourceScope(
     row.invalidCommuneCount,
     'invalid source commune count',
   );
+  const invalidProvenance = databaseCount(
+    row.invalidProvenanceCount,
+    'invalid source provenance count',
+  );
   const expectedDayCount =
     communeCount * dateCount(options.from, options.through);
   const manifestCommuneCount = databaseCount(
@@ -807,10 +1133,17 @@ async function certifiedSourceScope(
     'manifest commune day count',
   );
   const communeDigest = assertSha256(row.communeDigest, 'commune digest');
-  const sourceFingerprint = assertSha256(
+  const communeHistoryFingerprint = assertSha256(
     row.sourceFingerprint,
     'history fingerprint',
   );
+  const manifestSourceFingerprint =
+    options.sourceRunId === V2_SOURCE_RUN_ID
+      ? assertSha256(
+          row.manifestSourceFingerprint,
+          'manifest source fingerprint',
+        )
+      : null;
   const manifestCommuneDigest = assertSha256(
     row.manifestCommuneDigest,
     'manifest commune digest',
@@ -827,14 +1160,19 @@ async function certifiedSourceScope(
     manifestCommuneCount !== communeCount ||
     manifestDayCount !== dayCountValue ||
     manifestCommuneDigest !== communeDigest ||
-    manifestHistoryDigest !== sourceFingerprint ||
-    invalid !== 0
+    manifestHistoryDigest !== communeHistoryFingerprint ||
+    invalid !== 0 ||
+    invalidProvenance !== 0
   ) {
     throw new Error(
-      `Certified source coverage mismatch: communes=${communeCount}/${distinctCommuneCount}/${statisticCount}, days=${dayCountValue}/${expectedDayCount}, invalid=${invalid}`,
+      `Certified source coverage mismatch: communes=${communeCount}/${distinctCommuneCount}/${statisticCount}, days=${dayCountValue}/${expectedDayCount}, invalid=${invalid}, provenance=${invalidProvenance}`,
     );
   }
-  return {
+  const sourceFingerprint =
+    options.sourceRunId === V2_SOURCE_RUN_ID
+      ? manifestSourceFingerprint!
+      : communeHistoryFingerprint;
+  const result = {
     sourceRunId: options.sourceRunId,
     communeCount,
     dayCount: dayCountValue,
@@ -842,6 +1180,8 @@ async function certifiedSourceScope(
     sourceFingerprint,
     provenanceDigest: assertSha256(row.provenanceDigest, 'provenance digest'),
   };
+  assertPinnedV2CertifiedSource(result);
+  return result;
 }
 
 async function assertTargetScope(
@@ -1037,6 +1377,7 @@ export async function restoreCertifiedCommuneHistory(
           options.from,
           options.through,
           context,
+          options.sourceRunId,
         );
         await assertTargetScope(runner, sourceScope);
         return context;

@@ -2,6 +2,20 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { createHash, randomUUID } from 'node:crypto';
 import { DataSource, QueryRunner } from 'typeorm';
+import {
+  CERTIFIED_HISTORY_SOURCE_RUN_ID as V1_SOURCE_RUN_ID,
+  CERTIFIED_HISTORY_V2_CODE_COMMIT as V2_CODE_COMMIT,
+  CERTIFIED_HISTORY_V2_CORRECTIONS as V2_CORRECTIONS,
+  CERTIFIED_HISTORY_V2_CORRECTION_SOURCE as V2_CORRECTION_SOURCE,
+  CERTIFIED_HISTORY_V2_FINAL_BACKUP_SHA256 as V2_FINAL_BACKUP_SHA256,
+  CERTIFIED_HISTORY_V2_GEOMETRY_EVIDENCE as V2_GEOMETRY_EVIDENCE,
+  CERTIFIED_HISTORY_V2_GEOMETRY_EVIDENCE_FINGERPRINT as V2_GEOMETRY_EVIDENCE_FINGERPRINT,
+  CERTIFIED_HISTORY_V2_PARENT_COMMUNE_DELTA as V2_PARENT_DELTA,
+  CERTIFIED_HISTORY_V2_PARENT_PROVENANCE_DIGEST as V2_PARENT_PROVENANCE_DIGEST,
+  CERTIFIED_HISTORY_V2_PARENT_SOURCE_FINGERPRINT as V2_PARENT_SOURCE_FINGERPRINT,
+  CERTIFIED_HISTORY_V2_SOURCE_RUN_ID as V2_SOURCE_RUN_ID,
+  CERTIFIED_HISTORY_V2_VARIANT as V2_VARIANT,
+} from './build-certified-history-source';
 
 const SNAPSHOT_LOCK = 'vigieau:statistic-commune:snapshot-computation';
 const ZONE_PROMOTION_LOCK = 'vigieau:zone-publication-stable-promotion';
@@ -10,10 +24,54 @@ const PROMOTE_CONFIRMATION = 'PROMOTE_CERTIFIED_HISTORY';
 const ATTEST_CONFIRMATION = 'ATTEST_CERTIFIED_HISTORY';
 const EXPECTED_COMMUNE_COUNT = 34_943;
 const EXPECTED_DEPARTMENT_COUNT = 101;
-const EXPECTED_DAY_COUNT = 48;
-const EXPECTED_FROM = '2026-07-11';
-const EXPECTED_THROUGH = '2026-08-27';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+
+export const CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST = {
+  communeCount: 34_943,
+  communeDayCount: 1_817_036,
+  communeDigest:
+    '95e3081ffb5360dc80835ee9cbf218bb5ca17848622b625f05a3d19faca6af40',
+  communeHistoryDigest:
+    'cbc27b27356244017c067e9829347627d80fe9a225c3742706b2d1b71c52a63b',
+  departmentCount: 101,
+  departmentDayCount: 5_252,
+  departmentDigest:
+    '3c80bb8dc3cd50abae598358247a012d8ec787aa40d408b049b7e8d39d4c6097',
+  departmentHistoryDigest:
+    'e033ca3df6240901c87e99d00469aa1c07da1cab6f1825f0b29069550852e205',
+  statisticDayCount: 52,
+  statisticDigest:
+    '622f931af5db040a330441f98f5872eae0f508a13a3fd695d96b52fae8f8e0d2',
+  provenanceDigest:
+    'ed51a780628597d085433cfd02dcf5c700027ebc86ff6a0ec9a8b62c02feb0cf',
+  sourceFingerprint:
+    '18634d2cee5c23198429c034dad3f574ab9f8f94695b4fd5ff184f0a9717091b',
+} as const;
+
+interface CertifiedHistoryCompletionScope {
+  sourceRunId: string;
+  from: string;
+  through: string;
+  dirtyFrom: string;
+  dirtyThrough: string;
+}
+
+const CERTIFIED_HISTORY_COMPLETION_SCOPES = [
+  {
+    sourceRunId: V1_SOURCE_RUN_ID,
+    from: '2026-07-11',
+    through: '2026-08-27',
+    dirtyFrom: '2026-07-11',
+    dirtyThrough: '2026-08-27',
+  },
+  {
+    sourceRunId: V2_SOURCE_RUN_ID,
+    from: '2026-07-11',
+    through: '2026-08-31',
+    dirtyFrom: '2026-07-11',
+    dirtyThrough: '2026-08-27',
+  },
+] as const satisfies readonly CertifiedHistoryCompletionScope[];
 
 export type CertifiedHistoryCompletionMode = 'restore' | 'promote' | 'attest';
 
@@ -61,6 +119,29 @@ export interface CertifiedCompletionSourceScope {
   statisticDigest: string;
   provenanceDigest: string;
   sourceFingerprint: string;
+}
+
+export function assertPinnedV2CertifiedSource(
+  source: CertifiedCompletionSourceScope,
+): void {
+  if (source.sourceRunId !== V2_SOURCE_RUN_ID) return;
+  const expected = CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST;
+  if (
+    source.communeCount !== expected.communeCount ||
+    source.communeDayCount !== expected.communeDayCount ||
+    source.communeDigest !== expected.communeDigest ||
+    source.communeHistoryDigest !== expected.communeHistoryDigest ||
+    source.departmentCount !== expected.departmentCount ||
+    source.departmentDayCount !== expected.departmentDayCount ||
+    source.departmentDigest !== expected.departmentDigest ||
+    source.departmentHistoryDigest !== expected.departmentHistoryDigest ||
+    source.dayCount !== expected.statisticDayCount ||
+    source.statisticDigest !== expected.statisticDigest ||
+    source.provenanceDigest !== expected.provenanceDigest ||
+    source.sourceFingerprint !== expected.sourceFingerprint
+  ) {
+    throw new Error('Certified v2 source does not match the audited manifest');
+  }
 }
 
 export interface CertifiedDepartmentDay {
@@ -253,6 +334,26 @@ function assertContextToken(value: string): string {
   return value;
 }
 
+function certifiedHistoryCompletionScope(
+  options: Pick<
+    CertifiedHistoryCompletionOptions,
+    'from' | 'through' | 'sourceRunId'
+  >,
+): CertifiedHistoryCompletionScope {
+  const scope = CERTIFIED_HISTORY_COMPLETION_SCOPES.find(
+    (candidate) =>
+      candidate.sourceRunId === options.sourceRunId &&
+      candidate.from === options.from &&
+      candidate.through === options.through,
+  );
+  if (!scope) {
+    throw new Error(
+      'Certified history completion is restricted to the approved v1 or v2 source run and exact scope',
+    );
+  }
+  return scope;
+}
+
 export function parseCertifiedHistoryCompletionOptions(
   environment: NodeJS.ProcessEnv = process.env,
 ): CertifiedHistoryCompletionOptions {
@@ -303,11 +404,6 @@ export function parseCertifiedHistoryCompletionOptions(
     requiredEnvironment(environment, 'CERTIFIED_HISTORY_COMPLETION_THROUGH'),
   );
   if (from > through) throw new Error('Certified history range is reversed');
-  if (from !== EXPECTED_FROM || through !== EXPECTED_THROUGH) {
-    throw new Error(
-      `Certified history completion is restricted to ${EXPECTED_FROM}..${EXPECTED_THROUGH}`,
-    );
-  }
   const sourceRunId = requiredEnvironment(
     environment,
     'CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID',
@@ -315,6 +411,7 @@ export function parseCertifiedHistoryCompletionOptions(
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(sourceRunId)) {
     throw new Error('CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID is invalid');
   }
+  certifiedHistoryCompletionScope({ from, through, sourceRunId });
   const expectedSourceDatabase = requiredEnvironment(
     environment,
     'CERTIFIED_HISTORY_COMPLETION_EXPECTED_SOURCE_DATABASE',
@@ -369,15 +466,239 @@ export function parseCertifiedHistoryCompletionOptions(
 }
 
 export const CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL = `
-  WITH source_run AS MATERIALIZED (
+  WITH parent_candidate AS MATERIALIZED (
+    SELECT
+      parent.*,
+      encode(sha256(convert_to(parent.provenance::text, 'UTF8')), 'hex')
+        AS "provenanceDigest",
+      encode(sha256(convert_to(
+        '{"communeDigest":"' || parent."communeDigest" ||
+        '","communeHistoryDigest":"' || parent."communeHistoryDigest" ||
+        '","departmentDigest":"' || parent."departmentDigest" ||
+        '","departmentHistoryDigest":"' ||
+          parent."departmentHistoryDigest" ||
+        '","statisticDigest":"' || parent."statisticDigest" ||
+        '","provenanceDigest":"' ||
+          encode(sha256(convert_to(parent.provenance::text, 'UTF8')), 'hex') ||
+        '"}',
+        'UTF8'
+      )), 'hex') AS "sourceFingerprint"
+    FROM "certified_history_source_run" parent
+    WHERE parent.id = '${V1_SOURCE_RUN_ID}'
+      AND parent.status = 'certified'
+      AND parent."dateFrom" = '2026-07-11'::date
+      AND parent."dateThrough" = '2026-08-27'::date
+      AND jsonb_typeof(parent.provenance) = 'object'
+      AND parent.provenance ->> 'method' =
+          'scheduled-logical-backup-before-mutable-replay'
+      AND parent.provenance ->> 'communeDailyObjectKeyPolicy' =
+          'exact-date-SOU-SUP-AEP'
+  ), parent_run AS MATERIALIZED (
+    SELECT parent.*
+    FROM parent_candidate parent
+    WHERE parent."provenanceDigest" = '${V2_PARENT_PROVENANCE_DIGEST}'
+      AND parent."sourceFingerprint" = '${V2_PARENT_SOURCE_FINGERPRINT}'
+  ), source_run AS MATERIALIZED (
     SELECT
       run.*,
-      jsonb_typeof(run.provenance) = 'object'
-        AND run.provenance ->> 'method' =
-            'scheduled-logical-backup-before-mutable-replay'
-        AND run.provenance ->> 'communeDailyObjectKeyPolicy' =
-            'exact-date-SOU-SUP-AEP'
-        AND jsonb_typeof(run.provenance -> 'dateSources') = 'object'
+      CASE
+        WHEN run.id = '${V1_SOURCE_RUN_ID}' THEN
+          jsonb_typeof(run.provenance) = 'object'
+          AND run.provenance ->> 'method' =
+              'scheduled-logical-backup-before-mutable-replay'
+          AND run.provenance ->> 'communeDailyObjectKeyPolicy' =
+              'exact-date-SOU-SUP-AEP'
+          AND jsonb_typeof(run.provenance -> 'dateSources') = 'object'
+        WHEN run.id = '${V2_SOURCE_RUN_ID}' THEN
+          jsonb_typeof(run.provenance) = 'object'
+          AND run.provenance ->> 'method' =
+              '${V2_VARIANT}'
+          AND run.provenance -> 'planVersion' = '2'::jsonb
+          AND run.provenance ->> 'parentSourceRunId' =
+              '${V1_SOURCE_RUN_ID}'
+          AND run.provenance ->> 'codeCommit' = '${V2_CODE_COMMIT}'
+          AND run.provenance ->> 'digestPolicy' =
+              'postgresql-sha256-jsonb-text-v1'
+          AND run.provenance ->> 'communeDailyObjectKeyPolicy' =
+              'exact-date-SOU-SUP-AEP'
+          AND run.provenance ->> 'departmentPayloadPolicy' =
+              'complete-daily-restriction-object'
+          AND run.provenance ->> 'statisticPayloadPolicy' =
+              'complete-to-jsonb-row'
+          AND run.provenance - ARRAY[
+            'method', 'planVersion', 'parentSourceRunId',
+            'parentSourceFingerprint', 'parentDigests', 'codeCommit',
+            'corrections', 'parentDelta', 'correctionSource',
+            'geometryEvidence', 'digestPolicy',
+            'communeDailyObjectKeyPolicy', 'departmentPayloadPolicy',
+            'statisticPayloadPolicy', 'dateSources'
+          ]::text[] = '{}'::jsonb
+          AND (SELECT COUNT(*) FROM parent_run) = 1
+          AND run.provenance -> 'parentDigests' = (
+            SELECT jsonb_build_object(
+              'communeDigest', parent."communeDigest",
+              'communeHistoryDigest', parent."communeHistoryDigest",
+              'departmentDigest', parent."departmentDigest",
+              'departmentHistoryDigest', parent."departmentHistoryDigest",
+              'statisticDigest', parent."statisticDigest",
+              'provenanceDigest', parent."provenanceDigest"
+            )
+            FROM parent_run parent
+          )
+          AND run.provenance ->> 'parentSourceFingerprint' = (
+            SELECT parent."sourceFingerprint" FROM parent_run parent
+          )
+          AND run.provenance -> 'corrections' =
+              $v2_corrections$${JSON.stringify(V2_CORRECTIONS)}$v2_corrections$::jsonb
+          AND run.provenance -> 'parentDelta' =
+              $v2_parent_delta$${JSON.stringify(V2_PARENT_DELTA)}$v2_parent_delta$::jsonb
+          AND run.provenance -> 'correctionSource' =
+              $v2_correction_source$${JSON.stringify(V2_CORRECTION_SOURCE)}$v2_correction_source$::jsonb
+          AND run.provenance -> 'geometryEvidence' =
+              $v2_geometry_evidence$${JSON.stringify(V2_GEOMETRY_EVIDENCE)}$v2_geometry_evidence$::jsonb
+          AND run.provenance -> 'correctionSource' ->>
+                'geometryEvidenceFingerprint' =
+              '${V2_GEOMETRY_EVIDENCE_FINGERPRINT}'
+          AND run."communeCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeCount}
+          AND run."communeDayCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeDayCount}
+          AND run."communeDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeDigest}'
+          AND run."communeHistoryDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.communeHistoryDigest}'
+          AND run."departmentCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentCount}
+          AND run."departmentDayCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentDayCount}
+          AND run."departmentDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentDigest}'
+          AND run."departmentHistoryDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.departmentHistoryDigest}'
+          AND run."statisticDayCount" =
+              ${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.statisticDayCount}
+          AND run."statisticDigest" =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.statisticDigest}'
+          AND encode(
+                sha256(convert_to(run.provenance::text, 'UTF8')),
+                'hex'
+              ) = '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.provenanceDigest}'
+          AND encode(sha256(convert_to(
+            '{"communeDigest":"' || run."communeDigest" ||
+            '","communeHistoryDigest":"' || run."communeHistoryDigest" ||
+            '","departmentDigest":"' || run."departmentDigest" ||
+            '","departmentHistoryDigest":"' ||
+              run."departmentHistoryDigest" ||
+            '","statisticDigest":"' || run."statisticDigest" ||
+            '","provenanceDigest":"' ||
+              encode(
+                sha256(convert_to(run.provenance::text, 'UTF8')),
+                'hex'
+              ) ||
+            '"}',
+            'UTF8'
+          )), 'hex') =
+              '${CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST.sourceFingerprint}'
+          AND CASE
+            WHEN jsonb_typeof(run.provenance -> 'dateSources') = 'object'
+              THEN (
+                SELECT COUNT(*)
+                FROM jsonb_object_keys(
+                  run.provenance -> 'dateSources'
+                ) source_date(value)
+              ) = ($2::date - $1::date + 1)
+            ELSE false
+          END
+          AND NOT EXISTS (
+            SELECT 1
+            FROM generate_series(
+              $1::date, $2::date, '1 day'::interval
+            ) expected_date(value)
+            WHERE CASE
+              WHEN expected_date.value::date <= '2026-08-27'::date
+                THEN
+                  run.provenance -> 'dateSources' ->
+                      expected_date.value::date::text ->> 'backupId'
+                    IS DISTINCT FROM (
+                      SELECT parent.provenance -> 'dateSources' ->
+                        expected_date.value::date::text ->> 'backupId'
+                      FROM parent_run parent
+                    )
+                  OR run.provenance -> 'dateSources' ->
+                      expected_date.value::date::text ->> 'dumpSha256'
+                    IS DISTINCT FROM (
+                      SELECT parent.provenance -> 'dateSources' ->
+                        expected_date.value::date::text ->> 'dumpSha256'
+                      FROM parent_run parent
+                    )
+              ELSE
+                run.provenance -> 'dateSources' ->
+                    expected_date.value::date::text ->> 'backupId'
+                  IS DISTINCT FROM '${V2_CORRECTION_SOURCE.backupId}'
+                OR run.provenance -> 'dateSources' ->
+                    expected_date.value::date::text ->> 'dumpSha256'
+                  IS DISTINCT FROM '${V2_FINAL_BACKUP_SHA256}'
+            END
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_each(
+              CASE
+                WHEN jsonb_typeof(run.provenance -> 'dateSources') = 'object'
+                  THEN run.provenance -> 'dateSources'
+                ELSE '{}'::jsonb
+              END
+            ) date_source(date, payload)
+            WHERE jsonb_typeof(date_source.payload) IS DISTINCT FROM 'object'
+               OR NOT (date_source.payload ?& ARRAY[
+                 'backupId', 'dumpSha256', 'communeHistoryDigest',
+                 'departmentHistoryDigest', 'statisticDigest'
+               ])
+               OR date_source.payload - ARRAY[
+                 'backupId', 'dumpSha256', 'communeHistoryDigest',
+                 'departmentHistoryDigest', 'statisticDigest',
+                 'correctionSource'
+               ]::text[] <> '{}'::jsonb
+               OR (
+                 date_source.date < '2026-07-17'
+                 AND date_source.payload ? 'correctionSource'
+               )
+               OR (
+                 date_source.date >= '2026-07-17'
+                 AND date_source.payload -> 'correctionSource'
+                   IS DISTINCT FROM jsonb_build_object(
+                     'method', '${V2_CORRECTION_SOURCE.method}',
+                     'backupId', '${V2_CORRECTION_SOURCE.backupId}',
+                     'dumpSha256', '${V2_CORRECTION_SOURCE.dumpSha256}',
+                     'codeCommit', '${V2_CODE_COMMIT}',
+                     'departmentCodes', CASE
+                       WHEN date_source.date = '2026-08-31'
+                         THEN '["15","64","68"]'::jsonb
+                       ELSE '["64"]'::jsonb
+                     END,
+                     'correctionIds', CASE
+                       WHEN date_source.date = '2026-08-12'
+                         THEN '["pa64-level-37316","d64-late-import-37695"]'::jsonb
+                       WHEN date_source.date = '2026-08-31'
+                         THEN '["pa64-level-37316","d15-late-import-37897","d68-late-import-37898"]'::jsonb
+                       ELSE '["pa64-level-37316"]'::jsonb
+                     END,
+                     'geometryEvidenceFingerprint',
+                       '${V2_GEOMETRY_EVIDENCE_FINGERPRINT}',
+                     'correctedOutputDigestMethod',
+                       '${V2_CORRECTION_SOURCE.correctedOutputDigests.method}'
+                   )
+               )
+               OR date_source.payload ->> 'dumpSha256' !~ '^[a-f0-9]{64}$'
+               OR date_source.payload ->> 'communeHistoryDigest'
+                    !~ '^[a-f0-9]{64}$'
+               OR date_source.payload ->> 'departmentHistoryDigest'
+                    !~ '^[a-f0-9]{64}$'
+               OR date_source.payload ->> 'statisticDigest'
+                    !~ '^[a-f0-9]{64}$'
+          )
+        ELSE false
+      END
         AS "provenanceValid",
       encode(sha256(convert_to(run.provenance::text, 'UTF8')), 'hex')
         AS "provenanceDigest"
@@ -412,9 +733,20 @@ export const CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL = `
   ), provenance_errors AS MATERIALIZED (
     SELECT day.date
     FROM (
-      SELECT date, "backupId", "dumpSha256" FROM department_days
+      SELECT date, "backupId", "dumpSha256"
+      FROM "certified_history_commune_day"
+      WHERE "sourceRunId" = $3::text
+        AND $3::text = '${V2_SOURCE_RUN_ID}'
+        AND date BETWEEN $1::date AND $2::date
+      GROUP BY date, "backupId", "dumpSha256"
       UNION ALL
-      SELECT date, "backupId", "dumpSha256" FROM statistic_days
+      SELECT date, "backupId", "dumpSha256"
+      FROM department_days
+      GROUP BY date, "backupId", "dumpSha256"
+      UNION ALL
+      SELECT date, "backupId", "dumpSha256"
+      FROM statistic_days
+      GROUP BY date, "backupId", "dumpSha256"
     ) day
     CROSS JOIN source_run run
     WHERE run.provenance -> 'dateSources' -> day.date::text
@@ -835,20 +1167,34 @@ async function publicationContext(
 }
 
 export function assertRangeMatchesDirtyWindow(
-  options: Pick<CertifiedHistoryCompletionOptions, 'from' | 'through'>,
+  options: Pick<
+    CertifiedHistoryCompletionOptions,
+    'from' | 'through' | 'sourceRunId' | 'mode'
+  >,
   context: RepairPublicationContext,
 ): void {
+  const scope = certifiedHistoryCompletionScope(options);
   if (
-    context.historicDirtyFrom !== options.from ||
-    context.historicDirtyThrough !== options.through
+    context.historicDirtyFrom === null ||
+    context.historicDirtyThrough === null
   ) {
+    throw new Error('Certified completion requires a non-null dirty window');
+  }
+  if (context.historicDirtyFrom !== scope.dirtyFrom) {
     throw new Error(
-      `Certified range must exactly equal dirty window ${context.historicDirtyFrom ?? 'null'}/${context.historicDirtyThrough ?? 'null'}`,
+      `Certified range must start at dirty window ${context.historicDirtyFrom}`,
+    );
+  }
+  const expectedDirtyThrough =
+    options.mode === 'attest' ? scope.through : scope.dirtyThrough;
+  if (context.historicDirtyThrough !== expectedDirtyThrough) {
+    throw new Error(
+      `Certified ${options.mode} requires dirty window ${scope.dirtyFrom}/${expectedDirtyThrough}`,
     );
   }
   if (
     context.currentPublishedDate === null ||
-    options.through >= context.currentPublishedDate
+    scope.through >= context.currentPublishedDate
   ) {
     throw new Error('Certified range must precede the current publication');
   }
@@ -1073,7 +1419,7 @@ async function readSourceScope(
       provenanceDigest,
     }),
   );
-  return {
+  const source = {
     sourceRunId: options.sourceRunId,
     communeCount,
     communeDayCount,
@@ -1088,6 +1434,8 @@ async function readSourceScope(
     provenanceDigest,
     sourceFingerprint,
   };
+  assertPinnedV2CertifiedSource(source);
+  return source;
 }
 
 async function statisticColumns(target: DataSource): Promise<string[]> {
@@ -1482,7 +1830,7 @@ async function readCertifiedCommuneDigests(
       if (
         !/^[0-9A-Z]{5}$/.test(row.code) ||
         count(row.dayCount, `commune ${row.code} day count`) !==
-          EXPECTED_DAY_COUNT ||
+          sourceScope.dayCount ||
         !SHA256_PATTERN.test(row.digest)
       ) {
         throw new Error(`Invalid certified commune coverage ${row.code}`);
@@ -1571,8 +1919,8 @@ export const CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL = `
   SELECT
     (context."currentPublishedDate" =
       (now() AT TIME ZONE 'Europe/Paris')::date) AS "currentDateFresh",
-    (context."historicDirtyFrom" = $1::date AND
-      context."historicDirtyThrough" = $2::date) AS "dirtyRangeExact",
+    (context."historicDirtyFrom" = $4::date AND
+      context."historicDirtyThrough" = $5::date) AS "dirtyRangeExact",
     context."computeMapDate"::text AS "computeMapDate",
     context."computeStatsDate"::text AS "computeStatsDate",
     EXISTS (
@@ -1737,12 +2085,13 @@ export const CERTIFIED_COMPLETION_PROMOTION_SQL = `
   ), publication_update AS MATERIALIZED (
     UPDATE "statistic_publication_state" publication
     SET revision = publication.revision + 1,
+        "historicDirtyThrough" = $4::date,
         "updatedAt" = now()
     FROM audit_insert, snapshot_coverage
     WHERE publication.id = 1
       AND publication.revision = $15::bigint
-      AND publication."historicDirtyFrom" = $3::date
-      AND publication."historicDirtyThrough" = $4::date
+      AND publication."historicDirtyFrom" = $17::date
+      AND publication."historicDirtyThrough" = $18::date
       AND snapshot_coverage.count = $7::integer
       AND snapshot_coverage.invalid = 0
     RETURNING publication.revision
@@ -1914,7 +2263,13 @@ async function promote(
     await assertContext(runner, expectedContext, options.apply);
     const [preflight] = (await runner.query(
       CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
-      [options.from, options.through, EXPECTED_COMMUNE_COUNT],
+      [
+        options.from,
+        options.through,
+        EXPECTED_COMMUNE_COUNT,
+        expectedContext.historicDirtyFrom,
+        expectedContext.historicDirtyThrough,
+      ],
     )) as PromotionPreflight[];
     if (!preflight) throw new Error('Promotion preflight is unavailable');
     assertPromotionPreflight(preflight);
@@ -1962,6 +2317,8 @@ async function promote(
         method: 'certified-backup-repair',
         sourceFingerprint: sourceScope.sourceFingerprint,
       }),
+      expectedContext.historicDirtyFrom,
+      expectedContext.historicDirtyThrough,
     ])) as Array<Record<string, unknown>>;
     const promotedRevision = String(
       BigInt(expectedContext.statisticRevision) + 1n,
@@ -1969,7 +2326,7 @@ async function promote(
     if (
       count(result?.auditCount, 'audit insert count') !== 1 ||
       count(result?.snapshotDayCount, 'snapshot day count') !==
-        EXPECTED_DAY_COUNT ||
+        sourceScope.dayCount ||
       count(result?.invalidSnapshotCount, 'invalid snapshot count') !== 0 ||
       String(result?.revision) !== promotedRevision
     ) {
@@ -2099,7 +2456,13 @@ async function attestExistingRepair(
     await assertContext(runner, expectedContext, options.apply);
     const [preflight] = (await runner.query(
       CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
-      [options.from, options.through, EXPECTED_COMMUNE_COUNT],
+      [
+        options.from,
+        options.through,
+        EXPECTED_COMMUNE_COUNT,
+        expectedContext.historicDirtyFrom,
+        expectedContext.historicDirtyThrough,
+      ],
     )) as PromotionPreflight[];
     if (!preflight) throw new Error('Attestation preflight is unavailable');
     assertPromotionPreflight(preflight);
@@ -2369,7 +2732,8 @@ export async function completeCertifiedHistoryRestoration(
     }
     if (
       summary.departments !== EXPECTED_DEPARTMENT_COUNT ||
-      summary.departmentDays !== EXPECTED_DEPARTMENT_COUNT * EXPECTED_DAY_COUNT
+      summary.departmentDays !==
+        EXPECTED_DEPARTMENT_COUNT * sourceScope.dayCount
     ) {
       throw new Error(
         `Department source coverage mismatch: ${summary.departments}/${summary.departmentDays}`,

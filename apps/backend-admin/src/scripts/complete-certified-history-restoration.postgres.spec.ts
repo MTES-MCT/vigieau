@@ -7,6 +7,7 @@ import {
   CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
   CERTIFIED_COMPLETION_INSPECT_DEPARTMENT_BATCH_SQL,
   CERTIFIED_COMPLETION_PROMOTION_SQL,
+  CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL,
   TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
   buildStatisticApplySql,
   buildStatisticInspectionSql,
@@ -181,6 +182,83 @@ describePostgres('complete certified history PostgreSQL', () => {
         "provenanceDigest" text NOT NULL,
         context jsonb NOT NULL
       );
+      CREATE TABLE certified_history_source_run (
+        id text PRIMARY KEY,
+        status text NOT NULL,
+        "dateFrom" date NOT NULL,
+        "dateThrough" date NOT NULL,
+        "communeCount" integer NOT NULL,
+        "communeDayCount" bigint NOT NULL,
+        "communeDigest" text NOT NULL,
+        "communeHistoryDigest" text NOT NULL,
+        "departmentCount" integer NOT NULL,
+        "departmentDayCount" bigint NOT NULL,
+        "departmentDigest" text NOT NULL,
+        "departmentHistoryDigest" text NOT NULL,
+        "statisticDayCount" integer NOT NULL,
+        "statisticDigest" text NOT NULL,
+        provenance jsonb NOT NULL
+      );
+      CREATE TABLE certified_history_departement_day (
+        "sourceRunId" text NOT NULL,
+        code text NOT NULL,
+        date date NOT NULL,
+        restriction jsonb NOT NULL,
+        "backupId" text NOT NULL,
+        "dumpSha256" text NOT NULL
+      );
+      CREATE TABLE certified_history_commune_day (
+        "sourceRunId" text NOT NULL,
+        code text NOT NULL,
+        date date NOT NULL,
+        "SOU" text,
+        "SUP" text,
+        "AEP" text,
+        "backupId" text NOT NULL,
+        "dumpSha256" text NOT NULL
+      );
+      CREATE TABLE certified_history_statistic_day (
+        "sourceRunId" text NOT NULL,
+        date date NOT NULL,
+        payload jsonb NOT NULL,
+        "backupId" text NOT NULL,
+        "dumpSha256" text NOT NULL
+      );
+      CREATE VIEW active_certified_history_repair AS
+      SELECT repair.*, attestation.id AS "attestationId"
+      FROM certified_history_repair_audit repair
+      CROSS JOIN config
+      JOIN LATERAL (
+        SELECT candidate.*
+        FROM certified_history_repair_attestation candidate
+        WHERE candidate."repairId" = repair.id
+          AND candidate."attestedThroughEpoch" <= config."historicComputeEpoch"
+          AND candidate."communeHistoryDigest" = repair."communeHistoryDigest"
+          AND candidate."departmentHistoryDigest" =
+              repair."departmentHistoryDigest"
+          AND candidate."statisticDigest" = repair."statisticDigest"
+          AND candidate."provenanceDigest" = repair."provenanceDigest"
+        ORDER BY candidate."attestedThroughEpoch" DESC
+        LIMIT 1
+      ) attestation ON true
+      WHERE config.id = 1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM generate_series(
+            repair."dateFrom", repair."dateThrough", '1 day'::interval
+          ) repaired_day(value)
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM statistic_commune_snapshot snapshot
+            WHERE snapshot."snapshotDate" = repaired_day.value::date
+              AND snapshot.scope = 'national'
+              AND snapshot.status = 'completed'
+              AND snapshot."expectedCommuneCount" = repair."communeCount"
+              AND snapshot."processedCommuneCount" = repair."communeCount"
+              AND snapshot."sourceRevision" IS NULL
+              AND snapshot."certifiedHistoryRepairId" = repair.id
+          )
+        );
       INSERT INTO departement VALUES (1, '01'), (2, '77');
       INSERT INTO statistic_departement VALUES
         (1, 1, '[
@@ -205,7 +283,7 @@ describePostgres('complete certified history PostgreSQL', () => {
       );
       INSERT INTO statistic_publication_state VALUES (
         1, 5, '2026-08-29', '2026-07-12', '2026-07-11',
-        '2026-07-12', now()
+        '2026-07-11', now()
       );
       INSERT INTO config VALUES (
         1, 7, 9, '2026-07-11', '2026-07-11'
@@ -237,7 +315,7 @@ describePostgres('complete certified history PostgreSQL', () => {
       expect(context).toMatchObject({
         statisticRevision: '5',
         historicDirtyFrom: '2026-07-11',
-        historicDirtyThrough: '2026-07-12',
+        historicDirtyThrough: '2026-07-11',
         priorityActive: false,
       });
       await expect(
@@ -260,6 +338,52 @@ describePostgres('complete certified history PostgreSQL', () => {
       throw error;
     } finally {
       await runner.release();
+    }
+  });
+
+  it('executes the pinned source provenance query in PostgreSQL', async () => {
+    const [scope] = await readOnly.query(
+      CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL,
+      [
+        '2026-07-11',
+        '2026-08-31',
+        'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+      ],
+    );
+    expect(scope).toMatchObject({
+      runCount: 0,
+      departmentCount: 0,
+      departmentDayCount: '0',
+      statisticDayCount: 0,
+    });
+  });
+
+  it('fails closed when a v2 manifest reaches the semantic guard forged', async () => {
+    await database.query('BEGIN');
+    try {
+      await database.query(`
+        INSERT INTO certified_history_source_run VALUES (
+          'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+          'certified', '2026-07-11', '2026-08-31', 34943, 1817036,
+          repeat('a', 64), repeat('b', 64), 101, 5252,
+          repeat('c', 64), repeat('d', 64), 52, repeat('e', 64),
+          '{"method":"isolated-clone-certified-correction-v2"}'::jsonb
+        )
+      `);
+      const [scope] = await database.query(
+        CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL,
+        [
+          '2026-07-11',
+          '2026-08-31',
+          'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+        ],
+      );
+      expect(scope).toMatchObject({
+        runCount: 1,
+        provenanceValid: false,
+      });
+    } finally {
+      await database.query('ROLLBACK');
     }
   });
   afterAll(async () => {
@@ -405,7 +529,7 @@ describePostgres('complete certified history PostgreSQL', () => {
     `);
   });
 
-  it('activates only the audited statistic range and leaves dirty/cursors intact', async () => {
+  it('atomically expands dirty coverage to the fully audited statistic range', async () => {
     await database.query(`
       INSERT INTO statistic_commune_snapshot (
         "snapshotDate", scope, status, "expectedCommuneCount",
@@ -433,6 +557,8 @@ describePostgres('complete certified history PostgreSQL', () => {
       9,
       5,
       JSON.stringify({ method: 'certified-backup-repair' }),
+      '2026-07-11',
+      '2026-07-11',
     ];
     const [result] = await database.query(
       CERTIFIED_COMPLETION_PROMOTION_SQL,
@@ -459,6 +585,16 @@ describePostgres('complete certified history PostgreSQL', () => {
     expect(attestation).toEqual({
       attestationId,
       revision: '6',
+    });
+    const [activeRepair] = await database.query(
+      `SELECT id::text, "dateFrom"::text AS "dateFrom",
+              "dateThrough"::text AS "dateThrough"
+       FROM active_certified_history_repair`,
+    );
+    expect(activeRepair).toEqual({
+      id: auditId,
+      dateFrom: '2026-07-11',
+      dateThrough: '2026-07-12',
     });
     const [state] = await database.query(
       `SELECT revision::text, "historicDirtyFrom"::text,

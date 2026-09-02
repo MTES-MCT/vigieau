@@ -48,10 +48,16 @@ const certifiedHistoryCanaryCommune =
 const certifiedHistoryCanaryFrom =
   process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_FROM || "2026-07-11";
 const certifiedHistoryCanaryThrough =
-  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_THROUGH || "2026-08-27";
+  process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_THROUGH || "2026-08-31";
 const certifiedHistoryCanaryDigest =
   process.env.VIGIEAU_CERTIFIED_HISTORY_CANARY_SHA256 ||
-  "9a79da0dcea956455e1da05e271504f6163ef9d47be86dbe35ff6dfd1df1b255";
+  "b1b3c985b221077f85826c8664753bb71be0e3acbe94758d1a44c9eb5eac6aa7";
+const publicHistoryCanaryEnabled =
+  process.env.VIGIEAU_PUBLIC_HISTORY_CANARY !== "disabled";
+const publicHistoryCanaryFrom =
+  process.env.VIGIEAU_PUBLIC_HISTORY_CANARY_FROM || "2026-01-01";
+const publicHistoryCanaryThrough =
+  process.env.VIGIEAU_PUBLIC_HISTORY_CANARY_THROUGH || "2026-12-31";
 const runningSnapshotMaximumAgeMs = 15 * 60 * 1000;
 
 function assertInteger(value, minimum, name) {
@@ -418,6 +424,72 @@ for (const sample of samples.slice(1)) {
   }
 }
 
+let publicHistoryCanary = null;
+if (publicHistoryCanaryEnabled) {
+  assert.match(
+    publicHistoryCanaryFrom,
+    /^\d{4}-\d{2}-\d{2}$/,
+    "VIGIEAU_PUBLIC_HISTORY_CANARY_FROM must be a civil date",
+  );
+  assert.match(
+    publicHistoryCanaryThrough,
+    /^\d{4}-\d{2}-\d{2}$/,
+    "VIGIEAU_PUBLIC_HISTORY_CANARY_THROUGH must be a civil date",
+  );
+  const effectiveThrough =
+    reference.latestDate < publicHistoryCanaryThrough
+      ? reference.latestDate
+      : publicHistoryCanaryThrough;
+  assert.ok(
+    publicHistoryCanaryFrom <= effectiveThrough,
+    "The public history canary range is not yet available",
+  );
+  const historyQuery = new URLSearchParams({
+    dateDebut: publicHistoryCanaryFrom,
+    dateFin: effectiveThrough,
+  });
+  const [departmentHistoryResponse, areaHistoryResponse] = await Promise.all([
+    requestJson(`${apiBase}/api/data/departement?${historyQuery}`),
+    requestJson(`${apiBase}/api/data/area?${historyQuery}`),
+  ]);
+  const departmentHistoryDates = extractDates(
+    departmentHistoryResponse.body,
+    "Department public history canary",
+  );
+  const areaHistoryDates = extractDates(
+    areaHistoryResponse.body,
+    "Area public history canary",
+  );
+  assert.deepEqual(
+    departmentHistoryDates,
+    areaHistoryDates,
+    "Department and area public history canaries expose different dates",
+  );
+  assert.equal(
+    departmentHistoryDates[0],
+    publicHistoryCanaryFrom,
+    `Public statistics no longer start at ${publicHistoryCanaryFrom}`,
+  );
+  assert.equal(
+    departmentHistoryDates.at(-1),
+    effectiveThrough,
+    `Public statistics no longer reach ${effectiveThrough}`,
+  );
+  assert.ok(
+    departmentHistoryResponse.body.every(
+      ({ departements }) =>
+        Array.isArray(departements) &&
+        departements.length === expectedDepartmentCount,
+    ),
+    `A public history canary day does not contain ${expectedDepartmentCount} departments`,
+  );
+  publicHistoryCanary = {
+    dateFrom: publicHistoryCanaryFrom,
+    dateThrough: effectiveThrough,
+    certifiedDayCount: departmentHistoryDates.length,
+  };
+}
+
 const communeQuery = new URLSearchParams({
   dateDebut: startDate.slice(0, 7),
   dateFin: today.slice(0, 7),
@@ -480,6 +552,7 @@ console.log(
     departmentCount: expectedDepartmentCount,
     communeCount: expectedCommuneCount,
     communeCode,
+    publicHistoryCanary,
     certifiedHistoryCanary,
   }),
 );

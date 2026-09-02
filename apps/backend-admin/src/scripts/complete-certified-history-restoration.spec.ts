@@ -7,7 +7,10 @@ import {
   CERTIFIED_COMPLETION_INSPECT_DEPARTMENT_BATCH_SQL,
   CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
   CERTIFIED_COMPLETION_PROMOTION_SQL,
+  CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL,
+  CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST,
   RepairPublicationContext,
+  assertPinnedV2CertifiedSource,
   assertPromotionPreflight,
   assertRangeMatchesDirtyWindow,
   buildStatisticApplySql,
@@ -30,6 +33,13 @@ const requiredEnvironment = {
     'vigieau-2026-07-11-2026-08-27-backup-repair-v1',
   CERTIFIED_HISTORY_COMPLETION_EXPECTED_SOURCE_DATABASE: 'certified_source',
   CERTIFIED_HISTORY_COMPLETION_EXPECTED_TARGET_DATABASE: 'vigieau_prod',
+};
+
+const v2RequiredEnvironment = {
+  ...requiredEnvironment,
+  CERTIFIED_HISTORY_COMPLETION_THROUGH: '2026-08-31',
+  CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID:
+    'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
 };
 
 const publication: RepairPublicationContext = {
@@ -90,14 +100,34 @@ describe('certified history completion options', () => {
     ).toThrow('ATTEST_CERTIFIED_HISTORY');
   });
 
-  it('cannot be repointed to another 48-day window', () => {
+  it('accepts only the exact approved v1 and v2 run/scope pairs', () => {
+    expect(
+      parseCertifiedHistoryCompletionOptions(v2RequiredEnvironment),
+    ).toMatchObject({
+      from: '2026-07-11',
+      through: '2026-08-31',
+      sourceRunId: 'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+    });
     expect(() =>
       parseCertifiedHistoryCompletionOptions({
         ...requiredEnvironment,
         CERTIFIED_HISTORY_COMPLETION_FROM: '2026-07-10',
         CERTIFIED_HISTORY_COMPLETION_THROUGH: '2026-08-26',
       }),
-    ).toThrow('restricted to 2026-07-11..2026-08-27');
+    ).toThrow('approved v1 or v2 source run and exact scope');
+    expect(() =>
+      parseCertifiedHistoryCompletionOptions({
+        ...v2RequiredEnvironment,
+        CERTIFIED_HISTORY_COMPLETION_THROUGH: '2026-08-27',
+      }),
+    ).toThrow('approved v1 or v2 source run and exact scope');
+    expect(() =>
+      parseCertifiedHistoryCompletionOptions({
+        ...requiredEnvironment,
+        CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID:
+          'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+      }),
+    ).toThrow('approved v1 or v2 source run and exact scope');
   });
 
   it('pins mode, source fingerprints and dirty context in the token', () => {
@@ -196,19 +226,105 @@ describe('certified completion short validation transactions', () => {
 });
 
 describe('certified completion validation', () => {
-  it('requires the exact dirty window and keeps current out of scope', () => {
+  it('requires the exact incident dirty window for both approved scopes', () => {
     expect(() =>
       assertRangeMatchesDirtyWindow(
-        { from: '2026-07-11', through: '2026-08-27' },
-        publication,
+        {
+          mode: 'restore',
+          from: '2026-07-11',
+          through: '2026-08-27',
+          sourceRunId: 'vigieau-2026-07-11-2026-08-27-backup-repair-v1',
+        },
+        { ...publication, currentPublishedDate: '2026-09-02' },
       ),
     ).not.toThrow();
     expect(() =>
       assertRangeMatchesDirtyWindow(
-        { from: '2026-07-12', through: '2026-08-27' },
-        publication,
+        {
+          mode: 'restore',
+          from: '2026-07-11',
+          through: '2026-08-27',
+          sourceRunId: 'vigieau-2026-07-11-2026-08-27-backup-repair-v1',
+        },
+        { ...publication, historicDirtyThrough: '2026-08-26' },
       ),
-    ).toThrow('exactly equal dirty window');
+    ).toThrow('requires dirty window 2026-07-11/2026-08-27');
+
+    expect(() =>
+      assertRangeMatchesDirtyWindow(
+        {
+          mode: 'promote',
+          from: '2026-07-11',
+          through: '2026-08-31',
+          sourceRunId: 'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+        },
+        { ...publication, currentPublishedDate: '2026-09-02' },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRangeMatchesDirtyWindow(
+        {
+          mode: 'promote',
+          from: '2026-07-11',
+          through: '2026-08-31',
+          sourceRunId: 'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+        },
+        {
+          ...publication,
+          currentPublishedDate: '2026-09-02',
+          historicDirtyThrough: '2026-08-30',
+        },
+      ),
+    ).toThrow('requires dirty window 2026-07-11/2026-08-27');
+  });
+
+  it('rejects null, differently-started or out-of-range v2 dirty windows', () => {
+    const options = {
+      mode: 'promote' as const,
+      from: '2026-07-11',
+      through: '2026-08-31',
+      sourceRunId: 'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+    };
+    expect(() =>
+      assertRangeMatchesDirtyWindow(options, {
+        ...publication,
+        historicDirtyThrough: null,
+      }),
+    ).toThrow('non-null dirty window');
+    expect(() =>
+      assertRangeMatchesDirtyWindow(options, {
+        ...publication,
+        historicDirtyFrom: '2026-07-12',
+      }),
+    ).toThrow('start at dirty window');
+    expect(() =>
+      assertRangeMatchesDirtyWindow(options, {
+        ...publication,
+        historicDirtyThrough: '2026-09-01',
+      }),
+    ).toThrow('promote requires dirty window 2026-07-11/2026-08-27');
+  });
+
+  it('allows v2 attestation only after the dirty boundary is expanded', () => {
+    const options = {
+      mode: 'attest' as const,
+      from: '2026-07-11',
+      through: '2026-08-31',
+      sourceRunId: 'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+    };
+    expect(() =>
+      assertRangeMatchesDirtyWindow(options, {
+        ...publication,
+        currentPublishedDate: '2026-09-02',
+        historicDirtyThrough: '2026-08-31',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertRangeMatchesDirtyWindow(options, {
+        ...publication,
+        currentPublishedDate: '2026-09-02',
+      }),
+    ).toThrow('attest requires dirty window 2026-07-11/2026-08-31');
   });
 
   it('validates complete exact department payloads', () => {
@@ -283,6 +399,100 @@ describe('exact SQL and promotion barriers', () => {
     expect(statisticApply).toContain('IS NOT DISTINCT FROM');
   });
 
+  it('accepts only the exact v2 correction provenance manifest', () => {
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "'isolated-clone-certified-correction-v2'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "'7bd55680297c2f85b4baa08792eab9eefc0578a0'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "'e73b1ca10cb9af03e234b7340edd46dc66b5fe2172a43aba486ad394a0419d3f'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "'3568717e031455834eb3e2a55cc5e3fd00b8b2bda00999436ddf282cc2c31447'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "'0f9517ae3893103e8fcb4fa0198ca202fd286dba577d261e6244dc400a9e868d'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      '"restrictionIds":[98039,98040]',
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      '"zoneIds":[14768,14771]',
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      '"correctionId":"d64-late-import-37695"',
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'parentDelta'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'correctionSource'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'geometryEvidence'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "date_source.payload -> 'correctionSource'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      '2def5d18ad10a61c173ab25c8b69003dadc5a2387333abc749eb31ddb6c1abdb',
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      'run.provenance - ARRAY[',
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "jsonb_object_keys(\n                  run.provenance -> 'dateSources'",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      "SELECT parent.provenance -> 'dateSources' ->",
+    );
+    expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(
+      'FROM "certified_history_commune_day"',
+    );
+    for (const value of Object.values(
+      CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST,
+    )) {
+      expect(CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL).toContain(String(value));
+    }
+  });
+
+  it('rejects a v2 output even when a tampered manifest is internally consistent', () => {
+    const expected = CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST;
+    const source = {
+      sourceRunId:
+        v2RequiredEnvironment.CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID,
+      communeCount: expected.communeCount,
+      communeDayCount: expected.communeDayCount,
+      departmentCount: expected.departmentCount,
+      departmentDayCount: expected.departmentDayCount,
+      dayCount: expected.statisticDayCount,
+      communeDigest: expected.communeDigest,
+      communeHistoryDigest: expected.communeHistoryDigest,
+      departmentDigest: expected.departmentDigest,
+      departmentHistoryDigest: expected.departmentHistoryDigest,
+      statisticDigest: expected.statisticDigest,
+      provenanceDigest: expected.provenanceDigest,
+      sourceFingerprint: expected.sourceFingerprint,
+    };
+    expect(() => assertPinnedV2CertifiedSource(source)).not.toThrow();
+    expect(() =>
+      assertPinnedV2CertifiedSource({
+        ...source,
+        communeHistoryDigest: 'a'.repeat(64),
+        sourceFingerprint: 'b'.repeat(64),
+      }),
+    ).toThrow('does not match the audited manifest');
+    expect(() =>
+      assertPinnedV2CertifiedSource({
+        ...source,
+        provenanceDigest: 'c'.repeat(64),
+        sourceFingerprint: 'd'.repeat(64),
+      }),
+    ).toThrow('does not match the audited manifest');
+  });
+
   it('never clears dirty or advances either cursor during stats activation', () => {
     expect(CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL).toContain(
       'computeMapDate',
@@ -298,6 +508,12 @@ describe('exact SQL and promotion barriers', () => {
     );
     expect(CERTIFIED_COMPLETION_PROMOTION_SQL).not.toContain(
       '"computeStatsDate" =',
+    );
+    expect(CERTIFIED_COMPLETION_PROMOTION_SQL).toContain(
+      '"historicDirtyThrough" = $4::date',
+    );
+    expect(CERTIFIED_COMPLETION_PROMOTION_SQL).toContain(
+      'publication."historicDirtyThrough" = $18::date',
     );
   });
 
@@ -343,7 +559,7 @@ describe('exact SQL and promotion barriers', () => {
     );
   });
 
-  it('certifies 48 national days and leaves no existing repaired scope incomplete', () => {
+  it('certifies the dynamic source day count and leaves no repaired scope incomplete', () => {
     expect(CERTIFIED_COMPLETION_PROMOTION_SQL).toContain(
       'COUNT(DISTINCT repaired."snapshotDate")',
     );

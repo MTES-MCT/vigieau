@@ -23,6 +23,7 @@ async function runSmoke({
   healthOverridesBySample = [],
   expectArtifact = false,
   minimumInstanceCount = 2,
+  truncatePublicHistory = false,
   expectedExitCode = 0,
 }) {
   const policy = getStatisticFreshnessPolicy({
@@ -89,9 +90,16 @@ async function runSmoke({
     }
 
     const requestedStart = url.searchParams.get("dateDebut");
+    const requestedEnd = url.searchParams.get("dateFin");
+    const responseStart =
+      truncatePublicHistory && requestedStart === "2026-01-01"
+        ? "2026-01-02"
+        : requestedStart;
+    const responseEnd =
+      requestedEnd && requestedEnd < latestDate ? requestedEnd : latestDate;
     if (url.pathname === "/api/data/departement") {
       return send(
-        dateRange(requestedStart, latestDate).map((date) => ({
+        dateRange(responseStart, responseEnd).map((date) => ({
           date,
           departements: Array.from({ length: 101 }, (_, index) => ({
             code: String(index),
@@ -101,7 +109,7 @@ async function runSmoke({
     }
     if (url.pathname === "/api/data/area") {
       return send(
-        dateRange(requestedStart, latestDate).map((date) => ({
+        dateRange(responseStart, responseEnd).map((date) => ({
           date,
           ESU: {},
           ESO: {},
@@ -134,6 +142,9 @@ async function runSmoke({
         VIGIEAU_STATISTICS_MINIMUM_INSTANCE_COUNT: String(minimumInstanceCount),
         VIGIEAU_EXPECT_STATISTIC_ARTIFACT: expectArtifact ? "true" : "false",
         VIGIEAU_CERTIFIED_HISTORY_CANARY: "disabled",
+        VIGIEAU_PUBLIC_HISTORY_CANARY: "enabled",
+        VIGIEAU_PUBLIC_HISTORY_CANARY_FROM: "2026-01-01",
+        VIGIEAU_PUBLIC_HISTORY_CANARY_THROUGH: "2026-12-31",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -161,6 +172,11 @@ test("accepts yesterday before the Paris daily deadline", async () => {
   assert.equal(result.maximumLagDays, 1);
   assert.equal(result.expectedPublishedDate, "2026-08-10");
   assert.equal(result.latestDate, "2026-08-10");
+  assert.deepEqual(result.publicHistoryCanary, {
+    dateFrom: "2026-01-01",
+    dateThrough: "2026-08-10",
+    certifiedDayCount: 222,
+  });
 });
 
 test("requires today after the Paris daily deadline", async () => {
@@ -172,6 +188,31 @@ test("requires today after the Paris daily deadline", async () => {
   assert.equal(result.maximumLagDays, 0);
   assert.equal(result.expectedPublishedDate, "2026-08-11");
   assert.equal(result.latestDate, "2026-08-11");
+});
+
+test("rejects a truncated public history shared by area and department", async () => {
+  const result = await runSmoke({
+    now: "2026-08-11T04:30:00.000Z",
+    latestDate: "2026-08-11",
+    truncatePublicHistory: true,
+    expectedExitCode: 1,
+  });
+  assert.match(
+    result.stderr,
+    /Public statistics no longer start at 2026-01-01/,
+  );
+});
+
+test("keeps the recovered 2026 history canary bounded after 2026", async () => {
+  const result = await runSmoke({
+    now: "2027-01-02T06:30:00.000Z",
+    latestDate: "2027-01-02",
+  });
+  assert.deepEqual(result.publicHistoryCanary, {
+    dateFrom: "2026-01-01",
+    dateThrough: "2026-12-31",
+    certifiedDayCount: 365,
+  });
 });
 
 test("rejects yesterday after the Paris daily deadline", async () => {

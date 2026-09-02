@@ -3,7 +3,9 @@ import {
   CERTIFIED_INSPECT_TARGET_BATCH_SQL,
   CERTIFIED_SOURCE_BATCH_SQL,
   CERTIFIED_SOURCE_SCOPE_SQL,
+  CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST,
   CertifiedSourceDay,
+  assertPinnedV2CertifiedSource,
   assertCertifiedRangeAgainstPublicationContext,
   certifiedHistoryFingerprint,
   encodeCertifiedExecutionContext,
@@ -36,6 +38,8 @@ const requiredEnvironment = {
   CERTIFIED_HISTORY_EXPECTED_TARGET_DATABASE: 'vigieau_production',
 };
 
+const v2SourceRunId = 'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2';
+
 function twoDaySource(): Array<Record<string, unknown>> {
   return [
     {
@@ -56,6 +60,60 @@ function twoDaySource(): Array<Record<string, unknown>> {
 }
 
 describe('restore-certified-commune-history safeguards', () => {
+  it('validates the complete v2 provenance and every commune row source', () => {
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'parentDelta'",
+    );
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'correctionSource'",
+    );
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'geometryEvidence'",
+    );
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(
+      '"correctionId":"d64-late-import-37695"',
+    );
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(
+      '2def5d18ad10a61c173ab25c8b69003dadc5a2387333abc749eb31ddb6c1abdb',
+    );
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(
+      "run.provenance -> 'dateSources' -> day.date ->> 'backupId'",
+    );
+    expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain('AS "invalidProvenanceCount"');
+    for (const value of Object.values(
+      CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST,
+    )) {
+      expect(CERTIFIED_SOURCE_SCOPE_SQL).toContain(String(value));
+    }
+  });
+
+  it('rejects recalculated v2 commune manifests outside the audited result', () => {
+    const expected = CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST;
+    const source = {
+      sourceRunId: v2SourceRunId,
+      communeCount: expected.communeCount,
+      dayCount: expected.communeDayCount,
+      communeDigest: expected.communeDigest,
+      provenanceDigest: expected.provenanceDigest,
+      sourceFingerprint: expected.sourceFingerprint,
+    };
+    expect(() => assertPinnedV2CertifiedSource(source)).not.toThrow();
+    expect(() =>
+      assertPinnedV2CertifiedSource({
+        ...source,
+        dayCount: source.dayCount - 1,
+        sourceFingerprint: 'a'.repeat(64),
+      }),
+    ).toThrow('does not match the audited manifest');
+    expect(() =>
+      assertPinnedV2CertifiedSource({
+        ...source,
+        provenanceDigest: 'b'.repeat(64),
+        sourceFingerprint: 'c'.repeat(64),
+      }),
+    ).toThrow('does not match the audited manifest');
+  });
+
   it('defaults to a read-only dry-run with short bounded batches', () => {
     expect(parseRestoreCertifiedHistoryOptions(requiredEnvironment)).toEqual({
       from: '2026-07-11',
@@ -144,6 +202,37 @@ describe('restore-certified-commune-history safeguards', () => {
         },
       ),
     ).toThrow('must end before the current statistic publication');
+  });
+
+  it('accepts only the exact v2 source range over the pinned initial dirty window', () => {
+    const septemberContext = {
+      ...publicationContext,
+      currentPublishedDate: '2026-09-02',
+    };
+    expect(() =>
+      assertCertifiedRangeAgainstPublicationContext(
+        '2026-07-11',
+        '2026-08-31',
+        septemberContext,
+        v2SourceRunId,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertCertifiedRangeAgainstPublicationContext(
+        '2026-07-11',
+        '2026-08-30',
+        septemberContext,
+        v2SourceRunId,
+      ),
+    ).toThrow('v2 commune repair is restricted');
+    expect(() =>
+      assertCertifiedRangeAgainstPublicationContext(
+        '2026-07-11',
+        '2026-08-31',
+        { ...septemberContext, historicDirtyThrough: '2026-08-31' },
+        v2SourceRunId,
+      ),
+    ).toThrow('requires target dirty window 2026-07-11/2026-08-27');
   });
 
   it('pins source fingerprint, databases and exact range in the apply token', () => {

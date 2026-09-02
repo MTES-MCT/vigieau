@@ -79,6 +79,12 @@ describePostgres('restore certified commune history PostgreSQL', () => {
         "communeDayCount" bigint NOT NULL,
         "communeDigest" text NOT NULL,
         "communeHistoryDigest" text NOT NULL,
+        "departmentCount" integer NOT NULL DEFAULT 1,
+        "departmentDayCount" bigint NOT NULL DEFAULT 3,
+        "departmentDigest" text NOT NULL DEFAULT repeat('1', 64),
+        "departmentHistoryDigest" text NOT NULL DEFAULT repeat('2', 64),
+        "statisticDayCount" integer NOT NULL DEFAULT 3,
+        "statisticDigest" text NOT NULL DEFAULT repeat('3', 64),
         provenance jsonb NOT NULL
       );
       CREATE TABLE certified_history_commune_day (
@@ -88,6 +94,8 @@ describePostgres('restore certified commune history PostgreSQL', () => {
         "SOU" text,
         "SUP" text,
         "AEP" text,
+        "backupId" text NOT NULL DEFAULT 'backup-test',
+        "dumpSha256" text NOT NULL DEFAULT repeat('a', 64),
         PRIMARY KEY ("sourceRunId", code, date)
       );
       CREATE TABLE current_zone_recompute_request (
@@ -115,7 +123,11 @@ describePostgres('restore certified commune history PostgreSQL', () => {
       );
       INSERT INTO "statistic_publication_state"
       VALUES (1, 116, '2026-07-11', '2026-08-27');
-      INSERT INTO certified_history_source_run VALUES (
+      INSERT INTO certified_history_source_run (
+        id, status, "dateFrom", "dateThrough", "communeCount",
+        "communeDayCount", "communeDigest", "communeHistoryDigest",
+        provenance
+      ) VALUES (
         '${sourceRunId}', 'certified', '2026-07-11', '2026-07-13',
         1, 3, repeat('0', 64), repeat('0', 64),
         '{"communeDailyObjectKeyPolicy":"exact-date-SOU-SUP-AEP","dates":{"2026-07-11":"backup-a","2026-07-12":"backup-a","2026-07-13":"backup-b"}}'::jsonb
@@ -281,6 +293,47 @@ describePostgres('restore certified commune history PostgreSQL', () => {
     });
     expect(scope.communeDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(scope.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('fails closed before restore when a v2 source manifest is forged', async () => {
+    await database.query('BEGIN');
+    try {
+      await database.query(`
+        INSERT INTO certified_history_source_run (
+          id, status, "dateFrom", "dateThrough", "communeCount",
+          "communeDayCount", "communeDigest", "communeHistoryDigest",
+          "departmentCount", "departmentDayCount", "departmentDigest",
+          "departmentHistoryDigest", "statisticDayCount", "statisticDigest",
+          provenance
+        ) VALUES (
+          'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+          'certified', '2026-07-11', '2026-08-31', 34943, 1817036,
+          repeat('a', 64), repeat('b', 64), 101, 5252,
+          repeat('c', 64), repeat('d', 64), 52, repeat('e', 64),
+          '{"method":"isolated-clone-certified-correction-v2"}'::jsonb
+        );
+        INSERT INTO certified_history_commune_day (
+          "sourceRunId", code, date, "SOU", "SUP", "AEP",
+          "backupId", "dumpSha256"
+        ) VALUES (
+          'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+          '77132', '2026-07-11', NULL, NULL, NULL,
+          'forged-backup', repeat('f', 64)
+        )
+      `);
+      const [scope] = await database.query(CERTIFIED_SOURCE_SCOPE_SQL, [
+        '2026-07-11',
+        '2026-08-31',
+        'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
+      ]);
+      expect(scope).toMatchObject({
+        runCount: 1,
+        provenanceValid: false,
+        invalidProvenanceCount: 1,
+      });
+    } finally {
+      await database.query('ROLLBACK');
+    }
   });
 
   it('runs inspection in a strictly read-only target session', async () => {

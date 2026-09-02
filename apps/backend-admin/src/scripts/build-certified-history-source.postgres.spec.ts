@@ -3,6 +3,8 @@ import {
   BuildCertifiedHistorySourceOptions,
   CERTIFIED_HISTORY_PLAN,
   CERTIFIED_HISTORY_SOURCE_RUN_ID,
+  CERTIFIED_HISTORY_V2_SOURCE_RUN_ID,
+  assertV2ParentDelta,
   buildCertifiedHistorySourcePart,
 } from './build-certified-history-source';
 
@@ -250,6 +252,190 @@ describePostgres('build certified history source PostgreSQL', () => {
       )
     ).rows;
     expect(after.xmin).toBe(before.xmin);
+  }, 30_000);
+
+  it('executes the v2 delta guard and closes scope, NULL and AEP loopholes', async () => {
+    await accumulator.query('BEGIN');
+    try {
+      await accumulator.query(
+        `
+          INSERT INTO "certified_history_source_run" (
+            id, status, "dateFrom", "dateThrough"
+          ) VALUES ('${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}', 'building',
+                    '2026-07-11', '2026-08-31');
+
+          INSERT INTO "certified_history_commune_day"
+          SELECT '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}', code, date,
+                 "SOU", "SUP", "AEP", "backupId", "dumpSha256"
+          FROM "certified_history_commune_day"
+          WHERE "sourceRunId" = '${CERTIFIED_HISTORY_SOURCE_RUN_ID}';
+
+          INSERT INTO "certified_history_departement_day"
+          SELECT '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}', code, date,
+                 restriction, "backupId", "dumpSha256"
+          FROM "certified_history_departement_day"
+          WHERE "sourceRunId" = '${CERTIFIED_HISTORY_SOURCE_RUN_ID}';
+
+          INSERT INTO "certified_history_statistic_day"
+          SELECT '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}', date, payload,
+                 "backupId", "dumpSha256"
+          FROM "certified_history_statistic_day"
+          WHERE "sourceRunId" = '${CERTIFIED_HISTORY_SOURCE_RUN_ID}'
+        `,
+      );
+      await accumulator.query(
+        `
+          UPDATE "certified_history_commune_day"
+          SET code = '64086', "SOU" = 'alerte', "SUP" = 'alerte', "AEP" = NULL
+          WHERE "sourceRunId" IN (
+            '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}',
+            '${CERTIFIED_HISTORY_SOURCE_RUN_ID}'
+          ) AND code = '77132';
+
+          INSERT INTO "certified_history_commune_day" (
+            "sourceRunId", code, date, "SOU", "SUP", "AEP",
+            "backupId", "dumpSha256"
+          )
+          SELECT source."sourceRunId", codes.code, source.date,
+                 source."SOU", source."SUP", source."AEP",
+                 source."backupId", source."dumpSha256"
+          FROM "certified_history_commune_day" source
+          CROSS JOIN unnest(ARRAY[
+            '64094', '64134', '64147', '64250', '64277', '64289',
+            '64304', '64407', '64476', '64540', '64546'
+          ]) codes(code)
+          WHERE source.code = '64086' AND source."sourceRunId" IN (
+            '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}',
+            '${CERTIFIED_HISTORY_SOURCE_RUN_ID}'
+          );
+
+          UPDATE "certified_history_departement_day"
+          SET code = '64', restriction = jsonb_build_object(
+            'date', restriction -> 'date',
+            'SOU', jsonb_build_object(
+              'vigilance', '"100.00"'::jsonb,
+              'alerte', '"1000.00"'::jsonb,
+              'alerte_renforcee', '"2000.00"'::jsonb,
+              'crise', '0'::jsonb
+            ),
+            'SUP', jsonb_build_object(
+              'vigilance', '"100.00"'::jsonb,
+              'alerte', '"1100.00"'::jsonb,
+              'alerte_renforcee', '"2100.00"'::jsonb,
+              'crise', '0'::jsonb
+            ),
+            'AEP', restriction -> 'AEP'
+          )
+          WHERE "sourceRunId" IN (
+            '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}',
+            '${CERTIFIED_HISTORY_SOURCE_RUN_ID}'
+          ) AND code = '064';
+
+          UPDATE "certified_history_statistic_day"
+          SET payload = jsonb_set(
+            payload #- ARRAY['departementSituation', '064'],
+            ARRAY['departementSituation', '64'],
+            '{"max":"alerte","sup":"alerte","sou":"alerte","aep":null}'::jsonb
+          )
+          WHERE "sourceRunId" IN (
+            '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}',
+            '${CERTIFIED_HISTORY_SOURCE_RUN_ID}'
+          );
+
+          UPDATE "certified_history_commune_day"
+          SET "SOU" = 'alerte_renforcee', "SUP" = 'alerte_renforcee'
+          WHERE "sourceRunId" = '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}'
+            AND (
+              (code IN (
+                '64086', '64094', '64134', '64147', '64250',
+                '64277', '64289', '64304', '64407', '64476'
+              ) AND date >= '2026-07-17')
+              OR (code = '64540' AND date > '2026-07-17')
+              OR (code = '64546' AND date = '2026-07-17')
+            );
+
+          UPDATE "certified_history_departement_day"
+          SET restriction = jsonb_build_object(
+            'date', restriction -> 'date',
+            'SOU', jsonb_build_object(
+              'vigilance', '"100.00"'::jsonb,
+              'alerte', '"733.03"'::jsonb,
+              'alerte_renforcee', '"2266.97"'::jsonb,
+              'crise', '0'::jsonb
+            ),
+            'SUP', jsonb_build_object(
+              'vigilance', '"100.00"'::jsonb,
+              'alerte', '"833.03"'::jsonb,
+              'alerte_renforcee', '"2366.97"'::jsonb,
+              'crise', '0'::jsonb
+            ),
+            'AEP', restriction -> 'AEP'
+          )
+          WHERE "sourceRunId" = '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}'
+            AND code = '64'
+            AND date >= '2026-07-17';
+
+          UPDATE "certified_history_departement_day"
+          SET restriction = jsonb_set(jsonb_set(jsonb_set(jsonb_set(
+            restriction,
+            '{SOU,vigilance}', '"130.47"'::jsonb),
+            '{SOU,alerte}', '"702.56"'::jsonb),
+            '{SUP,vigilance}', '"130.47"'::jsonb),
+            '{SUP,alerte}', '"802.56"'::jsonb)
+          WHERE "sourceRunId" = '${CERTIFIED_HISTORY_V2_SOURCE_RUN_ID}'
+            AND code = '64' AND date = '2026-08-12'
+        `,
+      );
+
+      await expect(assertV2ParentDelta(accumulator)).resolves.toBeUndefined();
+
+      await accumulator.query(
+        `UPDATE "certified_history_commune_day" SET "SOU" = 'crise'
+         WHERE "sourceRunId" = $1 AND code = '64086'
+           AND date = '2026-07-11'`,
+        [CERTIFIED_HISTORY_V2_SOURCE_RUN_ID],
+      );
+      await expect(assertV2ParentDelta(accumulator)).rejects.toThrow(
+        'outside the audited correction',
+      );
+      await accumulator.query(
+        `UPDATE "certified_history_commune_day" SET "SOU" = 'alerte'
+         WHERE "sourceRunId" = $1 AND code = '64086'
+           AND date = '2026-07-11'`,
+        [CERTIFIED_HISTORY_V2_SOURCE_RUN_ID],
+      );
+      await expect(assertV2ParentDelta(accumulator)).resolves.toBeUndefined();
+
+      await accumulator.query(
+        `UPDATE "certified_history_commune_day" SET "SUP" = NULL
+         WHERE "sourceRunId" = $1 AND code = '64086'
+           AND date = '2026-07-17'`,
+        [CERTIFIED_HISTORY_V2_SOURCE_RUN_ID],
+      );
+      await expect(assertV2ParentDelta(accumulator)).rejects.toThrow(
+        '"invalid":1',
+      );
+      await accumulator.query(
+        `UPDATE "certified_history_commune_day"
+         SET "SUP" = 'alerte_renforcee'
+         WHERE "sourceRunId" = $1 AND code = '64086'
+           AND date = '2026-07-17'`,
+        [CERTIFIED_HISTORY_V2_SOURCE_RUN_ID],
+      );
+      await expect(assertV2ParentDelta(accumulator)).resolves.toBeUndefined();
+
+      await accumulator.query(
+        `UPDATE "certified_history_commune_day" SET "AEP" = 'crise'
+         WHERE "sourceRunId" = $1 AND code = '64086'
+           AND date = '2026-07-17'`,
+        [CERTIFIED_HISTORY_V2_SOURCE_RUN_ID],
+      );
+      await expect(assertV2ParentDelta(accumulator)).rejects.toThrow(
+        'outside the audited correction',
+      );
+    } finally {
+      await accumulator.query('ROLLBACK');
+    }
   }, 30_000);
 
   it('rolls back a divergent overlap', async () => {
