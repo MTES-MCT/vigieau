@@ -83,8 +83,20 @@
   "overrides": {
     "vue-dsfr-nuxt-module": {
       "@gouvminint/vue-dsfr": {
-        "pnpm": "10.34.4"
+        "pnpm": "10.34.5"
       }
+    },
+    "ajv": {
+      "fast-uri": "3.1.6"
+    },
+    "@cypress/request": {
+      "qs": "6.16.0"
+    },
+    "eslint-plugin-vue": {
+      "postcss-selector-parser": "6.1.3"
+    },
+    "purgecss": {
+      "postcss-selector-parser": "6.1.3"
     }
   }
 }
