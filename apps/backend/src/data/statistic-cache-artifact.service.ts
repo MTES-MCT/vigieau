@@ -46,6 +46,12 @@ export interface StatisticCacheMaterializationTarget extends StatisticCacheArtif
 
 export type StatisticCacheCandidateTarget = StatisticCacheMaterializationTarget;
 
+export interface StatisticCacheCandidateStageOptions {
+  replaceActivePublicationId?: string;
+  requiredFirstDate?: string;
+  minimumDateCount?: number;
+}
+
 export type StatisticCacheCandidateActivationResult =
   | {
       outcome: 'activated';
@@ -263,6 +269,30 @@ function hasCandidateIdentityTarget(
     identity.sourceRevision === target.sourceRevision &&
     identity.historicComputeEpoch === target.historicComputeEpoch &&
     identity.certifiedHistoryRepairId === target.certifiedHistoryRepairId,
+  );
+}
+
+function hasReusableCandidateIdentity(
+  identity: StatisticCacheArtifactIdentity | null,
+  target: StatisticCacheMaterializationTarget,
+  options: StatisticCacheCandidateStageOptions,
+): identity is StatisticCacheArtifactIdentity {
+  return Boolean(
+    hasCandidateIdentityTarget(identity, target) &&
+    identity.id !== (options.replaceActivePublicationId ?? null) &&
+    hasRequiredCandidateCoverage(identity, options),
+  );
+}
+
+function hasRequiredCandidateCoverage(
+  candidate: Pick<StatisticCacheArtifactCandidate, 'firstDate' | 'dateCount'>,
+  options: StatisticCacheCandidateStageOptions,
+): boolean {
+  return Boolean(
+    (!options.requiredFirstDate ||
+      candidate.firstDate === options.requiredFirstDate) &&
+    (options.minimumDateCount === undefined ||
+      candidate.dateCount >= options.minimumDateCount),
   );
 }
 
@@ -756,14 +786,15 @@ export class StatisticCacheArtifactService {
     candidateFactory: (
       manager: EntityManager,
     ) => Promise<StatisticCacheArtifactCandidate>,
+    options: StatisticCacheCandidateStageOptions = {},
   ): Promise<StatisticCacheArtifactIdentity> {
     const activeBeforeLock = await this.loadActiveIdentity();
-    if (hasCandidateIdentityTarget(activeBeforeLock, target)) {
+    if (hasReusableCandidateIdentity(activeBeforeLock, target, options)) {
       await this.garbageCollectPublications(this.dataSource);
       return activeBeforeLock;
     }
     const candidateBeforeLock = await this.loadCandidateIdentity();
-    if (hasCandidateIdentityTarget(candidateBeforeLock, target)) {
+    if (hasReusableCandidateIdentity(candidateBeforeLock, target, options)) {
       await this.garbageCollectPublications(this.dataSource);
       return candidateBeforeLock;
     }
@@ -780,7 +811,7 @@ export class StatisticCacheArtifactService {
       );
       locked = lock?.locked === true;
       if (!locked) {
-        const staged = await this.waitForCandidateIdentity(target);
+        const staged = await this.waitForCandidateIdentity(target, options);
         await this.garbageCollectPublications(queryRunner.manager);
         return staged;
       }
@@ -788,14 +819,14 @@ export class StatisticCacheArtifactService {
       const activeAfterLock = await this.loadActiveIdentity(
         queryRunner.manager,
       );
-      if (hasCandidateIdentityTarget(activeAfterLock, target)) {
+      if (hasReusableCandidateIdentity(activeAfterLock, target, options)) {
         await this.garbageCollectPublications(queryRunner.manager);
         return activeAfterLock;
       }
       const candidateAfterLock = await this.loadCandidateIdentity(
         queryRunner.manager,
       );
-      if (hasCandidateIdentityTarget(candidateAfterLock, target)) {
+      if (hasReusableCandidateIdentity(candidateAfterLock, target, options)) {
         await this.garbageCollectPublications(queryRunner.manager);
         return candidateAfterLock;
       }
@@ -805,6 +836,11 @@ export class StatisticCacheArtifactService {
       const candidate = await candidateFactory(queryRunner.manager);
       if (!candidateMatchesTarget(candidate, target)) {
         throw new Error('Statistic cache candidate does not match its target');
+      }
+      if (!hasRequiredCandidateCoverage(candidate, options)) {
+        throw new Error(
+          'Statistic cache candidate does not preserve required history',
+        );
       }
       const publicationId = randomUUID();
       const artifacts = this.encodeArtifacts(candidate);
@@ -1864,15 +1900,16 @@ export class StatisticCacheArtifactService {
 
   private async waitForCandidateIdentity(
     target: StatisticCacheCandidateTarget,
+    options: StatisticCacheCandidateStageOptions = {},
   ): Promise<StatisticCacheArtifactIdentity> {
     const deadline = Date.now() + MATERIALIZATION_WAIT_MS;
     while (Date.now() < deadline) {
       const active = await this.loadActiveIdentity();
-      if (hasCandidateIdentityTarget(active, target)) {
+      if (hasReusableCandidateIdentity(active, target, options)) {
         return active;
       }
       const candidate = await this.loadCandidateIdentity();
-      if (hasCandidateIdentityTarget(candidate, target)) {
+      if (hasReusableCandidateIdentity(candidate, target, options)) {
         return candidate;
       }
       await new Promise((resolve) =>
