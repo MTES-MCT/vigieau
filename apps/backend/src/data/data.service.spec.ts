@@ -1910,7 +1910,7 @@ describe('DataService', () => {
         ...stablePublicationState,
         revision: '48',
         statisticCachePublicationId: artifactPublicationId,
-        historicDirtyFrom: '2026-07-11',
+        historicDirtyFrom: '2013-01-03',
         historicDirtyThrough: '2026-08-27',
         historicComputeEpoch: '9',
         certifiedHistoryRepairId: repairId,
@@ -2211,7 +2211,7 @@ describe('DataService', () => {
         statisticCachePublicationId: null,
         currentPublishedDate: currentDate,
         historicDirtyFrom: '2011-06-07',
-        historicDirtyThrough: '2026-08-05',
+        historicDirtyThrough: '2026-08-18',
       };
       const referenceData = {
         departements: completeDepartments,
@@ -2284,6 +2284,363 @@ describe('DataService', () => {
         mockTransactionManager,
       );
       expect(fullBuild).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds the safe history when a certified repair is revoked', async () => {
+      const currentDate = '2026-09-04';
+      const state = {
+        ...artifactState,
+        revision: '49',
+        activePublicationId: '00000000-0000-4000-8000-000000000049',
+        currentPublishedDate: currentDate,
+        historicDirtyFrom: '2013-01-03',
+        historicDirtyThrough: '2026-09-03',
+        certifiedHistoryRepairId: null,
+        certifiedHistoryRepairFrom: null,
+        certifiedHistoryRepairThrough: null,
+        certifiedHistoryRepairSourceRunId: null,
+        certifiedHistoryRepairActivatedAt: null,
+        certifiedHistoryRepairRevision: null,
+      };
+      const safeDates = ['2013-01-01', '2013-01-02', currentDate];
+      const certifiedOverlay = {
+        ...activeArtifact,
+        identity: {
+          ...activeArtifact.identity,
+          statisticRevision: '48',
+          currentPublishedDate: '2026-09-03',
+          mode: 'versioned' as const,
+          materializationStrategy: 'certified-history-overlay' as const,
+          certifiedHistoryRepairId: '00000000-0000-4000-8000-000000000048',
+          firstDate: '2013-01-01',
+          latestDate: '2026-09-03',
+          dateCount: 3,
+        },
+      };
+      const referenceData = {
+        departements: completeDepartments,
+        regions: [],
+        bassinsVersants: [],
+        fullArea: 101,
+        metropoleArea: 101,
+      };
+      const currentCoverage = jest
+        .spyOn(service as any, 'getCertifiedCurrentSnapshotCommuneCount')
+        .mockResolvedValue(1);
+      const safeCache = {
+        ...referenceData,
+        revision: state.revision,
+        publicationState: state,
+        mode: 'versioned',
+        dataArea: safeDates.map((date) => ({
+          date,
+          ESO: {},
+          ESU: {},
+          AEP: {},
+        })),
+        dataDepartement: safeDates.map(departmentDay),
+        dataCommune: [
+          {
+            code: '01001',
+            restrictions: [{ d: '2026-09', p: 4 }],
+          },
+        ],
+        firstDate: safeDates[0],
+        latestDate: currentDate,
+        dateCount: safeDates.length,
+        departmentCount: 101,
+        communeCount: 1,
+        fingerprint: 'f'.repeat(64),
+      };
+      const fullLoad = jest
+        .spyOn(service as any, 'loadDataOnce')
+        .mockResolvedValue(safeCache);
+      jest
+        .spyOn(service as any, 'loadDailyCommuneWeights')
+        .mockResolvedValue(new Map([[currentDate, [['01001', 4]]]]));
+      const sparseBootstrap = jest.spyOn(
+        service as any,
+        'createSparseCurrentArtifactCandidate',
+      );
+      const delta = jest.spyOn(service as any, 'createDeltaArtifactCandidate');
+
+      const result = await (service as any).createArtifactCandidate(
+        state,
+        certifiedOverlay,
+        mockTransactionManager,
+      );
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          materializationStrategy: 'sparse-current',
+          firstDate: '2013-01-01',
+          latestDate: currentDate,
+          dateCount: 3,
+        }),
+      );
+      expect(result.dataArea.map(({ date }) => date)).toEqual(safeDates);
+      expect(result.dataDepartement.map(({ date }) => date)).toEqual(safeDates);
+      expect(result.dataArea).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ date: '2026-08-15' }),
+        ]),
+      );
+      expect(currentCoverage).toHaveBeenCalledWith(
+        state,
+        mockTransactionManager,
+      );
+      expect(fullLoad).toHaveBeenCalledWith(state, mockTransactionManager);
+      expect(sparseBootstrap).not.toHaveBeenCalled();
+      expect(delta).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the current snapshot cannot update a revoked overlay', async () => {
+      const state = {
+        ...artifactState,
+        revision: '49',
+        activePublicationId: '00000000-0000-4000-8000-000000000049',
+        currentPublishedDate: '2026-09-04',
+        historicDirtyFrom: '2013-01-03',
+        historicDirtyThrough: '2026-08-31',
+        certifiedHistoryRepairId: null,
+      };
+      const certifiedOverlay = {
+        ...activeArtifact,
+        identity: {
+          ...activeArtifact.identity,
+          currentPublishedDate: '2026-09-03',
+          mode: 'versioned' as const,
+          materializationStrategy: 'certified-history-overlay' as const,
+          certifiedHistoryRepairId: '00000000-0000-4000-8000-000000000048',
+          latestDate: '2026-09-03',
+        },
+      };
+      jest
+        .spyOn(service as any, 'getCertifiedCurrentSnapshotCommuneCount')
+        .mockRejectedValue(
+          new Error('Statistic current snapshot is not certified'),
+        );
+      const fullLoad = jest.spyOn(service as any, 'loadDataOnce');
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          state,
+          certifiedOverlay,
+          mockTransactionManager,
+        ),
+      ).rejects.toThrow('current snapshot');
+      expect(fullLoad).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['start', '2013-01-04', '2026-09-01'],
+      ['end', '2013-01-03', '2026-08-31'],
+    ])(
+      'rebuilds safe history when the dirty boundary %s changes',
+      async (_boundary, activeDirtyFrom, activeDirtyThrough) => {
+        const state = {
+          ...artifactState,
+          activePublicationId: '00000000-0000-4000-8000-000000000049',
+          historicDirtyFrom: '2013-01-03',
+          historicDirtyThrough: '2026-09-01',
+        };
+        const sparseArtifact = {
+          ...activeArtifact,
+          identity: {
+            ...activeArtifact.identity,
+            mode: 'versioned' as const,
+            materializationStrategy: 'sparse-current' as const,
+            historicDirtyFrom: activeDirtyFrom,
+            historicDirtyThrough: activeDirtyThrough,
+            firstDate: '2013-01-01',
+            latestDate: state.currentPublishedDate,
+            dateCount: 3,
+          },
+        };
+        const candidate = {
+          materializationStrategy: 'sparse-current',
+          firstDate: '2013-01-01',
+          latestDate: state.currentPublishedDate,
+          dateCount: 3,
+          dataArea: [
+            { date: '2013-01-01' },
+            { date: '2013-01-02' },
+            { date: state.currentPublishedDate },
+          ],
+        };
+        jest
+          .spyOn(service as any, 'getCertifiedCurrentSnapshotCommuneCount')
+          .mockResolvedValue(1);
+        const full = jest
+          .spyOn(service as any, 'createFullArtifactCandidate')
+          .mockResolvedValue(candidate);
+        const delta = jest.spyOn(
+          service as any,
+          'createDeltaArtifactCandidate',
+        );
+
+        await expect(
+          (service as any).createArtifactCandidate(
+            state,
+            sparseArtifact,
+            mockTransactionManager,
+          ),
+        ).resolves.toBe(candidate);
+        expect(full).toHaveBeenCalledWith(
+          state,
+          'sparse-current',
+          mockTransactionManager,
+        );
+        expect(delta).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rebuilds a collapsed sparse cache when a safe historic prefix exists', async () => {
+      const state = {
+        ...artifactState,
+        activePublicationId: '00000000-0000-4000-8000-000000000049',
+        historicDirtyFrom: '2013-01-03',
+        historicDirtyThrough: '2026-09-01',
+      };
+      const collapsed = {
+        ...activeArtifact,
+        identity: {
+          ...activeArtifact.identity,
+          mode: 'versioned' as const,
+          materializationStrategy: 'sparse-current' as const,
+          firstDate: state.currentPublishedDate,
+          latestDate: state.currentPublishedDate,
+          dateCount: 1,
+        },
+      };
+      const candidate = {
+        materializationStrategy: 'sparse-current',
+        firstDate: '2013-01-01',
+        latestDate: state.currentPublishedDate,
+        dateCount: 3,
+        dataArea: [
+          { date: '2013-01-01' },
+          { date: '2013-01-02' },
+          { date: state.currentPublishedDate },
+        ],
+      };
+      jest
+        .spyOn(service as any, 'getCertifiedCurrentSnapshotCommuneCount')
+        .mockResolvedValue(1);
+      const full = jest
+        .spyOn(service as any, 'createFullArtifactCandidate')
+        .mockResolvedValue(candidate);
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          state,
+          collapsed,
+          mockTransactionManager,
+        ),
+      ).resolves.toBe(candidate);
+      expect(full).toHaveBeenCalledWith(
+        state,
+        'sparse-current',
+        mockTransactionManager,
+      );
+    });
+
+    it('detects a partial sparse cache even when its first date is preserved', () => {
+      const state = {
+        ...artifactState,
+        activePublicationId: '00000000-0000-4000-8000-000000000049',
+        historicDirtyFrom: '2013-01-03',
+        historicDirtyThrough: '2026-09-01',
+      };
+      const partialIdentity = {
+        ...activeArtifact.identity,
+        mode: 'versioned' as const,
+        materializationStrategy: 'sparse-current' as const,
+        firstDate: '2013-01-01',
+        latestDate: state.currentPublishedDate,
+        dateCount: 2,
+      };
+
+      expect(
+        (service as any).shouldRecoverSparseHistoricArtifact(
+          partialIdentity,
+          state,
+        ),
+      ).toBe(true);
+    });
+
+    it('recovers a safe suffix when the dirty range starts at history begin', () => {
+      const state = {
+        ...artifactState,
+        activePublicationId: '00000000-0000-4000-8000-000000000049',
+        historicDirtyFrom: '2013-01-01',
+        historicDirtyThrough: '2026-08-31',
+      };
+      const oneDayIdentity = {
+        ...activeArtifact.identity,
+        mode: 'versioned' as const,
+        materializationStrategy: 'sparse-current' as const,
+        firstDate: state.currentPublishedDate,
+        latestDate: state.currentPublishedDate,
+        dateCount: 1,
+      };
+
+      expect(
+        (service as any).shouldRecoverSparseHistoricArtifact(
+          oneDayIdentity,
+          state,
+        ),
+      ).toBe(true);
+      expect(
+        (service as any).getSafeHistoricCoverageRequirement(state),
+      ).toEqual({
+        firstDate: '2026-09-01',
+        minimumDateCount: 2,
+        ranges: [{ from: '2026-09-01', through: '2026-09-02' }],
+      });
+    });
+
+    it('refuses to replace history with incomplete safe coverage', async () => {
+      const state = {
+        ...artifactState,
+        activePublicationId: '00000000-0000-4000-8000-000000000049',
+        historicDirtyFrom: '2013-01-03',
+        historicDirtyThrough: '2026-09-01',
+      };
+      const collapsed = {
+        ...activeArtifact,
+        identity: {
+          ...activeArtifact.identity,
+          mode: 'versioned' as const,
+          materializationStrategy: 'sparse-current' as const,
+          firstDate: state.currentPublishedDate,
+          latestDate: state.currentPublishedDate,
+          dateCount: 1,
+        },
+      };
+      jest
+        .spyOn(service as any, 'getCertifiedCurrentSnapshotCommuneCount')
+        .mockResolvedValue(1);
+      jest
+        .spyOn(service as any, 'createFullArtifactCandidate')
+        .mockResolvedValue({
+          materializationStrategy: 'sparse-current',
+          firstDate: '2013-01-01',
+          latestDate: state.currentPublishedDate,
+          dateCount: 2,
+          dataArea: [
+            { date: '2013-01-01' },
+            { date: state.currentPublishedDate },
+          ],
+        });
+
+      await expect(
+        (service as any).createArtifactCandidate(
+          state,
+          collapsed,
+          mockTransactionManager,
+        ),
+      ).rejects.toThrow('did not preserve safe historic coverage');
     });
 
     it('transitions a dirty legacy artifact to versioned without filling a missing day', async () => {
@@ -3866,6 +4223,77 @@ describe('DataService', () => {
 
       expect(artifactService.loadActive).toHaveBeenCalledTimes(1);
       expect(service['candidateDataCache']).toBeNull();
+    });
+
+    it('forces reconciliation of a matching one-day sparse artifact', async () => {
+      const activeId = distributedState.statisticCachePublicationId;
+      const recoveryState = {
+        ...distributedState,
+        historicDirtyFrom: '2026-07-11',
+        historicDirtyThrough: '2026-08-16',
+      };
+      const activeIdentity = {
+        id: activeId,
+        statisticRevision: recoveryState.revision,
+        currentPublishedDate: recoveryState.currentPublishedDate,
+        protocolVersion: 1,
+        mode: 'versioned',
+        materializationStrategy: 'sparse-current',
+        historicDirtyFrom: recoveryState.historicDirtyFrom,
+        historicDirtyThrough: recoveryState.historicDirtyThrough,
+        historicMapCursor: recoveryState.historicMapCursor,
+        historicStatsCursor: recoveryState.historicStatsCursor,
+        sourceRevision: recoveryState.sourceRevision,
+        historicComputeEpoch: recoveryState.historicComputeEpoch,
+        certifiedHistoryRepairId: null,
+        contentFingerprint: 'a'.repeat(64),
+        firstDate: recoveryState.currentPublishedDate,
+        latestDate: recoveryState.currentPublishedDate,
+        dateCount: 1,
+        areaCount: 1,
+        departmentCount: 101,
+        communeCount: 34943,
+        readyAt: new Date('2026-08-19T06:00:00.000Z'),
+      };
+      const stagedIdentity = {
+        ...activeIdentity,
+        id: '00000000-0000-4000-8000-000000000101',
+        firstDate: '2013-01-01',
+        dateCount: 4888,
+      };
+      const artifactService = {
+        loadActiveIdentity: jest.fn().mockResolvedValue(activeIdentity),
+        stageCandidate: jest.fn().mockResolvedValue(stagedIdentity),
+        activateCandidate: jest.fn().mockResolvedValue({
+          outcome: 'awaiting-acknowledgements',
+          reason: '0/2-acknowledgements',
+        }),
+      };
+      (service as any).statisticCacheArtifactService = artifactService;
+      jest
+        .spyOn(service as any, 'getPublicationState')
+        .mockResolvedValue(recoveryState);
+
+      await expect(service.reconcileStatisticCacheCandidate()).resolves.toEqual(
+        {
+          outcome: 'awaiting-acknowledgements',
+          reason: '0/2-acknowledgements',
+        },
+      );
+      expect(artifactService.stageCandidate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          statisticRevision: recoveryState.revision,
+          currentPublishedDate: recoveryState.currentPublishedDate,
+          historicDirtyFrom: recoveryState.historicDirtyFrom,
+        }),
+        expect.any(Function),
+        {
+          replaceActivePublicationId: activeId,
+          requiredFirstDate: '2013-01-01',
+          minimumDateCount: expect.any(Number),
+        },
+      );
+      expect(artifactService.activateCandidate).toHaveBeenCalledTimes(1);
     });
 
     it('classifies a publication drift as superseded instead of throwing', async () => {

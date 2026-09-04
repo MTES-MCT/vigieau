@@ -810,6 +810,77 @@ describe('StatisticCacheArtifactService', () => {
     ).toHaveLength(1);
   });
 
+  it('forces a replacement candidate when the active identity matches', async () => {
+    const { service, dataSource } = createService();
+    const matchingActive = {
+      id: previousPublicationId,
+      ...materializationTarget,
+      mode: candidate.mode,
+      materializationStrategy: 'sparse-current' as const,
+      contentFingerprint: 'a'.repeat(64),
+      firstDate: candidate.currentPublishedDate,
+      latestDate: candidate.currentPublishedDate,
+      dateCount: 1,
+      areaCount: 1,
+      departmentCount: candidate.departmentCount,
+      communeCount: candidate.communeCount,
+      readyAt: new Date('2026-08-15T05:00:00.000Z'),
+    };
+    const manager = { query: jest.fn() };
+    const queryRunner = {
+      manager,
+      connect: jest.fn(),
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      rollbackTransaction: jest.fn(),
+      release: jest.fn(),
+      query: jest.fn(async (sql: string) =>
+        sql.includes('pg_advisory_unlock')
+          ? [{ unlocked: true }]
+          : [{ locked: true }],
+      ),
+    };
+    dataSource.createQueryRunner.mockReturnValue(queryRunner);
+    jest.spyOn(service, 'loadActiveIdentity').mockResolvedValue(matchingActive);
+    const replacementCandidate = {
+      ...candidate,
+      firstDate: '2013-01-01',
+      dateCount: 2,
+    };
+    let persistedId: string | null = null;
+    let candidateReadCount = 0;
+    jest
+      .spyOn(service, 'loadCandidateIdentity')
+      .mockImplementation(async () => {
+        candidateReadCount += 1;
+        return candidateReadCount < 3
+          ? { ...matchingActive, id: 'stale-candidate' }
+          : {
+              ...matchingActive,
+              id: persistedId!,
+              firstDate: replacementCandidate.firstDate,
+              dateCount: replacementCandidate.dateCount,
+            };
+      });
+    const persist = jest
+      .spyOn(service as any, 'persistPublication')
+      .mockImplementation(async (_manager, id) => {
+        persistedId = String(id);
+      });
+    const factory = jest.fn().mockResolvedValue(replacementCandidate);
+
+    await expect(
+      service.stageCandidate(materializationTarget, factory, {
+        replaceActivePublicationId: previousPublicationId,
+        requiredFirstDate: replacementCandidate.firstDate,
+        minimumDateCount: replacementCandidate.dateCount,
+      }),
+    ).resolves.toEqual(expect.objectContaining(materializationTarget));
+    expect(factory).toHaveBeenCalledWith(manager);
+    expect(service.loadActiveIdentity).toHaveBeenCalledTimes(2);
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [1, true, 'awaiting-acknowledgements'],
     [2, true, 'activated'],

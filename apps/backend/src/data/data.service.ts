@@ -61,6 +61,12 @@ interface StatisticPublicationState {
   certifiedHistoryRepairRevision?: string | null;
 }
 
+interface StatisticSafeHistoricCoverage {
+  firstDate: string;
+  minimumDateCount: number;
+  ranges: Array<{ from: string; through: string }>;
+}
+
 type StatisticCacheMode = 'legacy-bootstrap' | 'versioned';
 
 export function statisticDeltaMaterializationStrategy(
@@ -1050,7 +1056,7 @@ export class DataService implements OnModuleInit {
       active?.identity.materializationStrategy === 'certified-history-overlay';
     if (activeCertifiedOverlay && !certifiedHistoryRepairActivated) {
       if (mode === 'versioned' && publicationState.historicDirtyFrom !== null) {
-        return this.createSparseCurrentArtifactCandidate(
+        return this.createSparseHistoricArtifactCandidate(
           publicationState,
           manager,
         );
@@ -1064,6 +1070,37 @@ export class DataService implements OnModuleInit {
       }
       throw new Error(
         'A certified history overlay cannot transition to a dirty legacy cache',
+      );
+    }
+    const historicDirtyBoundaryChanged = Boolean(
+      active &&
+      mode === 'versioned' &&
+      !certifiedHistoryRepairActivated &&
+      publicationState.historicDirtyFrom !== null &&
+      (active.identity.historicDirtyFrom !==
+        publicationState.historicDirtyFrom ||
+        active.identity.historicDirtyThrough !==
+          publicationState.historicDirtyThrough),
+    );
+    if (historicDirtyBoundaryChanged) {
+      return this.createSparseHistoricArtifactCandidate(
+        publicationState,
+        manager,
+      );
+    }
+    if (
+      active &&
+      mode === 'versioned' &&
+      !certifiedHistoryRepairActivated &&
+      publicationState.historicDirtyFrom !== null &&
+      this.shouldRecoverSparseHistoricArtifact(
+        active.identity,
+        publicationState,
+      )
+    ) {
+      return this.createSparseHistoricArtifactCandidate(
+        publicationState,
+        manager,
       );
     }
     const overlayPredatesCertifiedRepair = Boolean(
@@ -1107,7 +1144,7 @@ export class DataService implements OnModuleInit {
       publicationState.historicDirtyFrom !== null &&
       !certifiedHistoryRepairActivated
     ) {
-      return this.createSparseCurrentArtifactCandidate(
+      return this.createSparseHistoricArtifactCandidate(
         publicationState,
         manager,
       );
@@ -1149,6 +1186,45 @@ export class DataService implements OnModuleInit {
       active!,
       manager,
     );
+  }
+
+  private async createSparseHistoricArtifactCandidate(
+    publicationState: StatisticPublicationState,
+    manager: EntityManager,
+  ): Promise<StatisticCacheArtifactCandidate> {
+    const requiredCoverage =
+      this.getSafeHistoricCoverageRequirement(publicationState);
+    if (!requiredCoverage || requiredCoverage.minimumDateCount <= 1) {
+      return this.createSparseCurrentArtifactCandidate(
+        publicationState,
+        manager,
+      );
+    }
+    await this.getCertifiedCurrentSnapshotCommuneCount(
+      publicationState,
+      manager,
+    );
+    const candidate = await this.createFullArtifactCandidate(
+      publicationState,
+      'sparse-current',
+      manager,
+    );
+    const candidateDates = new Set(
+      candidate.dataArea.map(({ date }) => String(date)),
+    );
+    const missingRequiredDate = requiredCoverage.ranges
+      .flatMap(({ from, through }) => this.generateDateRange(from, through))
+      .find(({ date }) => !candidateDates.has(date));
+    if (
+      candidate.firstDate !== requiredCoverage.firstDate ||
+      candidate.dateCount < requiredCoverage.minimumDateCount ||
+      missingRequiredDate
+    ) {
+      throw new Error(
+        'Sparse statistic recovery did not preserve safe historic coverage',
+      );
+    }
+    return candidate;
   }
 
   private async createFullArtifactCandidate(
@@ -2126,8 +2202,19 @@ export class DataService implements OnModuleInit {
       }
       const target = this.getCandidateTarget(publicationState);
       const active = await artifactService.loadActiveIdentity();
+      const forceHistoricRecovery = this.shouldRecoverSparseHistoricArtifact(
+        active,
+        publicationState,
+      );
+      const safeHistoricCoverage =
+        publicationState.historicDirtyFrom !== null &&
+        this.getStatisticCacheMode(publicationState) === 'versioned' &&
+        !this.hasCertifiedHistoryRepair(publicationState)
+          ? this.getSafeHistoricCoverageRequirement(publicationState)
+          : null;
       if (
         active &&
+        !forceHistoricRecovery &&
         publicationState.statisticCachePublicationId === active.id &&
         this.isArtifactIdentityForState(active, publicationState)
       ) {
@@ -2145,6 +2232,19 @@ export class DataService implements OnModuleInit {
           const base = await artifactService.loadActive(manager);
           return this.createArtifactCandidate(latestState, base, manager);
         },
+        forceHistoricRecovery || safeHistoricCoverage
+          ? {
+              ...(forceHistoricRecovery
+                ? { replaceActivePublicationId: active!.id }
+                : {}),
+              ...(safeHistoricCoverage
+                ? {
+                    requiredFirstDate: safeHistoricCoverage.firstDate,
+                    minimumDateCount: safeHistoricCoverage.minimumDateCount,
+                  }
+                : {}),
+            }
+          : undefined,
       );
       if (
         publicationState.statisticCachePublicationId === staged.id &&
@@ -2979,6 +3079,72 @@ export class DataService implements OnModuleInit {
       throw new Error(`Unsupported STATISTIC_CACHE_MODE: ${configuredMode}`);
     }
     return configuredMode;
+  }
+
+  private shouldRecoverSparseHistoricArtifact(
+    identity: StatisticCacheArtifactIdentity | null | undefined,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    if (
+      identity?.materializationStrategy !== 'sparse-current' ||
+      this.getStatisticCacheMode(publicationState) !== 'versioned' ||
+      this.hasCertifiedHistoryRepair(publicationState) ||
+      publicationState.historicDirtyFrom === null
+    ) {
+      return false;
+    }
+    const requiredCoverage =
+      this.getSafeHistoricCoverageRequirement(publicationState);
+    if (!requiredCoverage) return false;
+    return (
+      identity.firstDate !== requiredCoverage.firstDate ||
+      identity.dateCount < requiredCoverage.minimumDateCount
+    );
+  }
+
+  private getSafeHistoricCoverageRequirement(
+    publicationState: StatisticPublicationState,
+  ): StatisticSafeHistoricCoverage | null {
+    const currentPublishedDate = publicationState.currentPublishedDate;
+    const historicDirtyFrom = publicationState.historicDirtyFrom;
+    if (!currentPublishedDate || !historicDirtyFrom) return null;
+
+    const ranges: StatisticSafeHistoricCoverage['ranges'] = [];
+    if (historicDirtyFrom > this.beginDate) {
+      const prefixThrough = moment
+        .utc(historicDirtyFrom, 'YYYY-MM-DD', true)
+        .subtract(1, 'day')
+        .format('YYYY-MM-DD');
+      ranges.push({
+        from: this.beginDate,
+        through:
+          prefixThrough < currentPublishedDate
+            ? prefixThrough
+            : currentPublishedDate,
+      });
+    }
+
+    if (
+      publicationState.historicDirtyThrough &&
+      publicationState.historicDirtyThrough < currentPublishedDate
+    ) {
+      const suffixFrom = moment
+        .utc(publicationState.historicDirtyThrough, 'YYYY-MM-DD', true)
+        .add(1, 'day')
+        .format('YYYY-MM-DD');
+      ranges.push({
+        from: suffixFrom > this.beginDate ? suffixFrom : this.beginDate,
+        through: currentPublishedDate,
+      });
+    }
+
+    const minimumDateCount = ranges.reduce(
+      (count, { from, through }) => count + this.countCivilDates(from, through),
+      0,
+    );
+    return minimumDateCount > 0
+      ? { firstDate: ranges[0].from, minimumDateCount, ranges }
+      : null;
   }
 
   private hasCertifiedHistoryRepair(

@@ -142,14 +142,14 @@ describe('certified statistic-only historic repair', () => {
     ).toBe(false);
   });
 
-  it('drops to sparse current when an overlay loses its exact audit', async () => {
+  it('rebuilds sparse safe history when an overlay loses its exact audit', async () => {
     const sparse = jest.fn().mockResolvedValue({ strategy: 'sparse' });
     const full = jest.fn();
     const delta = jest.fn();
     const service = {
       getStatisticCacheMode: () => 'versioned',
       hasCertifiedHistoryRepair: () => false,
-      createSparseCurrentArtifactCandidate: sparse,
+      createSparseHistoricArtifactCandidate: sparse,
       createFullArtifactCandidate: full,
       createDeltaArtifactCandidate: delta,
     };
