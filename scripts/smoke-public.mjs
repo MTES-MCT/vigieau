@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { smokeFetch } from "./smoke-http.mjs";
 import {
   assertLegacyArtifactFreshness,
   assertPublicZoneCache,
@@ -43,11 +44,7 @@ assert.ok(
 );
 
 async function request(url, init = {}) {
-  const response = await fetch(url, {
-    ...init,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  return response;
+  return smokeFetch(url, init, { timeoutMs });
 }
 
 async function json(url, expectedStatus = 200) {
