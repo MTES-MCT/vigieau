@@ -39,6 +39,8 @@ const writeWebManifest = async () => {
 export default defineNuxtConfig({
   ssr: false,
 
+  sourcemap: { client: 'hidden', server: false },
+
   app: {
     head: {
       title: appName,
@@ -119,6 +121,7 @@ export default defineNuxtConfig({
       s3vhost: process.env.S3_VHOST,
       sentryDsn: process.env.SENTRY_DSN,
       sentryEnv: process.env.SENTRY_ENV || process.env.APP_ENV || 'local',
+      sentryRelease: process.env.SENTRY_RELEASE || process.env.SOURCE_VERSION || process.env.CONTAINER_VERSION || '',
       sentryTracesSampleRate: process.env.SENTRY_TRACES_SAMPLE_RATE || '0.1',
       sentryProfilesSampleRate: process.env.SENTRY_PROFILES_SAMPLE_RATE || '0',
       sentrySendDefaultPii: process.env.SENTRY_SEND_DEFAULT_PII || 'false',
@@ -141,6 +144,10 @@ export default defineNuxtConfig({
         requireEnv: false,
       }),
     ],
+  },
+
+  experimental: {
+    entryImportMap: false,
   },
 
   hooks: {
@@ -193,7 +200,8 @@ export default defineNuxtConfig({
       ],
     },
     client: {
-      installPrompt: true,
+      // No custom install UI: retain the browser prompt without requiring storage.
+      installPrompt: false,
     },
     devOptions: {
       enabled: false,

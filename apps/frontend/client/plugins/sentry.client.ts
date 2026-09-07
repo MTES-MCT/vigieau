@@ -62,6 +62,7 @@ export default defineNuxtPlugin((nuxtApp) => {
   Sentry.init({
     app: nuxtApp.vueApp,
     dsn: sentryDsn,
+    release: toTrimmedString(runtimeConfig.public.sentryRelease) || undefined,
     environment:
       toTrimmedString(runtimeConfig.public.sentryEnv) ||
       toTrimmedString(runtimeConfig.public.appEnv) ||

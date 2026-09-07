@@ -113,7 +113,7 @@ test('routes all five public PNG exports through the shared guarded helper', asy
     const source = await readFile(new URL(path, import.meta.url), 'utf8');
 
     assert.match(source, /await downloadElementAsPng\(/);
-    assert.match(source, /if \(downloadingPng\.value\)/);
+    assert.match(source, /if \(downloadingPng\.value(?:\s*\|\|[^)]*)?\)/);
     assert.match(source, /pngDownloadError\.value = true/);
     assert.doesNotMatch(source, /import html2canvas/);
   }

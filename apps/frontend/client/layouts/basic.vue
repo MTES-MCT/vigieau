@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useScheme } from '@gouvminint/vue-dsfr';
+import { applyLightTheme } from '../utils/light-theme';
 import {
   ensureButtonAccessibleText,
   trapTabKey,
@@ -64,10 +64,6 @@ const skipLinks = [
   { id: 'footer', text: 'Pied de page' },
 ];
 
-const preferences = reactive({
-  theme: undefined,
-  scheme: undefined,
-});
 const runTimeConfig = useRuntimeConfig().public;
 
 function trapMenuFocus(event: KeyboardEvent): void {
@@ -137,15 +133,7 @@ onMounted(() => {
   document.addEventListener('keydown', preserveFocusOnClosedHeaderEscape, true);
   document.addEventListener('keydown', trapMenuFocus);
   document.addEventListener('click', focusMenuAfterOpening, true);
-  const { theme, setScheme } = useScheme();
-  // preferences.scheme = 'dark';
-  preferences.scheme = 'light';
-
-  watchEffect(() => {
-    preferences.theme = theme.value;
-  });
-
-  watchEffect(() => setScheme(preferences.scheme));
+  applyLightTheme(document.documentElement, () => window.localStorage);
 
   watch(
     () => route.path,
