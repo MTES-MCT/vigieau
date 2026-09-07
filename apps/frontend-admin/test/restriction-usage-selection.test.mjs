@@ -115,8 +115,8 @@ test('typographic variants collapse into one option without modifying selected o
   });
   const second = usage({
     id: 13,
-    nom: ' ALIMENTATION DES FONTAINES PUBLIQUES D\u2019ORNEMENT \u2013 CAS GENERAL\u00a0',
-    descriptionCrise: 'Interdit sauf pour l\u02bceau recyclee \u2014 circuit\r\nferme',
+    nom: ' ALIMENTATION DES FONTAINES PUBLIQUES D\u2019ORNEMENT \u2013 CAS GENERAL\u00A0',
+    descriptionCrise: 'Interdit sauf pour l\u02BCeau recyclee \u2014 circuit\r\nferme',
   });
   const selected = Object.freeze([Object.freeze(first), Object.freeze(second)]);
   const options = getRestrictionUsageOptions(selected, [usage({ ...second, id: 99 })]);
@@ -149,7 +149,7 @@ test('definition equivalence normalizes every instruction but keeps all public a
 });
 
 test('typographic equivalence handles Unicode forms but never removes or rewrites words', () => {
-  assert.equal(haveEquivalentRestrictionUsageDefinition(usage({ nom: 'Fontaines 47' }), usage({ nom: '\uff26ontaines \uff14\uff17' })), true);
+  assert.equal(haveEquivalentRestrictionUsageDefinition(usage({ nom: 'Fontaines 47' }), usage({ nom: '\uFF26ontaines \uFF14\uFF17' })), true);
   assert.equal(haveEquivalentRestrictionUsageDefinition(usage({ descriptionCrise: 'Interdit y compris le remplissage' }), usage({ descriptionCrise: 'Interdit y compris remplissage' })), false);
   assert.equal(haveEquivalentRestrictionUsageDefinition(usage({ descriptionCrise: 'Limite a 10 %' }), usage({ descriptionCrise: 'Limite a 20 %' })), false);
 });

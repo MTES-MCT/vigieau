@@ -501,7 +501,6 @@ describe('Restriction publication errors with mocked APIs', () => {
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').should('have.length', 17);
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').should('contain.text', '17/17');
     cy.get('#arrete-restriction-zone-0').scrollIntoView();
-    cy.screenshot('usage-reset-confirmed-zone-desktop', { capture: 'viewport' });
     cy.get('[data-cy=ArreteRestrictionFormPublishBtn]').click();
     cy.wait('@saveDraft');
     cy.then(() => {
