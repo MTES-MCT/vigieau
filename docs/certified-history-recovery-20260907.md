@@ -7,7 +7,7 @@ de certification est identifiee ; les resultats corriges n'ont pas encore ete
 recalcules ni certifies. Aucune ecriture de donnees de production, activation du
 rattrapage, creation de base cloud ou suspension des ecritures admin n'a ete
 effectuee pour cette investigation. Les alertes sont traitees separement dans
-[production-alerts-20260907.md](production-alerts-20260907.md).
+[production-monitoring.md](production-monitoring.md).
 
 L'API publique sert le courant du 7 septembre avec 4 946 dates disponibles et
 trois instances pretes. La plage du 11 juillet au 31 aout, soit 52 dates, est

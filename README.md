@@ -70,6 +70,12 @@ Quand `SENTRY_DSN` est renseigné :
 - `backend` et `backend-admin` utilisent `SentryModule.forRoot()` et `SentryGlobalFilter` ;
 - les frontends Nuxt initialisent Sentry côté client avec `@sentry/vue`.
 
+Les builds frontend conservent les sourcemaps dans `.sentry-sourcemaps/`, hors du
+répertoire public `.output/public`. Leur téléversement dans Sentry n'est pas
+automatisé : utiliser les fichiers de l'image réellement déployée et la même
+release que le build (`SENTRY_RELEASE`, sinon `SOURCE_VERSION` sur Scalingo),
+jamais les fichiers d'un autre build local. Ne pas publier ce répertoire sur le site.
+
 ## S3 local avec MinIO
 
 MinIO est initialisé automatiquement au démarrage par le service `minio-init` :

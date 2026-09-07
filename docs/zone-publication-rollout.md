@@ -373,12 +373,11 @@ n'effectue volontairement aucune écriture.
 
 ## Déploiement preprod
 
-1. Attendre tous les jobs CI verts sur le SHA exact à déployer. Tant que le
-   workflow `production-smoke.yml` n'est pas fusionné sur la branche par défaut
-   `master`, son cron horaire ne s'exécute pas. Un lancement manuel depuis
-   `master` valide une promotion ponctuelle mais ne remplace jamais cette
-   condition : l'intervention n'est pas considérée terminée tant que le workflow
-   n'est pas présent sur `master` et qu'un premier cron planifié n'a pas réussi.
+1. Attendre tous les jobs CI verts sur le SHA exact à déployer. Les contrôles
+   planifiés appartiennent à `production-incidents.yml` sur `master` ;
+   `production-smoke.yml` reste manuel. Vérifier une collecte complète et les
+   checks métier, puis le passage planifié conformément au
+   [guide de surveillance](production-monitoring.md).
 2. Relever les formations, tailles, variables et le nombre nominal d'instances
    de l'API publique. En preprod, le quorum attendu est `1`.
 3. Obtenir un gel réel avec la release actuellement en place : scaler le `web`

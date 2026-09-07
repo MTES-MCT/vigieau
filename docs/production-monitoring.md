@@ -21,11 +21,8 @@ Les tests unitaires du collecteur et du transport sont obligatoires dans la CI
 du code (`scripts/*.test.mjs`), pas dans la collecte planifiee : un test local
 ne doit pas empecher l'observation reelle de la production.
 
-Le workflow historique `production-smoke.yml` reste la verification manuelle
-stricte. Son ancienne planification est retiree apres validation du relais et
-de la notification reelle le 7 septembre 2026 ; `production-incidents.yml` est
-l'unique proprietaire des controles planifies. Voir les preuves dans
-[le compte rendu de bascule](production-alerts-20260907.md#delivery-verification).
+Le workflow `production-smoke.yml` reste la verification manuelle stricte.
+`production-incidents.yml` est l'unique proprietaire des controles planifies.
 
 ## Cycle d'incident
 
@@ -71,7 +68,7 @@ une cause, mais leur retablissement exige les deux smokes reussis. Les autres
 echecs d'export et les controles admin restent independants. Aucune reponse brute
 ni secret n'est publie dans une issue ou un check.
 
-## Validation et bascule
+## Validation
 
 ```sh
 node --test scripts/production-incidents.test.mjs scripts/smoke-http.test.mjs
@@ -86,7 +83,7 @@ drapeau, les ecritures sont refusees hors d'un workflow planifie/manuel sur
 des scripts existants ; aucune date certifiee n'est ignoree. Chaque smoke profond
 est borne a cinq minutes : un timeout est une collecte incomplete, jamais un succes.
 
-Avant suppression de l'ancienne planification : verifier un run complet, les
+Apres toute modification du collecteur : verifier un run complet, les
 checks rouges/verts, les tests du cycle ouverture/retablissement avec API simulee,
 la notification GitHub du veritable incident et l'absence de doublon au second
 passage. La livraison par
