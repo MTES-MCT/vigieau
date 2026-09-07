@@ -7,14 +7,14 @@ import { useContextStore } from '~/stores/context';
 const runTimeConfig = useRuntimeConfig().public;
 const authStore = useAuthStore();
 const contextStore = useContextStore();
-const serviceTitle = <string>runTimeConfig.appName;
+const serviceTitle = runTimeConfig.appName as string;
 const logoText = ['République', 'Française'];
 const modalSchemeOpened = ref(false);
 const schemeFormRef = ref(null);
-const { theme, scheme, setScheme } = <any>useScheme();
+const { theme, scheme, setScheme } = useScheme() as any;
 const accountOpened = ref(false);
 const route = useRoute();
-const showAlerts = route.path !== '/connexion' && route.path !== '/';
+const showAlerts = computed(() => route.path !== '/connexion' && route.path !== '/');
 const quickLinks: Ref<any[]> = ref([]);
 const navItems: Ref<any[]> = ref([]);
 
@@ -85,7 +85,7 @@ const loadQuickLinks = async () => {
           if (!buttons || !menu || !menuWidth) {
             return;
           }
-          menu.style['right'] = document.body.clientWidth - buttons.getBoundingClientRect().right + menuWidth + 'px';
+          menu.style.right = document.body.clientWidth - buttons.getBoundingClientRect().right + menuWidth + 'px';
         });
       },
     });
@@ -229,7 +229,7 @@ watch(
   <div v-show="accountOpened" id="account-menu-list" class="fr-header__menu-list-link">
     <div class="fr-menu">
       <ul class="fr-menu__list">
-        <template v-for="action of accountOptions(true)">
+        <template v-for="action of accountOptions(true)" :key="action.text">
           <li>
             <a
               class="fr-nav__link"

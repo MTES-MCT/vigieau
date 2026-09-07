@@ -3,14 +3,17 @@ import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import type { Restriction } from '~/dto/restriction.dto';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
-import type { Ref } from 'vue';
+import { type Ref, useId } from 'vue';
 import type { UsageArreteCadre } from '~/dto/usage_arrete_cadre.dto';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { Parametres } from '~/dto/parametres.dto';
 import {
   canReuseRestrictionUsages,
   concernsAnyWaterType,
+  getRestrictionUsageOptions,
+  haveSameRestrictionUsageDefinition,
   type RestrictionWaterType,
+  setRestrictionUsageSelected,
 } from '~/utils/restriction-usage';
 
 const props = defineProps<{
@@ -78,8 +81,10 @@ const typesToShow = computed<RestrictionWaterType[]>(() => {
     return ['AEP'];
   }
 });
-const usagesSelected: Ref<string[]> = ref(props.restriction.usages.map((u) => u.nom));
-const allUsages: Ref<any[]> = ref([]);
+const allUsages: Ref<UsageArreteCadre[]> = ref([]);
+const checkboxPrefix = useId();
+const checkboxIds = new WeakMap<UsageArreteCadre, string>();
+let nextCheckboxId = 0;
 const utils = useUtils();
 
 const v$ = useVuelidate(rules, props.restriction);
@@ -106,36 +111,39 @@ const expandedId = ref();
 
 const accordionTitle = computed(() => {
   const allUsagesLength = props.restriction.niveauGravite ?
-    allUsages.value.filter((u) => getNiveauGravite(u) !== null && getNiveauGravite(u) !== '').length :
+    allUsages.value.filter((u) => isUsageSelected(u) || (getNiveauGravite(u) !== null && getNiveauGravite(u) !== '')).length :
     allUsages.value.length;
-  return `Afficher les ${props.restriction.usages.length}/${allUsagesLength} usages`;
+  const selectedUsagesLength = allUsages.value.filter(isUsageSelected).length;
+  return `Afficher les ${selectedUsagesLength}/${allUsagesLength} usages`;
 });
 
 const modalOpened = ref(false);
 const modalTitle = ref('');
-const usageNameToEmit = ref();
+const usageToEmit = ref<UsageArreteCadre>();
 const modalActions = ref([
   {
-    label: 'Appliquer à toutes les zones',
+    label: 'Appliquer seulement à cette zone',
     onclick: () => {
-      emit('applyToAllRestrictions', usageNameToEmit.value);
       utils.closeModal(modalOpened);
     },
   },
   {
-    label: 'Appliquer seulement à cette zone',
+    label: 'Appliquer à toutes les zones',
     secondary: true,
     onclick: () => {
+      emit('applyToAllRestrictions', usageToEmit.value);
       utils.closeModal(modalOpened);
     },
   },
 ]);
 
-const onChange = ({ nom, checked }: { nom: string; checked: boolean }) => {
-  usagesSelected.value = checked ? [...usagesSelected.value, nom] : usagesSelected.value.filter((val) => val !== nom);
-  props.restriction.usages = allUsages.value.filter((u) => usagesSelected.value.includes(u.nom));
+const isUsageSelected = (usage: UsageArreteCadre) =>
+  props.restriction.usages.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage));
+
+const onChange = ({ usage, checked }: { usage: UsageArreteCadre; checked: boolean }) => {
+  props.restriction.usages = setRestrictionUsageSelected(props.restriction.usages, usage, checked);
   if (!checked && props.multipleZones) {
-    usageNameToEmit.value = nom;
+    usageToEmit.value = usage;
     modalTitle.value = `Souhaitez-vous ${checked ? 'cocher' : 'décocher'} cet usage sur toutes les zones d’alertes de même ressource ?`;
     modalOpened.value = true;
   }
@@ -157,40 +165,18 @@ const getNiveauGravite = (usageArreteCadre: UsageArreteCadre, niveauGravite?: st
 };
 
 const computeAllUsages = () => {
-  let restrictionUsages =
-    props.restriction.usages.concat(
-      props.arreteRestriction.restrictions
-        .filter((restriction) =>
-          canReuseRestrictionUsages(
-            restriction,
-            props.restriction.id,
-            props.arreteCadre?.id,
-          ),
-        )
-        .map(r => r.usages
-          .filter(u => !props.restriction.usages.some(ru => ru.nom === u.nom))
-          .map((u) => ({ ...u, id: null })))
-        .flat(),
-    ).filter((value, index, self) =>
-        index === self.findIndex((u) => (
-          u.nom === value.nom && u.nom === value.nom
-        )),
-    );
-  restrictionUsages = JSON.parse(JSON.stringify(restrictionUsages));
-  if (!props.arreteCadre) {
-    allUsages.value = restrictionUsages;
-  } else {
-    let usagesAc = props.arreteCadre.usages;
-    usagesAc = usagesAc.filter((value, index, self) =>
-        index === self.findIndex((t) => (
-          t.nom === value.nom
-        )),
-    );
-    allUsages.value = restrictionUsages.concat(usagesAc
-      .filter((u) => !restrictionUsages.some(ru => ru.nom === u.nom))
-      .map((u) => ({ ...u, id: null })),
-    ).filter(u => concernsAnyWaterType(u, typesToShow.value));
-  }
+  const reusableUsages = props.arreteRestriction.restrictions
+    .filter((restriction) =>
+      canReuseRestrictionUsages(
+        restriction,
+        props.restriction.id,
+        props.arreteCadre?.id,
+      ),
+    )
+    .flatMap((restriction) => restriction.usages);
+  const candidates = reusableUsages.concat(props.arreteCadre?.usages ?? [])
+    .filter((usage) => concernsAnyWaterType(usage, typesToShow.value));
+  allUsages.value = getRestrictionUsageOptions(props.restriction.usages, candidates);
   allUsages.value = allUsages.value.sort((a, b) => {
     if (a.nom < b.nom) {
       return -1;
@@ -200,17 +186,34 @@ const computeAllUsages = () => {
     }
     return 0;
   });
-  allUsages.value = JSON.parse(JSON.stringify(allUsages.value));
-  filterUsages();
 };
 
-const filterUsages = () => {
-  props.restriction.usages = props.restriction.usages.filter(u => getNiveauGravite(u) !== null && getNiveauGravite(u) !== '');
-  usagesSelected.value = props.restriction.usages.map((u) => u.nom);
+const getUsageCheckboxId = (usage: UsageArreteCadre) => {
+  if (!checkboxIds.has(usage)) {
+    checkboxIds.set(usage, `${checkboxPrefix}-usage-${nextCheckboxId++}`);
+  }
+  return checkboxIds.get(usage);
 };
 
-const getUsageCheckboxId = (usage: UsageArreteCadre) =>
-  `${props.restriction.zoneAlerte?.id ?? ''}${props.restriction.nomGroupementAep ?? ''}${usage.nom}`;
+const getUsageVariantLabel = (usage: UsageArreteCadre) => {
+  const variants = allUsages.value.filter((candidate) => candidate.nom === usage.nom);
+  if (variants.length < 2) {
+    return '';
+  }
+  const profiles = [
+    usage.concerneParticulier && 'Particuliers',
+    usage.concerneEntreprise && 'Entreprises',
+    usage.concerneCollectivite && 'Collectivités',
+    usage.concerneExploitation && 'Exploitations agricoles',
+  ].filter(Boolean).join(', ');
+  const resources = [
+    usage.concerneEsu && 'eaux superficielles',
+    usage.concerneEso && 'eaux souterraines',
+    usage.concerneAep && 'eau potable',
+  ].filter(Boolean).join(', ');
+  const crisisLabel = usage.descriptionCrise || 'sans consigne de crise';
+  return `Variante ${variants.indexOf(usage) + 1}/${variants.length} ; ${profiles} ; ${resources} ; crise : ${crisisLabel}`;
+};
 
 computeAllUsages();
 
@@ -219,19 +222,23 @@ defineExpose({
 });
 
 watch(() => props.restriction.usages, () => {
-  usagesSelected.value = props.restriction.usages.map((u) => u.nom);
+  props.restriction.usages.forEach((usage) => {
+    if (!allUsages.value.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage))) {
+      allUsages.value.push(usage);
+    }
+  });
 });
 
 watch(() => props.restriction.niveauGravite, (newValue, oldValue) => {
-  const selectedUsage = allUsages.value.filter(usage => {
-    return usagesSelected.value.includes(usage.nom) && getNiveauGravite(usage) !== null && getNiveauGravite(usage) !== '';
-  }).map(u => u.nom);
+  let selectedUsages = props.restriction.usages.filter((usage) => getNiveauGravite(usage) !== null && getNiveauGravite(usage) !== '');
   const oldUsagesDisabledEnabled = allUsages.value.filter(usage => {
     return (getNiveauGravite(usage, oldValue ? oldValue : 'new') === null || getNiveauGravite(usage, oldValue ? oldValue : 'new') === '') &&
       getNiveauGravite(usage) !== null && getNiveauGravite(usage) !== '';
-  }).map(u => u.nom);
-  usagesSelected.value = [...new Set([selectedUsage, oldUsagesDisabledEnabled].flat())];
-  props.restriction.usages = allUsages.value.filter((u) => usagesSelected.value.includes(u.nom));
+  });
+  oldUsagesDisabledEnabled.forEach((usage) => {
+    selectedUsages = setRestrictionUsageSelected(selectedUsages, usage, true);
+  });
+  props.restriction.usages = selectedUsages;
 });
 </script>
 
@@ -273,14 +280,17 @@ watch(() => props.restriction.niveauGravite, (newValue, oldValue) => {
             <div v-for="usageArreteCadre in allUsages" :key="getUsageCheckboxId(usageArreteCadre)">
               <DsfrCheckbox
                 :id="getUsageCheckboxId(usageArreteCadre)"
-                :name="usageArreteCadre.nom"
-                :model-value="usagesSelected.includes(usageArreteCadre.nom)"
+                :name="getUsageCheckboxId(usageArreteCadre)"
+                :model-value="isUsageSelected(usageArreteCadre)"
                 :small="false"
-                :disabled="getNiveauGravite(usageArreteCadre) === null || getNiveauGravite(usageArreteCadre) === ''"
-                @update:model-value="onChange({ nom: usageArreteCadre.nom, checked: $event })"
+                :disabled="!isUsageSelected(usageArreteCadre) && (getNiveauGravite(usageArreteCadre) === null || getNiveauGravite(usageArreteCadre) === '')"
+                @update:model-value="onChange({ usage: usageArreteCadre, checked: $event })"
               >
                 <template #label>
                   <b>{{ usageArreteCadre.nom }}</b>
+                  <div v-if="getUsageVariantLabel(usageArreteCadre)" class="fr-text--sm fr-mb-1w">
+                    {{ getUsageVariantLabel(usageArreteCadre) }}
+                  </div>
                   <div class="full-width">
                     {{ getNiveauGravite(usageArreteCadre) }}
                   </div>
