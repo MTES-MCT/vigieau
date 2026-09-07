@@ -109,6 +109,14 @@ export function advanceIncident(previous, item, { now, observationId, remind = t
       ? { ...previous, recoveryCount: 0, lastObservationId: observationId } : null;
   }
   if (!previous && item.status === "success") return null;
+  if (previous?.status === "recovered" && item.status === "success") return null;
+  if (previous?.status === "open" && item.status === "failure" &&
+      previous.recoveryCount === 0 && !previous.pendingTransition &&
+      !(previous.severity === "warning" && item.severity === "critical") &&
+      (!remind || now.getTime() - Date.parse(previous.lastNotificationAt) < 86_400_000)) {
+    // Even editing an issue body can resurface its notification thread.
+    return null;
+  }
   const stamp = now.toISOString();
   const latestDetail = String(item.detail || "").replace(/[\r\n]/g, " ").slice(0, 500);
   if (!previous) return {
@@ -150,9 +158,9 @@ export function incidentBody(state, runUrl) {
     `Impact : ${history ? "historique certifie ou export incomplet ; les services courants sont controles separement" : "le contrat de production indique ci-dessous n'est plus garanti"}.\n\n` +
     `Dernier diagnostic : ${detail}\n\n` +
     `Action : consulter le [guide de diagnostic et de retablissement](https://github.com/MTES-MCT/vigieau/blob/master/docs/${runbook}).\n\n` +
-    `Premiere observation : ${state.firstSeenAt}. Derniere observation : ${state.lastSeenAt}.\n\n` +
+    `Premiere observation : ${state.firstSeenAt}. Derniere observation persistee : ${state.lastSeenAt}.\n\n` +
     `Cause : \`${state.key}\`. Retablissement : deux controles complets consecutifs reussis.\n\n` +
-    `[Derniere collecte et controles detailles](${runUrl})\n\n` +
+    `[Collecte de cette transition](${runUrl}) ; [dernieres collectes et checks de production](https://github.com/MTES-MCT/vigieau/actions/workflows/production-incidents.yml).\n\n` +
     `Une fermeture manuelle ne constitue pas une preuve de retablissement.\n\n` +
     `<!-- ${MARKER}\n${JSON.stringify(state)}\n-->`;
 }

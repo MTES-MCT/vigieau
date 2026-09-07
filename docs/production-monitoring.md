@@ -31,7 +31,18 @@ serialise les collecteurs, y compris les executions manuelles.
 
 L'issue est assignee a `sghribi`. L'ouverture, l'aggravation, le retablissement,
 un nouvel episode et au plus un rappel quotidien produisent une notification.
-Un echec identique ne produit pas de commentaire a chaque collecte. Les retours
+Un echec persistant de meme severite ne produit aucune ecriture sur l'issue avant
+le rappel quotidien : ni commentaire, ni modification de corps, titre ou etat.
+Les modifications de corps peuvent elles aussi reactiver les notifications GitHub.
+Les diagnostics courants restent dans les checks et les runs, accessibles par le
+lien permanent de l'issue. La date de derniere observation persistee reste donc
+figee entre deux changements significatifs. Les succes d'une issue deja retablie
+ne la modifient pas non plus.
+
+La premiere observation de retablissement et toute interruption de confirmation
+sont persistees pour garantir deux succes consecutifs ; ces changements de corps
+peuvent reactiver le fil, mais aucun commentaire de retablissement n'est envoye
+avant la seconde confirmation. Les retours
 reseau ambigus apres creation sont reconcilies par marqueur avant toute reprise.
 Les transitions de commentaire sont persistees avant l'envoi puis acquittees.
 
