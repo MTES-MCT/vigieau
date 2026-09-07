@@ -1,6 +1,4 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
-import { HttpService } from '@nestjs/axios';
-import { firstValueFrom } from 'rxjs';
 import { DepartementsService } from '../departements/departements.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -8,7 +6,8 @@ import { IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { Statistic } from '@shared/entities/statistic.entity';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { VigieauLogger } from '../logger/vigieau.logger';
-import { ConfigService } from '@nestjs/config';
+import { MatomoStatisticsClient } from './matomo-statistics.client';
+import { MatomoStatisticsRunService } from './matomo-statistics-run.service';
 
 @Injectable()
 export class StatisticsService {
@@ -20,11 +19,11 @@ export class StatisticsService {
   constructor(
     @InjectRepository(Statistic)
     private readonly statisticRepository: Repository<Statistic>,
-    private readonly httpService: HttpService,
+    private readonly matomoClient: MatomoStatisticsClient,
     private readonly departementsService: DepartementsService,
     @Inject(forwardRef(() => SubscriptionsService))
     private readonly subscriptionsService: SubscriptionsService,
-    private readonly configService: ConfigService,
+    private readonly matomoRun: MatomoStatisticsRunService,
   ) {}
 
   /**
@@ -46,11 +45,17 @@ export class StatisticsService {
         date: MoreThanOrEqual(this.releaseDate),
       },
       order: {
-        date: 'ASC',
+        date: 'DESC',
       },
+      take: 30,
     });
 
-    this.statistics = this.aggregateStatistics(statistics.slice(-30));
+    this.statistics = this.aggregateStatistics(statistics.reverse());
+  }
+
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async refreshStatistics(): Promise<void> {
+    await this.loadStatistics();
   }
 
   /**
@@ -119,9 +124,13 @@ export class StatisticsService {
    */
   @Cron(CronExpression.EVERY_3_HOURS)
   async computeStatistics(): Promise<void> {
+    await this.matomoRun.run(this.matomoClient.configurationFingerprint(), () =>
+      this.collectStatistics(),
+    );
+  }
+
+  private async collectStatistics(): Promise<void> {
     this.logger.log('COMPUTE STATISTICS');
-    const matomoUrl = `${this.configService.get('MATOMO_URL')}/?module=API&token_auth=${this.configService.get('MATOMO_API_KEY')}&format=JSON&idSite=${this.configService.get('MATOMO_ID_SITE')}&period=day`;
-    const oldMatomoUrl = `${this.configService.get('OLD_MATOMO_URL')}/?module=API&token_auth=${this.configService.get('OLD_MATOMO_API_KEY')}&format=JSON&idSite=${this.configService.get('OLD_MATOMO_ID_SITE')}&period=day`;
     const lastStat = await this.statisticRepository.findOne({
       where: { id: Not(IsNull()) },
       order: { date: 'DESC' },
@@ -129,7 +138,7 @@ export class StatisticsService {
     const lastStatDate = lastStat?.date
       ? new Date(lastStat?.date)
       : new Date(this.releaseDate);
-    const matomoDate = `date=${this.generateDateString(lastStatDate)},today`;
+    const matomoDate = `${this.generateDateString(lastStatDate)},${this.generateDateString(new Date())}`;
     const [
       visitsByDay,
       oldVisitsByDay,
@@ -144,65 +153,75 @@ export class StatisticsService {
       departementRepartitionByDay,
       oldDepartementRepartitionByDay,
     ] = await Promise.all([
-      firstValueFrom(
-        this.httpService.get(
-          `${matomoUrl}&method=VisitsSummary.getVisits&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'current',
+        'VisitsSummary.getVisits',
+        matomoDate,
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${oldMatomoUrl}&method=VisitsSummary.getVisits&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'legacy',
+        'VisitsSummary.getVisits',
+        matomoDate,
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${matomoUrl}&method=Events.getActionFromCategoryId&idSubtable=1&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'current',
+        'Events.getActionFromCategoryId',
+        matomoDate,
+        '1',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${oldMatomoUrl}&method=Events.getActionFromCategoryId&idSubtable=1&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'legacy',
+        'Events.getActionFromCategoryId',
+        matomoDate,
+        '1',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${matomoUrl}&method=Events.getActionFromCategoryId&idSubtable=2&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'current',
+        'Events.getActionFromCategoryId',
+        matomoDate,
+        '2',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${oldMatomoUrl}&method=Events.getActionFromCategoryId&idSubtable=2&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'legacy',
+        'Events.getActionFromCategoryId',
+        matomoDate,
+        '2',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${matomoUrl}&method=Events.getActionFromCategoryId&idSubtable=3&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'current',
+        'Events.getActionFromCategoryId',
+        matomoDate,
+        '3',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${oldMatomoUrl}&method=Events.getActionFromCategoryId&idSubtable=3&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'legacy',
+        'Events.getActionFromCategoryId',
+        matomoDate,
+        '3',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${matomoUrl}&method=Events.getNameFromActionId&idSubtable=1&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'current',
+        'Events.getNameFromActionId',
+        matomoDate,
+        '1',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${oldMatomoUrl}&method=Events.getNameFromActionId&idSubtable=1&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'legacy',
+        'Events.getNameFromActionId',
+        matomoDate,
+        '1',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${matomoUrl}&method=Events.getNameFromActionId&idSubtable=2&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'current',
+        'Events.getNameFromActionId',
+        matomoDate,
+        '2',
       ),
-      firstValueFrom(
-        this.httpService.get(
-          `${oldMatomoUrl}&method=Events.getNameFromActionId&idSubtable=2&${matomoDate}`,
-        ),
+      this.matomoClient.getReport(
+        'legacy',
+        'Events.getNameFromActionId',
+        matomoDate,
+        '2',
       ),
     ]);
 
@@ -271,8 +290,9 @@ export class StatisticsService {
       };
       if (profileRepartitionByDay.data[day]) {
         for (const profile in profileRepartitionTmp) {
-          // @ts-ignore
-          if (Object.hasOwn(profileRepartitionTmp, profile)) {
+          if (
+            Object.prototype.hasOwnProperty.call(profileRepartitionTmp, profile)
+          ) {
             const event = profileRepartitionByDay.data[day].find(
               (matomoEvent) => matomoEvent.label === profile,
             );
@@ -283,8 +303,9 @@ export class StatisticsService {
 
       if (oldProfileRepartitionByDay.data[day]) {
         for (const profile in profileRepartitionTmp) {
-          // @ts-ignore
-          if (Object.hasOwn(profileRepartitionTmp, profile)) {
+          if (
+            Object.prototype.hasOwnProperty.call(profileRepartitionTmp, profile)
+          ) {
             const event = oldProfileRepartitionByDay.data[day].find(
               (matomoEvent) => matomoEvent.label === profile,
             );
