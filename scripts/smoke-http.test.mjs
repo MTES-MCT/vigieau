@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { smokeFetch } from "./smoke-http.mjs";
 
@@ -248,48 +247,109 @@ test("Retry-After beyond the total budget returns the last response untouched", 
   }
 });
 
-test("Retry-After within the budget is respected before retrying", async (t) => {
-  t.mock.method(console, "warn", () => {});
-  let attempts = 0;
-  const startedAt = performance.now();
-  const response = await smokeFetch(
-    url,
-    {},
-    {
-      timeoutMs: 5_000,
-      retryDelayMs: 0,
-      fetchImpl: async () => {
-        attempts += 1;
-        return attempts === 1
-          ? new Response(null, { status: 429, headers: { "retry-after": "1" } })
-          : new Response("recovered");
+test(
+  "Retry-After within the budget is respected before retrying",
+  { timeout: 10_000 },
+  async (t) => {
+    t.mock.method(console, "warn", () => {});
+    const deadline = new AbortController();
+    t.mock.method(AbortSignal, "timeout", () => deadline.signal);
+    const realNow = performance.now.bind(performance);
+    t.mock.method(performance, "now", () => 0);
+    let attempts = 0;
+    const startedAt = realNow();
+    const response = await smokeFetch(
+      url,
+      {},
+      {
+        timeoutMs: 5_000,
+        retryDelayMs: 0,
+        fetchImpl: async () => {
+          attempts += 1;
+          return attempts === 1
+            ? new Response(null, {
+                status: 429,
+                headers: { "retry-after": "1" },
+              })
+            : new Response("recovered");
+        },
       },
-    },
-  );
-  assert.equal(attempts, 2);
-  assert.ok(performance.now() - startedAt >= 900);
-  assert.equal(await response.text(), "recovered");
-});
+    );
+    assert.equal(attempts, 2);
+    assert.ok(realNow() - startedAt >= 900);
+    assert.equal(await response.text(), "recovered");
+  },
+);
 
-test("the total timeout aborts a hanging connection without resetting the budget", async (t) => {
-  let attempts = 0;
-  const baseUrl = await localServer(t, () => {
-    attempts += 1;
-  });
-  await assert.rejects(smokeFetch(baseUrl, {}, { timeoutMs: 75 }), {
-    name: "TimeoutError",
-  });
-  assert.equal(attempts, 1);
-});
+test(
+  "the total timeout aborts a hanging retry without resetting the budget",
+  { timeout: 10_000 },
+  async (t) => {
+    t.mock.method(console, "warn", () => {});
+    const deadline = new AbortController();
+    const timeout = t.mock.method(AbortSignal, "timeout", (timeoutMs) => {
+      assert.equal(timeoutMs, 75);
+      return deadline.signal;
+    });
+    let elapsedMs = 0;
+    t.mock.method(performance, "now", () => elapsedMs);
+    let attempts = 0;
+    const signals = [];
+    const enteredRetry = Promise.withResolvers();
+    const pending = smokeFetch(
+      url,
+      {},
+      {
+        timeoutMs: 75,
+        retryDelayMs: 0,
+        fetchImpl: async (_input, { signal }) => {
+          attempts += 1;
+          signals.push(signal);
+          if (attempts === 1) {
+            elapsedMs = 20;
+            throw networkFailure();
+          }
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+            enteredRetry.resolve();
+          });
+        },
+      },
+    );
+    await enteredRetry.promise;
+    assert.equal(timeout.mock.callCount(), 1);
+    assert.ok(signals.every((signal) => signal === deadline.signal));
+    elapsedMs = 75;
+    const reason = new DOMException("The operation timed out", "TimeoutError");
+    deadline.abort(reason);
+    await assert.rejects(pending, (error) => error === reason);
+    assert.equal(attempts, 2);
+  },
+);
 
-test("the deadline remains active while the caller reads the response body", async (t) => {
-  const baseUrl = await localServer(t, (_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.write('{"status":');
-  });
-  const response = await smokeFetch(baseUrl, {}, { timeoutMs: 100 });
-  await assert.rejects(response.text(), { name: "TimeoutError" });
-});
+test(
+  "the deadline remains active while the caller reads the response body",
+  { timeout: 10_000 },
+  async (t) => {
+    const deadline = new AbortController();
+    const timeout = t.mock.method(AbortSignal, "timeout", (timeoutMs) => {
+      assert.equal(timeoutMs, 100);
+      return deadline.signal;
+    });
+    const baseUrl = await localServer(t, (_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"status":');
+    });
+    const response = await smokeFetch(baseUrl, {}, { timeoutMs: 100 });
+    const body = response.text();
+    const reason = new DOMException("The operation timed out", "TimeoutError");
+    deadline.abort(reason);
+    await assert.rejects(body, (error) => error === reason);
+    assert.equal(timeout.mock.callCount(), 1);
+  },
+);
 
 test("an already aborted caller signal is preserved and never fetched", async () => {
   const controller = new AbortController();
@@ -312,9 +372,11 @@ test("an already aborted caller signal is preserved and never fetched", async ()
 });
 
 test("caller cancellation during backoff stops further attempts", async (t) => {
-  t.mock.method(console, "warn", () => {});
   const controller = new AbortController();
   const reason = new Error("cancelled by caller");
+  t.mock.method(console, "warn", () => {
+    queueMicrotask(() => controller.abort(reason));
+  });
   let attempts = 0;
   const pending = smokeFetch(
     url,
@@ -326,8 +388,6 @@ test("caller cancellation during backoff stops further attempts", async (t) => {
       },
     },
   );
-  await setImmediate();
-  controller.abort(reason);
   await assert.rejects(pending, (error) => error === reason);
   assert.equal(attempts, 1);
 });

@@ -36,8 +36,6 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Verify incident lifecycle and transport contracts
-        run: node --test scripts/production-incidents.test.mjs scripts/smoke-http.test.mjs
       - name: Collect health, publish explicit checks, persist incidents and notify transitions
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

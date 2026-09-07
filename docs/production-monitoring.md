@@ -17,9 +17,15 @@ les issues et les checks du depot.
   ne signifie jamais que la production est saine. Toute erreur GitHub ou
   execution incomplete fait echouer le collecteur.
 
+Les tests unitaires du collecteur et du transport sont obligatoires dans la CI
+du code (`scripts/*.test.mjs`), pas dans la collecte planifiee : un test local
+ne doit pas empecher l'observation reelle de la production.
+
 Le workflow historique `production-smoke.yml` reste la verification manuelle
-stricte. Son ancienne planification ne doit etre retiree qu'apres validation du
-relais et de la notification reelle.
+stricte. Son ancienne planification est retiree apres validation du relais et
+de la notification reelle le 7 septembre 2026 ; `production-incidents.yml` est
+l'unique proprietaire des controles planifies. Voir les preuves dans
+[le compte rendu de bascule](production-alerts-20260907.md#delivery-verification).
 
 ## Cycle d'incident
 
