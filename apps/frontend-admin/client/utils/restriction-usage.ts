@@ -69,6 +69,29 @@ export const haveSameRestrictionUsageDefinition = (first: RestrictionUsageDefini
   (first.thematique?.id ?? null) === (second.thematique?.id ?? null) &&
   usageDefinitionFields.every((field) => (first[field] ?? null) === (second[field] ?? null));
 
+export const getRestrictionUsageOptions = <T extends RestrictionUsageDefinition>(selected: T[], candidates: T[]): T[] => {
+  const options: T[] = [];
+  selected.forEach((usage) => {
+    if (!options.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage))) {
+      options.push(usage);
+    }
+  });
+  candidates.forEach((usage) => {
+    if (!options.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage))) {
+      options.push({ ...usage, id: null });
+    }
+  });
+  return options;
+};
+
+export const setRestrictionUsageSelected = <T extends RestrictionUsageDefinition>(selected: T[], usage: T, checked: boolean): T[] => {
+  if (!checked) {
+    return selected.filter((candidate) => !haveSameRestrictionUsageDefinition(candidate, usage));
+  }
+  // Keep existing occurrences and persisted IDs instead of rebuilding the selection from options.
+  return selected.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage)) ? selected : [...selected, usage];
+};
+
 export const replaceRestrictionUsageDefinition = <T extends RestrictionUsageDefinition>(
   usages: T[],
   source: RestrictionUsageDefinition,

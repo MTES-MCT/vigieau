@@ -5,6 +5,8 @@ import useVuelidate from '@vuelidate/core';
 import type { Restriction } from '~/dto/restriction.dto';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 import type { Ref } from 'vue';
+import type { UsageArreteCadre } from '~/dto/usage_arrete_cadre.dto';
+import { setRestrictionUsageSelected } from '~/utils/restriction-usage';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -66,13 +68,13 @@ const niveauGraviteOptions = [
   },
 ];
 
-const applyToAllRestrictions = (restriction: Restriction, $event: any) => {
+const applyToAllRestrictions = (restriction: Restriction, usage: UsageArreteCadre) => {
   const restrictions: Restriction[] = getRestrictionsByZoneTypeAndAc(
     restriction.isAep ? 'AEP' : restriction.zoneAlerte.type,
     restriction.arreteCadre?.id,
   );
   restrictions.forEach(r => {
-    r.usages = r.usages.filter(u => u.nom !== $event);
+    r.usages = setRestrictionUsageSelected(r.usages, usage, false);
   });
 };
 
@@ -157,6 +159,8 @@ watch(() => props.arreteRestriction.departement, async () => {
               <div
                 v-for="(r, restrictionIndex) in getRestrictionsByZoneTypeAndAc(zoneType.type, ac.id)"
                 :key="r.id ?? restrictionIndex"
+                :id="`arrete-restriction-zone-${arreteRestriction.restrictions.indexOf(r)}`"
+                tabindex="-1"
                 class="divider"
               >
                 <ArreteRestrictionFormRestriction
