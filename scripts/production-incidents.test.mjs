@@ -58,15 +58,36 @@ function mockGitHub() {
 test("persistent failure opens once and does not repeatedly comment", async () => {
   const mock = mockGitHub();
   await mock.api.reconcile([failure], context(1));
+  const initialBody = mock.issues[0].body;
+  const openingWriteCount = mock.writes.length;
   await mock.api.reconcile([failure], context(2, 0.25));
   await mock.api.reconcile([failure], context(3, 0.5));
   assert.equal(mock.issues.length, 1);
   assert.equal(mock.comments.length, 0);
+  assert.equal(mock.writes.length, openingWriteCount, "Identical failures must not PATCH or POST anything");
+  assert.equal(mock.issues[0].body, initialBody);
+  assert.equal(parseIncident(mock.issues[0]).lastSeenAt, context(1).now.toISOString());
   assert.deepEqual(mock.issues[0].assignees, ["sghribi"]);
   assert.equal(parseIncident(mock.issues[0]).status, "open");
   assert.match(mock.issues[0].body, /Impact :/);
   assert.match(mock.issues[0].body, /Action :/);
   assert.match(mock.issues[0].body, /Clock stale/);
+  assert.match(mock.issues[0].body, /Derniere observation persistee/);
+  assert.match(mock.issues[0].body, /actions\/workflows\/production-incidents.yml/);
+});
+
+test("changing diagnostics alone do not notify a persistent cause before its daily reminder", async () => {
+  const mock = mockGitHub();
+  await mock.api.reconcile([failure], context(1));
+  const openingWriteCount = mock.writes.length;
+  for (const [run, hours] of [[2, 1], [3, 12], [4, 23.99]]) {
+    await mock.api.reconcile([{ ...failure, detail: `Different diagnostic at run ${run}` }], context(run, hours));
+  }
+  assert.equal(mock.writes.length, openingWriteCount);
+  assert.equal(parseIncident(mock.issues[0]).lastObservationId, context(1).observationId);
+  await mock.api.reconcile([failure], context(5, 24));
+  assert.equal(mock.comments.length, 1);
+  assert.match(mock.comments[0].body, /RAPPEL QUOTIDIEN/);
 });
 
 test("two consecutive complete successes notify once and close", async () => {
@@ -75,10 +96,12 @@ test("two consecutive complete successes notify once and close", async () => {
   await mock.api.reconcile([success], context(2, 0.25));
   assert.equal(mock.issues[0].state, "open");
   await mock.api.reconcile([success], context(3, 0.5));
+  const recoveryWriteCount = mock.writes.length;
   await mock.api.reconcile([success], context(4, 0.75));
   assert.equal(mock.issues[0].state, "closed");
   assert.equal(mock.comments.length, 1);
   assert.match(mock.comments[0].body, /RETABLI/);
+  assert.equal(mock.writes.length, recoveryWriteCount, "Already recovered issues must not be updated every poll");
 });
 
 test("unknown and pending observations break recovery sequence without healing", async () => {
@@ -151,9 +174,12 @@ test("manual closure is reopened on failure, not treated as recovery", async () 
   const mock = mockGitHub();
   await mock.api.reconcile([failure], context(1));
   mock.issues[0].state = "closed";
+  const beforeReopening = mock.writes.length;
   await mock.api.reconcile([failure], context(2));
   assert.equal(mock.issues[0].state, "open");
   assert.equal(mock.comments.length, 0);
+  assert.deepEqual(mock.writes.slice(beforeReopening).map(({ method, body }) => ({ method, body })),
+    [{ method: "PATCH", body: { state: "open" } }]);
 });
 
 test("untrusted and corrupt incident metadata fail closed", () => {

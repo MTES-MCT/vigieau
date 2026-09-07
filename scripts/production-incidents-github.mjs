@@ -86,7 +86,12 @@ export class GitHubIncidents {
         existing.state = await this.deliverPending(existing.issue, existing.state, context);
       }
       const next = advanceIncident(existing?.state, item, context);
-      if (!next) continue;
+      if (!next) {
+        if (existing?.issue.state === "closed" && existing.state.status === "open" && item.status === "failure") {
+          await this.request(`/issues/${existing.issue.number}`, "PATCH", { state: "open" });
+        }
+        continue;
+      }
       if (!existing) {
         let issue;
         try {
