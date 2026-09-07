@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { smokeFetch } from "./smoke-http.mjs";
 import {
   DEFAULT_STATISTICS_DEADLINE,
   getStatisticFreshnessPolicy,
@@ -126,14 +127,17 @@ function extractDates(rows, label) {
 }
 
 async function requestJson(url, expectedStatuses = [200]) {
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      "Cache-Control": "no-cache",
-      Connection: "close",
+  const response = await smokeFetch(
+    url,
+    {
+      headers: {
+        Accept: "application/json",
+        "Cache-Control": "no-cache",
+        Connection: "close",
+      },
     },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+    { timeoutMs },
+  );
   const text = await response.text();
   assert.ok(
     expectedStatuses.includes(response.status),

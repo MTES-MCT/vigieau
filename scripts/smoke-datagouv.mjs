@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { smokeFetch } from "./smoke-http.mjs";
 import { inspectZipDates, inspectZipEntries } from "./inspect-zip-dates.mjs";
 
 const datasetUrl =
@@ -75,10 +76,7 @@ for (const [name, value] of [
 }
 
 async function request(url, init = {}) {
-  return fetch(url, {
-    ...init,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  return smokeFetch(url, init, { timeoutMs });
 }
 
 const mapArchiveHealthResponse = await request(

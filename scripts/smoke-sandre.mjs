@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { smokeFetch } from "./smoke-http.mjs";
 import {
   assertSandreHealth,
   parseExpectedSandreModes,
@@ -16,10 +17,11 @@ const expectedDepartmentCount = Number(
 );
 
 async function json(path, expectedStatuses = [200]) {
-  const response = await fetch(`${apiBase}/api/${path}`, {
-    headers: { Accept: "application/json", "Cache-Control": "no-cache" },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const response = await smokeFetch(
+    `${apiBase}/api/${path}`,
+    { headers: { Accept: "application/json", "Cache-Control": "no-cache" } },
+    { timeoutMs },
+  );
   const text = await response.text();
   assert.ok(
     expectedStatuses.includes(response.status),

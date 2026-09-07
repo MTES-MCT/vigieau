@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { smokeFetch } from "./smoke-http.mjs";
 import {
   assertZonePublicationResponse,
   parseExpectedZonePublicationMode,
@@ -49,10 +50,11 @@ async function jsonUrl(url) {
 }
 
 async function jsonUrlResponse(url, expectedStatuses = [200]) {
-  const response = await fetch(url, {
-    headers: { Accept: "application/json", "Cache-Control": "no-cache" },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const response = await smokeFetch(
+    url,
+    { headers: { Accept: "application/json", "Cache-Control": "no-cache" } },
+    { timeoutMs },
+  );
   const body = await response.text();
   assert.ok(
     expectedStatuses.includes(response.status),
@@ -64,10 +66,11 @@ async function jsonUrlResponse(url, expectedStatuses = [200]) {
   };
 }
 
-const frontResponse = await fetch(`${frontBase}/`, {
-  headers: { Accept: "text/html", "Cache-Control": "no-cache" },
-  signal: AbortSignal.timeout(timeoutMs),
-});
+const frontResponse = await smokeFetch(
+  `${frontBase}/`,
+  { headers: { Accept: "text/html", "Cache-Control": "no-cache" } },
+  { timeoutMs },
+);
 assert.equal(frontResponse.status, 200, "The admin front is unavailable");
 assert.match(
   frontResponse.headers.get("content-type") || "",
