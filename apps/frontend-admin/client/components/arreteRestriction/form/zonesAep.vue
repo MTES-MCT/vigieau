@@ -6,6 +6,7 @@ import type { Ref } from 'vue';
 import { Restriction } from '~/dto/restriction.dto';
 import type { Commune } from '~/dto/commune.dto';
 import { useRefDataStore } from '~/stores/refData';
+import { transferRestrictionUsageSelectionState } from '~/utils/restriction-usage';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -110,6 +111,7 @@ const createEditGroupement = async (restriction: Restriction) => {
     zoneKeys.set(restriction, editedZoneKey.value);
     const idx = props.arreteRestriction.restrictions.findIndex((r) => r.isAep && getZoneKey(r) === editedZoneKey.value);
     if (idx >= 0) {
+      transferRestrictionUsageSelectionState(props.arreteRestriction.restrictions[idx], restriction);
       props.arreteRestriction.restrictions[idx] = restriction;
     }
     const idxBis = zonesAep.value.findIndex((r) => r.isAep && getZoneKey(r) === editedZoneKey.value);
