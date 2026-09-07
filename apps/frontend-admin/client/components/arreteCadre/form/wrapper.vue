@@ -147,7 +147,7 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
 
     // Mise à jour des ids des objets nouvellement crées
     props.arreteCadre.id = data.value.id;
-    syncSavedUsageIds(<ArreteCadre>data.value);
+    syncSavedUsageIds(data.value as ArreteCadre);
     componentKey.value++;
 
     shouldPublishAfterSave = props.arreteCadre.statut !== 'a_valider';
@@ -179,7 +179,7 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
 
 const showErrors = (errors: any, title: string | null) => {
   alertStore.addAlert({
-    title: title,
+    title,
     description: errors.filter((e: any) => e.$message).map((e: any) => {
       if (Array.isArray(e.$message)) {
         return e.$message.flat().filter((m: any) => m).join(', ');

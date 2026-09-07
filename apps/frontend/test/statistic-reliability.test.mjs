@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyLightTheme } from '../client/utils/light-theme.ts';
-import { isAreaStatisticSeries, isDepartmentStatisticSeries, isCommuneStatisticData } from '../client/utils/statistic-series.ts';
+import { isAreaStatisticSeries, isCommuneStatisticData, isDepartmentStatisticSeries } from '../client/utils/statistic-series.ts';
 import { createLatestWorkerTask } from '../client/utils/latest-worker-task.ts';
 import { readFile } from 'node:fs/promises';
 
