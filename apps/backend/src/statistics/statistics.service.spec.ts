@@ -1,21 +1,20 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { StatisticsService } from './statistics.service';
-import { HttpService } from '@nestjs/axios';
-import { ConfigService } from '@nestjs/config';
 import { IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Statistic } from '@shared/entities/statistic.entity';
 import { DepartementsService } from '../departements/departements.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
-import { of } from 'rxjs';
+import {
+  MatomoStatisticsClient,
+  MatomoReportError,
+} from './matomo-statistics.client';
+import { MatomoStatisticsRunService } from './matomo-statistics-run.service';
 
 describe('StatisticsService', () => {
   let service: StatisticsService;
   let statisticRepository: Repository<Statistic>;
-  let httpService: HttpService;
-  let departementsService: DepartementsService;
-  let subscriptionsService: SubscriptionsService;
-  let configService: ConfigService;
+  let matomoClient: MatomoStatisticsClient;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -26,9 +25,12 @@ describe('StatisticsService', () => {
           useClass: Repository, // Mock the TypeORM repository
         },
         {
-          provide: HttpService,
+          provide: MatomoStatisticsClient,
           useValue: {
-            get: jest.fn(), // Mock the HTTP requests
+            getReport: jest.fn(),
+            configurationFingerprint: jest
+              .fn()
+              .mockReturnValue('configuration'),
           },
         },
         {
@@ -52,19 +54,9 @@ describe('StatisticsService', () => {
           },
         },
         {
-          provide: ConfigService,
+          provide: MatomoStatisticsRunService,
           useValue: {
-            get: jest.fn((key: string) => {
-              const config = {
-                MATOMO_URL: 'http://matomo-url',
-                MATOMO_API_KEY: 'matomo-api-key',
-                MATOMO_ID_SITE: '1',
-                OLD_MATOMO_URL: 'http://old-matomo-url',
-                OLD_MATOMO_API_KEY: 'old-matomo-api-key',
-                OLD_MATOMO_ID_SITE: '2',
-              };
-              return config[key];
-            }), // Mock the environment variables
+            run: jest.fn((_fingerprint, collect) => collect()),
           },
         },
       ],
@@ -74,12 +66,7 @@ describe('StatisticsService', () => {
     statisticRepository = <Repository<Statistic>>(
       module.get(getRepositoryToken(Statistic))
     );
-    httpService = <HttpService>module.get(HttpService);
-    departementsService = <DepartementsService>module.get(DepartementsService);
-    subscriptionsService = <SubscriptionsService>(
-      module.get(SubscriptionsService)
-    );
-    configService = <ConfigService>module.get(ConfigService);
+    matomoClient = module.get(MatomoStatisticsClient);
   });
 
   it('should be defined', () => {
@@ -116,16 +103,16 @@ describe('StatisticsService', () => {
         },
       ];
 
-      // @ts-ignore
       jest
         .spyOn(statisticRepository, 'find')
-        .mockResolvedValueOnce(mockStatistics as any);
+        .mockResolvedValueOnce([...mockStatistics].reverse() as any);
 
       await service.loadStatistics();
 
       expect(statisticRepository.find).toHaveBeenCalledWith({
         where: { date: MoreThanOrEqual('2023-07-11') },
-        order: { date: 'ASC' },
+        order: { date: 'DESC' },
+        take: 30,
       });
       expect(service.findAll()).toEqual({
         subscriptions: 8,
@@ -150,6 +137,15 @@ describe('StatisticsService', () => {
     });
   });
 
+  it('refreshes each local cache from persisted statistics without collecting Matomo', async () => {
+    const load = jest
+      .spyOn(service, 'loadStatistics')
+      .mockResolvedValue(undefined);
+    await service.refreshStatistics();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(matomoClient.getReport).not.toHaveBeenCalled();
+  });
+
   describe('computeStatistics', () => {
     it('should compute and save statistics', async () => {
       const mockLastStat = { date: '2023-07-10' };
@@ -160,19 +156,14 @@ describe('StatisticsService', () => {
         },
       };
 
-      // @ts-ignore
       jest
         .spyOn(statisticRepository, 'findOne')
         .mockResolvedValueOnce(mockLastStat as any);
-      // @ts-ignore
       jest
-        .spyOn(httpService, 'get')
-        .mockImplementation(() => of(mockMatomoData as any));
-      // @ts-ignore
+        .spyOn(matomoClient, 'getReport')
+        .mockResolvedValue(mockMatomoData as any);
       jest.spyOn(statisticRepository, 'upsert').mockResolvedValue({} as any);
-      // @ts-ignore
-      jest.spyOn(statisticRepository, 'update').mockResolvedValue([]);
-      // @ts-ignore
+      jest.spyOn(statisticRepository, 'update').mockResolvedValue({} as any);
       jest.spyOn(statisticRepository, 'find').mockResolvedValue([]);
 
       await service.computeStatistics();
@@ -187,6 +178,34 @@ describe('StatisticsService', () => {
         ['date'],
       );
       expect(statisticRepository.update).not.toHaveBeenCalled();
+    });
+
+    it('does not overwrite valid statistics when only the legacy source fails', async () => {
+      const previous = { subscriptions: 42, statsByDay: [{ visits: 123 }] };
+      (service as any).statistics = previous;
+      jest
+        .spyOn(statisticRepository, 'findOne')
+        .mockResolvedValue({ date: '2026-09-06' } as Statistic);
+      const upsert = jest.spyOn(statisticRepository, 'upsert');
+      const load = jest.spyOn(service, 'loadStatistics');
+      const error = new MatomoReportError(
+        'legacy',
+        'VisitsSummary.getVisits',
+        'authentication',
+        401,
+      );
+      jest
+        .spyOn(matomoClient, 'getReport')
+        .mockImplementation(async (source) => {
+          if (source === 'legacy') throw error;
+          return { data: { '2026-09-06': 12 } };
+        });
+
+      await expect(service.computeStatistics()).rejects.toBe(error);
+
+      expect(upsert).not.toHaveBeenCalled();
+      expect(load).not.toHaveBeenCalled();
+      expect(service.findAll()).toBe(previous);
     });
   });
 

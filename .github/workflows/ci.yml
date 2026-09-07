@@ -158,6 +158,12 @@ jobs:
           src/data/historic-config-schema-repair.postgres.spec.ts
         env:
           STATISTIC_CACHE_ARTIFACT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify Matomo collection coordination against PostgreSQL
+        run: >-
+          npm --prefix apps/backend test -- --runInBand
+          src/statistics/matomo-statistics-run.postgres.spec.ts
+        env:
+          MATOMO_STATISTICS_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Verify statistic boundary recovery against PostgreSQL
         run: >-
           npm --prefix apps/backend-admin test -- --runInBand

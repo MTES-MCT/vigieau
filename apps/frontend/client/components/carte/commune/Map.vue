@@ -6,6 +6,8 @@ import { Ref } from 'vue';
 import api from '../../../api';
 import { useRefDataStore } from '../../../store/refData';
 import { getFrenchMapLocale } from '../../../utils/map-locale';
+import { createLatestWorkerTask } from '../../../utils/latest-worker-task';
+import * as Sentry from '@sentry/vue';
 
 const props = defineProps<{
   embedded: any,
@@ -37,6 +39,24 @@ const router = useRouter();
 const depsSelected = ref([]);
 const expanded = ref(false);
 const loading = ref(false);
+let disposed = false;
+let mapStyleReady = false;
+const computation = createLatestWorkerTask(
+  () => new CommuneWorker(),
+  ({ communeDataReturned, departementData }) => {
+    communeDataComputed.value = communeDataReturned;
+    departementDataComputed.value = departementData;
+    computingCommunes.value = false;
+    showCommunesPonderation();
+    emit('endLoading');
+  },
+  (error) => {
+    computingCommunes.value = false;
+    showError.value = true;
+    emit('endLoading');
+    Sentry.captureException(error, { tags: { action: 'commune_map_computation' } });
+  },
+);
 
 const initialState = [[-7.075195, 41.211722], [11.403809, 51.248163]];
 
@@ -53,12 +73,33 @@ popup.on('open', () => {
   }, 100);
 });
 
-onMounted(async () => {
+async function loadData() {
+  if (loading.value || disposed) {
+    return;
+  }
   loading.value = true;
-  // Load data
-  communeData.value = (await api.getDataDuree()).data.value;
-  loading.value = false;
-});
+  showError.value = false;
+  try {
+    const { data, error } = await api.getDataDuree();
+    if (disposed) {
+      return;
+    }
+    if (error.value || !Array.isArray(data.value)) {
+      throw error.value || new Error('Invalid commune duration response');
+    }
+    communeData.value = data.value;
+  } catch (error) {
+    if (!disposed) {
+      showError.value = true;
+      emit('endLoading');
+      Sentry.captureException(error, { tags: { action: 'load_commune_duration' } });
+    }
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(loadData);
 
 onMounted(() => {
   if (!isMapSupported) {
@@ -93,6 +134,9 @@ onMounted(() => {
   map.value?.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
 
   map.value?.on('load', () => {
+    if (disposed || !map.value) {
+      return;
+    }
     const layers = map.value.getStyle().layers;
     for (let i = 0; i < layers.length; i++) {
       if (layers[i].type === 'symbol') {
@@ -106,6 +150,7 @@ onMounted(() => {
         `https://openmaptiles.data.gouv.fr/data/decoupage-administratif.json`,
     });
     addSourceAndLayerZones();
+    mapStyleReady = true;
     if (communeDataComputed.value) {
       showCommunesPonderation();
     }
@@ -128,16 +173,22 @@ onMounted(() => {
 
   map.value?.on('mouseenter', 'zones-data', () => {
     // Change the cursor style as a UI indicator.
-    map.value.getCanvas().style.cursor = 'pointer';
+    if (map.value) map.value.getCanvas().style.cursor = 'pointer';
   });
 
   map.value?.on('mouseleave', 'zones-data', () => {
-    map.value.getCanvas().style.cursor = '';
+    if (map.value) map.value.getCanvas().style.cursor = '';
   });
 });
 
-onUnmounted(() => {
-  map.value?.remove();
+onBeforeUnmount(() => {
+  disposed = true;
+  mapStyleReady = false;
+  computation.dispose();
+  popup.remove();
+  const previousMap = map.value;
+  map.value = null;
+  previousMap?.remove();
 });
 
 const mapTags: Ref<any[]> = ref([{
@@ -192,10 +243,16 @@ const flyToLocation = (bounds: any) => {
 };
 
 const updateContourFilter = () => {
+  if (!mapStyleReady) {
+    return;
+  }
   map.value?.setFilter('communes-contour', ['all', ['==', 'code', communeSelected.value]]);
 };
 
 const updateDepartementsContourFilter = () => {
+  if (!mapStyleReady) {
+    return;
+  }
   map.value?.setFilter('departements-contour', ['in', 'code', ...depsSelected.value]);
 };
 
@@ -324,7 +381,7 @@ function computeMinMaxPonderation(dateBegin: Moment, dateEnd: Moment) {
 async function computeData() {
   const dateBegin = props.dateBegin ? moment(props.dateBegin, 'YYYY-MM') : null;
   const dateEnd = props.dateEnd ? moment(props.dateEnd, 'YYYY-MM') : null;
-  if (!dateBegin || !dateEnd || !communeData.value) {
+  if (disposed || !dateBegin || !dateEnd || !communeData.value) {
     return;
   }
   emit('beginLoading');
@@ -334,14 +391,12 @@ async function computeData() {
   computeMinMaxPonderation(dateBegin, dateEnd);
 
   computingCommunes.value = true;
+  showError.value = false;
   communeDataComputed.value = [];
   departementDataComputed.value = [];
 
   const communeDataBis = toRaw(communeData.value);
-  const worker = new CommuneWorker();
-
-  // Envoyer les données au Worker
-  worker.postMessage({
+  computation.run({
       communesData: communeDataBis,
       depsSelected: depsSelected.value.map((d: any) => {
         return d;
@@ -350,23 +405,12 @@ async function computeData() {
       dateEnd: dateEnd.format('YYYY-MM-DD'),
     },
   );
-
-  // Écouter les messages du Worker (résultats)
-  worker.onmessage = (e) => {
-    const { communeDataReturned, departementData } = e.data;
-    communeDataComputed.value = JSON.parse(JSON.stringify(communeDataReturned));
-    departementDataComputed.value = JSON.parse(JSON.stringify(departementData));
-
-    computingCommunes.value = false;
-    showCommunesPonderation();
-
-    // Arrêter le Worker pour libérer la mémoire
-    worker.terminate();
-    emit('endLoading');
-  };
 }
 
 function showCommunesPonderation() {
+  if (disposed || !map.value || !mapStyleReady) {
+    return;
+  }
   if (map.value?.getLayer('communes-data')) {
     map.value?.removeLayer('communes-data');
   }
@@ -388,7 +432,7 @@ function showCommunesPonderation() {
     layout: {},
     paint: {
       'fill-outline-color': '#888888',
-      'fill-color': matchCommuneExpression,
+      'fill-color': communeDataComputed.value.length ? matchCommuneExpression : 'rgba(0, 0, 0, 0)',
       'fill-opacity': {
         stops: [[5, 1], [6, 0.9]],
       },
@@ -409,7 +453,7 @@ function showCommunesPonderation() {
     layout: {},
     maxzoom: 8,
     paint: {
-      'fill-color': matchDepartementExpression,
+      'fill-color': departementDataComputed.value.length ? matchDepartementExpression : 'rgba(0, 0, 0, 0)',
       'fill-opacity': {
         stops: [[5, 1], [6, 0.9]],
       },
@@ -445,10 +489,10 @@ function computeArea() {
   }
   if (territoire === 'bassinVersant' && idTerritoire) {
     const bassinVersantDeps = refDataStore.bassinsVersants.find((r: any) => r.id === +idTerritoire)?.departements;
-    deps = refDataStore.departements.filter((d: any) => bassinVersantDeps.some(bvd => bvd.id === d.id));
+    deps = refDataStore.departements.filter((d: any) => bassinVersantDeps?.some(bvd => bvd.id === d.id));
   } else if (territoire === 'region' && idTerritoire) {
     const regionDeps = refDataStore.regions.find((r: any) => r.id === +idTerritoire)?.departements;
-    deps = refDataStore.departements.filter((d: any) => regionDeps.some(rd => rd.id === d.id));
+    deps = refDataStore.departements.filter((d: any) => regionDeps?.some(rd => rd.id === d.id));
   } else if (territoire === 'departement' && idTerritoire) {
     deps = refDataStore.departements.filter((d: any) => d.id === +idTerritoire);
   }
@@ -466,7 +510,7 @@ function computeArea() {
   updateDepartementsContourFilter();
 }
 
-watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
+watch(() => [props.dateBegin, props.dateEnd, props.area, communeData.value], () => {
   computeData();
 }, { immediate: true });
 </script>
@@ -486,6 +530,10 @@ watch(() => [props.dateBegin, props.dateEnd, props.area], () => {
                      type="error"
                      :closeable="false"
           />
+          <DsfrButton class="fr-mt-1w" :disabled="loading || computingCommunes"
+                      @click="communeData ? computeData() : loadData()">
+            Réessayer
+          </DsfrButton>
         </div>
         <div class="map-pre-actions-card fr-p-1w fr-m-1w hide-sm"
              role="group"

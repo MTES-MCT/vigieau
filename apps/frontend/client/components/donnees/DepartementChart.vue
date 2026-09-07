@@ -22,6 +22,8 @@ import moment from 'moment';
 import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
+import { isDepartmentStatisticSeries } from '../../utils/statistic-series';
+import * as Sentry from '@sentry/vue';
 
 
 ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, LineController, TimeScale, ArcElement, Colors, Filler);
@@ -29,7 +31,9 @@ ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale
 const refDataStore = useRefDataStore();
 const loading = ref(false);
 const chartLineData = ref(null);
-const dataDepartement = ref(null);
+const dataDepartement = ref<any[] | null>(null);
+const loadError = ref(false);
+const hasData = computed(() => !loadError.value && (dataDepartement.value?.length ?? 0) > 0);
 const computeDisabled = ref(true);
 const downloadingPng = ref(false);
 const pngDownloadError = ref(false);
@@ -38,7 +42,7 @@ const dateMin = ref('2013-01-01');
 const tmp = new Date();
 tmp.setFullYear(tmp.getFullYear() - 1);
 const currentDate = ref(new Date().toISOString().split('T')[0]);
-const territoire = ref();
+const territoire = ref({ text: 'France entière', value: '' });
 const screenshotZone = ref();
 
 const typesEauOptions = [
@@ -127,23 +131,45 @@ const rules = computed(() => {
 const v$ = useVuelidate(rules, formData);
 
 async function loadData() {
-  await v$.value.$validate();
-  if (v$.value.$error) {
+  if (loading.value) {
     return;
   }
   loading.value = true;
-  const { data } = await api.getDataDepartement(formData.dateDebut, formData.dateFin, formData.area);
-  if (data.value) {
+  try {
+    await v$.value.$validate();
+    if (v$.value.$error) {
+      return;
+    }
+    loadError.value = false;
+    const { data, error } = await api.getDataDepartement(formData.dateDebut, formData.dateFin, formData.area);
+    if (error.value || !isDepartmentStatisticSeries(data.value)) {
+      throw error.value || new Error('Invalid statistic response');
+    }
     dataDepartement.value = data.value;
-    territoire.value = areaOptions.value.find((a: any) => a.value === formData.area);
+    territoire.value = areaOptions.value.find((a: any) => a.value === formData.area) || territoire.value;
     sortData();
+    computeDisabled.value = true;
+  } catch (error) {
+    loadError.value = true;
+    dataDepartement.value = null;
+    chartLineData.value = null;
+    computeDisabled.value = false;
+    Sentry.captureException(error, { tags: { action: 'load_department_statistics' } });
+  } finally {
+    loading.value = false;
   }
-  computeDisabled.value = true;
-  loading.value = false;
 }
 
 function sortData() {
-  loading.value = true;
+  if (!isDepartmentStatisticSeries(dataDepartement.value)) {
+    chartLineData.value = null;
+    if (dataDepartement.value !== null) {
+      loadError.value = true;
+      computeDisabled.value = false;
+    }
+    return;
+  }
+  loadError.value = false;
   chartLineData.value = {
     labels: dataDepartement.value.map((d: any) => d.date),
     datasets: [
@@ -185,7 +211,6 @@ function sortData() {
       },
     ],
   };
-  loading.value = false;
 }
 
 const getNiveauGravite = (departement: any) => {
@@ -241,7 +266,7 @@ const chartLineOptions: ChartOptions = {
 };
 
 async function downloadGraph() {
-  if (downloadingPng.value) {
+  if (downloadingPng.value || loading.value || !hasData.value || !computeDisabled.value) {
     return;
   }
 
@@ -306,6 +331,7 @@ watch(() => refDataStore.departements, () => {
       <div class="fr-col-lg-2 fr-col-md-6 fr-col-12">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'typeEau')">
           <DsfrSelect label="Type d'eau"
+                      :disabled="loading"
                       v-model="formData.typeEau"
                       @update:modelValue="sortData()"
                       :options="typesEauOptions"
@@ -315,6 +341,7 @@ watch(() => refDataStore.departements, () => {
       <div class="fr-col-lg-2 fr-col-md-6 fr-col-12">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'area')">
           <DsfrSelect label="Territoire"
+                      :disabled="loading"
                       v-model="formData.area"
                       @update:modelValue="computeDisabled = false"
                       :options="areaOptions"
@@ -325,6 +352,7 @@ watch(() => refDataStore.departements, () => {
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'dateDebut')">
           <DsfrInput
             id="dateDebut"
+            :disabled="loading"
             v-model="formData.dateDebut"
             @update:modelValue="computeDisabled = false"
             label="Date début"
@@ -341,6 +369,7 @@ watch(() => refDataStore.departements, () => {
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'dateFin')">
           <DsfrInput
             id="dateFin"
+            :disabled="loading"
             v-model="formData.dateFin"
             @update:modelValue="computeDisabled = false"
             label="Date fin"
@@ -354,7 +383,8 @@ watch(() => refDataStore.departements, () => {
         </DsfrInputGroup>
       </div>
       <div data-html2canvas-ignore="true" class="fr-col-lg-2 fr-col-6">
-        <DsfrButton :disabled="computeDisabled"
+        <DsfrButton :disabled="loading || computeDisabled"
+                    :aria-busy="loading ? 'true' : undefined"
                     @click="loadData()">
           Calculer
         </DsfrButton>
@@ -372,17 +402,28 @@ watch(() => refDataStore.departements, () => {
         superficielles et souterraines.
       </DsfrAlert>
     </div>
-    <template v-if="!loading">
-      <Line v-if="chartLineData"
-            id="departement-chart-line"
+    <div v-if="!loading && chartLineData && hasData" class="chart-container">
+      <Line id="departement-chart-line"
             :options="chartLineOptions"
             :data="chartLineData" />
-    </template>
+    </div>
   </div>
-  <template v-if="!loading">
+  <DsfrAlert v-if="loadError"
+             title="Données temporairement indisponibles"
+             type="error"
+             class="fr-my-2w">
+    Le chargement des données a échoué. Veuillez réessayer.
+    <DsfrButton class="fr-mt-2w" :disabled="loading" @click="loadData()">
+      Réessayer
+    </DsfrButton>
+  </DsfrAlert>
+  <p v-else-if="!loading && !hasData" role="status" class="fr-my-2w">
+    Aucune donnée disponible pour cette sélection.
+  </p>
+  <template v-if="!loading && !loadError">
     <div class="text-align-right fr-mt-1w">
       <DsfrButton
-        :disabled="downloadingPng"
+        :disabled="downloadingPng || !hasData || !computeDisabled"
         :aria-busy="downloadingPng ? 'true' : undefined"
         @click="downloadGraph()"
       >
@@ -401,12 +442,13 @@ watch(() => refDataStore.departements, () => {
 
     <DonneesDepartementTable class="fr-mt-4w"
                              :dataDepartement="dataDepartement"
+                             :disabled="!hasData || !computeDisabled"
                              :territoire="territoire?.text"
                              :typeEau="formData.typeEau"
                              :dateDebut="formData.dateDebut"
                              :dateFin="formData.dateFin" />
   </template>
-  <template v-else>
+  <template v-if="loading">
     <div class="fr-grid-row fr-grid-row--center fr-my-2w">
       <Loader :show="true" />
     </div>
@@ -422,8 +464,14 @@ watch(() => refDataStore.departements, () => {
   }
 }
 
-#departement-chart-line {
+.chart-container {
+  position: relative;
+  width: 100%;
+  min-width: 0;
   height: 600px;
-  max-height: 600px;
+
+  :deep(canvas) {
+    max-width: 100%;
+  }
 }
 </style>

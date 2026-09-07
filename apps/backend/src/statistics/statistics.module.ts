@@ -6,6 +6,8 @@ import { DepartementsModule } from '../departements/departements.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Statistic } from '@shared/entities/statistic.entity';
+import { MatomoStatisticsClient } from './matomo-statistics.client';
+import { MatomoStatisticsRunService } from './matomo-statistics-run.service';
 
 @Module({
   imports: [
@@ -15,7 +17,11 @@ import { Statistic } from '@shared/entities/statistic.entity';
     forwardRef(() => SubscriptionsModule),
   ],
   controllers: [StatisticsController],
-  providers: [StatisticsService],
+  providers: [
+    StatisticsService,
+    MatomoStatisticsClient,
+    MatomoStatisticsRunService,
+  ],
   exports: [StatisticsService],
 })
 export class StatisticsModule {}

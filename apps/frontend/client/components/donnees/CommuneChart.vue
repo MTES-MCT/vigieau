@@ -5,6 +5,8 @@ import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
+import { isCommuneStatisticData } from '../../utils/statistic-series';
+import * as Sentry from '@sentry/vue';
 
 const props = defineProps<{
   codeInsee: string,
@@ -19,6 +21,10 @@ const showError = ref(false);
 const router = useRouter();
 const route = useRoute();
 const errorButtons = [
+  {
+    label: 'Réessayer',
+    onClick: () => { void loadData(); },
+  },
   {
     label: 'Page d\'accueil',
     onClick: () => {
@@ -104,32 +110,46 @@ const rules = computed(() => {
 
 const v$ = useVuelidate(rules, formData);
 
-onMounted(async () => {
+async function loadData() {
+  if (loading.value) {
+    return;
+  }
   loading.value = true;
-  const { data, error } = await api.getDataCommune(props.codeInsee);
-  if (data.value) {
+  showError.value = false;
+  try {
+    const { data, error } = await api.getDataCommune(props.codeInsee);
+    if (error.value || !isCommuneStatisticData(data.value)) {
+      throw error.value || new Error('Invalid commune statistic response');
+    }
     communeStats.value = data.value;
     emit('commune', communeStats.value.commune);
-    sortData();
-  } else if (error.value) {
+    await sortData();
+  } catch (error) {
+    communeStats.value = null;
+    restrictionsFiltered.value = [];
     showError.value = true;
+    Sentry.captureException(error, { tags: { action: 'load_commune_statistics' } });
+  } finally {
+    loading.value = false;
   }
-  loading.value = false;
-});
+}
+
+onMounted(loadData);
 
 async function sortData() {
   await v$.value.$validate();
-  if (v$.value.$error) {
+  if (v$.value.$error || !isCommuneStatisticData(communeStats.value)) {
     return;
   }
   restrictionsFiltered.value = communeStats.value.restrictions.filter((r: any) => {
     return moment(r.date, 'YYYY-MM-DD').isSameOrAfter(moment(formData.dateDebut, 'YYYY-MM-DD')) &&
       moment(r.date, 'YYYY-MM-DD').isSameOrBefore(moment(formData.dateFin, 'YYYY-MM-DD'));
   });
+  computeDisabled.value = true;
 }
 
 async function downloadGraph() {
-  if (downloadingPng.value) {
+  if (downloadingPng.value || loading.value || !communeStats.value || !computeDisabled.value) {
     return;
   }
 
@@ -222,7 +242,7 @@ async function downloadGraph() {
 
       <div class="text-align-right fr-mt-1w">
         <DsfrButton
-          :disabled="downloadingPng"
+          :disabled="downloadingPng || !restrictionsFiltered.length || !computeDisabled"
           :aria-busy="downloadingPng ? 'true' : undefined"
           @click="downloadGraph()"
         >
@@ -241,6 +261,7 @@ async function downloadGraph() {
 
       <DonneesCommuneTable class="fr-mt-4w"
                            :dataCommune="restrictionsFiltered"
+                           :disabled="!computeDisabled"
                            :communeNom="communeStats.commune.nom"
                            :dateDebut="formData.dateDebut"
                            :dateFin="formData.dateFin" />
@@ -248,7 +269,7 @@ async function downloadGraph() {
     <template v-else>
       <DsfrErrorPage class="fr-mt-8w"
                      title="Oups, une erreur est survenue"
-                     subtitle="Il semblerait qu'il y ai un problème avec le code INSEE de votre commune."
+                     subtitle="Les données de cette commune ne peuvent pas être chargées pour le moment."
                      description=""
                      help=""
                      :buttons="errorButtons"

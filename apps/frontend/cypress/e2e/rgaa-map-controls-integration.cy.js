@@ -348,6 +348,7 @@ describe('Contrôles MapLibre accessibles dans le DOM rendu', () => {
 
   it('ouvre et utilise le popup de restrictions au clavier sur une couche rendue', () => {
     stubRestrictionMap();
+    cy.intercept('GET', '**/zones/v2?*', { statusCode: 404, body: {} });
     cy.intercept('GET', '**/departements?*', {
       statusCode: 200,
       body: [],
@@ -451,7 +452,7 @@ describe('Contrôles MapLibre accessibles dans le DOM rendu', () => {
     cy.get('.maplibregl-canvas')
       .focus()
       .trigger('keydown', { key: 'Enter' });
-    cy.wait(['@reverseGeocoding', '@communeGeocoding']);
+    cy.wait(['@reverseGeocoding', '@communeGeocoding', '@restrictions']);
     cy.get('.maplibregl-popup[role="dialog"]')
       .should('have.attr', 'aria-label', 'Informations sur le point sélectionné')
       .and('contain.text', 'Zone clavier test');
@@ -466,6 +467,7 @@ describe('Contrôles MapLibre accessibles dans le DOM rendu', () => {
 
     cy.get('.maplibregl-canvas')
       .trigger('keydown', { key: ' ' });
+    cy.wait('@restrictions');
     cy.contains('.maplibregl-popup button', 'Je consulte les restrictions')
       .should('be.focused');
     cy.press(Cypress.Keyboard.Keys.TAB);

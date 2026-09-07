@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import moment from 'moment';
-import { json2csv } from 'json-2-csv';
+import { downloadCsvFile } from '../../utils/csv-download';
+
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
 import { sortByDateDesc } from '../../utils/date-sort';
 
 const props = defineProps<{
   dataCommune: any,
+  disabled?: boolean,
   dateDebut: string,
   dateFin: string,
   communeNom: string,
@@ -13,8 +15,17 @@ const props = defineProps<{
 
 const headers = ['Date', 'Eau potable', 'Eau superficielle', 'Eau souterraine'];
 const rows = ref([]);
+const downloadingCsv = ref(false);
+const csvDownloadError = ref(false);
+const validData = computed(() => Array.isArray(props.dataCommune) && props.dataCommune.every((row: any) => row && typeof row.date === 'string'));
+const canDownload = computed(() => !props.disabled && validData.value && props.dataCommune.length > 0);
 
 async function downloadCsv() {
+  if (!canDownload.value || downloadingCsv.value) {
+    return;
+  }
+  downloadingCsv.value = true;
+  csvDownloadError.value = false;
   const formatData = sortByDateDesc(props.dataCommune)
     .map((stat: any) => {
       return {
@@ -24,22 +35,13 @@ async function downloadCsv() {
         SOU: stat.SOU,
       };
     });
-  const csv = await json2csv(formatData, {
-    expandArrayObjects: true,
-  });
-
-  // Create a CSV file and allow the user to download it
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = window.URL.createObjectURL(blob);
-
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `commune_${props.communeNom}_${props.dateDebut}_${props.dateFin}.csv`;
-  a.click();
+  csvDownloadError.value = !await downloadCsvFile(formatData, `commune_${props.communeNom}_${props.dateDebut}_${props.dateFin}.csv`);
+  downloadingCsv.value = false;
 }
 
 watch(() => [props.dataCommune], () => {
-  if(!props.dataCommune) {
+  if (!validData.value) {
+    rows.value = [];
     return;
   }
   rows.value = sortByDateDesc(props.dataCommune).map(s => {
@@ -64,8 +66,13 @@ watch(() => [props.dataCommune], () => {
   />
 
   <div class="text-align-right fr-mt-1w">
-    <DsfrButton @click="downloadCsv()">
+    <DsfrButton :disabled="!canDownload || downloadingCsv"
+                :aria-busy="downloadingCsv ? 'true' : undefined"
+                @click="downloadCsv()">
       Télécharger les données (CSV)
     </DsfrButton>
   </div>
+  <DsfrAlert v-if="csvDownloadError" title="Téléchargement impossible" type="error" class="fr-mt-2w">
+    La génération du fichier CSV a échoué. Veuillez réessayer.
+  </DsfrAlert>
 </template>

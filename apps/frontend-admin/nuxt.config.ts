@@ -6,6 +6,8 @@ const appName = "VigiEau Admin";
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
   ssr: false,
+  sourcemap: { client: 'hidden', server: false },
+  experimental: { entryImportMap: false },
 
   app: {
     head: {
@@ -66,6 +68,7 @@ export default defineNuxtConfig({
       email: 'contact.vigieau@beta.gouv.fr',
       apiSecheresseUrl: process.env.API_SECHERESSE_URL,
       sentryDsn: process.env.SENTRY_DSN,
+      sentryRelease: process.env.SENTRY_RELEASE || process.env.SOURCE_VERSION || process.env.CONTAINER_VERSION || '',
       sentryEnv: process.env.SENTRY_ENV || (process.env.IS_PROD === '1' ? 'prod' : 'local'),
       sentryTracesSampleRate: process.env.SENTRY_TRACES_SAMPLE_RATE || '0.1',
       sentryProfilesSampleRate: process.env.SENTRY_PROFILES_SAMPLE_RATE || '0',

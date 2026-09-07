@@ -4,6 +4,7 @@
 /.nuxt
 /.output
 /dist
+.sentry-sourcemaps/
 
 # Logs
 logs
