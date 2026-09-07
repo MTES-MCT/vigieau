@@ -95,6 +95,8 @@ const publicationContext = (action: string) => ({
   arreteId: props.arreteCadre.id,
   numero: props.arreteCadre.numero,
   statut: props.arreteCadre.statut,
+  departement: props.arreteCadre.departementPilote?.code ??
+    (props.arreteCadre.departements.length === 1 ? props.arreteCadre.departements[0]?.code : undefined),
 });
 
 const syncSavedUsageIds = (savedArreteCadre: ArreteCadre) => {

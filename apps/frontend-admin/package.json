@@ -2,7 +2,7 @@
   "name": "vigieau_admin_frontend",
   "version": "1.0.0",
   "scripts": {
-    "build": "nuxi generate && purgecss --config ./purgecss.config.js",
+    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs",
     "start": "nuxi preview --host 0.0.0.0 --port ${PORT:-3003}",
     "dev": "nuxi dev",
     "format": "eslint . --fix",

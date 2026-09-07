@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import type { Ref } from 'vue';
 import { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { useAuthStore } from '~/stores/auth';
 import { useRefDataStore } from '~/stores/refData';
+import { captureClientError, getApiErrorMessage } from '~/composables/useApiErrorHandler';
+import { useRetryableLoad } from '~/composables/useRetryableLoad';
 
 const props = defineProps<{
   duplicate?: boolean;
 }>();
-
-const arreteRestriction: Ref<ArreteRestriction> = ref();
 
 const route = useRoute();
 const api = useApi();
@@ -16,24 +15,35 @@ const isNewArreteRestriction = route.params.id === 'nouveau';
 const authStore = useAuthStore();
 const refDataStore = useRefDataStore();
 
-if (isNewArreteRestriction && !route.query.arreterestriction) {
-  const newAr = new ArreteRestriction();
-  if (route.query.arretecadre) {
-    const { data, error } = await api.arreteCadre.get(route.query.arretecadre.toString());
-    if (data.value) {
-      newAr.arretesCadre = [data.value];
-      newAr.departement = authStore.user?.role === 'departement' ?
-        refDataStore.departements.find((d) => authStore.user?.roleDepartements.includes(d.code)) :
-        data.value?.departements[0];
+const {
+  data: arreteRestriction,
+  error: loadError,
+  loading,
+  load,
+} = useRetryableLoad(
+  async () => {
+    if (isNewArreteRestriction && !route.query.arreterestriction) {
+      const newAr = new ArreteRestriction();
+      if (route.query.arretecadre) {
+        const { data, error } = await api.arreteCadre.get(route.query.arretecadre.toString());
+        if (error.value || !data.value) {
+          throw error.value || new Error('L’arrêté-cadre demandé n’a pas été renvoyé par l’API.');
+        }
+        newAr.arretesCadre = [data.value];
+        newAr.departement =
+          authStore.user?.role === 'departement'
+            ? refDataStore.departements.find((d) => authStore.user?.roleDepartements.includes(d.code))
+            : data.value?.departements[0];
+      }
+      return newAr;
     }
-  }
-  arreteRestriction.value = newAr;
-} else {
-  const { data, error } = await api.arreteRestriction.get(
-    isNewArreteRestriction && route.query.arreterestriction ? <string>route.query.arreterestriction : <string>route.params.id,
-  );
-  if (data.value) {
-    const ar = <ArreteRestriction>JSON.parse(JSON.stringify(data.value));
+    const { data, error } = await api.arreteRestriction.get(
+      isNewArreteRestriction && route.query.arreterestriction ? (route.query.arreterestriction as string) : (route.params.id as string),
+    );
+    if (error.value || !data.value) {
+      throw error.value || new Error('L’arrêté de restriction demandé n’a pas été renvoyé par l’API.');
+    }
+    const ar = JSON.parse(JSON.stringify(data.value)) as ArreteRestriction;
     // Format restrictions
     ar.restrictions = ar.restrictions.map((r) => {
       if (!r.zoneAlerte) {
@@ -44,8 +54,7 @@ if (isNewArreteRestriction && !route.query.arreterestriction) {
     // Format périmètre AR
     if (ar.restrictions.length < 1) {
       ar.perimetreAr = null;
-    } else if (ar.restrictions.some((r) => r.isAep) && ar.restrictions.some((r) => !r.isAep) ||
-      ar.ressourceEapCommunique) {
+    } else if ((ar.restrictions.some((r) => r.isAep) && ar.restrictions.some((r) => !r.isAep)) || ar.ressourceEapCommunique) {
       ar.perimetreAr = 'all';
     } else if (ar.restrictions.some((r) => r.isAep)) {
       ar.perimetreAr = 'aep';
@@ -57,10 +66,10 @@ if (isNewArreteRestriction && !route.query.arreterestriction) {
       ar.ressourceEapCommunique = null;
     }
     if (route.query.arreterestriction) {
-      ar.arreteRestrictionAbroge = <ArreteRestriction>{
+      ar.arreteRestrictionAbroge = {
         id: data.value.id,
         numero: data.value.numero,
-      };
+      } as ArreteRestriction;
     }
     if (props.duplicate || route.query.arreterestriction) {
       ar.id = null;
@@ -81,19 +90,40 @@ if (isNewArreteRestriction && !route.query.arreterestriction) {
         });
         return r;
       });
-      if(!route.query.arreterestriction) {
+      if (!route.query.arreterestriction) {
         ar.arreteRestrictionAbroge = null;
       }
     }
-    arreteRestriction.value = ar;
-  }
-}
+    return ar;
+  },
+  (error) =>
+    captureClientError(error, {
+      action: 'load',
+      entity: 'arrete_restriction',
+      mode: props.duplicate ? 'duplication' : isNewArreteRestriction ? 'creation' : 'edition',
+      departement: authStore.user?.roleDepartements?.length === 1 ? authStore.user.roleDepartements[0] : undefined,
+    }),
+);
+
+void load();
 </script>
 
 <template>
   <h1>
     {{ duplicate ? 'Duplication' : isNewArreteRestriction ? 'Création' : 'Edition' }} d'un arrêté de restriction
-    <MixinsStatutBadge :statut="arreteRestriction.statut" />
+    <MixinsStatutBadge v-if="arreteRestriction" :statut="arreteRestriction.statut" />
   </h1>
-  <ArreteRestrictionFormWrapper v-if="arreteRestriction" :arreteRestriction="arreteRestriction" />
+  <p v-if="loading" role="status" data-cy="ArreteLoadPending">
+    Chargement de l’arrêté en cours.
+  </p>
+  <template v-else-if="loadError">
+    <DsfrAlert title="Chargement de l’arrêté impossible" type="error" class="fr-mb-2w" data-cy="ArreteLoadError">
+      {{ getApiErrorMessage(loadError) }}
+    </DsfrAlert>
+    <ul class="fr-btns-group fr-btns-group--inline-md">
+      <li><DsfrButton label="Réessayer" icon="ri-refresh-line" data-cy="ArreteLoadRetry" @click="load" /></li>
+      <li><DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="navigateTo('/arrete-restriction')" /></li>
+    </ul>
+  </template>
+  <ArreteRestrictionFormWrapper v-if="arreteRestriction" :arrete-restriction="arreteRestriction" />
 </template>

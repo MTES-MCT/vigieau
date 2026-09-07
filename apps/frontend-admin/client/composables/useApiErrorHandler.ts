@@ -1,4 +1,7 @@
 import { useAlertStore } from '~/stores/alert';
+import { createClientErrorDeduplicator, getClientErrorTags } from '~/utils/client-error-context';
+
+const clientErrorDeduplicator = createClientErrorDeduplicator();
 
 const normalizeMessages = (value: unknown): string[] => {
   if (value === undefined || value === null || value === '') {
@@ -26,7 +29,7 @@ export const getApiErrorMessage = (error: any, fallback = 'Une erreur est surven
 };
 
 export const captureClientError = (error: unknown, context: Record<string, unknown> = {}) => {
-  if (!import.meta.client) {
+  if (!import.meta.client || !clientErrorDeduplicator.reserve(error)) {
     return;
   }
 
@@ -35,13 +38,14 @@ export const captureClientError = (error: unknown, context: Record<string, unkno
   void import('@sentry/vue')
     .then((Sentry) => {
       Sentry.withScope((scope) => {
+        scope.setTags(getClientErrorTags(error, context));
         Object.entries(context).forEach(([key, value]) => {
           scope.setExtra(key, value);
         });
         Sentry.captureException(exception);
       });
     })
-    .catch(() => undefined);
+    .catch(() => clientErrorDeduplicator.release(error));
 };
 
 export const useApiErrorHandler = () => {
