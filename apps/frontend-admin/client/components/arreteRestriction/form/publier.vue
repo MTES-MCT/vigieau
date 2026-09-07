@@ -13,6 +13,7 @@ const emit = defineEmits<{
   publier: any;
 }>();
 const utils = useUtils();
+const errorSummaryRef = ref<HTMLElement | null>(null);
 const MAX_FILE_SIZE = 10_000_000;
 
 const rules = computed(() => {
@@ -56,18 +57,29 @@ const submitForm = async () => {
   }
 };
 
+const focusErrors = async () => {
+  await nextTick();
+  errorSummaryRef.value?.focus();
+  errorSummaryRef.value?.scrollIntoView({ block: 'center' });
+};
+
 defineExpose({
   submitForm,
+  focusErrors,
 });
 </script>
 
 <template>
   <form @submit.prevent="">
-    <DsfrAlert v-if="errors && errors.length > 0" type="error" class="fr-mb-2w">
-      <ul class="fr-m-0">
-        <li v-for="error in errors" :key="error">{{ error }}</li>
-      </ul>
-    </DsfrAlert>
+    <div v-if="errors && errors.length > 0" ref="errorSummaryRef" tabindex="-1" data-cy="ArreteRestrictionPublicationErrorSummary">
+      <DsfrAlert type="error" class="fr-mb-2w" title="La publication n'a pas abouti">
+        <ul class="fr-m-0">
+          <li v-for="error in errors" :key="error">
+            {{ error }}
+          </li>
+        </ul>
+      </DsfrAlert>
+    </div>
 
     <p>Choisissez la date d’entrée en vigueur de l’arrêté et sa date de fin (optionnel)</p>
     <div class="fr-grid-row fr-grid-row--gutters">
