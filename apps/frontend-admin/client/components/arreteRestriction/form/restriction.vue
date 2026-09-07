@@ -11,9 +11,14 @@ import {
   canReuseRestrictionUsages,
   concernsAnyWaterType,
   getRestrictionUsageOptions,
-  haveSameRestrictionUsageDefinition,
+  getRestrictionUsageResetPreview,
+  getRestrictionUsageSelectionState,
+  getRestrictionUsagesForSeverity,
+  haveEquivalentRestrictionUsageDefinition,
+  haveSameRestrictionUsageMeasure,
+  resetRestrictionUsagesFromFramework,
   type RestrictionWaterType,
-  setRestrictionUsageSelected,
+  setRestrictionUsageChoice,
 } from '~/utils/restriction-usage';
 
 const props = defineProps<{
@@ -82,6 +87,8 @@ const typesToShow = computed<RestrictionWaterType[]>(() => {
   }
 });
 const allUsages: Ref<UsageArreteCadre[]> = ref([]);
+const frameworkUsages = computed(() => (props.arreteCadre?.usages ?? [])
+  .filter((usage) => concernsAnyWaterType(usage, typesToShow.value)));
 const checkboxPrefix = useId();
 const checkboxIds = new WeakMap<UsageArreteCadre, string>();
 let nextCheckboxId = 0;
@@ -111,7 +118,7 @@ const expandedId = ref();
 
 const accordionTitle = computed(() => {
   const allUsagesLength = props.restriction.niveauGravite ?
-    allUsages.value.filter((u) => isUsageSelected(u) || (getNiveauGravite(u) !== null && getNiveauGravite(u) !== '')).length :
+    allUsages.value.filter((u) => isUsageSelected(u) || hasCurrentInstruction(u)).length :
     allUsages.value.length;
   const selectedUsagesLength = allUsages.value.filter(isUsageSelected).length;
   return `Afficher les ${selectedUsagesLength}/${allUsagesLength} usages`;
@@ -138,10 +145,10 @@ const modalActions = ref([
 ]);
 
 const isUsageSelected = (usage: UsageArreteCadre) =>
-  props.restriction.usages.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage));
+  props.restriction.usages.some((candidate) => haveEquivalentRestrictionUsageDefinition(candidate, usage));
 
 const onChange = ({ usage, checked }: { usage: UsageArreteCadre; checked: boolean }) => {
-  props.restriction.usages = setRestrictionUsageSelected(props.restriction.usages, usage, checked);
+  props.restriction.usages = setRestrictionUsageChoice(props.restriction, usage, checked);
   if (!checked && props.multipleZones) {
     usageToEmit.value = usage;
     modalTitle.value = `Souhaitez-vous ${checked ? 'cocher' : 'décocher'} cet usage sur toutes les zones d’alertes de même ressource ?`;
@@ -164,8 +171,11 @@ const getNiveauGravite = (usageArreteCadre: UsageArreteCadre, niveauGravite?: st
   }
 };
 
+const hasCurrentInstruction = (usage: UsageArreteCadre) => !!getNiveauGravite(usage)?.trim();
+
 const computeAllUsages = () => {
-  const reusableUsages = props.arreteRestriction.restrictions
+  const selection = getRestrictionUsageSelectionState(props.restriction, frameworkUsages.value);
+  const reusableUsages = selection.frameworkOnly ? [] : props.arreteRestriction.restrictions
     .filter((restriction) =>
       canReuseRestrictionUsages(
         restriction,
@@ -174,7 +184,7 @@ const computeAllUsages = () => {
       ),
     )
     .flatMap((restriction) => restriction.usages);
-  const candidates = reusableUsages.concat(props.arreteCadre?.usages ?? [])
+  const candidates = selection.intended.concat(frameworkUsages.value, reusableUsages)
     .filter((usage) => concernsAnyWaterType(usage, typesToShow.value));
   allUsages.value = getRestrictionUsageOptions(props.restriction.usages, candidates);
   allUsages.value = allUsages.value.sort((a, b) => {
@@ -195,11 +205,7 @@ const getUsageCheckboxId = (usage: UsageArreteCadre) => {
   return checkboxIds.get(usage);
 };
 
-const getUsageVariantLabel = (usage: UsageArreteCadre) => {
-  const variants = allUsages.value.filter((candidate) => candidate.nom === usage.nom);
-  if (variants.length < 2) {
-    return '';
-  }
+const getUsageScope = (usage: UsageArreteCadre) => {
   const profiles = [
     usage.concerneParticulier && 'Particuliers',
     usage.concerneEntreprise && 'Entreprises',
@@ -211,8 +217,39 @@ const getUsageVariantLabel = (usage: UsageArreteCadre) => {
     usage.concerneEso && 'eaux souterraines',
     usage.concerneAep && 'eau potable',
   ].filter(Boolean).join(', ');
-  const crisisLabel = usage.descriptionCrise || 'sans consigne de crise';
-  return `Variante ${variants.indexOf(usage) + 1}/${variants.length} ; ${profiles} ; ${resources} ; crise : ${crisisLabel}`;
+  return `${profiles} ; ${resources}`;
+};
+
+const getUsageVariantLabel = (usage: UsageArreteCadre) => {
+  const variants = allUsages.value.filter((candidate) => haveSameRestrictionUsageMeasure(candidate, usage));
+  return variants.length < 2 ? '' : `Variante ${variants.indexOf(usage) + 1}/${variants.length} ; ${getUsageScope(usage)}`;
+};
+
+const getUsageOrigin = (usage: UsageArreteCadre) => {
+  if (props.arreteCadre?.usages.some((candidate) => haveEquivalentRestrictionUsageDefinition(candidate, usage))) {
+    return `Arrêté-cadre : ${props.arreteCadre.numero}`;
+  }
+  return 'Version reprise dans cet arrêté';
+};
+
+const resetModalOpened = ref(false);
+const resetSides = ['before', 'after'] as const;
+const resetChangeLabels = { added: 'Ajouté', removed: 'Retiré', changed: 'Remplacé' };
+const getSelectedUsageCountLabel = (count: number) => `${count} ${count === 1 ? 'usage sélectionné' : 'usages sélectionnés'}`;
+const resetPreview = computed(() => getRestrictionUsageResetPreview(
+  getRestrictionUsageSelectionState(props.restriction, frameworkUsages.value).intended,
+  frameworkUsages.value,
+  props.restriction.niveauGravite,
+));
+const canResetUsages = computed(() => props.arreteRestriction.statut === 'a_valider' &&
+  !!props.arreteCadre?.id && !!props.restriction.niveauGravite);
+const resetUsages = () => {
+  if (!canResetUsages.value) {
+    return;
+  }
+  props.restriction.usages = resetRestrictionUsagesFromFramework(props.restriction, frameworkUsages.value);
+  computeAllUsages();
+  resetModalOpened.value = utils.closeModal(resetModalOpened);
 };
 
 computeAllUsages();
@@ -223,22 +260,19 @@ defineExpose({
 
 watch(() => props.restriction.usages, () => {
   props.restriction.usages.forEach((usage) => {
-    if (!allUsages.value.some((candidate) => haveSameRestrictionUsageDefinition(candidate, usage))) {
+    if (!allUsages.value.some((candidate) => haveEquivalentRestrictionUsageDefinition(candidate, usage))) {
       allUsages.value.push(usage);
     }
   });
 });
 
 watch(() => props.restriction.niveauGravite, (newValue, oldValue) => {
-  let selectedUsages = props.restriction.usages.filter((usage) => getNiveauGravite(usage) !== null && getNiveauGravite(usage) !== '');
-  const oldUsagesDisabledEnabled = allUsages.value.filter(usage => {
-    return (getNiveauGravite(usage, oldValue ? oldValue : 'new') === null || getNiveauGravite(usage, oldValue ? oldValue : 'new') === '') &&
-      getNiveauGravite(usage) !== null && getNiveauGravite(usage) !== '';
-  });
-  oldUsagesDisabledEnabled.forEach((usage) => {
-    selectedUsages = setRestrictionUsageSelected(selectedUsages, usage, true);
-  });
-  props.restriction.usages = selectedUsages;
+  props.restriction.usages = getRestrictionUsagesForSeverity(
+    props.restriction,
+    frameworkUsages.value,
+    newValue,
+    oldValue,
+  );
 });
 </script>
 
@@ -283,23 +317,48 @@ watch(() => props.restriction.niveauGravite, (newValue, oldValue) => {
                 :name="getUsageCheckboxId(usageArreteCadre)"
                 :model-value="isUsageSelected(usageArreteCadre)"
                 :small="false"
-                :disabled="!isUsageSelected(usageArreteCadre) && (getNiveauGravite(usageArreteCadre) === null || getNiveauGravite(usageArreteCadre) === '')"
+                :disabled="!isUsageSelected(usageArreteCadre) && !hasCurrentInstruction(usageArreteCadre)"
                 @update:model-value="onChange({ usage: usageArreteCadre, checked: $event })"
               >
                 <template #label>
-                  <b>{{ usageArreteCadre.nom }}</b>
-                  <div v-if="getUsageVariantLabel(usageArreteCadre)" class="fr-text--sm fr-mb-1w">
+                  <b class="full-width">{{ usageArreteCadre.nom }}</b>
+                  <div v-if="getUsageVariantLabel(usageArreteCadre)" class="full-width fr-text--sm fr-mb-1w">
                     {{ getUsageVariantLabel(usageArreteCadre) }}
                   </div>
                   <div class="full-width">
-                    {{ getNiveauGravite(usageArreteCadre) }}
+                    {{ getNiveauGravite(usageArreteCadre) || 'Aucune consigne à ce niveau' }}
                   </div>
                 </template>
               </DsfrCheckbox>
+              <details v-if="getUsageVariantLabel(usageArreteCadre)" class="fr-ml-4w fr-mb-2w" data-cy="RestrictionUsageVariantDetails">
+                <summary>{{ getUsageOrigin(usageArreteCadre) }} : consignes par niveau</summary>
+                <dl class="fr-mt-1w fr-mb-0">
+                  <template v-for="level in niveauGraviteOptions" :key="level.value">
+                    <dt class="fr-text--bold">
+                      {{ level.text }}
+                    </dt>
+                    <dd class="fr-ml-0 fr-mb-1w">
+                      {{ getNiveauGravite(usageArreteCadre, level.value) || 'Aucune consigne' }}
+                    </dd>
+                  </template>
+                </dl>
+              </details>
               <div class="divider fr-mb-2w" />
             </div>
           </DsfrAccordion>
         </DsfrInputGroup>
+        <DsfrButton
+          v-if="arreteRestriction.statut === 'a_valider'"
+          type="button"
+          label="Reprendre les usages de l’arrêté-cadre"
+          icon="ri-restart-line"
+          secondary
+          size="sm"
+          class="fr-mb-2w restriction-usage-reset-button"
+          data-cy="RestrictionUsageResetButton"
+          :disabled="!canResetUsages"
+          @click="resetModalOpened = true"
+        />
       </div>
     </div>
   </form>
@@ -311,11 +370,107 @@ watch(() => props.restriction.niveauGravite, (newValue, oldValue) => {
   >
     Vous pouvez choisir d’appliquer ou non votre action à toutes les autres zones d’alertes de même ressource.
   </DsfrModal>
+  <DsfrModal
+    :opened="resetModalOpened"
+    title="Reprendre les usages de l’arrêté-cadre"
+    size="lg"
+    data-cy="RestrictionUsageResetDialog"
+    @close="resetModalOpened = utils.closeModal(resetModalOpened)"
+  >
+    <p>
+      <strong>{{ restriction.zoneAlerte?.nom || restriction.nomGroupementAep }}</strong><br>
+      Arrêté-cadre : {{ arreteCadre?.numero }}
+    </p>
+    <p>
+      Les adaptations de cette zone seront remplacées par les usages de cet arrêté-cadre.
+      Les autres zones et l’arrêté source ne seront pas modifiés.
+    </p>
+    <p class="fr-text--bold">
+      Avant : {{ getSelectedUsageCountLabel(restriction.usages.length) }}.
+      Après : {{ getSelectedUsageCountLabel(resetPreview.usages.length) }} au niveau actuel.
+    </p>
+    <div data-cy="RestrictionUsageResetPreview">
+      <p v-if="!resetPreview.groups.length">
+        Les usages sélectionnés correspondent déjà à ceux de l’arrêté-cadre.
+      </p>
+      <details v-for="(group, groupIndex) in resetPreview.groups" :key="groupIndex" class="fr-mb-2w">
+        <summary>{{ resetChangeLabels[group.change] }} : {{ group.name }}</summary>
+        <div class="restriction-usage-reset-columns fr-mt-1w">
+          <div v-for="side in resetSides" :key="side">
+            <h3 class="fr-h6">
+              {{ side === 'before' ? 'Avant' : 'Après' }}
+            </h3>
+            <p v-if="!group[side].length">
+              Aucun usage
+            </p>
+            <div v-for="(usage, usageIndex) in group[side]" :key="usageIndex" class="fr-mb-2w">
+              <p class="fr-mb-1w">
+                <strong>{{ usage.nom }}</strong><br>
+                {{ getUsageScope(usage) }}
+              </p>
+              <dl class="fr-m-0">
+                <template v-for="level in niveauGraviteOptions" :key="level.value">
+                  <dt class="fr-text--bold">
+                    {{ level.text }}
+                  </dt>
+                  <dd class="fr-ml-0 fr-mb-1w">
+                    {{ getNiveauGravite(usage, level.value) || 'Aucune consigne' }}
+                  </dd>
+                </template>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </details>
+    </div>
+    <template #footer>
+      <ul class="fr-btns-group fr-btns-group--inline-md">
+        <li>
+          <DsfrButton
+            label="Annuler"
+            secondary
+            data-cy="RestrictionUsageResetCancel"
+            @click="resetModalOpened = utils.closeModal(resetModalOpened)"
+          />
+        </li>
+        <li>
+          <DsfrButton
+            label="Confirmer le remplacement"
+            icon="ri-restart-line"
+            data-cy="RestrictionUsageResetConfirm"
+            :disabled="!canResetUsages"
+            @click="resetUsages"
+          />
+        </li>
+      </ul>
+    </template>
+  </DsfrModal>
 </template>
 
 <style lang="scss">
+.restriction-usage-reset-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+  overflow-wrap: anywhere;
+
+  > div {
+    min-width: 0;
+  }
+
+  @media (min-width: 48rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .restriction-line {
   align-items: center;
+
+  .restriction-usage-reset-button {
+    max-width: 100%;
+    white-space: normal;
+    text-align: left;
+  }
 
   .fr-select-group {
     margin-bottom: 0;

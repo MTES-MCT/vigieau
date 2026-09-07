@@ -6,7 +6,7 @@ import type { Restriction } from '~/dto/restriction.dto';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 import type { Ref } from 'vue';
 import type { UsageArreteCadre } from '~/dto/usage_arrete_cadre.dto';
-import { setRestrictionUsageSelected } from '~/utils/restriction-usage';
+import { setRestrictionUsageChoice } from '~/utils/restriction-usage';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -74,7 +74,7 @@ const applyToAllRestrictions = (restriction: Restriction, usage: UsageArreteCadr
     restriction.arreteCadre?.id,
   );
   restrictions.forEach(r => {
-    r.usages = setRestrictionUsageSelected(r.usages, usage, false);
+    r.usages = setRestrictionUsageChoice(r, usage, false);
   });
 };
 
