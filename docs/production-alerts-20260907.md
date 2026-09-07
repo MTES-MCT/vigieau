@@ -65,3 +65,29 @@ Do not simulate memory exhaustion or HTTP failure in production to test delivery
 See [Production monitoring](production-monitoring.md) for the collector, incident
 state and notification lifecycle. Native Scalingo alert configuration is verified;
 email delivery cannot be inferred from a successful configuration API response.
+
+The first full collector run opened the real history incident, assigned to the
+operator: https://github.com/MTES-MCT/vigieau/issues/51. Its GitHub notification
+was observed through the operator's authenticated notification API. The next run
+kept a single issue and no comments, but updating the issue body still refreshed
+the notification. The collector now performs no issue writes on an unchanged
+persistent failure until a daily reminder or a meaningful transition.
+
+After that correction, full run
+https://github.com/MTES-MCT/vigieau/actions/runs/34094968096 (attempt 2) completed
+successfully. The notification thread stayed at `2026-09-07T07:11:37Z`, unchanged
+from before that run. There was still one open incident and zero comments. Its
+`Production / certified-history` check remained red; availability, current caches,
+clock, zones, browser and SANDRE checks were green. External publications were
+explicitly grouped under the confirmed historical cause, not marked recovered.
+
+The first attempt exposed a test that expected a local HTTP request to reach its
+test server within 75 milliseconds. It failed on the shared runner before any
+production observation. The timeout tests now control cancellation explicitly;
+all unit tests remain mandatory in CI, but do not run inside the scheduled
+collector. A unit-test failure must not block production observation.
+
+The legacy `production-smoke.yml` schedule is therefore removed. Its six strict
+manual checks remain available; the same six checks also remain scheduled through
+the incident collector. No production application restart, write freeze, data
+change or history recertification was performed during this alerting change.

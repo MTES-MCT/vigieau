@@ -1,10 +1,8 @@
-# GitHub loads scheduled workflows from the default branch. Keep this file and
-# its checked-out smoke scripts on master, the branch deployed to production.
-name: Surveillance production
+# Scheduled checks and incident notifications are owned by production-incidents.yml.
+# Keep these strict checks available for explicit manual diagnostics.
+name: Verification manuelle de production
 
 on:
-  schedule:
-    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions:

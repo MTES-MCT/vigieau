@@ -3,6 +3,7 @@ import { Departement } from '@shared/entities/departement.entity';
 import { SandreZoneAlias } from '@shared/entities/sandre_zone_alias.entity';
 import { SandreZoneSyncState } from '@shared/entities/sandre_zone_sync_state.entity';
 import { ZoneAlerte } from '@shared/entities/zone_alerte.entity';
+import { performance } from 'perf_hooks';
 import { of } from 'rxjs';
 import { DataSource, EntitySchema, getMetadataArgsStorage } from 'typeorm';
 import * as approvedReferences from './sandre-zone-sync-approved-references';
@@ -964,6 +965,9 @@ describe('ZoneAlerteService Sandre synchronization', () => {
 
   it('lets the global deadline abort hanging siblings after a transient-first failure', async () => {
     jest.useFakeTimers();
+    const monotonicClock = jest
+      .spyOn(performance, 'now')
+      .mockImplementation(() => jest.now());
     try {
       const harness = createHarness();
       const cancelledResources: string[] = [];
@@ -1019,6 +1023,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
       expect(jest.getTimerCount()).toBe(0);
       expect(harness.queryRunner.startTransaction).not.toHaveBeenCalled();
     } finally {
+      monotonicClock.mockRestore();
       jest.useRealTimers();
     }
   });
