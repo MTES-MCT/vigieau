@@ -2,6 +2,8 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { Readable } from 'node:stream';
 import { DataSource, QueryRunner } from 'typeorm';
 import { CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST as PINNED } from './restore-certified-commune-history';
 import { CERTIFIED_HISTORY_V2_SOURCE_RUN_ID } from './build-certified-history-source';
@@ -43,6 +45,7 @@ export const EQUIVALENCE_INSPECTION_SETTINGS_SQL =
   "SET LOCAL jit=off; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='50ms'; SET LOCAL idle_in_transaction_session_timeout='15s'";
 export const EQUIVALENCE_INPUT_BATCH_SQL =
   'FETCH FORWARD 100 FROM equivalence_inputs';
+export const EQUIVALENCE_CONFIRMATION_TIMEOUT_MS = 30_000;
 const SOURCE_TABLES = [
   'zone_alerte',
   'restriction',
@@ -67,6 +70,7 @@ const SOURCE_TABLES = [
 
 export interface EquivalenceOptions {
   apply: boolean;
+  preparedApply: boolean;
   sourceDatabase: string;
   targetDatabase: string;
   archivePath: string;
@@ -200,6 +204,10 @@ export function parseEquivalenceOptions(env = process.env): EquivalenceOptions {
     'HISTORY_EQUIVALENCE_APPLY',
     env.HISTORY_EQUIVALENCE_APPLY,
   );
+  const preparedApply = parseBoolean(
+    'HISTORY_EQUIVALENCE_PREPARED_APPLY',
+    env.HISTORY_EQUIVALENCE_PREPARED_APPLY,
+  );
   const sourceDatabase = requiredEnvironment(
     env,
     'HISTORY_EQUIVALENCE_SOURCE_DATABASE',
@@ -219,10 +227,12 @@ export function parseEquivalenceOptions(env = process.env): EquivalenceOptions {
     );
   }
   const expectedProof = env.HISTORY_EQUIVALENCE_EXPECTED_PROOF?.trim() || null;
+  if (preparedApply && (!apply || expectedProof !== null))
+    throw new Error('Prepared apply requires APPLY=true and no initial proof');
   if (
     apply &&
     (env.HISTORY_EQUIVALENCE_CONFIRMATION !== CONFIRMATION ||
-      !/^[a-f0-9]{64}$/.test(expectedProof ?? ''))
+      (!preparedApply && !/^[a-f0-9]{64}$/.test(expectedProof ?? '')))
   ) {
     throw new Error(
       `${CONFIRMATION} and the matching dry-run proof are required`,
@@ -230,6 +240,7 @@ export function parseEquivalenceOptions(env = process.env): EquivalenceOptions {
   }
   return {
     apply,
+    preparedApply,
     sourceDatabase,
     targetDatabase,
     expectedProof,
@@ -285,9 +296,14 @@ export function assertEquivalenceLedger(
   const last = BigInt(throughEpoch);
   let expected = BigInt(EQUIVALENCE_ANCHOR.historicComputeEpoch) + 1n;
   for (const row of rows) {
+    const knownCause =
+      row.cause === 'published-source-mutation' ||
+      (row.cause === 'published-calendar-mutation' &&
+        row.invalidatesStatistics === false &&
+        row.invalidatesMaps === true);
     if (
       BigInt(row.epochAfter) !== expected ||
-      row.cause !== 'published-source-mutation' ||
+      !knownCause ||
       row.fallback !== false ||
       (row.sourceRevision !== null && !/^\d+$/.test(row.sourceRevision))
     ) {
@@ -814,6 +830,7 @@ export async function attestHistoryBySourceEquivalence(
   source: DataSource,
   target: DataSource,
   options: EquivalenceOptions,
+  hooks: EquivalenceConfirmationHooks = {},
 ) {
   await archiveDigest(options.archivePath);
   const artifacts = [
@@ -838,6 +855,108 @@ export async function attestHistoryBySourceEquivalence(
     false,
     operatorDigest,
   );
+  return completeEquivalenceInspection(target, anchor, current, options, hooks);
+}
+
+export interface EquivalencePreview {
+  status: 'DRY_RUN' | 'AWAITING_CONFIRMATION';
+  mode: string;
+  proof: string;
+  anchor: typeof EQUIVALENCE_ANCHOR;
+  context: RepairPublicationContext;
+  inputDigest: string;
+  outputDigests: Record<string, string>;
+}
+
+export interface EquivalenceConfirmationHooks {
+  confirmPreparedApply?: (
+    preview: EquivalencePreview,
+    signal: AbortSignal,
+  ) => Promise<string | null>;
+}
+
+export async function readPreparedConfirmationLine(
+  input: Readable,
+  signal: AbortSignal,
+): Promise<string | null> {
+  if (signal.aborted || input.readableEnded || input.destroyed) return null;
+  const lines = createInterface({
+    input,
+    crlfDelay: Infinity,
+    terminal: false,
+  });
+  return new Promise((resolve, reject) => {
+    const finish = (line: string | null, error?: Error) => {
+      lines.removeListener('line', onLine);
+      lines.removeListener('close', onClose);
+      lines.removeListener('error', onError);
+      signal.removeEventListener('abort', onAbort);
+      input.removeListener('error', onError);
+      lines.close();
+      input.pause();
+      if (error) reject(error);
+      else resolve(line);
+    };
+    const onAbort = () => finish(null);
+    const onError = (error: Error) => finish(null, error);
+    const onLine = (line: string) => finish(input.readableEnded ? null : line);
+    const onClose = () => finish(null);
+    lines.once('line', onLine);
+    lines.once('close', onClose);
+    lines.once('error', onError);
+    input.once('error', onError);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
+async function confirmPreparedEquivalence(
+  preview: EquivalencePreview,
+  hooks: EquivalenceConfirmationHooks,
+): Promise<void> {
+  if (!hooks.confirmPreparedApply)
+    throw new Error('Prepared apply requires an interactive confirmation hook');
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error('Prepared apply confirmation timed out'));
+      controller.abort();
+    }, EQUIVALENCE_CONFIRMATION_TIMEOUT_MS);
+  });
+  try {
+    const line = await Promise.race([
+      Promise.resolve().then(() =>
+        hooks.confirmPreparedApply!(
+          structuredClone(preview),
+          controller.signal,
+        ),
+      ),
+      expired,
+    ]);
+    if (Date.now() - startedAt >= EQUIVALENCE_CONFIRMATION_TIMEOUT_MS)
+      throw new Error('Prepared apply confirmation timed out');
+    if (line !== `CONFIRM ${preview.proof}`)
+      throw new Error('Prepared apply confirmation missing or mismatched');
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
+}
+
+export async function completeEquivalenceInspection(
+  target: DataSource,
+  anchor: Inspection,
+  current: Inspection,
+  options: EquivalenceOptions,
+  hooks: EquivalenceConfirmationHooks = {},
+) {
+  if (
+    options.preparedApply &&
+    (!options.apply || options.expectedProof !== null)
+  )
+    throw new Error('Prepared apply requires APPLY=true and no initial proof');
   same(
     current.inputs,
     anchor.inputs,
@@ -846,6 +965,7 @@ export async function attestHistoryBySourceEquivalence(
   const proof = equivalenceProof(current);
   if (
     options.apply &&
+    !options.preparedApply &&
     current.active?.attestedThroughEpoch ===
       Number(current.context.historicComputeEpoch) &&
     (current.active.attestationContext as Record<string, unknown>)?.proof ===
@@ -858,11 +978,15 @@ export async function attestHistoryBySourceEquivalence(
       attestationId: current.active.attestationId,
     };
   }
-  if (options.apply && proof !== options.expectedProof)
+  if (
+    options.apply &&
+    !options.preparedApply &&
+    proof !== options.expectedProof
+  )
     throw new Error('Dry-run proof changed; rerun inspection');
-  if (!options.apply)
-    return {
-      status: 'DRY_RUN',
+  if (!options.apply || options.preparedApply) {
+    const preview: EquivalencePreview = {
+      status: options.preparedApply ? 'AWAITING_CONFIRMATION' : 'DRY_RUN',
       mode: MODE,
       proof,
       anchor: EQUIVALENCE_ANCHOR,
@@ -875,6 +999,9 @@ export async function attestHistoryBySourceEquivalence(
         ]),
       ),
     };
+    if (!options.apply) return preview;
+    await confirmPreparedEquivalence(preview, hooks);
+  }
   return {
     ...(await applyEquivalenceAttestation(target, current, proof)),
     mode: MODE,
@@ -896,7 +1023,18 @@ async function main() {
     await source.initialize();
     await target.initialize();
     process.stdout.write(
-      `${JSON.stringify(await attestHistoryBySourceEquivalence(source, target, options))}\n`,
+      `${JSON.stringify(
+        await attestHistoryBySourceEquivalence(source, target, options, {
+          confirmPreparedApply: async (preview, signal) => {
+            const response = readPreparedConfirmationLine(
+              process.stdin,
+              signal,
+            );
+            process.stdout.write(`${JSON.stringify(preview)}\n`);
+            return response;
+          },
+        }),
+      )}\n`,
     );
   } finally {
     if (target.isInitialized) await target.destroy();
