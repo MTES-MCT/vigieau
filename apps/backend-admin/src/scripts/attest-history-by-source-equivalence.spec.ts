@@ -1,6 +1,7 @@
 import {
   EQUIVALENCE_ANCHOR,
   EQUIVALENCE_ANCHOR_LOOKUP_GUARD,
+  EQUIVALENCE_INPUT_BATCH_SQL,
   EQUIVALENCE_INSPECTION_SETTINGS_SQL,
   EQUIVALENCE_LEDGER_SQL,
   EQUIVALENCE_LOOKUP_GUARD_SQL,
@@ -64,6 +65,16 @@ const invalidation = {
 };
 
 describe('explicit history source equivalence options', () => {
+  it('bounds input fetches to 100 rows and entity output batches to 50', () => {
+    expect(EQUIVALENCE_INPUT_BATCH_SQL).toBe(
+      'FETCH FORWARD 100 FROM equivalence_inputs',
+    );
+    for (const kind of ['commune', 'department'] as const) {
+      expect(outputBatchSql(kind)).toMatch(
+        /WHERE e\.code>\$1 ORDER BY e\.code LIMIT 50\s*\)/,
+      );
+    }
+  });
   it('disables JIT for bounded read-only inspection batches', () => {
     expect(EQUIVALENCE_INSPECTION_SETTINGS_SQL).toContain('SET LOCAL jit=off');
     expect(EQUIVALENCE_INSPECTION_SETTINGS_SQL).toContain(
