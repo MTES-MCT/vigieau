@@ -1,6 +1,7 @@
 import {
   EQUIVALENCE_ANCHOR,
   EQUIVALENCE_ANCHOR_LOOKUP_GUARD,
+  EQUIVALENCE_CONFIRMATION_TIMEOUT_MS,
   EQUIVALENCE_INPUT_BATCH_SQL,
   EQUIVALENCE_INSPECTION_SETTINGS_SQL,
   EQUIVALENCE_LEDGER_SQL,
@@ -13,9 +14,12 @@ import {
   assertEquivalenceLedger,
   assertEquivalenceLookupGuard,
   assertVersionValidation,
+  completeEquivalenceInspection,
+  equivalenceProof,
   outputBatchSql,
   parseEquivalenceOptions,
   rowVersionEvidence,
+  readPreparedConfirmationLine,
   validateOutputRows,
   versionValidationSql,
   releaseEquivalenceRunner,
@@ -29,6 +33,7 @@ import {
   sourceEquivalenceEvidence,
 } from './history-source-equivalence';
 import { DataSource, QueryRunner } from 'typeorm';
+import { PassThrough } from 'node:stream';
 import {
   CERTIFIED_COMPLETION_ATTESTATION_SQL,
   CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
@@ -85,6 +90,7 @@ describe('explicit history source equivalence options', () => {
   it('defaults to read-only, bounded inspection with explicit distinct identities', () => {
     expect(parseEquivalenceOptions(environment)).toEqual({
       apply: false,
+      preparedApply: false,
       sourceDatabase: 'history_source_20260903',
       targetDatabase: 'regleau_bac_1701',
       archivePath: environment.HISTORY_EQUIVALENCE_ANCHOR_ARCHIVE,
@@ -127,6 +133,73 @@ describe('explicit history source equivalence options', () => {
         HISTORY_EQUIVALENCE_EXPECTED_PROOF: 'a'.repeat(64),
       }).apply,
     ).toBe(true);
+  });
+  it('requires a separate prepared opt-in, apply permission and no prefilled proof', () => {
+    const prepared = {
+      ...environment,
+      HISTORY_EQUIVALENCE_PREPARED_APPLY: 'true',
+      HISTORY_EQUIVALENCE_APPLY: 'true',
+      HISTORY_EQUIVALENCE_CONFIRMATION: 'ATTEST_HISTORY_BY_SOURCE_EQUIVALENCE',
+    };
+    expect(parseEquivalenceOptions(prepared)).toMatchObject({
+      apply: true,
+      preparedApply: true,
+      expectedProof: null,
+    });
+    for (const change of [
+      { HISTORY_EQUIVALENCE_APPLY: 'false' },
+      { HISTORY_EQUIVALENCE_EXPECTED_PROOF: 'a'.repeat(64) },
+      { HISTORY_EQUIVALENCE_CONFIRMATION: '' },
+      { HISTORY_EQUIVALENCE_PREPARED_APPLY: 'false' },
+    ]) {
+      expect(() =>
+        parseEquivalenceOptions({ ...prepared, ...change }),
+      ).toThrow();
+    }
+  });
+});
+
+describe('prepared confirmation input lifecycle', () => {
+  it('reads one exact line and closes input listeners', async () => {
+    const input = new PassThrough();
+    const controller = new AbortController();
+    const response = readPreparedConfirmationLine(input, controller.signal);
+    input.write(' CONFIRM proof \r\n');
+    await expect(response).resolves.toBe(' CONFIRM proof ');
+    expect(input.listenerCount('data')).toBe(0);
+    expect(input.listenerCount('error')).toBe(0);
+    expect(input.isPaused()).toBe(true);
+  });
+  it.each(['abort', 'end', 'error'])(
+    'closes without confirming on %s',
+    async (event) => {
+      const input = new PassThrough();
+      const controller = new AbortController();
+      const response = readPreparedConfirmationLine(input, controller.signal);
+      if (event === 'error') {
+        const failure = expect(response).rejects.toThrow('input failed');
+        input.emit('error', new Error('input failed'));
+        await failure;
+      } else {
+        if (event === 'abort') controller.abort();
+        else input.end();
+        await expect(response).resolves.toBeNull();
+      }
+      expect(input.listenerCount('data')).toBe(0);
+      expect(input.listenerCount('error')).toBe(0);
+      expect(input.isPaused()).toBe(true);
+    },
+  );
+  it('does not accept an unterminated confirmation at EOF', async () => {
+    const input = new PassThrough();
+    const response = readPreparedConfirmationLine(
+      input,
+      new AbortController().signal,
+    );
+    input.end(`CONFIRM ${'a'.repeat(64)}`);
+    await expect(response).resolves.toBeNull();
+    expect(input.listenerCount('data')).toBe(0);
+    expect(input.listenerCount('error')).toBe(0);
   });
 });
 
@@ -189,6 +262,27 @@ describe('inspection connection failure cleanup', () => {
 });
 
 describe('existing certified anchor, not manufactured provenance', () => {
+  it('accepts only non-fallback map-only calendar events in a contiguous ledger', () => {
+    const calendar = {
+      ...invalidation,
+      cause: 'published-calendar-mutation',
+      invalidatesStatistics: false,
+      invalidatesMaps: true,
+      sourceRevision: null,
+    };
+    expect(() => assertEquivalenceLedger([calendar], '797')).not.toThrow();
+    for (const change of [
+      { fallback: true },
+      { invalidatesStatistics: true },
+      { invalidatesMaps: false },
+      { cause: 'unknown-calendar-mutation' },
+      { epochAfter: '798' },
+    ]) {
+      expect(() =>
+        assertEquivalenceLedger([{ ...calendar, ...change }], '797'),
+      ).toThrow('Unexplained');
+    }
+  });
   it('rejects an altered restored clone even when its old audit remains present', () => {
     expect(() =>
       assertEquivalenceAnchorInputs(EQUIVALENCE_ANCHOR.inputDigest),
@@ -508,6 +602,7 @@ describe('atomic append-only attestation', () => {
     let mismatch = false;
     let existing = false;
     let lookupChanged = false;
+    let priorityActive = false;
     const runner = {
       isTransactionActive: false,
       connect: jest.fn(async () => {}),
@@ -541,7 +636,7 @@ describe('atomic append-only attestation', () => {
             {
               ...context,
               sourceRevision: changed ? '187080' : context.sourceRevision,
-              priorityActive: false,
+              priorityActive,
             },
           ];
         if (sql === EQUIVALENCE_RELATIONS_SQL || sql === EQUIVALENCE_LEDGER_SQL)
@@ -590,8 +685,187 @@ describe('atomic append-only attestation', () => {
       setLookupChanged: () => {
         lookupChanged = true;
       },
+      setPriorityActive: () => {
+        priorityActive = true;
+      },
     };
   }
+  function preparedOptions() {
+    return parseEquivalenceOptions({
+      ...environment,
+      HISTORY_EQUIVALENCE_APPLY: 'true',
+      HISTORY_EQUIVALENCE_PREPARED_APPLY: 'true',
+      HISTORY_EQUIVALENCE_CONFIRMATION: 'ATTEST_HISTORY_BY_SOURCE_EQUIVALENCE',
+    });
+  }
+  it('waits for exact consent on a detached preview before starting the existing CAS', async () => {
+    const f = fixture();
+    const proof = equivalenceProof(f.inspection);
+    let confirm!: (line: string) => void;
+    const consent = new Promise<string>((resolve) => {
+      confirm = resolve;
+    });
+    const confirmPreparedApply = jest.fn(async (preview) => {
+      expect(preview).toMatchObject({
+        status: 'AWAITING_CONFIRMATION',
+        proof,
+        inputDigest: f.inspection.inputs.digest,
+        outputDigests: { commune: 'a'.repeat(64) },
+      });
+      preview.context.sourceRevision = '999999';
+      return consent;
+    });
+    const result = completeEquivalenceInspection(
+      f.target,
+      f.inspection,
+      f.inspection,
+      preparedOptions(),
+      { confirmPreparedApply },
+    );
+    await Promise.resolve();
+    expect(confirmPreparedApply).toHaveBeenCalledTimes(1);
+    expect(f.runner.connect).not.toHaveBeenCalled();
+    expect(f.inspection.context.sourceRevision).toBe('187079');
+    confirm(`CONFIRM ${proof}`);
+    await expect(result).resolves.toMatchObject({ status: 'ATTESTED', proof });
+    expect(f.runner.startTransaction).toHaveBeenCalledWith('READ COMMITTED');
+  });
+  it.each([null, 'wrong', `CONFIRM ${'f'.repeat(64)}`, 'extra-space'])(
+    'does not connect or write when prepared consent is %s',
+    async (line) => {
+      const f = fixture();
+      const response =
+        line === 'extra-space'
+          ? `CONFIRM ${equivalenceProof(f.inspection)} `
+          : line;
+      await expect(
+        completeEquivalenceInspection(
+          f.target,
+          f.inspection,
+          f.inspection,
+          preparedOptions(),
+          { confirmPreparedApply: async () => response },
+        ),
+      ).rejects.toThrow('missing or mismatched');
+      expect(f.runner.connect).not.toHaveBeenCalled();
+      expect(f.runner.query).not.toHaveBeenCalled();
+    },
+  );
+  it('requires a confirmation hook without auto-confirming the prepared proof', async () => {
+    const f = fixture();
+    await expect(
+      completeEquivalenceInspection(
+        f.target,
+        f.inspection,
+        f.inspection,
+        preparedOptions(),
+      ),
+    ).rejects.toThrow('confirmation hook');
+    expect(f.runner.connect).not.toHaveBeenCalled();
+  });
+  it('aborts an unresponsive confirmation hook within 30 seconds without a transaction', async () => {
+    jest.useFakeTimers();
+    try {
+      const f = fixture();
+      let signal: AbortSignal | undefined;
+      const result = completeEquivalenceInspection(
+        f.target,
+        f.inspection,
+        f.inspection,
+        preparedOptions(),
+        {
+          confirmPreparedApply: async (_preview, currentSignal) => {
+            signal = currentSignal;
+            return new Promise(() => {});
+          },
+        },
+      );
+      const rejection = expect(result).rejects.toThrow('timed out');
+      await jest.advanceTimersByTimeAsync(EQUIVALENCE_CONFIRMATION_TIMEOUT_MS);
+      await rejection;
+      expect(signal?.aborted).toBe(true);
+      expect(f.runner.connect).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  it.each(['source', 'priority'])(
+    'still rejects %s drift after prepared confirmation without writes',
+    async (kind) => {
+      const f = fixture();
+      await expect(
+        completeEquivalenceInspection(
+          f.target,
+          f.inspection,
+          f.inspection,
+          preparedOptions(),
+          {
+            confirmPreparedApply: async (preview) => {
+              if (kind === 'source') f.setChanged();
+              else f.setPriorityActive();
+              return `CONFIRM ${preview.proof}`;
+            },
+          },
+        ),
+      ).rejects.toThrow();
+      expect(f.runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(
+        f.runner.query.mock.calls.some(
+          ([sql]) => sql === CERTIFIED_COMPLETION_ATTESTATION_SQL,
+        ),
+      ).toBe(false);
+    },
+  );
+  it('rejects unequal inspected sources before asking for consent', async () => {
+    const f = fixture();
+    const confirmPreparedApply = jest.fn();
+    await expect(
+      completeEquivalenceInspection(
+        f.target,
+        {
+          ...f.inspection,
+          inputs: { ...f.inspection.inputs, digest: 'other' },
+        },
+        f.inspection,
+        preparedOptions(),
+        { confirmPreparedApply },
+      ),
+    ).rejects.toThrow('not equivalent');
+    expect(confirmPreparedApply).not.toHaveBeenCalled();
+    expect(f.runner.connect).not.toHaveBeenCalled();
+  });
+  it('preserves dry-run and prior-proof apply modes without invoking consent', async () => {
+    const f = fixture();
+    const confirmPreparedApply = jest.fn();
+    const options = parseEquivalenceOptions(environment);
+    await expect(
+      completeEquivalenceInspection(
+        f.target,
+        f.inspection,
+        f.inspection,
+        options,
+        {
+          confirmPreparedApply,
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'DRY_RUN' });
+    expect(f.runner.connect).not.toHaveBeenCalled();
+    await expect(
+      completeEquivalenceInspection(
+        f.target,
+        f.inspection,
+        f.inspection,
+        {
+          ...options,
+          apply: true,
+          expectedProof: equivalenceProof(f.inspection),
+        },
+        { confirmPreparedApply },
+      ),
+    ).resolves.toMatchObject({ status: 'ATTESTED' });
+    expect(confirmPreparedApply).not.toHaveBeenCalled();
+  });
   it('uses fresh READ COMMITTED checks and only appends attestation plus cache revision', async () => {
     const f = fixture();
     await expect(
