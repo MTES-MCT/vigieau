@@ -7,6 +7,7 @@ import {
   acquireEquivalenceFinalLocks,
   assertEquivalenceLookupGuard,
   assertVersionValidation,
+  rowVersionEvidence,
   versionValidationSql,
 } from './attest-history-by-source-equivalence';
 
@@ -59,13 +60,10 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
   }
 
   async function validation(
-    expected: RowVersion[],
     table: VersionTable = 'statistic_commune',
     connection: DataSource | QueryRunner = database,
   ) {
-    const [row] = await connection.query(versionValidationSql(table), [
-      JSON.stringify(expected),
-    ]);
+    const [row] = await connection.query(versionValidationSql(table));
     return row;
   }
 
@@ -155,9 +153,9 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
     'region',
   ])('accepts unchanged versions of %s', async (table) => {
     const expected = await versions(table);
-    const awaitedRow = await validation(expected, table);
+    const awaitedRow = await validation(table);
     expect(() =>
-      assertVersionValidation(awaitedRow, expected.length),
+      assertVersionValidation(awaitedRow, rowVersionEvidence(expected)),
     ).not.toThrow();
   });
 
@@ -172,34 +170,84 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
   ])('rejects a concurrent %s', async (_label, sql) => {
     const expected = await versions();
     await database.query(sql);
-    const row = await validation(expected);
-    expect(() => assertVersionValidation(row, expected.length)).toThrow(
-      'changed after validation',
-    );
+    const row = await validation();
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).toThrow('changed after validation');
   });
 
   it('rejects duplicate proof identities even when the proof length is unchanged', async () => {
     const expected = await versions();
     expected[1] = expected[0];
-    const row = await validation(expected);
-    expect(row.actualCount).toBe(3);
-    expect(row.expectedCount).toBe(3);
-    expect(row.uniqueExpectedCount).toBe(2);
-    expect(() => assertVersionValidation(row, expected.length)).toThrow();
+    expect(() => rowVersionEvidence(expected)).toThrow();
   });
 
   it('rejects changed physical table identity', async () => {
     const expected = await versions();
-    expected[0].tableoid = '0';
-    const row = await validation(expected);
-    expect(() => assertVersionValidation(row, expected.length)).toThrow();
+    expected[0].tableoid = (BigInt(expected[0].tableoid) + 1n).toString();
+    const row = await validation();
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).toThrow();
+  });
+
+  it('matches Node and PostgreSQL digests with numeric rather than lexical ID ordering', async () => {
+    await database.query(
+      "INSERT INTO statistic_commune VALUES (10,'ten'),(21,'twenty-one'),(100,'hundred')",
+    );
+    const expected = await versions();
+    const shuffled = [
+      expected[5],
+      expected[1],
+      expected[4],
+      expected[0],
+      expected[3],
+      expected[2],
+    ];
+    const evidence = rowVersionEvidence(shuffled);
+    const row = await validation();
+    expect(row).toEqual({
+      actualCount: 6,
+      distinctCount: 6,
+      digest: evidence.digest,
+    });
+    expect(evidence).toEqual(rowVersionEvidence(expected));
+    expect(() => assertVersionValidation(row, evidence)).not.toThrow();
+  });
+
+  it('rejects an actual replacement relation even when IDs and xmin are unchanged', async () => {
+    const transaction = await runner();
+    await transaction.startTransaction('READ COMMITTED');
+    await transaction.query('UPDATE statistic_commune SET value=value');
+    const expected: RowVersion[] = await transaction.query(
+      'SELECT id,xmin::text,tableoid::text FROM statistic_commune ORDER BY id',
+    );
+    await transaction.query(`
+      CREATE TABLE statistic_commune_replacement (LIKE statistic_commune INCLUDING ALL);
+      INSERT INTO statistic_commune_replacement SELECT * FROM statistic_commune;
+      ALTER TABLE statistic_commune RENAME TO statistic_commune_previous;
+      ALTER TABLE statistic_commune_replacement RENAME TO statistic_commune;
+    `);
+    const actual: RowVersion[] = await transaction.query(
+      'SELECT id,xmin::text,tableoid::text FROM statistic_commune ORDER BY id',
+    );
+    expect(actual.map(({ id, xmin }) => ({ id, xmin }))).toEqual(
+      expected.map(({ id, xmin }) => ({ id, xmin })),
+    );
+    expect(actual[0].tableoid).not.toBe(expected[0].tableoid);
+    const row = await validation('statistic_commune', transaction);
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).toThrow();
   });
 
   it('detects a region label change not covered by source revision triggers', async () => {
     const expected = await versions('region');
     await database.query("UPDATE region SET value='renamed' WHERE id=1");
-    const row = await validation(expected, 'region');
-    expect(() => assertVersionValidation(row, expected.length)).toThrow();
+    const row = await validation('region');
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).toThrow();
     expect(
       await database.query(
         'SELECT revision FROM zone_publication_source_state',
@@ -267,8 +315,10 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
     await database.query(
       "UPDATE statistic SET value='new-current' WHERE date='2026-09-08'",
     );
-    const row = await validation(expected, 'statistic');
-    expect(() => assertVersionValidation(row, 2)).not.toThrow();
+    const row = await validation('statistic');
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).not.toThrow();
     expect(
       await database.query(
         "SELECT value FROM statistic WHERE date='2026-09-08'",
@@ -285,8 +335,10 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
       "UPDATE statistic_commune SET value='late-commit' WHERE id=1",
     );
     await acquireEquivalenceFinalLocks(final);
-    const row = await validation(expected, 'statistic_commune', final);
-    expect(() => assertVersionValidation(row, expected.length)).toThrow();
+    const row = await validation('statistic_commune', final);
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).toThrow();
   });
 
   it('demonstrates why a repeatable-read final transaction would miss that commit', async () => {
@@ -298,8 +350,10 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
       "UPDATE statistic_commune SET value='late-commit' WHERE id=1",
     );
     await acquireEquivalenceFinalLocks(final);
-    const row = await validation(expected, 'statistic_commune', final);
-    expect(() => assertVersionValidation(row, expected.length)).not.toThrow();
+    const row = await validation('statistic_commune', final);
+    expect(() =>
+      assertVersionValidation(row, rowVersionEvidence(expected)),
+    ).not.toThrow();
   });
 
   it('refuses a busy statistic writer without waiting', async () => {
