@@ -28,6 +28,11 @@ export interface ArreteComputationState {
   statut: StatutArreteCadre;
 }
 
+export interface HistoricStatisticRange {
+  from: string;
+  through: string | null;
+}
+
 export interface ArretePublicationState
   extends ArreteComputationState, ArreteEndDateState {}
 
@@ -166,6 +171,61 @@ export function hasArreteComputationStateChanged(
       (after.dateFin ? normalizeCivilDate(after.dateFin) : null) ||
     before.statut !== after.statut
   );
+}
+
+export function getArreteHistoricStatisticRanges(
+  before: ArreteComputationState | null,
+  after: ArreteComputationState | null,
+): HistoricStatisticRange[] {
+  const boundaries = new Map<string, number>();
+  const addBoundary = (date: string) => {
+    boundaries.set(date, (boundaries.get(date) ?? 0) + 1);
+  };
+
+  for (const state of [before, after]) {
+    if (!state) {
+      continue;
+    }
+    const from =
+      state.dateDebut === null || state.dateDebut === undefined
+        ? null
+        : normalizeCivilDate(state.dateDebut);
+    const through =
+      state.dateFin === null || state.dateFin === undefined
+        ? null
+        : normalizeCivilDate(state.dateFin);
+    if (state.statut !== 'publie' && state.statut !== 'abroge') {
+      continue;
+    }
+    if (!from || (through && through < from)) {
+      continue;
+    }
+    addBoundary(from);
+    if (through) {
+      addBoundary(shiftCivilDate(through, 1));
+    }
+  }
+
+  // Inclusive intervals become half-open boundaries; shared days cancel out.
+  const ranges: HistoricStatisticRange[] = [];
+  let from: string | null = null;
+  for (const [date, count] of [...boundaries.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    if (count % 2 === 0) {
+      continue;
+    }
+    if (from === null) {
+      from = date;
+    } else {
+      ranges.push({ from, through: shiftCivilDate(date, -1) });
+      from = null;
+    }
+  }
+  if (from !== null) {
+    ranges.push({ from, through: null });
+  }
+  return ranges;
 }
 
 export function hasArretePublicationStateChanged(

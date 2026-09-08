@@ -357,6 +357,7 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.invalidateComputationsFromWithManager).toHaveBeenCalledWith(
       harness.manager,
       '2026-07-01',
+      undefined,
     );
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
     expect(loggerError).toHaveBeenCalledWith(
@@ -638,7 +639,7 @@ describe('ArreteRestrictionService chain mutations', () => {
       statut: 'publie',
     });
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
-    expect(harness.manager.query).toHaveBeenCalledTimes(1);
+    expect(harness.manager.query).toHaveBeenCalledTimes(2);
   });
 
   it('restores the predecessor after deleting its published successor', async () => {
@@ -672,6 +673,10 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.invalidateComputationsFromWithManager).toHaveBeenCalledWith(
       harness.manager,
       '2026-07-01',
+      [
+        { from: '2026-08-04', through: null },
+        { from: '2026-08-04', through: null },
+      ],
     );
     expect(harness.recordPublicMutation).toHaveBeenCalledWith(
       harness.manager,
@@ -681,19 +686,19 @@ describe('ArreteRestrictionService chain mutations', () => {
     expect(harness.manager.query).toHaveBeenLastCalledWith(
       expect.stringContaining('record_historic_compute_invalidation'),
       [
-        '2026-07-01',
+        '2026-08-04',
         null,
-        true,
-        true,
-        'published-source-mutation',
+        false,
+        false,
+        'published-calendar-mutation',
         null,
         '{}',
-        '2026-07-01',
-        '2026-07-01',
+        null,
+        '2026-08-04',
         false,
         false,
         false,
-        true,
+        false,
         false,
       ],
     );

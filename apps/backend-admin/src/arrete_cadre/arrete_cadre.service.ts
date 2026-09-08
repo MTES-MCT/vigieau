@@ -36,6 +36,7 @@ import { MailService } from '../shared/services/mail.service';
 import {
   areCivilDatesEqual,
   getArreteLifecycleStatus,
+  getArreteHistoricStatisticRanges,
   getCurrentParisCivilDate,
   getPredecessorEndDateConstraint,
   getPublicationEndDateProvenance,
@@ -46,6 +47,7 @@ import {
   normalizeCivilDate,
   resolveArreteEndDate,
   UnknownArreteEndDateProvenanceError,
+  type HistoricStatisticRange,
 } from '../shared/arrete-date-continuity';
 import { hasArreteCadrePublicUpdate } from '../shared/arrete-public-update';
 import { UsageService } from '../usage/usage.service';
@@ -595,6 +597,7 @@ export class ArreteCadreService {
               );
             }
             const continuityDirtyDates: string[] = [];
+            const calendarRanges: HistoricStatisticRange[] = [];
             for (const affectedId of affectedIds) {
               const previous = before.find(
                 (arrete) => arrete.id === affectedId,
@@ -614,6 +617,12 @@ export class ArreteCadreService {
               ) {
                 continuityDirtyDates.push(
                   normalizeCivilDate(previous.dateDebut),
+                );
+                calendarRanges.push(
+                  ...getArreteHistoricStatisticRanges(previous, {
+                    ...previous,
+                    ...synchronized,
+                  }),
                 );
               }
               if (affectedId === id) {
@@ -637,6 +646,8 @@ export class ArreteCadreService {
                 manager,
                 affectedIds,
                 businessDate,
+                true,
+                calendarRanges,
               );
             const dirtyDates = changesPublicContent
               ? before
@@ -650,6 +661,7 @@ export class ArreteCadreService {
               await this.arreteRestrictionService.invalidateComputationsFromWithManager(
                 manager,
                 dirtyDates.sort()[0],
+                changesPublicContent ? undefined : calendarRanges,
               );
             }
             if (
@@ -835,6 +847,12 @@ export class ArreteCadreService {
               statut: synchronized.statut ?? toSave.statut,
             });
           const dirtyDates: string[] = [];
+          const calendarRanges = getArreteHistoricStatisticRanges(current, {
+            ...current,
+            dateDebut,
+            dateFin: synchronized.dateFin,
+            statut: synchronized.statut ?? toSave.statut,
+          });
           if (
             hasArreteComputationStateChanged(current, {
               dateDebut,
@@ -867,6 +885,12 @@ export class ArreteCadreService {
               })
             ) {
               dirtyDates.push(normalizeCivilDate(predecessor.dateDebut));
+              calendarRanges.push(
+                ...getArreteHistoricStatisticRanges(predecessor, {
+                  ...predecessor,
+                  ...synchronizedPredecessor,
+                }),
+              );
             }
           }
           dirtyDates.push(
@@ -876,6 +900,8 @@ export class ArreteCadreService {
                 (arreteId): arreteId is number => arreteId !== undefined,
               ),
               businessDate,
+              true,
+              calendarRanges,
             )),
           );
           if (newFile) {
@@ -885,6 +911,7 @@ export class ArreteCadreService {
             await this.arreteRestrictionService.invalidateComputationsFromWithManager(
               manager,
               dirtyDates.sort()[0],
+              calendarRanges,
             );
           }
           if (publicationContentChanged || dirtyDates.length > 0) {
@@ -1283,17 +1310,24 @@ export class ArreteCadreService {
             businessDate,
           ),
         );
+        const calendarRanges = getArreteHistoricStatisticRanges(current, {
+          ...current,
+          ...saved,
+        });
         const dirtyDates = [
           normalizeCivilDate(current.dateDebut),
           ...(await this.arreteRestrictionService.reconcileArreteRestrictionsForArreteCadres(
             manager,
             [id],
             businessDate,
+            true,
+            calendarRanges,
           )),
         ];
         await this.arreteRestrictionService.invalidateComputationsFromWithManager(
           manager,
           dirtyDates.sort()[0],
+          calendarRanges,
         );
         await this.arreteRestrictionService.recordPublicMutation(
           manager,
@@ -1822,6 +1856,7 @@ export class ArreteCadreService {
           ids,
         );
         const dirtyFrom: string[] = [];
+        const calendarRanges: HistoricStatisticRange[] = [];
         for (const previous of candidates) {
           const synchronized = await this.synchronizeArreteCadreEndDate(
             repository,
@@ -1843,6 +1878,18 @@ export class ArreteCadreService {
             missedEnd
           ) {
             dirtyFrom.push(normalizeCivilDate(previous.dateDebut));
+            calendarRanges.push(
+              ...getArreteHistoricStatisticRanges(previous, {
+                ...previous,
+                ...synchronized,
+              }),
+            );
+            if (missedEnd) {
+              calendarRanges.push({
+                from: shiftCivilDate(normalizeCivilDate(previous.dateFin), 1),
+                through: shiftCivilDate(businessDate, -1),
+              });
+            }
           }
           if (synchronized.statut !== previous.statut) {
             changedStatusCounts[synchronized.statut] += 1;
@@ -1854,12 +1901,14 @@ export class ArreteCadreService {
             ids,
             businessDate,
             false,
+            calendarRanges,
           )),
         );
         if (dirtyFrom.length > 0) {
           await this.arreteRestrictionService.invalidateComputationsFromWithManager(
             manager,
             dirtyFrom.sort()[0],
+            calendarRanges,
           );
         }
         if (!dailyPublicationReuse) {

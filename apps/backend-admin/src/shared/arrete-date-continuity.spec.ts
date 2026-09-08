@@ -1,4 +1,6 @@
 import {
+  ArreteComputationState,
+  getArreteHistoricStatisticRanges,
   getArreteLifecycleStatus,
   getCurrentParisCivilDate,
   getPredecessorEndDateConstraint,
@@ -12,6 +14,183 @@ import {
 } from './arrete-date-continuity';
 
 describe('arrete date continuity', () => {
+  describe('getArreteHistoricStatisticRanges', () => {
+    const state = (
+      dateDebut: string | null = '2026-07-11',
+      dateFin: string | null = '2026-08-20',
+      statut: ArreteComputationState['statut'] = 'publie',
+    ): ArreteComputationState => ({ dateDebut, dateFin, statut });
+
+    it.each([
+      ['publie', 'publie'],
+      ['publie', 'abroge'],
+      ['abroge', 'publie'],
+      ['abroge', 'abroge'],
+    ] as const)(
+      'keeps an identical %s to %s historical interval',
+      (before, after) => {
+        expect(
+          getArreteHistoricStatisticRanges(
+            state('2026-07-11', '2026-08-20', before),
+            state('2026-07-11', '2026-08-20', after),
+          ),
+        ).toEqual([]);
+      },
+    );
+
+    it('preserves the status change guard even when historic statistic days are identical', () => {
+      const before = state('2026-07-11', '2026-08-20', 'publie');
+      const after = state('2026-07-11', '2026-08-20', 'abroge');
+      expect(hasArreteComputationStateChanged(before, after)).toBe(true);
+      expect(getArreteHistoricStatisticRanges(before, after)).toEqual([]);
+    });
+
+    it('bounds the impact of changing only the start of an open-ended interval', () => {
+      expect(
+        getArreteHistoricStatisticRanges(
+          state('2026-07-11', null),
+          state('2026-07-15', null),
+        ),
+      ).toEqual([{ from: '2026-07-11', through: '2026-07-14' }]);
+    });
+
+    it.each([
+      ['2026-08-20', '2026-08-25', '2026-08-21', '2026-08-25'],
+      ['2026-08-25', '2026-08-20', '2026-08-21', '2026-08-25'],
+      ['2026-08-20', null, '2026-08-21', null],
+      [null, '2026-08-20', '2026-08-21', null],
+      ['2026-08-31', '2026-09-01', '2026-09-01', '2026-09-01'],
+    ])(
+      'limits the change from end %s to %s',
+      (before, after, from, through) => {
+        expect(
+          getArreteHistoricStatisticRanges(
+            state('2026-07-11', before),
+            state('2026-07-11', after),
+          ),
+        ).toEqual([{ from, through }]);
+      },
+    );
+
+    it('handles two changed boundaries without invalidating their common days', () => {
+      expect(
+        getArreteHistoricStatisticRanges(
+          state('2026-07-11', '2026-08-20'),
+          state('2026-07-15', '2026-08-25'),
+        ),
+      ).toEqual([
+        { from: '2026-07-11', through: '2026-07-14' },
+        { from: '2026-08-21', through: '2026-08-25' },
+      ]);
+    });
+
+    it('keeps disjoint ranges separate, but merges adjacent changed days', () => {
+      expect(
+        getArreteHistoricStatisticRanges(
+          state('2026-07-11', '2026-07-15'),
+          state('2026-07-20', '2026-07-25'),
+        ),
+      ).toEqual([
+        { from: '2026-07-11', through: '2026-07-15' },
+        { from: '2026-07-20', through: '2026-07-25' },
+      ]);
+      expect(
+        getArreteHistoricStatisticRanges(
+          state('2026-07-11', '2026-07-15'),
+          state('2026-07-16', '2026-07-20'),
+        ),
+      ).toEqual([{ from: '2026-07-11', through: '2026-07-20' }]);
+    });
+
+    it.each(['a_valider', 'a_venir'] as const)(
+      'adds or removes the whole interval for a transition involving %s',
+      (inactiveStatus) => {
+        const inactive = state('2026-07-11', '2026-08-20', inactiveStatus);
+        const active = state();
+        expect(getArreteHistoricStatisticRanges(inactive, active)).toEqual([
+          { from: '2026-07-11', through: '2026-08-20' },
+        ]);
+        expect(getArreteHistoricStatisticRanges(active, inactive)).toEqual([
+          { from: '2026-07-11', through: '2026-08-20' },
+        ]);
+      },
+    );
+
+    it('supports creation, deletion and incomplete inactive drafts', () => {
+      expect(getArreteHistoricStatisticRanges(null, state())).toEqual([
+        { from: '2026-07-11', through: '2026-08-20' },
+      ]);
+      expect(getArreteHistoricStatisticRanges(state(), null)).toEqual([
+        { from: '2026-07-11', through: '2026-08-20' },
+      ]);
+      expect(
+        getArreteHistoricStatisticRanges(
+          state(null, null, 'a_valider'),
+          state('2026-07-11', null, 'a_venir'),
+        ),
+      ).toEqual([]);
+    });
+
+    it.each([state(null), state('2026-08-21', '2026-08-20')])(
+      'treats an empty legacy active interval like the historic SQL predicate: %p',
+      (emptyState) => {
+        expect(getArreteHistoricStatisticRanges(emptyState, state())).toEqual([
+          { from: '2026-07-11', through: '2026-08-20' },
+        ]);
+        expect(getArreteHistoricStatisticRanges(state(), emptyState)).toEqual([
+          { from: '2026-07-11', through: '2026-08-20' },
+        ]);
+        expect(getArreteHistoricStatisticRanges(null, emptyState)).toEqual([]);
+      },
+    );
+
+    it('normalizes civil dates and preserves inclusive leap-day and year boundaries', () => {
+      expect(
+        getArreteHistoricStatisticRanges(
+          state('2024-02-01T12:00:00.000Z', '2024-02-28'),
+          state('2024-02-01', '2024-03-01'),
+        ),
+      ).toEqual([{ from: '2024-02-29', through: '2024-03-01' }]);
+      expect(
+        getArreteHistoricStatisticRanges(
+          state('2025-01-01', '2025-12-31'),
+          state('2025-01-01', '2026-01-01'),
+        ),
+      ).toEqual([{ from: '2026-01-01', through: '2026-01-01' }]);
+    });
+
+    it('never reaches unchanged July dates during successive September replacements', () => {
+      let before = state('2026-07-11', null);
+      for (const dateFin of ['2026-09-07', '2026-09-14', '2026-09-06']) {
+        const after = state('2026-07-11', dateFin, 'abroge');
+        expect(
+          getArreteHistoricStatisticRanges(before, after).every(
+            ({ from }) => from >= '2026-09-07',
+          ),
+        ).toBe(true);
+        before = after;
+      }
+    });
+
+    it.each([
+      state(''),
+      state('2026-02-29'),
+      state('2026-07-11', ''),
+      state('2026-07-11', 'invalid'),
+      state('invalid', null, 'a_valider'),
+    ])(
+      'rejects an invalid state instead of silently shrinking the impact: %p',
+      (invalid) => {
+        expect(() =>
+          getArreteHistoricStatisticRanges(state(), invalid),
+        ).toThrow();
+        expect(() =>
+          getArreteHistoricStatisticRanges(invalid, state()),
+        ).toThrow();
+      },
+    );
+  });
+
   describe('normalizeCivilDate', () => {
     it.each([
       ['2026-08-05', '2026-08-05'],

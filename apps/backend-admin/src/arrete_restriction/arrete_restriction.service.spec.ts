@@ -46,6 +46,7 @@ function createHarness(
     predecessorFrameworkEnd?: string;
     initialOverrides?: Record<string, unknown>;
     currentOverrides?: Record<string, unknown>;
+    predecessorOverrides?: Record<string, unknown>;
   } = {},
 ) {
   const initial = createArrete({
@@ -78,6 +79,7 @@ function createHarness(
     arretesRestriction: [
       { id: 37577, dateDebut: '2026-08-05', statut: 'a_venir' },
     ],
+    ...options.predecessorOverrides,
   });
   const lockQuery = {
     select: jest.fn().mockReturnThis(),
@@ -219,6 +221,91 @@ describe('ArreteRestrictionService.publish', () => {
     jest.useRealTimers();
   });
 
+  it.each(['2026-07-11', '2024-07-10'])(
+    'preserves summer statistics when replacing a predecessor started on %s in September',
+    async (predecessorStart) => {
+      jest.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
+      const harness = createHarness({
+        initialOverrides: { dateDebut: '2026-09-08', statut: 'a_valider' },
+        currentOverrides: { dateDebut: '2026-09-08', statut: 'publie' },
+        predecessorOverrides: {
+          dateDebut: predecessorStart,
+          dateFin: null,
+          dateFinCalculee: false,
+          statut: 'publie',
+          arretesRestriction: [
+            { id: 37577, dateDebut: '2026-09-08', statut: 'publie' },
+          ],
+        },
+      });
+
+      await harness.service.publish(
+        37577,
+        null,
+        {
+          dateDebut: '2026-09-08',
+          dateFin: null,
+          dateSignature: '2026-09-08',
+        },
+        currentUser,
+      );
+
+      expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+        { id: 37487 },
+        expect.objectContaining({ dateFin: '2026-09-07', statut: 'abroge' }),
+      );
+      const invalidations = harness.manager.query.mock.calls
+        .filter(([sql]) => sql.includes('record_historic_compute_invalidation'))
+        .map(([, parameters]) => parameters as unknown[]);
+      expect(invalidations.length).toBeGreaterThan(0);
+      expect(invalidations.every((parameters) => parameters[2] === false)).toBe(
+        true,
+      );
+      expect(invalidations).toEqual(
+        expect.arrayContaining([
+          expect.arrayContaining([predecessorStart, '2026-09-07', false, true]),
+        ]),
+      );
+      expect(
+        invalidations.some((parameters) => parameters[8] === '2026-09-08'),
+      ).toBe(true);
+      expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('invalidates only the changed historical predecessor end, not its original start', async () => {
+    jest.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
+    const harness = createHarness({
+      initialOverrides: { dateDebut: '2026-08-26', statut: 'a_valider' },
+      currentOverrides: { dateDebut: '2026-08-26', statut: 'publie' },
+      predecessorOverrides: {
+        dateDebut: '2026-07-11',
+        dateFin: '2026-08-20',
+        statut: 'abroge',
+        arretesRestriction: [
+          { id: 37577, dateDebut: '2026-08-26', statut: 'publie' },
+        ],
+      },
+    });
+    await harness.service.publish(
+      37577,
+      null,
+      {
+        dateDebut: '2026-08-26',
+        dateFin: null,
+        dateSignature: null,
+      },
+      currentUser,
+    );
+    const statistics = harness.manager.query.mock.calls.filter(
+      ([sql, parameters]) =>
+        sql.includes('record_historic_compute_invalidation') && parameters[2],
+    );
+    expect(statistics).toHaveLength(1);
+    expect(statistics[0][1][0]).toBe('2026-08-21');
+    expect(statistics[0][1][1]).toBe('2026-09-07');
+  });
+
   it('moves the Mayenne predecessor within one serializable transaction', async () => {
     const harness = createHarness();
 
@@ -254,11 +341,79 @@ describe('ArreteRestrictionService.publish', () => {
         statut: 'publie',
       }),
     );
-    expect(harness.manager.query).toHaveBeenCalledTimes(1);
+    expect(harness.manager.query).toHaveBeenCalledTimes(2);
     expect(harness.requestCurrentZoneRecompute).toHaveBeenCalledWith(
       [harness.initial.departement],
       'PUBLICATION AR',
     );
+  });
+
+  it('preserves priority invalidation on overlapping days when a published start changes', async () => {
+    jest.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: { dateDebut: '2026-07-11', statut: 'publie' },
+      currentOverrides: { dateDebut: '2026-08-26', statut: 'publie' },
+    });
+    await harness.service.publish(
+      37577,
+      null,
+      {
+        dateDebut: '2026-08-26',
+        dateFin: null,
+        dateSignature: null,
+      },
+      currentUser,
+    );
+    const statistics = harness.manager.query.mock.calls.filter(
+      ([sql, parameters]) =>
+        sql.includes('record_historic_compute_invalidation') && parameters[2],
+    );
+    expect(statistics).toHaveLength(1);
+    expect(statistics[0][1].slice(0, 4)).toEqual([
+      '2026-07-11',
+      '2026-09-07',
+      true,
+      false,
+    ]);
+  });
+
+  it('limits a retrospective end extension to its added days', async () => {
+    jest.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
+    const harness = createHarness({
+      withoutPredecessor: true,
+      initialOverrides: {
+        dateDebut: '2026-07-11',
+        dateFin: '2026-08-20',
+        statut: 'publie',
+      },
+      currentOverrides: {
+        dateDebut: '2026-07-11',
+        dateFin: '2026-08-25',
+        statut: 'abroge',
+      },
+    });
+    await harness.service.publish(
+      37577,
+      null,
+      {
+        dateDebut: '2026-07-11',
+        dateFin: '2026-08-25',
+        dateSignature: null,
+      },
+      currentUser,
+    );
+    const statistics = harness.manager.query.mock.calls.filter(
+      ([sql, parameters]) =>
+        sql.includes('record_historic_compute_invalidation') && parameters[2],
+    );
+    expect(statistics).toHaveLength(1);
+    expect(statistics[0][1].slice(0, 4)).toEqual([
+      '2026-08-21',
+      '2026-08-25',
+      true,
+      false,
+    ]);
   });
 
   it('rejects the publication when historic invalidation updates no config row', async () => {

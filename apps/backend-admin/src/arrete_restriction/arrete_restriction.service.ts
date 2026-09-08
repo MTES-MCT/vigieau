@@ -40,7 +40,10 @@ import {
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { ConfigService } from '../config/config.service';
-import { invalidateHistoricComputationsFromWithManager } from '../config/historic-computation-invalidation';
+import {
+  invalidateHistoricCalendarComputationsWithManager,
+  invalidateHistoricComputationsFromWithManager,
+} from '../config/historic-computation-invalidation';
 import { DepartementService } from '../departement/departement.service';
 import { FichierService } from '../fichier/fichier.service';
 import { RegleauLogger } from '../logger/regleau.logger';
@@ -49,6 +52,7 @@ import { MailService } from '../shared/services/mail.service';
 import {
   areCivilDatesEqual,
   getArreteLifecycleStatus,
+  getArreteHistoricStatisticRanges,
   getCurrentParisCivilDate,
   getPredecessorEndDateConstraint,
   getPublicationEndDateProvenance,
@@ -58,6 +62,7 @@ import {
   normalizeCivilDate,
   resolveArreteEndDate,
   UnknownArreteEndDateProvenanceError,
+  type HistoricStatisticRange,
 } from '../shared/arrete-date-continuity';
 import { hasArreteRestrictionPublicUpdate } from '../shared/arrete-public-update';
 import { StatisticDepartementService } from '../statistic_departement/statistic_departement.service';
@@ -837,6 +842,7 @@ export class ArreteRestrictionService {
                 );
               }
               const continuityDirtyDates: string[] = [];
+              const calendarRanges: HistoricStatisticRange[] = [];
               for (const affectedId of affectedIds) {
                 const previous = before.find(
                   (arrete) => arrete.id === affectedId,
@@ -857,6 +863,12 @@ export class ArreteRestrictionService {
                 ) {
                   continuityDirtyDates.push(
                     normalizeCivilDate(previous.dateDebut),
+                  );
+                  calendarRanges.push(
+                    ...getArreteHistoricStatisticRanges(previous, {
+                      ...previous,
+                      ...synchronized,
+                    }),
                   );
                 }
                 if (affectedId === id) {
@@ -886,6 +898,7 @@ export class ArreteRestrictionService {
                 await this.invalidateComputationsFromWithManager(
                   manager,
                   dirtyDates.sort()[0],
+                  changesPublicContent ? undefined : calendarRanges,
                 );
               }
               if (changesPublicContent || continuityDirtyDates.length > 0) {
@@ -1101,6 +1114,27 @@ export class ArreteRestrictionService {
               statut: synchronized.statut ?? toSave.statut,
             });
           const dirtyDates: string[] = [];
+          const calendarRanges = getArreteHistoricStatisticRanges(current, {
+            ...current,
+            dateDebut,
+            dateFin: synchronized.dateFin,
+            statut: synchronized.statut ?? toSave.statut,
+          });
+          // Start and signature dates also order competing historic restrictions.
+          if (
+            !areCivilDatesEqual(current.dateSignature, dateSignature) ||
+            !areCivilDatesEqual(current.dateDebut, dateDebut)
+          ) {
+            calendarRanges.push(
+              ...getArreteHistoricStatisticRanges(null, current),
+              ...getArreteHistoricStatisticRanges(null, {
+                ...current,
+                dateDebut,
+                dateFin: synchronized.dateFin,
+                statut: synchronized.statut ?? toSave.statut,
+              }),
+            );
+          }
           if (
             hasArreteComputationStateChanged(current, {
               dateDebut,
@@ -1139,6 +1173,12 @@ export class ArreteRestrictionService {
               })
             ) {
               dirtyDates.push(normalizeCivilDate(predecessor.dateDebut));
+              calendarRanges.push(
+                ...getArreteHistoricStatisticRanges(predecessor, {
+                  ...predecessor,
+                  ...synchronizedPredecessor,
+                }),
+              );
             }
           }
 
@@ -1146,6 +1186,7 @@ export class ArreteRestrictionService {
             await this.invalidateComputationsFromWithManager(
               manager,
               dirtyDates.sort()[0],
+              calendarRanges,
             );
           }
           if (publicationContentChanged || dirtyDates.length > 0) {
@@ -1519,6 +1560,7 @@ export class ArreteRestrictionService {
     businessDate: string,
     rejectUnknownExtension = true,
     dirtyDates?: string[],
+    statisticRanges?: HistoricStatisticRange[],
   ): Promise<Partial<ArreteRestriction>> {
     const arrete = await this.findOneForContinuity(repository, id);
     const validSuccessors = arrete.arretesRestriction.filter(
@@ -1615,6 +1657,18 @@ export class ArreteRestrictionService {
           : missedStart || missedEnd))
     ) {
       dirtyDates.push(normalizeCivilDate(arrete.dateDebut));
+      statisticRanges?.push(
+        ...getArreteHistoricStatisticRanges(arrete, {
+          ...arrete,
+          ...update,
+        }),
+      );
+      if (!rejectUnknownExtension && missedEnd) {
+        statisticRanges?.push({
+          from: shiftCivilDate(normalizeCivilDate(arrete.dateFin), 1),
+          through: shiftCivilDate(businessDate, -1),
+        });
+      }
     }
     if (
       arrete.dateFin === update.dateFin &&
@@ -1637,6 +1691,7 @@ export class ArreteRestrictionService {
     arreteCadreIds: number[],
     businessDate: string,
     rejectUnknownExtension = true,
+    statisticRanges?: HistoricStatisticRange[],
   ): Promise<string[]> {
     if (arreteCadreIds.length === 0) {
       return [];
@@ -1657,6 +1712,7 @@ export class ArreteRestrictionService {
         businessDate,
         rejectUnknownExtension,
         dirtyDates,
+        statisticRanges,
       );
     }
     return [...new Set(dirtyDates)];
@@ -1689,8 +1745,17 @@ export class ArreteRestrictionService {
   async invalidateComputationsFromWithManager(
     manager: EntityManager,
     date: string,
+    statisticRanges?: HistoricStatisticRange[],
   ): Promise<void> {
-    await invalidateHistoricComputationsFromWithManager(manager, date);
+    if (statisticRanges === undefined) {
+      await invalidateHistoricComputationsFromWithManager(manager, date);
+    } else {
+      await invalidateHistoricCalendarComputationsWithManager(
+        manager,
+        date,
+        statisticRanges,
+      );
+    }
   }
 
   async repeal(
@@ -1766,6 +1831,7 @@ export class ArreteRestrictionService {
         await this.invalidateComputationsFromWithManager(
           manager,
           normalizeCivilDate(current.dateDebut),
+          getArreteHistoricStatisticRanges(current, { ...current, ...saved }),
         );
         await this.recordPublicMutation(
           manager,
@@ -2039,11 +2105,17 @@ export class ArreteRestrictionService {
             affectsPublicComputations && current.dateDebut
               ? [normalizeCivilDate(current.dateDebut)]
               : [];
+          const calendarRanges = getArreteHistoricStatisticRanges(
+            current,
+            null,
+          );
+          let predecessorBefore: ArreteRestriction | undefined;
           if (affectsPublicComputations && predecessorId) {
             const predecessor = await this.findOneForContinuity(
               repository,
               predecessorId,
             );
+            predecessorBefore = predecessor;
             if (predecessor.dateDebut) {
               dirtyFrom.push(normalizeCivilDate(predecessor.dateDebut));
             }
@@ -2056,11 +2128,17 @@ export class ArreteRestrictionService {
           if (deleted.affected !== 1) {
             throw new Error(`Unable to delete restriction order ${id}`);
           }
-          if (affectsPublicComputations && predecessorId) {
-            await this.synchronizeArreteRestrictionEndDate(
+          if (affectsPublicComputations && predecessorId && predecessorBefore) {
+            const synchronized = await this.synchronizeArreteRestrictionEndDate(
               repository,
               predecessorId,
               businessDate,
+            );
+            calendarRanges.push(
+              ...getArreteHistoricStatisticRanges(predecessorBefore, {
+                ...predecessorBefore,
+                ...synchronized,
+              }),
             );
           }
           if (affectsPublicComputations) {
@@ -2068,6 +2146,7 @@ export class ArreteRestrictionService {
               await this.invalidateComputationsFromWithManager(
                 manager,
                 dirtyFrom.sort()[0],
+                calendarRanges,
               );
             }
             await this.recordPublicMutation(
@@ -2922,6 +3001,7 @@ export class ArreteRestrictionService {
           const ids = candidates.map(({ id }) => id);
           await this.lockArreteRestrictionGraph(repository, ids);
           const dirtyFrom: string[] = [];
+          const calendarRanges: HistoricStatisticRange[] = [];
           for (const previous of candidates) {
             const synchronized = await this.synchronizeArreteRestrictionEndDate(
               repository,
@@ -2943,6 +3023,18 @@ export class ArreteRestrictionService {
               missedEnd
             ) {
               dirtyFrom.push(normalizeCivilDate(previous.dateDebut));
+              calendarRanges.push(
+                ...getArreteHistoricStatisticRanges(previous, {
+                  ...previous,
+                  ...synchronized,
+                }),
+              );
+              if (missedEnd) {
+                calendarRanges.push({
+                  from: shiftCivilDate(normalizeCivilDate(previous.dateFin), 1),
+                  through: shiftCivilDate(businessDate, -1),
+                });
+              }
             }
             if (synchronized.statut !== previous.statut) {
               changedStatusCounts[synchronized.statut] += 1;
@@ -2952,6 +3044,7 @@ export class ArreteRestrictionService {
             await this.invalidateComputationsFromWithManager(
               manager,
               dirtyFrom.sort()[0],
+              calendarRanges,
             );
           }
           await this.recordPublicMutation(
