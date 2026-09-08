@@ -77,6 +77,10 @@ export interface RowVersion {
   xmin: string;
   tableoid: string;
 }
+export interface RowVersionEvidence {
+  count: number;
+  digest: string;
+}
 type OutputKind = 'commune' | 'department' | 'national';
 interface OutputRow extends RowVersion {
   code: string;
@@ -565,6 +569,35 @@ async function inspect(
   }
 }
 
+export function rowVersionEvidence(
+  versions: readonly RowVersion[],
+): RowVersionEvidence {
+  if (!versions.length) throw new Error('Empty row version evidence');
+  const ids = new Set<number>();
+  for (const row of versions) {
+    if (
+      !Number.isSafeInteger(row?.id) ||
+      row.id < 1 ||
+      typeof row.xmin !== 'string' ||
+      !/^(0|[1-9]\d*)$/.test(row.xmin) ||
+      typeof row.tableoid !== 'string' ||
+      !/^[1-9]\d*$/.test(row.tableoid)
+    )
+      throw new Error('Invalid row version identity');
+    if (ids.has(row.id)) throw new Error('Duplicate row version identity');
+    ids.add(row.id);
+  }
+  // Canonical decimal fields cannot contain delimiters. Numeric ordering must
+  // match PostgreSQL ORDER BY id, with no trailing newline on either side.
+  const hash = createHash('sha256');
+  [...versions]
+    .sort((left, right) => left.id - right.id)
+    .forEach(({ id, xmin, tableoid }, index) => {
+      hash.update(`${index ? '\n' : ''}${id}\t${xmin}\t${tableoid}`);
+    });
+  return { count: versions.length, digest: hash.digest('hex') };
+}
+
 export function versionValidationSql(
   table: 'statistic_commune' | 'statistic_departement' | 'statistic' | 'region',
 ): string {
@@ -572,37 +605,33 @@ export function versionValidationSql(
     table === 'statistic'
       ? `WHERE date BETWEEN '${FROM}' AND '${THROUGH}'`
       : '';
-  return `WITH expected AS MATERIALIZED (
-    SELECT * FROM jsonb_to_recordset($1::jsonb) e(id integer,xmin text,tableoid text)
-  ), actual AS MATERIALIZED (SELECT id,xmin::text,tableoid::text FROM ${table} ${predicate})
-  SELECT (SELECT count(*)::integer FROM actual) AS "actualCount",
-    (SELECT count(DISTINCT id)::integer FROM actual) AS "distinctCount",
-    (SELECT count(*)::integer FROM expected) AS "expectedCount",
-    (SELECT count(DISTINCT id)::integer FROM expected) AS "uniqueExpectedCount",
-    (SELECT count(*)::integer FROM actual a JOIN expected e ON a.id=e.id AND a.xmin=e.xmin AND a.tableoid=e.tableoid) AS "matchedCount"`;
+  return `SELECT count(*)::integer AS "actualCount",
+    count(DISTINCT id)::integer AS "distinctCount",
+    encode(sha256(convert_to(string_agg(id::text||E'\\t'||xmin::text||E'\\t'||tableoid::text,
+      E'\\n' ORDER BY id),'UTF8')),'hex') AS digest
+    FROM ${table} ${predicate}`;
 }
 
 export function assertVersionValidation(
   row: Record<string, unknown>,
-  expected: number,
+  expected: RowVersionEvidence,
 ): void {
-  for (const key of [
-    'actualCount',
-    'distinctCount',
-    'expectedCount',
-    'uniqueExpectedCount',
-    'matchedCount',
-  ]) {
-    if (Number(row?.[key]) !== expected)
-      throw new Error('Statistic or reference rows changed after validation');
-  }
+  if (
+    !Number.isSafeInteger(expected.count) ||
+    expected.count < 1 ||
+    !/^[a-f0-9]{64}$/.test(expected.digest) ||
+    row?.actualCount !== expected.count ||
+    row?.distinctCount !== expected.count ||
+    row?.digest !== expected.digest
+  )
+    throw new Error('Statistic or reference rows changed after validation');
 }
 
 export async function acquireEquivalenceFinalLocks(
   runner: Pick<QueryRunner, 'query'>,
 ): Promise<void> {
   await runner.query(
-    "SET LOCAL transaction_timeout='3s'; SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='50ms'",
+    "SET LOCAL jit=off; SET LOCAL transaction_timeout='3s'; SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='50ms'",
   );
   const [locks] = await runner.query(`SELECT
     pg_try_advisory_xact_lock(hashtext('vigieau:statistic-commune:snapshot-computation')) AS snapshot,
@@ -654,6 +683,17 @@ export async function applyEquivalenceAttestation(
   inspection: Inspection,
   proof: string,
 ) {
+  const versionChecks = (
+    [
+      ['statistic_commune', inspection.outputs.commune.versions],
+      ['statistic_departement', inspection.outputs.department.versions],
+      ['statistic', inspection.outputs.national.versions],
+      ['region', inspection.regionVersions],
+    ] as const
+  ).map(([table, versions]) => ({
+    table,
+    evidence: rowVersionEvidence(versions),
+  }));
   const runner = target.createQueryRunner();
   await runner.connect();
   let operationFailed = false;
@@ -692,16 +732,9 @@ export async function applyEquivalenceAttestation(
     );
     assertEquivalenceAudit(audit?.value);
     same(audit.value, inspection.audit, 'Certified repair audit changed');
-    for (const [table, versions] of [
-      ['statistic_commune', inspection.outputs.commune.versions],
-      ['statistic_departement', inspection.outputs.department.versions],
-      ['statistic', inspection.outputs.national.versions],
-      ['region', inspection.regionVersions],
-    ] as const) {
-      const [result] = await runner.query(versionValidationSql(table), [
-        JSON.stringify(versions),
-      ]);
-      assertVersionValidation(result, versions.length);
+    for (const { table, evidence } of versionChecks) {
+      const [result] = await runner.query(versionValidationSql(table));
+      assertVersionValidation(result, evidence);
     }
     const [existing] = await runner.query(
       `SELECT "attestationId" AS id FROM active_certified_history_repair

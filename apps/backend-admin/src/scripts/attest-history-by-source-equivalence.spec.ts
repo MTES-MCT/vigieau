@@ -15,6 +15,7 @@ import {
   assertVersionValidation,
   outputBatchSql,
   parseEquivalenceOptions,
+  rowVersionEvidence,
   validateOutputRows,
   versionValidationSql,
   releaseEquivalenceRunner,
@@ -357,25 +358,86 @@ describe('exact statistical inputs and output proofs', () => {
 });
 
 describe('short optimistic validation boundary', () => {
+  it('hashes exact decimal versions in numeric ID order without mutating the snapshot', () => {
+    const versions = [
+      { id: 10, xmin: '5', tableoid: '6' },
+      { id: 2, xmin: '3', tableoid: '4' },
+    ];
+    const expected = {
+      count: 2,
+      digest:
+        'abe37b297b284463a50c696f579f091080defd4033df4cf9af843e0332364be6',
+    };
+    expect(rowVersionEvidence(versions)).toEqual(expected);
+    expect(rowVersionEvidence([...versions].reverse())).toEqual(expected);
+    expect(versions.map(({ id }) => id)).toEqual([10, 2]);
+    for (const change of [{ id: 3 }, { xmin: '4' }, { tableoid: '5' }]) {
+      expect(
+        rowVersionEvidence([versions[0], { ...versions[1], ...change }]).digest,
+      ).not.toBe(expected.digest);
+    }
+  });
+  it('rejects empty, duplicate, noncanonical and delimiter-bearing version identities', () => {
+    const valid = { id: 1, xmin: '0', tableoid: '200' };
+    expect(() => rowVersionEvidence([])).toThrow('Empty');
+    expect(() => rowVersionEvidence([valid, valid])).toThrow('Duplicate');
+    for (const change of [
+      { id: 0 },
+      { id: -1 },
+      { id: 1.5 },
+      { id: NaN },
+      { id: Number.MAX_SAFE_INTEGER + 1 },
+      { id: '1' },
+      { xmin: '01' },
+      { xmin: '-1' },
+      { xmin: '1\t2' },
+      { xmin: '1\n2' },
+      { xmin: 1 },
+      { xmin: null },
+      { tableoid: '0' },
+      { tableoid: '0200' },
+      { tableoid: '200\n' },
+      { tableoid: '2e2' },
+      { tableoid: 200 },
+    ]) {
+      expect(() =>
+        rowVersionEvidence([
+          { ...valid, ...change } as Parameters<
+            typeof rowVersionEvidence
+          >[0][number],
+        ]),
+      ).toThrow('Invalid');
+    }
+    expect(() => rowVersionEvidence([valid])).not.toThrow();
+  });
   it('checks total and unique populations as well as every id/xmin/tableoid', () => {
+    const expected = rowVersionEvidence([
+      { id: 1, xmin: '100', tableoid: '200' },
+      { id: 2, xmin: '101', tableoid: '200' },
+    ]);
     const valid = {
       actualCount: 2,
       distinctCount: 2,
-      expectedCount: 2,
-      uniqueExpectedCount: 2,
-      matchedCount: 2,
+      digest: expected.digest,
     };
-    expect(() => assertVersionValidation(valid, 2)).not.toThrow();
+    expect(() => assertVersionValidation(valid, expected)).not.toThrow();
     for (const field of Object.keys(valid))
       expect(() =>
-        assertVersionValidation({ ...valid, [field]: 1 }, 2),
+        assertVersionValidation({ ...valid, [field]: 1 }, expected),
       ).toThrow('changed');
-    expect(versionValidationSql('statistic_commune')).toContain(
-      'jsonb_to_recordset',
+    expect(() =>
+      assertVersionValidation({ ...valid, actualCount: '2' }, expected),
+    ).toThrow('changed');
+    expect(() =>
+      assertVersionValidation({ ...valid, digest: 'f'.repeat(64) }, expected),
+    ).toThrow('changed');
+    const sql = versionValidationSql('statistic_commune');
+    expect(sql).toContain('count(DISTINCT id)::integer');
+    expect(sql).toContain(
+      "id::text||E'\\t'||xmin::text||E'\\t'||tableoid::text",
     );
-    expect(versionValidationSql('statistic_commune')).toContain(
-      'a.tableoid=e.tableoid',
-    );
+    expect(sql).toContain("E'\\n' ORDER BY id");
+    expect(sql).not.toMatch(/jsonb_to_recordset|JOIN|\$1/);
     expect(versionValidationSql('statistic')).toContain(
       "date BETWEEN '2026-07-11' AND '2026-08-31'",
     );
@@ -388,6 +450,7 @@ describe('short optimistic validation boundary', () => {
     );
     await acquireEquivalenceFinalLocks({ query } as unknown as QueryRunner);
     const sql = query.mock.calls.map(([value]) => value).join('\n');
+    expect(sql).toContain('SET LOCAL jit=off');
     expect(sql).toContain("transaction_timeout='3s'");
     expect(sql).toContain("statement_timeout='2s'");
     expect(sql).toContain("lock_timeout='50ms'");
@@ -489,14 +552,14 @@ describe('atomic append-only attestation', () => {
           )
         )
           return [{ value: audit }];
-        if (sql.includes('WITH expected AS MATERIALIZED'))
+        if (sql.includes('count(DISTINCT id)::integer AS "distinctCount"'))
           return [
             {
               actualCount: 1,
               distinctCount: 1,
-              expectedCount: 1,
-              uniqueExpectedCount: 1,
-              matchedCount: mismatch ? 0 : 1,
+              digest: mismatch
+                ? '0'.repeat(64)
+                : rowVersionEvidence(versions).digest,
             },
           ];
         if (sql.includes('SELECT "attestationId" AS id'))
@@ -550,6 +613,23 @@ describe('atomic append-only attestation', () => {
     ]);
     expect(f.inspection.context.currentPublishedDate).toBe('2026-09-08');
     expect(f.inspection.context.historicDirtyFrom).toBe('2026-07-11');
+    const versionQueries = f.runner.query.mock.calls.filter(([sql]) =>
+      sql.includes('count(DISTINCT id)::integer AS "distinctCount"'),
+    );
+    expect(versionQueries).toHaveLength(4);
+    expect(versionQueries.every(([, params]) => params === undefined)).toBe(
+      true,
+    );
+  });
+  it('rejects malformed version evidence before opening the final transaction', async () => {
+    const f = fixture();
+    f.inspection.regionVersions.push(f.inspection.regionVersions[0]);
+    await expect(
+      applyEquivalenceAttestation(f.target, f.inspection, 'proof'),
+    ).rejects.toThrow('Duplicate');
+    expect(f.runner.connect).not.toHaveBeenCalled();
+    expect(f.runner.startTransaction).not.toHaveBeenCalled();
+    expect(f.runner.query).not.toHaveBeenCalled();
   });
   it.each(['context', 'outputs', 'lookup'])(
     'rolls back without writes when %s drift',
