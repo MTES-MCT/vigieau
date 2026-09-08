@@ -39,6 +39,8 @@ export const EQUIVALENCE_ANCHOR = {
 const MODE = 'attest-by-source-equivalence';
 const CONFIRMATION = 'ATTEST_HISTORY_BY_SOURCE_EQUIVALENCE';
 const MAX_INSPECTION_MS = 15 * 60_000;
+export const EQUIVALENCE_INSPECTION_SETTINGS_SQL =
+  "SET LOCAL jit=off; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='50ms'; SET LOCAL idle_in_transaction_session_timeout='15s'";
 const SOURCE_TABLES = [
   'zone_alerte',
   'restriction',
@@ -414,6 +416,27 @@ async function archiveDigest(path: string) {
   );
 }
 
+export async function releaseEquivalenceRunner(
+  runner: QueryRunner,
+  preservePrimaryError: boolean,
+): Promise<void> {
+  if (runner.isReleased) return;
+  let cleanupError: unknown;
+  try {
+    if (!runner.isReleased && runner.isTransactionActive) {
+      await runner.rollbackTransaction();
+    }
+  } catch (error) {
+    cleanupError = error;
+  }
+  try {
+    if (!runner.isReleased) await runner.release();
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (cleanupError && !preservePrimaryError) throw cleanupError;
+}
+
 async function inspect(
   database: DataSource,
   expectedDatabase: string,
@@ -427,12 +450,11 @@ async function inspect(
       throw new Error('Read-only inspection deadline exceeded');
   };
   await runner.connect();
+  let operationFailed = false;
   try {
     await runner.startTransaction('REPEATABLE READ');
     await runner.query('SET TRANSACTION READ ONLY');
-    await runner.query(
-      "SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='50ms'; SET LOCAL idle_in_transaction_session_timeout='15s'",
-    );
+    await runner.query(EQUIVALENCE_INSPECTION_SETTINGS_SQL);
     const [identity] = await runner.query('SELECT current_database() AS name');
     same(identity?.name, expectedDatabase, 'Unexpected database identity');
     const context = await publicationContext(runner);
@@ -535,9 +557,11 @@ async function inspect(
       active: active?.value ?? null,
       lookupGuard,
     };
+  } catch (error) {
+    operationFailed = true;
+    throw error;
   } finally {
-    if (runner.isTransactionActive) await runner.rollbackTransaction();
-    await runner.release();
+    await releaseEquivalenceRunner(runner, operationFailed);
   }
 }
 
@@ -632,6 +656,7 @@ export async function applyEquivalenceAttestation(
 ) {
   const runner = target.createQueryRunner();
   await runner.connect();
+  let operationFailed = false;
   try {
     // READ COMMITTED is intentional: advisory-lock SELECTs must not fix an old
     // snapshot before a concurrent writer commits and releases its table lock.
@@ -744,9 +769,11 @@ export async function applyEquivalenceAttestation(
       throw new Error('Attestation insertion lost its boundary');
     await runner.commitTransaction();
     return { status: 'ATTESTED', attestationId: id, revision };
+  } catch (error) {
+    operationFailed = true;
+    throw error;
   } finally {
-    if (runner.isTransactionActive) await runner.rollbackTransaction();
-    await runner.release();
+    await releaseEquivalenceRunner(runner, operationFailed);
   }
 }
 

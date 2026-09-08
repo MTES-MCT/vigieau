@@ -1,6 +1,7 @@
 import {
   EQUIVALENCE_ANCHOR,
   EQUIVALENCE_ANCHOR_LOOKUP_GUARD,
+  EQUIVALENCE_INSPECTION_SETTINGS_SQL,
   EQUIVALENCE_LEDGER_SQL,
   EQUIVALENCE_LOOKUP_GUARD_SQL,
   EQUIVALENCE_RELATIONS_SQL,
@@ -15,6 +16,7 @@ import {
   parseEquivalenceOptions,
   validateOutputRows,
   versionValidationSql,
+  releaseEquivalenceRunner,
 } from './attest-history-by-source-equivalence';
 import { CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST as PINNED } from './restore-certified-commune-history';
 import { CERTIFIED_HISTORY_V2_SOURCE_RUN_ID } from './build-certified-history-source';
@@ -62,6 +64,12 @@ const invalidation = {
 };
 
 describe('explicit history source equivalence options', () => {
+  it('disables JIT for bounded read-only inspection batches', () => {
+    expect(EQUIVALENCE_INSPECTION_SETTINGS_SQL).toContain('SET LOCAL jit=off');
+    expect(EQUIVALENCE_INSPECTION_SETTINGS_SQL).toContain(
+      "statement_timeout='5s'",
+    );
+  });
   it('defaults to read-only, bounded inspection with explicit distinct identities', () => {
     expect(parseEquivalenceOptions(environment)).toEqual({
       apply: false,
@@ -107,6 +115,64 @@ describe('explicit history source equivalence options', () => {
         HISTORY_EQUIVALENCE_EXPECTED_PROOF: 'a'.repeat(64),
       }).apply,
     ).toBe(true);
+  });
+});
+
+describe('inspection connection failure cleanup', () => {
+  it('does not rollback or release a runner already released by a connection failure', async () => {
+    const runner = {
+      isReleased: true,
+      isTransactionActive: true,
+      rollbackTransaction: jest.fn(),
+      release: jest.fn(),
+    };
+    await releaseEquivalenceRunner(runner as unknown as QueryRunner, true);
+    expect(runner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(runner.release).not.toHaveBeenCalled();
+  });
+  it('does not mask the primary error if the connection fails during rollback and release', async () => {
+    const runner = {
+      isReleased: false,
+      isTransactionActive: true,
+      rollbackTransaction: jest.fn(async () => {
+        throw new Error('Query runner already released');
+      }),
+      release: jest.fn(async () => {
+        throw new Error('Connection lost');
+      }),
+    };
+    await expect(
+      releaseEquivalenceRunner(runner as unknown as QueryRunner, true),
+    ).resolves.toBeUndefined();
+    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(runner.release).toHaveBeenCalledTimes(1);
+  });
+  it('still exposes an unexpected cleanup failure when the operation succeeded', async () => {
+    const failure = new Error('Unexpected rollback failure');
+    const runner = {
+      isReleased: false,
+      isTransactionActive: true,
+      rollbackTransaction: jest.fn(async () => {
+        throw failure;
+      }),
+      release: jest.fn(),
+    };
+    await expect(
+      releaseEquivalenceRunner(runner as unknown as QueryRunner, false),
+    ).rejects.toBe(failure);
+    expect(runner.release).toHaveBeenCalledTimes(1);
+  });
+  it('rechecks release state after rollback', async () => {
+    const runner = {
+      isReleased: false,
+      isTransactionActive: true,
+      rollbackTransaction: jest.fn(async () => {
+        runner.isReleased = true;
+      }),
+      release: jest.fn(),
+    };
+    await releaseEquivalenceRunner(runner as unknown as QueryRunner, true);
+    expect(runner.release).not.toHaveBeenCalled();
   });
 });
 
