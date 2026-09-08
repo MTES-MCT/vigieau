@@ -23,6 +23,7 @@ import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
 import { isAreaStatisticSeries } from '../../utils/statistic-series';
+import { findMissingStatisticPeriods, MAX_DAILY_STATISTIC_GAP_MS } from '../../utils/statistic-history-gaps';
 import * as Sentry from '@sentry/vue';
 
 ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, LineController, TimeScale, ArcElement, Colors, Filler);
@@ -33,6 +34,7 @@ const chartLineData = ref(null);
 const dataArea = ref<any[] | null>(null);
 const loadError = ref(false);
 const hasData = computed(() => !loadError.value && (dataArea.value?.length ?? 0) > 0);
+const missingPeriods = computed(() => findMissingStatisticPeriods(dataArea.value));
 const computeDisabled = ref(true);
 const downloadingPng = ref(false);
 const pngDownloadError = ref(false);
@@ -209,15 +211,17 @@ function sortData() {
 loadData();
 
 const tooltipTitle = (tooltipItems: any[]): string => {
-  return moment(tooltipItems[0].parsed.x).format('DD/MM/YYYY');
+  return moment.utc(tooltipItems[0].parsed.x).format('DD/MM/YYYY');
 };
 
 const chartLineOptions: ChartOptions = {
   responsive: true,
   maintainAspectRatio: false,
+  spanGaps: MAX_DAILY_STATISTIC_GAP_MS,
   scales: {
     x: {
       type: 'time',
+      adapters: { date: { zone: 'UTC' } },
       time: {
         unit: 'week',
       },
@@ -385,6 +389,7 @@ watch(() => refDataStore.departements, () => {
         superficielles et souterraines.
       </DsfrAlert>
     </div>
+    <DonneesStatisticHistoryGaps :periods="!loading && hasData ? missingPeriods : []" />
     <div v-if="!loading && chartLineData && hasData" class="chart-container">
       <Line id="area-chart-line"
             :options="chartLineOptions"
