@@ -41,6 +41,8 @@ const CONFIRMATION = 'ATTEST_HISTORY_BY_SOURCE_EQUIVALENCE';
 const MAX_INSPECTION_MS = 15 * 60_000;
 export const EQUIVALENCE_INSPECTION_SETTINGS_SQL =
   "SET LOCAL jit=off; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='50ms'; SET LOCAL idle_in_transaction_session_timeout='15s'";
+export const EQUIVALENCE_INPUT_BATCH_SQL =
+  'FETCH FORWARD 100 FROM equivalence_inputs';
 const SOURCE_TABLES = [
   'zone_alerte',
   'restriction',
@@ -330,7 +332,7 @@ export function outputBatchSql(kind: OutputKind): string {
   return `WITH batch AS MATERIALIZED (
     SELECT e.code,s.id,s.xmin::text,s.tableoid::text,s.restrictions
     FROM ${entity} e LEFT JOIN ${statistic} s ON s."${fk}"=e.id
-    WHERE e.code>$1 ORDER BY e.code LIMIT 100
+    WHERE e.code>$1 ORDER BY e.code LIMIT 50
   ) SELECT b.code,b.id,b.xmin,b.tableoid,days.* FROM batch b CROSS JOIN LATERAL (
     SELECT count(*)::integer AS "dayCount",count(DISTINCT day->>'date')::integer AS "distinctDayCount",
       (count(*) FILTER (WHERE jsonb_typeof(day) IS DISTINCT FROM 'object' OR (${shape}))
@@ -497,9 +499,7 @@ async function inspect(
     const inputRows: EquivalenceInput[] = [];
     while (true) {
       checkDeadline();
-      const rows = await runner.query(
-        'FETCH FORWARD 250 FROM equivalence_inputs',
-      );
+      const rows = await runner.query(EQUIVALENCE_INPUT_BATCH_SQL);
       if (!rows.length) break;
       inputRows.push(
         ...rows.map((row: { value: EquivalenceInput }) => row.value),
