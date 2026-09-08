@@ -193,7 +193,9 @@ describe('ArreteCadreService.publish', () => {
     expect(
       harness.arreteRestrictionService
         .reconcileArreteRestrictionsForArreteCadres,
-    ).toHaveBeenCalledWith(expect.anything(), [200, 100], '2026-08-04');
+    ).toHaveBeenCalledWith(expect.anything(), [200, 100], '2026-08-04', true, [
+      { from: '2026-08-04', through: '2026-08-04' },
+    ]);
     expect(
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
     ).toHaveBeenCalled();
@@ -390,7 +392,7 @@ describe('ArreteCadreService.publish', () => {
     expect(harness.transactionRepository.save).toHaveBeenCalled();
     expect(
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
-    ).toHaveBeenCalledWith(expect.anything(), '2026-08-05');
+    ).toHaveBeenCalledWith(expect.anything(), '2026-08-05', undefined);
     expect(
       harness.arreteRestrictionService.recordPublicMutation,
     ).toHaveBeenCalledWith(expect.anything(), [53, 53], 'MODIFICATION AC');

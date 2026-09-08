@@ -428,29 +428,23 @@ describe('ArreteRestrictionService scheduled status update', () => {
         statut: 'abroge',
       }),
     );
-    expect(
-      harness.manager.query.mock.calls.find(([sql]) =>
-        sql.includes('record_historic_compute_invalidation'),
-      ),
-    ).toEqual([
-      expect.stringContaining('record_historic_compute_invalidation'),
-      [
-        '2026-07-01',
-        null,
-        true,
-        true,
-        'published-source-mutation',
-        null,
-        '{}',
-        '2026-07-01',
-        '2026-07-01',
-        false,
-        false,
-        false,
-        true,
-        false,
-      ],
+    const invalidations = harness.manager.query.mock.calls
+      .filter(([sql]) => sql.includes('record_historic_compute_invalidation'))
+      .map(([, parameters]) => parameters);
+    expect(invalidations).toHaveLength(2);
+    expect(invalidations[0][0]).toBe('2026-07-01');
+    expect(invalidations[0][2]).toBe(false);
+    expect(invalidations[0][3]).toBe(true);
+    expect(invalidations[0][8]).toBeNull();
+    expect(invalidations[1].slice(0, 5)).toEqual([
+      '2026-08-04',
+      '2026-08-04',
+      true,
+      false,
+      'published-calendar-mutation',
     ]);
+    expect(invalidations[1][7]).toBeNull();
+    expect(invalidations[1][8]).toBe('2026-08-04');
     const publicMutationCalls = harness.manager.query.mock.calls;
     const fenceCallIndexes = publicMutationCalls.flatMap(([sql], index) =>
       sql.includes('pg_advisory_xact_lock_shared') ? [index] : [],

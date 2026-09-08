@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { CertifiedHistoryRepairAudit1787910600000 } from '../migrations/1787910600000-CertifiedHistoryRepairAudit';
 import { HistoricRangeAwareCertifiedRepair1788199200000 } from '../migrations/1788199200000-HistoricRangeAwareCertifiedRepair';
+import { invalidateHistoricCalendarComputationsWithManager } from './historic-computation-invalidation';
+import * as arreteDates from '../shared/arrete-date-continuity';
 
 const postgresUrl = process.env.REPAIR_CERTIFIED_HISTORY_POSTGRES_URL;
 const describePostgres = postgresUrl ? describe : describe.skip;
@@ -153,6 +155,59 @@ describePostgres('range-aware certified history repair PostgreSQL', () => {
       return Number(row.count);
     };
     expect(await activeCount()).toBe(1);
+
+    const today = jest
+      .spyOn(arreteDates, 'getCurrentParisCivilDate')
+      .mockReturnValue('2026-09-08');
+    await database.query('BEGIN');
+    try {
+      await invalidateHistoricCalendarComputationsWithManager(
+        database.manager,
+        '2024-07-10',
+        [{ from: '2026-09-08', through: null }],
+      );
+      expect(await activeCount()).toBe(1);
+      expect(
+        await database.query(`
+        SELECT "affectedRange"::text AS range, "invalidatesStatistics" AS statistics,
+               "invalidatesMaps" AS maps
+        FROM "historic_range_invalidation" ORDER BY "epochAfter"
+      `),
+      ).toEqual([
+        { range: '[2024-07-10,2026-09-08)', statistics: false, maps: true },
+      ]);
+      const [state] = await database.query(`
+        SELECT "computeMapDate"::text AS map, "computeStatsDate"::text AS statistics,
+               "computeMapGeneration"::integer AS "mapGeneration",
+               "computeStatsGeneration"::integer AS "statisticGeneration"
+        FROM config WHERE id = 1
+      `);
+      expect(state).toEqual({
+        map: '2024-07-10',
+        statistics: '2026-09-08',
+        mapGeneration: 1,
+        statisticGeneration: 1,
+      });
+
+      await invalidateHistoricCalendarComputationsWithManager(
+        database.manager,
+        '2026-07-11',
+        [{ from: '2026-07-12', through: '2026-07-12' }],
+      );
+      expect(await activeCount()).toBe(0);
+      expect(
+        await database.query(`
+        SELECT "affectedRange"::text AS range, "invalidatesStatistics" AS statistics,
+               "invalidatesMaps" AS maps
+        FROM "historic_range_invalidation" WHERE "invalidatesStatistics"
+      `),
+      ).toEqual([
+        { range: '[2026-07-12,2026-07-13)', statistics: true, maps: false },
+      ]);
+    } finally {
+      await database.query('ROLLBACK');
+      today.mockRestore();
+    }
 
     await database.query(
       `SELECT * FROM "record_historic_compute_invalidation"(

@@ -113,6 +113,59 @@ describe('ArreteCadreService continuity entry points', () => {
     jest.useRealTimers();
   });
 
+  it('keeps summer statistics when publishing a September replacement of a framework from 2024', async () => {
+    jest.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
+    const harness = createHarness();
+    const predecessor = createArrete({
+      id: 100,
+      dateDebut: '2024-07-10',
+      arretesCadre: [{ id: 200, dateDebut: '2026-09-08', statut: 'publie' }],
+    });
+    const current = createArrete({
+      dateDebut: '2026-09-08',
+      statut: 'a_valider',
+      arreteCadreAbroge: { id: 100, dateDebut: '2024-07-10' },
+    });
+    let persisted = false;
+    harness.lockIds([100, 200]);
+    harness.transactionRepository.findOneOrFail.mockImplementation(
+      async ({ where: { id } }) =>
+        id === 100
+          ? predecessor
+          : createArrete({
+              ...current,
+              statut: persisted ? 'publie' : 'a_valider',
+            }),
+    );
+    harness.transactionRepository.save.mockImplementation(async (value) => {
+      persisted = true;
+      return { ...current, ...value };
+    });
+    jest.spyOn(harness.service, 'findOne').mockResolvedValue(current);
+    jest.spyOn(harness.service, 'canUpdateArreteCadre').mockResolvedValue(true);
+
+    await harness.service.publish(
+      200,
+      null,
+      { dateDebut: '2026-09-08', dateFin: null },
+      currentUser,
+    );
+
+    expect(harness.transactionRepository.update).toHaveBeenCalledWith(
+      { id: 100 },
+      expect.objectContaining({ dateFin: '2026-09-07', statut: 'abroge' }),
+    );
+    const [, mapFrom, ranges] =
+      harness.arreteRestrictionService.invalidateComputationsFromWithManager
+        .mock.calls[0];
+    expect(mapFrom).toBe('2024-07-10');
+    expect(ranges.length).toBeGreaterThan(0);
+    expect(ranges.every(({ from }) => from >= '2026-09-08')).toBe(true);
+    expect(
+      harness.arreteRestrictionService.recordPublicMutation,
+    ).toHaveBeenCalledWith(harness.manager, [65], 'PUBLICATION AC');
+  });
+
   it('reactivates an expired framework when its calculated boundary moves forward', async () => {
     const harness = createHarness();
     const candidate = createArrete({
@@ -150,10 +203,14 @@ describe('ArreteCadreService continuity entry points', () => {
     expect(
       harness.arreteRestrictionService
         .reconcileArreteRestrictionsForArreteCadres,
-    ).toHaveBeenCalledWith(harness.manager, [100], '2026-08-04', false);
+    ).toHaveBeenCalledWith(harness.manager, [100], '2026-08-04', false, [
+      { from: '2026-08-04', through: '2026-08-09' },
+    ]);
     expect(
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
-    ).toHaveBeenCalledWith(harness.manager, '2026-07-01');
+    ).toHaveBeenCalledWith(harness.manager, '2026-07-01', [
+      { from: '2026-08-04', through: '2026-08-09' },
+    ]);
   });
 
   it('does not reactivate an explicitly repealed legacy framework without an end boundary', async () => {
@@ -442,10 +499,19 @@ describe('ArreteCadreService continuity entry points', () => {
     expect(
       harness.arreteRestrictionService
         .reconcileArreteRestrictionsForArreteCadres,
-    ).toHaveBeenCalledWith(harness.manager, [100, 200, 300], '2026-08-04');
+    ).toHaveBeenCalledWith(
+      harness.manager,
+      [100, 200, 300],
+      '2026-08-04',
+      true,
+      [
+        { from: '2026-08-10', through: '2026-12-31' },
+        { from: '2026-08-10', through: null },
+      ],
+    );
     expect(
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
-    ).toHaveBeenCalledWith(harness.manager, '2026-06-01');
+    ).toHaveBeenCalledWith(harness.manager, '2026-06-01', undefined);
   });
 
   it('stores a manual inclusive end and reconciles restrictions when repealing', async () => {
@@ -490,10 +556,14 @@ describe('ArreteCadreService continuity entry points', () => {
     expect(
       harness.arreteRestrictionService
         .reconcileArreteRestrictionsForArreteCadres,
-    ).toHaveBeenCalledWith(harness.manager, [200], '2026-08-04');
+    ).toHaveBeenCalledWith(harness.manager, [200], '2026-08-04', true, [
+      { from: '2026-08-05', through: null },
+    ]);
     expect(
       harness.arreteRestrictionService.invalidateComputationsFromWithManager,
-    ).toHaveBeenCalledWith(harness.manager, '2026-07-01');
+    ).toHaveBeenCalledWith(harness.manager, '2026-07-01', [
+      { from: '2026-08-05', through: null },
+    ]);
   });
 
   it('restores and reactivates the predecessor after removing its successor', async () => {

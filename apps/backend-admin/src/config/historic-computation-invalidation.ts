@@ -1,6 +1,8 @@
 import type { EntityManager } from 'typeorm';
+import { shiftCivilDate } from '../core/scheduling/daily-job-schedule';
 import {
   getCurrentParisCivilDate,
+  HistoricStatisticRange,
   normalizeCivilDate,
 } from '../shared/arrete-date-continuity';
 
@@ -85,5 +87,85 @@ export async function invalidateHistoricComputationsFromWithManager(
   });
   if (updated.length !== 1 || updated[0].changed !== true) {
     throw new Error('Unable to invalidate zone computations');
+  }
+}
+
+export async function invalidateHistoricCalendarComputationsWithManager(
+  manager: EntityManager,
+  mapDirtyFrom: string | null,
+  statisticRanges: readonly HistoricStatisticRange[],
+  context: Record<string, unknown> = {},
+): Promise<void> {
+  const today = getCurrentParisCivilDate();
+  const yesterday = shiftCivilDate(today, -1);
+  const normalizedMapFrom =
+    mapDirtyFrom === null ? null : normalizeCivilDate(mapDirtyFrom);
+  const normalizedRanges = statisticRanges
+    .map(({ from, through }) => {
+      const normalizedFrom = normalizeCivilDate(from);
+      const normalizedThrough =
+        through === null ? null : normalizeCivilDate(through);
+      if (normalizedThrough !== null && normalizedThrough < normalizedFrom) {
+        throw new Error('Invalid historic statistic interval');
+      }
+      return { from: normalizedFrom, through: normalizedThrough };
+    })
+    .sort((left, right) => left.from.localeCompare(right.from));
+  const mergedRanges: HistoricStatisticRange[] = [];
+  for (const range of normalizedRanges) {
+    const previous = mergedRanges[mergedRanges.length - 1];
+    if (
+      !previous ||
+      (previous.through !== null &&
+        range.from > shiftCivilDate(previous.through, 1))
+    ) {
+      mergedRanges.push(range);
+    } else if (
+      previous.through !== null &&
+      (range.through === null || range.through > previous.through)
+    ) {
+      previous.through = range.through;
+    }
+  }
+  const invalidatesHistoricMaps =
+    normalizedMapFrom !== null && normalizedMapFrom < today;
+  const invalidations: HistoricComputeInvalidation[] = [
+    {
+      affectedFrom: normalizedMapFrom,
+      affectedThrough: invalidatesHistoricMaps ? yesterday : null,
+      invalidatesStatistics: false,
+      invalidatesMaps: invalidatesHistoricMaps,
+      cause: 'published-calendar-mutation',
+      context,
+      requestedMapDate: normalizedMapFrom,
+      bumpHistoricEpoch: invalidatesHistoricMaps,
+    },
+    ...mergedRanges.map(({ from, through }) => {
+      const invalidatesPublishedHistory = from < today;
+      return {
+        affectedFrom: from,
+        affectedThrough: invalidatesPublishedHistory
+          ? through === null || through > yesterday
+            ? yesterday
+            : through
+          : through,
+        invalidatesStatistics: invalidatesPublishedHistory,
+        invalidatesMaps: false,
+        cause: 'published-calendar-mutation',
+        context,
+        requestedStatsDate: from,
+        bumpHistoricEpoch: invalidatesPublishedHistory,
+      };
+    }),
+  ];
+
+  for (const invalidation of invalidations) {
+    const updated = await recordHistoricComputeInvalidation(
+      manager,
+      invalidation,
+    );
+    if (updated.length !== 1 || updated[0].changed !== true) {
+      throw new Error('Unable to invalidate zone computations');
+    }
   }
 }
