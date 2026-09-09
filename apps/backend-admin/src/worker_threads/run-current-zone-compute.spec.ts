@@ -35,6 +35,37 @@ describe('waitForCurrentZoneComputeWorker', () => {
     );
   });
 
+  it('keeps the reported primary error when a failed worker exits non-zero', async () => {
+    const worker = new EventEmitter();
+    const result = waitForCurrentZoneComputeWorker(worker as any);
+
+    worker.emit('message', {
+      success: false,
+      error: 'Original computation failed',
+    });
+    worker.emit('exit', 1);
+
+    await expect(result).rejects.toThrow(
+      'Zone compute worker stopped with exit code 1: Original computation failed',
+    );
+  });
+
+  it.each([
+    { success: true, error: 'Do not trust this error' },
+    { success: false, error: { message: 'Not a string' } },
+  ])(
+    'does not add an invalid failure diagnostic to non-zero exits',
+    async (message) => {
+      const worker = new EventEmitter();
+      const result = waitForCurrentZoneComputeWorker(worker as any);
+      worker.emit('message', message);
+      worker.emit('exit', 1);
+      await expect(result).rejects.toThrow(
+        /^Zone compute worker stopped with exit code 1$/,
+      );
+    },
+  );
+
   it('terminates and rejects a worker that exceeds its deadline', async () => {
     const worker = Object.assign(new EventEmitter(), {
       terminate: jest.fn().mockResolvedValue(1),

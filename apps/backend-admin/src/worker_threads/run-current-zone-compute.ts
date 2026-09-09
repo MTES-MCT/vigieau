@@ -53,7 +53,15 @@ export function waitForCurrentZoneComputeWorker(
       settled = true;
       clearTimeout(timeout);
       if (code !== 0) {
-        reject(new Error(`Zone compute worker stopped with exit code ${code}`));
+        const detail =
+          result?.success === false && typeof result.error === 'string'
+            ? `: ${result.error}`
+            : '';
+        reject(
+          new Error(
+            `Zone compute worker stopped with exit code ${code}${detail}`,
+          ),
+        );
         return;
       }
       if (!result) {
