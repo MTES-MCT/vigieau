@@ -182,6 +182,14 @@ interface SandreRolloutAuditCoverage {
   attemptedDepartmentIds: Set<number>;
 }
 
+interface SandreAuditBatch {
+  id: string;
+  status: string;
+  snapshotHash: string;
+  sourceUpdatedAt: string | null;
+  featureCount: number;
+}
+
 interface SandreSnapshotPreflight {
   departement: Departement;
   resolvedActiveFeatures: Array<{
@@ -1118,9 +1126,10 @@ export class ZoneAlerteService {
     depCode: string,
     mode: Exclude<SandreZoneSyncMode, 'paused'>,
     startedAt: Date,
+    manager: Pick<EntityManager, 'query'> = this.dataSource,
   ): Promise<string> {
     const [batch] = unwrapTypeOrmDmlReturningRows<{ id: string }>(
-      await this.dataSource.query(
+      await manager.query(
         `
         INSERT INTO sandre_zone_sync_batch (
           kind, mode, status, "startedAt", "departementId"
@@ -1188,12 +1197,11 @@ export class ZoneAlerteService {
     return { observedDepartmentIds, attemptedDepartmentIds };
   }
 
-  private async loadExactSandreAuditEvidenceForSafe(
+  private async loadLatestSandreAuditBatch(
     manager: EntityManager,
     departmentId: number,
-    snapshot: SandreZoneSnapshot,
     cutoff: Date,
-  ): Promise<SandreApprovedAuditEvidence> {
+  ): Promise<SandreAuditBatch | undefined> {
     const [batch] = await manager.query(
       `
         SELECT
@@ -1213,13 +1221,33 @@ export class ZoneAlerteService {
       `,
       [departmentId, cutoff],
     );
-    if (
-      !batch ||
-      batch.status !== 'observed' ||
-      batch.snapshotHash !== snapshot.snapshotHash ||
-      batch.sourceUpdatedAt !== snapshot.sourceUpdatedAt ||
-      Number(batch.featureCount) !== snapshot.featureCount
-    ) {
+    return batch;
+  }
+
+  private matchesSandreAuditSnapshot(
+    batch: SandreAuditBatch | undefined,
+    snapshot: SandreZoneSnapshot,
+  ): boolean {
+    return (
+      batch?.status === 'observed' &&
+      batch.snapshotHash === snapshot.snapshotHash &&
+      batch.sourceUpdatedAt === snapshot.sourceUpdatedAt &&
+      Number(batch.featureCount) === snapshot.featureCount
+    );
+  }
+
+  private async loadExactSandreAuditEvidenceForSafe(
+    manager: EntityManager,
+    departmentId: number,
+    snapshot: SandreZoneSnapshot,
+    cutoff: Date,
+  ): Promise<SandreApprovedAuditEvidence> {
+    const batch = await this.loadLatestSandreAuditBatch(
+      manager,
+      departmentId,
+      cutoff,
+    );
+    if (!batch || !this.matchesSandreAuditSnapshot(batch, snapshot)) {
       throw new Error(
         'SANDRE safe mode requires a successful exact-snapshot audit',
       );
@@ -1244,6 +1272,60 @@ export class ZoneAlerteService {
     };
   }
 
+  private async refreshSandreAuditForSafe(
+    manager: EntityManager,
+    departement: Departement,
+    snapshot: SandreZoneSnapshot,
+    startedAt: Date,
+    approvedMdmEvidence?: SandreApprovedMdmEvidence,
+  ): Promise<void> {
+    const previous = await this.loadLatestSandreAuditBatch(
+      manager,
+      departement.id,
+      this.getRequiredSandreAuditCutoff('safe'),
+    );
+    if (
+      previous?.status !== 'observed' ||
+      this.matchesSandreAuditSnapshot(previous, snapshot)
+    ) {
+      return;
+    }
+
+    // A refresh never substitutes for rollout approval. Its proof and application
+    // commit together, so a failed refresh cannot invalidate other departments.
+    const preflight = await this.createSandreSnapshotPreflight(
+      manager,
+      departement.code,
+      snapshot,
+      departement,
+    );
+    const decisions = await this.createAuditDecisions(
+      snapshot,
+      preflight,
+      approvedMdmEvidence,
+      manager,
+    );
+    const auditBatchId = await this.startSandreBatch(
+      departement.code,
+      'audit',
+      startedAt,
+      manager,
+    );
+    await this.persistSandreDecisions(
+      manager,
+      departement.code,
+      auditBatchId,
+      decisions,
+    );
+    await this.finishSandreBatch(
+      auditBatchId,
+      'observed',
+      snapshot,
+      undefined,
+      manager,
+    );
+  }
+
   private assertSafeRolloutAuditComplete(
     departements: Array<{ id: number; code: string }>,
     observedDepartmentIds: Set<number>,
@@ -1265,8 +1347,9 @@ export class ZoneAlerteService {
     status: 'observed' | 'applied' | 'blocked' | 'failed',
     snapshot: SandreZoneSnapshot | null,
     error?: unknown,
+    manager: Pick<EntityManager, 'query'> = this.dataSource,
   ): Promise<void> {
-    await this.dataSource.query(
+    await manager.query(
       `
         UPDATE sandre_zone_sync_batch
         SET
@@ -1542,6 +1625,7 @@ export class ZoneAlerteService {
     snapshot: SandreZoneSnapshot,
     preflight: SandreSnapshotPreflight,
     approvedMdmEvidence?: SandreApprovedMdmEvidence,
+    manager: EntityManager = this.dataSource.manager,
   ): Promise<SandreSyncDecisionDraft[]> {
     const decisions: SandreSyncDecisionDraft[] = snapshot.features.map(
       (feature) =>
@@ -1575,7 +1659,6 @@ export class ZoneAlerteService {
       decisions.map((decision) => [decision.decisionKey, decision]),
     );
 
-    const manager = this.dataSource.manager;
     const { departement, resolvedInactiveFeatures } = preflight;
     const activeZoneIds = new Set(preflight.activeZoneIds);
     const activeZonesByCode = new Map<string, ZoneAlerte>();
@@ -2001,6 +2084,15 @@ export class ZoneAlerteService {
         };
       }
 
+      if (batchId) {
+        await this.refreshSandreAuditForSafe(
+          queryRunner.manager,
+          departement,
+          snapshot,
+          snapshotStartedAt,
+          approvedMdmEvidence,
+        );
+      }
       const approvedAuditEvidence =
         await this.loadExactSandreAuditEvidenceForSafe(
           queryRunner.manager,
