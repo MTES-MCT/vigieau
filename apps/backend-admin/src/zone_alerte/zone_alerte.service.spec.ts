@@ -364,6 +364,7 @@ describe('ZoneAlerteService Sandre synchronization', () => {
         exactAuditFeatures.length,
         department.code,
       );
+    let refreshedAuditBatch: Record<string, unknown> | undefined;
     const manager = {
       getRepository: jest.fn((entity) => repositories.get(entity)),
       query: jest.fn(async (query: string, parameters?: any[]) => {
@@ -410,6 +411,9 @@ describe('ZoneAlerteService Sandre synchronization', () => {
           query.includes("batch.mode = 'audit'") &&
           query.includes('FOR SHARE')
         ) {
+          if (refreshedAuditBatch) {
+            return [refreshedAuditBatch];
+          }
           if (options && 'exactAuditBatch' in options) {
             return options.exactAuditBatch ? [options.exactAuditBatch] : [];
           }
@@ -423,6 +427,19 @@ describe('ZoneAlerteService Sandre synchronization', () => {
               featureCount: exactAuditSnapshot.featureCount,
             },
           ];
+        }
+        if (query.includes('INSERT INTO sandre_zone_sync_batch')) {
+          return [{ id: 'refreshed-audit-1' }];
+        }
+        if (query.includes('UPDATE sandre_zone_sync_batch')) {
+          refreshedAuditBatch = {
+            id: parameters?.[0],
+            status: parameters?.[1],
+            snapshotHash: parameters?.[2],
+            sourceUpdatedAt: parameters?.[3],
+            featureCount: parameters?.[4],
+          };
+          return [];
         }
         if (query.includes('WITH sandre_geometry_input AS')) {
           const inputs = JSON.parse(parameters?.[0] ?? '[]');
@@ -3939,6 +3956,238 @@ describe('ZoneAlerteService Sandre synchronization', () => {
     );
 
     expect(harness.zoneRepository.find).not.toHaveBeenCalled();
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  const previousRolloutAudit = {
+    id: 'previous-audit',
+    status: 'observed',
+    snapshotHash: 'previous-snapshot',
+    sourceUpdatedAt: '2026-06-01',
+    featureCount: 1,
+  };
+
+  it('audits a new safe snapshot in the application transaction without refetching it', async () => {
+    const harness = createHarness({ exactAuditBatch: previousRolloutAudit });
+    const audit = jest.spyOn(harness.service as any, 'createAuditDecisions');
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      expect.objectContaining({ added: 1 }),
+    );
+
+    expect(harness.httpService.get).toHaveBeenCalledTimes(3);
+    expect(audit).toHaveBeenCalledTimes(1);
+    expect(audit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      harness.manager,
+    );
+    expect(harness.manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO sandre_zone_sync_batch'),
+      ['65', 'audit', expect.any(Date)],
+    );
+    expect(harness.manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE sandre_zone_sync_batch'),
+      [
+        'refreshed-audit-1',
+        'observed',
+        expect.any(String),
+        '2026-07-01',
+        1,
+        null,
+      ],
+    );
+    expect(harness.queryRunner.startTransaction).toHaveBeenCalledWith(
+      'SERIALIZABLE',
+    );
+    expect(harness.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.queryRunner.rollbackTransaction).not.toHaveBeenCalled();
+    expect(
+      harness.dataSource.query.mock.calls.filter(
+        ([query, parameters]) =>
+          query.includes('INSERT INTO sandre_zone_sync_batch') &&
+          parameters?.[1] === 'audit',
+      ),
+    ).toEqual([]);
+  });
+
+  it('does not create another audit when the exact snapshot is already approved', async () => {
+    const harness = createHarness();
+    const audit = jest.spyOn(harness.service as any, 'createAuditDecisions');
+
+    await harness.service.updateDepartementZones('65');
+
+    expect(audit).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('INSERT INTO sandre_zone_sync_batch'),
+      ),
+    ).toBe(false);
+  });
+
+  it('refreshes audit evidence without invalidation when the materialized zones are unchanged', async () => {
+    const snapshot = createSandreZoneSnapshot(
+      [rawFeature()],
+      1,
+      department.code,
+    );
+    const feature = snapshot.features[0];
+    const existingZone = {
+      id: 201,
+      idSandre: feature.gid,
+      codeSandre: feature.codeSandre,
+      code: feature.preferredAlternateCode,
+      nom: feature.name,
+      type: feature.type,
+      numeroVersionSandre: feature.version,
+      ressourceInfluencee: feature.influencedResource,
+      disabled: false,
+      statutSandre: feature.status,
+      dateMajSandre: feature.sourceUpdatedAt,
+      sandrePayloadHash: feature.payloadHash,
+      codesAlternatifs: feature.alternateCodes,
+      geom: feature.geometry,
+      departement: department,
+      bassinVersant: basin,
+    };
+    const harness = createHarness({
+      exactAuditBatch: previousRolloutAudit,
+      zoneFind: jest.fn().mockResolvedValue([existingZone]),
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).resolves.toEqual(
+      {
+        added: 0,
+        updated: 0,
+        disabled: 0,
+        unchanged: 1,
+      },
+    );
+
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.manager.query.mock.calls.some(
+        ([query]) =>
+          query.includes('record_historic_compute_invalidation') ||
+          query.includes('UPDATE "zone_publication_source_state"') ||
+          query.includes('INSERT INTO "historic_backfill_department_revision"'),
+      ),
+    ).toBe(false);
+    expect(harness.runCurrentZoneComputeWorker).not.toHaveBeenCalled();
+  });
+
+  it('propagates the transactional manager into automatic audit reference reads', async () => {
+    const harness = createHarness({ exactAuditBatch: previousRolloutAudit });
+    const reconcile = jest.spyOn(
+      harness.service as any,
+      'reconcileOperationalFrozenZones',
+    );
+
+    await harness.service.updateDepartementZones('65');
+
+    expect(reconcile.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      reconcile.mock.calls.every(([manager]) => manager === harness.manager),
+    ).toBe(true);
+    expect(
+      reconcile.mock.calls.some((parameters) => parameters[7] === false),
+    ).toBe(true);
+  });
+
+  it.each(['blocked', 'failed', 'started'])(
+    'never replaces a %s rollout audit automatically',
+    async (status) => {
+      const harness = createHarness({
+        exactAuditBatch: { ...previousRolloutAudit, status },
+      });
+      const audit = jest.spyOn(harness.service as any, 'createAuditDecisions');
+
+      await expect(
+        harness.service.updateDepartementZones('65'),
+      ).rejects.toThrow('successful exact-snapshot audit');
+
+      expect(audit).not.toHaveBeenCalled();
+      expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps an invalid new geometry blocked without replacing the rollout audit', async () => {
+    const harness = createHarness({
+      exactAuditBatch: previousRolloutAudit,
+      invalidGeometryCodes: ['3201'],
+    });
+
+    await expect(
+      harness.service.updateDepartementZones('65'),
+    ).rejects.toThrow();
+
+    expect(harness.zoneRepository.save).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      harness.manager.query.mock.calls.some(([query]) =>
+        query.includes('INSERT INTO sandre_zone_sync_batch'),
+      ),
+    ).toBe(false);
+    expect(harness.dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('"blockedSnapshotHash"'),
+      expect.anything(),
+    );
+    expect(
+      harness.dataSource.query.mock.calls.filter(
+        ([query, parameters]) =>
+          query.includes('INSERT INTO sandre_zone_sync_batch') &&
+          parameters?.[1] === 'audit',
+      ),
+    ).toEqual([]);
+  });
+
+  it('rolls the refreshed audit back with an application failure', async () => {
+    const harness = createHarness({ exactAuditBatch: previousRolloutAudit });
+    harness.zoneRepository.save.mockRejectedValueOnce(
+      new Error('Application failed'),
+    );
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'Application failed',
+    );
+
+    expect(harness.manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE sandre_zone_sync_batch'),
+      expect.arrayContaining(['refreshed-audit-1', 'observed']),
+    );
+    expect(harness.queryRunner.commitTransaction).not.toHaveBeenCalled();
+    expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(harness.stateRepository.save).not.toHaveBeenCalled();
+    expect(
+      harness.dataSource.query.mock.calls.filter(
+        ([query, parameters]) =>
+          query.includes('INSERT INTO sandre_zone_sync_batch') &&
+          parameters?.[1] === 'audit',
+      ),
+    ).toEqual([]);
+  });
+
+  it('rechecks the persisted exact proof before applying an automatically audited snapshot', async () => {
+    const harness = createHarness({ exactAuditBatch: previousRolloutAudit });
+    const originalQuery = harness.manager.query.getMockImplementation()!;
+    let auditReads = 0;
+    harness.manager.query.mockImplementation(async (query, parameters) => {
+      if (
+        query.includes('FROM sandre_zone_sync_batch batch') &&
+        query.includes('FOR SHARE')
+      ) {
+        auditReads += 1;
+        if (auditReads === 2) return [previousRolloutAudit];
+      }
+      return originalQuery(query, parameters);
+    });
+
+    await expect(harness.service.updateDepartementZones('65')).rejects.toThrow(
+      'successful exact-snapshot audit',
+    );
+
     expect(harness.zoneRepository.save).not.toHaveBeenCalled();
     expect(harness.queryRunner.rollbackTransaction).toHaveBeenCalledTimes(1);
   });

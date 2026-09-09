@@ -11,6 +11,7 @@ import {
 } from '../scripts/reconcile-sandre-zones';
 import { normalizeSandreZoneGeometries } from './sandre-zone-geometry';
 import { fingerprint } from './sandre-zone-reconciliation';
+import { ZoneAlerteService } from './zone_alerte.service';
 import {
   assertSandreApprovedMaterializedTargets,
   auditSandreApprovedSyncGeometry,
@@ -33,6 +34,169 @@ import {
 
 const postgresUrl = process.env.SANDRE_RECONCILIATION_POSTGRES_URL;
 const describeWithPostgres = postgresUrl ? describe : describe.skip;
+
+describeWithPostgres('Sandre automatic audit transaction on PostgreSQL', () => {
+  const schema = `sandre_auto_audit_${process.pid}_${Date.now()}`;
+  const cutoff = new Date('2026-09-01T00:00:00Z');
+  const snapshot = {
+    snapshotHash: 'new-snapshot',
+    sourceUpdatedAt: '2026-09-04',
+    featureCount: 1,
+    features: [],
+  };
+  let dataSource: DataSource;
+  let runner: QueryRunner;
+  let service: any;
+
+  beforeAll(async () => {
+    dataSource = await new DataSource({
+      type: 'postgres',
+      url: postgresUrl,
+      entities: [],
+      synchronize: false,
+    }).initialize();
+    runner = dataSource.createQueryRunner();
+    await runner.connect();
+    await runner.query(`CREATE SCHEMA "${schema}"`);
+    await runner.query(`SET search_path TO "${schema}", public`);
+    await runner.query(`
+      CREATE TABLE departement (id integer PRIMARY KEY, code text UNIQUE);
+      CREATE TABLE sandre_zone_sync_batch (
+        id bigserial PRIMARY KEY, kind text, mode text, status text,
+        "startedAt" timestamptz, "finishedAt" timestamptz,
+        "departementId" integer REFERENCES departement(id),
+        "snapshotHash" text, "sourceUpdatedAt" date, "featureCount" integer,
+        "failureReason" text
+      );
+      CREATE TABLE sandre_zone_sync_decision (
+        "batchId" bigint REFERENCES sandre_zone_sync_batch(id),
+        "departementId" integer, "zoneAlerteId" integer,
+        "candidateZoneAlerteId" integer, "decisionKey" text, "zoneType" text,
+        "sourceCode" text, "targetCode" text, action text, outcome text,
+        reason text, evidence jsonb, UNIQUE ("batchId", "decisionKey")
+      );
+      INSERT INTO departement SELECT id, id::text FROM generate_series(1, 101) id;
+    `);
+  });
+
+  beforeEach(async () => {
+    await runner.query(
+      'TRUNCATE sandre_zone_sync_decision, sandre_zone_sync_batch',
+    );
+    await runner.query(
+      `
+      INSERT INTO sandre_zone_sync_batch (
+        kind, mode, status, "startedAt", "departementId", "snapshotHash",
+        "sourceUpdatedAt", "featureCount"
+      ) SELECT 'snapshot', 'audit', 'observed', $1, id, 'old-snapshot',
+               '2026-09-01', 1 FROM departement
+    `,
+      [cutoff],
+    );
+    service = Object.assign(Object.create(ZoneAlerteService.prototype), {
+      dataSource: {
+        query: jest.fn((sql, parameters) => runner.query(sql, parameters)),
+      },
+      configService: { get: () => cutoff.toISOString() },
+      createSandreSnapshotPreflight: jest.fn(async () => ({})),
+      createAuditDecisions: jest.fn(async () => [
+        {
+          decisionKey: 'new:active',
+          zoneType: 'SOU',
+          sourceCode: 'new',
+          action: 'UPSERT_ACTIVE',
+          outcome: 'observed',
+          reason: 'AUDIT_MODE_NO_WRITE',
+          evidence: { payloadHash: 'new-payload' },
+        },
+      ]),
+    });
+  });
+
+  afterEach(async () => {
+    if (runner.isTransactionActive) await runner.rollbackTransaction();
+  });
+
+  afterAll(async () => {
+    if (runner) {
+      if (runner.isTransactionActive) await runner.rollbackTransaction();
+      await runner.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await runner.release();
+    }
+    if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  const refresh = () =>
+    service.refreshSandreAuditForSafe(
+      runner.manager,
+      { id: 95, code: '95' },
+      snapshot,
+      new Date('2026-09-09T10:00:00Z'),
+    );
+
+  const expectRolloutIntact = async () => {
+    const coverage = await service.getRolloutAuditCoverage(cutoff);
+    expect(coverage.observedDepartmentIds.size).toBe(101);
+    expect(
+      await runner.query(
+        'SELECT count(*)::integer AS count FROM sandre_zone_sync_batch',
+      ),
+    ).toEqual([{ count: 101 }]);
+    expect(
+      await runner.query(
+        'SELECT count(*)::integer AS count FROM sandre_zone_sync_decision',
+      ),
+    ).toEqual([{ count: 0 }]);
+  };
+
+  it('commits exact audit evidence in the same transaction as its caller', async () => {
+    await runner.startTransaction('SERIALIZABLE');
+    await refresh();
+    const evidence = await service.loadExactSandreAuditEvidenceForSafe(
+      runner.manager,
+      95,
+      snapshot,
+      cutoff,
+    );
+    expect(evidence.decisions.get('new:active')).toEqual({
+      payloadHash: 'new-payload',
+    });
+    expect(service.dataSource.query).not.toHaveBeenCalled();
+    await runner.commitTransaction();
+    const coverage = await service.getRolloutAuditCoverage(cutoff);
+    expect(coverage.observedDepartmentIds.size).toBe(101);
+  });
+
+  it('does not replace any rollout proof when the automatic audit is blocked', async () => {
+    service.createAuditDecisions.mockRejectedValueOnce(
+      new Error('Ambiguous operational reference'),
+    );
+    await runner.startTransaction('SERIALIZABLE');
+    await expect(refresh()).rejects.toThrow('Ambiguous operational reference');
+    expect(service.dataSource.query).not.toHaveBeenCalled();
+    await runner.rollbackTransaction();
+    await expectRolloutIntact();
+  });
+
+  it('rolls back the completed audit and decisions if the later application fails', async () => {
+    await runner.startTransaction('SERIALIZABLE');
+    await refresh();
+    await expect(runner.query('SELECT 1 / 0')).rejects.toThrow(
+      'division by zero',
+    );
+    expect(service.dataSource.query).not.toHaveBeenCalled();
+    await runner.rollbackTransaction();
+    await expectRolloutIntact();
+    await expect(
+      service.loadExactSandreAuditEvidenceForSafe(
+        runner.manager,
+        95,
+        snapshot,
+        cutoff,
+      ),
+    ).rejects.toThrow('successful exact-snapshot audit');
+  });
+});
 
 describeWithPostgres('Sandre durable reconciliation on PostgreSQL', () => {
   const schema = `sandre_durability_${process.pid}_${Date.now()}`;
