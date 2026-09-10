@@ -297,23 +297,44 @@ export function assertEquivalenceLedger(
   const last = BigInt(throughEpoch);
   let expected = BigInt(EQUIVALENCE_ANCHOR.historicComputeEpoch) + 1n;
   for (const row of rows) {
+    // Calendar changes are recorded as separate map-only and statistics-only
+    // events. Neither kind proves equivalence: certification still requires
+    // exact pinned statistical inputs and outputs after this ledger check.
+    const knownCalendarScope =
+      (row.invalidatesStatistics === false && row.invalidatesMaps === true) ||
+      (row.invalidatesStatistics === true && row.invalidatesMaps === false);
     const knownCause =
       row.cause === 'published-source-mutation' ||
-      (row.cause === 'published-calendar-mutation' &&
-        row.invalidatesStatistics === false &&
-        row.invalidatesMaps === true);
-    if (
-      BigInt(row.epochAfter) !== expected ||
-      !knownCause ||
-      row.fallback !== false ||
-      (row.sourceRevision !== null && !/^\d+$/.test(row.sourceRevision))
+      (row.cause === 'published-calendar-mutation' && knownCalendarScope);
+    let reason: string | undefined;
+    if (!/^\d+$/.test(row.epochAfter)) {
+      reason = 'invalid epoch';
+    } else if (BigInt(row.epochAfter) !== expected) {
+      reason = `expected epoch ${expected}`;
+    } else if (!knownCause) {
+      reason =
+        row.cause === 'published-calendar-mutation'
+          ? 'calendar invalidation must target exactly one of maps or statistics'
+          : `unsupported cause ${row.cause}`;
+    } else if (row.fallback !== false) {
+      reason = 'fallback must be explicitly false';
+    } else if (
+      row.sourceRevision !== null &&
+      !/^\d+$/.test(row.sourceRevision)
     ) {
-      throw new Error('Unexplained historic invalidation or incomplete ledger');
+      reason = 'invalid source revision';
+    }
+    if (reason) {
+      throw new Error(
+        `Unexplained historic invalidation or incomplete ledger: epoch=${row.epochAfter}; ${reason}`,
+      );
     }
     expected++;
   }
   if (expected !== last + 1n)
-    throw new Error('Incomplete historic invalidation ledger');
+    throw new Error(
+      `Incomplete historic invalidation ledger: expected through epoch ${last}; observed through epoch ${expected - 1n}`,
+    );
 }
 
 export const EQUIVALENCE_LEDGER_SQL = `

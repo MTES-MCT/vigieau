@@ -263,7 +263,7 @@ describe('inspection connection failure cleanup', () => {
 });
 
 describe('existing certified anchor, not manufactured provenance', () => {
-  it('accepts only non-fallback map-only calendar events in a contiguous ledger', () => {
+  it('accepts the separate non-fallback map-only and statistics-only calendar events', () => {
     const calendar = {
       ...invalidation,
       cause: 'published-calendar-mutation',
@@ -272,6 +272,21 @@ describe('existing certified anchor, not manufactured provenance', () => {
       sourceRevision: null,
     };
     expect(() => assertEquivalenceLedger([calendar], '797')).not.toThrow();
+    expect(() =>
+      assertEquivalenceLedger(
+        [
+          calendar,
+          {
+            ...calendar,
+            epochAfter: '798',
+            invalidatesStatistics: true,
+            invalidatesMaps: false,
+            affectedRange: '[2026-08-10,2026-09-10)',
+          },
+        ],
+        '798',
+      ),
+    ).not.toThrow();
     for (const change of [
       { fallback: true },
       { invalidatesStatistics: true },
@@ -284,6 +299,63 @@ describe('existing certified anchor, not manufactured provenance', () => {
       ).toThrow('Unexplained');
     }
   });
+  it.each([
+    '[2026-09-04,2026-09-09)',
+    '[2026-08-10,2026-09-10)',
+    '[2026-07-10,2026-09-10)',
+  ])(
+    'recognizes statistics calendar events for %s without asserting source equivalence',
+    (affectedRange) => {
+      expect(() =>
+        assertEquivalenceLedger(
+          [
+            {
+              ...invalidation,
+              cause: 'published-calendar-mutation',
+              invalidatesMaps: false,
+              affectedRange,
+            },
+          ],
+          '797',
+        ),
+      ).not.toThrow();
+      expect(() => assertEquivalenceAnchorInputs('a'.repeat(64))).toThrow(
+        'anchor inputs differ',
+      );
+    },
+  );
+  it.each([
+    [{ epochAfter: '798' }, 'expected epoch 797'],
+    [{ epochAfter: 'invalid' }, 'invalid epoch'],
+    [
+      { cause: 'unknown-calendar-mutation' },
+      'unsupported cause unknown-calendar-mutation',
+    ],
+    [{ fallback: true }, 'fallback must be explicitly false'],
+    [{ fallback: undefined }, 'fallback must be explicitly false'],
+    [
+      { invalidatesStatistics: true, invalidatesMaps: true },
+      'calendar invalidation must target exactly one',
+    ],
+    [
+      { invalidatesStatistics: false, invalidatesMaps: false },
+      'calendar invalidation must target exactly one',
+    ],
+    [{ sourceRevision: 'invalid' }, 'invalid source revision'],
+  ])(
+    'reports the exact failing calendar event and reason (%j)',
+    (change, reason) => {
+      const calendar = {
+        ...invalidation,
+        cause: 'published-calendar-mutation',
+        invalidatesMaps: false,
+        ...change,
+      };
+      expect(() => assertEquivalenceLedger([calendar], '797')).toThrow(
+        `Unexplained historic invalidation or incomplete ledger: epoch=${calendar.epochAfter}; ${reason}`,
+      );
+    },
+  );
   it('rejects an altered restored clone even when its old audit remains present', () => {
     expect(() =>
       assertEquivalenceAnchorInputs(EQUIVALENCE_ANCHOR.inputDigest),

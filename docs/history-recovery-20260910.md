@@ -71,6 +71,15 @@ certification est refusée et les journées disponibles restent provisoires.
 Il faut alors examiner les sources datées et préparer une correction séparée.
 Les causes d'invalidation non reconnues sont également refusées.
 
+Le journal reconnaît les deux événements calendaires émis par le métier :
+cartes uniquement et statistiques uniquement. Ils sont enregistrés séparément.
+Le contrôle conserve la continuité des époques et refuse les événements de
+secours (`fallback`), les causes inconnues et les combinaisons calendaires
+incohérentes. Reconnaître un événement qui touche juillet–août ne certifie pas
+les données : les empreintes complètes des entrées et sorties doivent toujours
+correspondre à l'ancre. En cas de refus du journal, l'erreur indique désormais
+l'époque et le motif précis.
+
 Ne pas activer `HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED` en production : les
 anciens chemins de recalcul utiliseraient les géométries actuelles mutables.
 Ce correctif ne modifie pas ce garde et n'autorise aucun replay aveugle.
