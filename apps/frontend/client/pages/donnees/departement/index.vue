@@ -22,7 +22,6 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, {
   </div>
   <div class="background-blue fr-py-2w">
     <div class="fr-container">
-      <DonneesStatisticDataStatus />
       <DonneesDepartementChart />
     </div>
   </div>
