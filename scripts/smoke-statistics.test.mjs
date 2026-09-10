@@ -24,6 +24,10 @@ async function runSmoke({
   expectArtifact = false,
   minimumInstanceCount = 2,
   truncatePublicHistory = false,
+  provisionalHistoryDates = [],
+  missingPublicHistoryDate = null,
+  areaProvisionalMismatch = false,
+  provisionalReason = "historic-recalculation",
   expectedExitCode = 0,
 }) {
   const policy = getStatisticFreshnessPolicy({
@@ -97,10 +101,25 @@ async function runSmoke({
         : requestedStart;
     const responseEnd =
       requestedEnd && requestedEnd < latestDate ? requestedEnd : latestDate;
+    const includeProvisional =
+      url.searchParams.get("includeProvisional") === "true";
+    const historyDates = () =>
+      dateRange(responseStart, responseEnd).filter(
+        (date) =>
+          (!includeProvisional || date !== missingPublicHistoryDate) &&
+          (includeProvisional || !provisionalHistoryDates.includes(date)),
+      );
+    const dataStatus = (date, area = false) =>
+      includeProvisional &&
+      provisionalHistoryDates.includes(date) &&
+      !(area && areaProvisionalMismatch)
+        ? { dataStatus: "provisional", dataStatusReason: provisionalReason }
+        : {};
     if (url.pathname === "/api/data/departement") {
       return send(
-        dateRange(responseStart, responseEnd).map((date) => ({
+        historyDates().map((date) => ({
           date,
+          ...dataStatus(date),
           departements: Array.from({ length: 101 }, (_, index) => ({
             code: String(index),
           })),
@@ -109,8 +128,9 @@ async function runSmoke({
     }
     if (url.pathname === "/api/data/area") {
       return send(
-        dateRange(responseStart, responseEnd).map((date) => ({
+        historyDates().map((date) => ({
           date,
+          ...dataStatus(date, true),
           ESU: {},
           ESO: {},
           AEP: {},
@@ -162,6 +182,73 @@ async function runSmoke({
     await new Promise((resolve) => server.close(resolve));
   }
 }
+
+const recalculatingHistory = {
+  now: "2026-09-10T06:00:00.000Z",
+  latestDate: "2026-09-10",
+  healthOverrides: {
+    historicComplete: false,
+    historicDirtyFrom: "2026-07-11",
+    historicDirtyThrough: "2026-08-31",
+  },
+  provisionalHistoryDates: dateRange("2026-07-11", "2026-08-31"),
+};
+
+test("keeps the 52-day display history during recalculation without counting it as certified", async () => {
+  const result = await runSmoke(recalculatingHistory);
+  assert.deepEqual(result.publicHistoryCanary, {
+    dateFrom: "2026-01-01",
+    dateThrough: "2026-09-10",
+    certifiedDayCount: 201,
+    provisionalDayCount: 52,
+  });
+});
+
+test("keeps provisional history when the next daily publication arrives", async () => {
+  const result = await runSmoke({
+    ...recalculatingHistory,
+    now: "2026-09-11T06:00:00.000Z",
+    latestDate: "2026-09-11",
+  });
+  assert.equal(result.publicHistoryCanary.certifiedDayCount, 202);
+  assert.equal(result.publicHistoryCanary.provisionalDayCount, 52);
+});
+
+test("rejects a new display gap even during an acknowledged recalculation", async () => {
+  const result = await runSmoke({
+    ...recalculatingHistory,
+    missingPublicHistoryDate: "2026-08-15",
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /public history canary statistics contain a gap/);
+});
+
+test("rejects inconsistent provisional markings across the two public charts", async () => {
+  const result = await runSmoke({
+    ...recalculatingHistory,
+    areaProvisionalMismatch: true,
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /disagree on provisional dates/);
+});
+
+test("rejects provisional dates outside the declared recalculation period", async () => {
+  const result = await runSmoke({
+    ...recalculatingHistory,
+    provisionalHistoryDates: ["2026-07-10"],
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /outside the recalculation range/);
+});
+
+test("rejects unknown reasons for provisional data", async () => {
+  const result = await runSmoke({
+    ...recalculatingHistory,
+    provisionalReason: "unverified",
+    expectedExitCode: 1,
+  });
+  assert.match(result.stderr, /Unknown public history data status reason/);
+});
 
 test("accepts yesterday before the Paris daily deadline", async () => {
   const result = await runSmoke({

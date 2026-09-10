@@ -3,6 +3,7 @@ import moment from 'moment';
 import { downloadCsvFile } from '../../utils/csv-download';
 import { isAreaStatisticSeries } from '../../utils/statistic-series';
 import { sortByDateDesc } from '../../utils/date-sort';
+import { getStatisticRowStatusLabel, isProvisionalStatistic } from '../../utils/statistic-provisional';
 
 const props = defineProps<{
   dataArea: any,
@@ -13,11 +14,12 @@ const props = defineProps<{
   dateFin: string,
 }>();
 
-const headers = ['Date', 'Vigilance', 'Alerte', 'Alerte renforcée', 'Crise'];
+const headers = computed(() => ['Date', 'Vigilance', 'Alerte', 'Alerte renforcée', 'Crise', ...(hasProvisionalData.value ? ['Statut'] : [])]);
 const rows = ref([]);
 const downloadingCsv = ref(false);
 const csvDownloadError = ref(false);
 const validData = computed(() => isAreaStatisticSeries(props.dataArea, props.typeEau));
+const hasProvisionalData = computed(() => validData.value && props.dataArea.some(isProvisionalStatistic));
 const canDownload = computed(() => !props.disabled && validData.value && props.dataArea.length > 0);
 
 async function downloadCsv() {
@@ -34,6 +36,7 @@ async function downloadCsv() {
         alerte: stat[props.typeEau].alerte,
         alerte_renforcee: stat[props.typeEau].alerte_renforcee,
         crise: stat[props.typeEau].crise,
+        ...(hasProvisionalData.value ? { statut: getStatisticRowStatusLabel(stat) } : {}),
       };
     });
   csvDownloadError.value = !await downloadCsvFile(formatData, `tableau_surface_${props.territoire}_${props.dateDebut}_${props.dateFin}_${props.typeEau}.csv`);
@@ -52,6 +55,7 @@ watch(() => [props.typeEau, props.dataArea], () => {
       s[props.typeEau].alerte + '%',
       s[props.typeEau].alerte_renforcee + '%',
       s[props.typeEau].crise + '%',
+      ...(hasProvisionalData.value ? [getStatisticRowStatusLabel(s)] : []),
     ];
   });
 }, { immediate: true });

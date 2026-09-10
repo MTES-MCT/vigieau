@@ -82,6 +82,7 @@ export class DataController {
       query.bassinVersant,
       query.region,
       query.departement,
+      query.includeProvisional === 'true',
     );
   }
 
@@ -95,6 +96,7 @@ export class DataController {
       query.bassinVersant,
       query.region,
       query.departement,
+      query.includeProvisional === 'true',
     );
   }
 

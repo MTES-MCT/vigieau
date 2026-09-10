@@ -3,6 +3,7 @@ import moment from 'moment';
 import { downloadCsvFile } from '../../utils/csv-download';
 import { isDepartmentStatisticSeries } from '../../utils/statistic-series';
 import { sortByDateDesc } from '../../utils/date-sort';
+import { getStatisticRowStatusLabel, isProvisionalStatistic } from '../../utils/statistic-provisional';
 
 const props = defineProps<{
   dataDepartement: any,
@@ -13,11 +14,12 @@ const props = defineProps<{
   dateFin: string,
 }>();
 
-const headers = ['Date', 'Vigilance', 'Alerte', 'Alerte renforcée', 'Crise'];
+const headers = computed(() => ['Date', 'Vigilance', 'Alerte', 'Alerte renforcée', 'Crise', ...(hasProvisionalData.value ? ['Statut'] : [])]);
 const rows = ref([]);
 const downloadingCsv = ref(false);
 const csvDownloadError = ref(false);
 const validData = computed(() => isDepartmentStatisticSeries(props.dataDepartement));
+const hasProvisionalData = computed(() => validData.value && props.dataDepartement.some(isProvisionalStatistic));
 const canDownload = computed(() => !props.disabled && validData.value && props.dataDepartement.length > 0);
 
 async function downloadCsv() {
@@ -34,6 +36,7 @@ async function downloadCsv() {
         alerte: stat.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'alerte' ? 1 : 0), 0),
         alerte_renforcee: stat.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'alerte_renforcee' ? 1 : 0), 0),
         crise: stat.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'crise' ? 1 : 0), 0),
+        ...(hasProvisionalData.value ? { statut: getStatisticRowStatusLabel(stat) } : {}),
       };
     });
   csvDownloadError.value = !await downloadCsvFile(formatData, `tableau_departements_${props.territoire}_${props.dateDebut}_${props.dateFin}_${props.typeEau}.csv`);
@@ -65,6 +68,7 @@ watch(() => [props.typeEau, props.dataDepartement], () => {
       s.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'alerte' ? 1 : 0), 0),
       s.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'alerte_renforcee' ? 1 : 0), 0),
       s.departements.reduce((acc: number, dep: any) => acc + (getNiveauGravite(dep) === 'crise' ? 1 : 0), 0),
+      ...(hasProvisionalData.value ? [getStatisticRowStatusLabel(s)] : []),
     ];
   });
 }, { immediate: true });

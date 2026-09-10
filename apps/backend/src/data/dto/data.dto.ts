@@ -1,6 +1,10 @@
-import { IsOptional, IsString, IsDateString } from 'class-validator';
+import { IsOptional, IsString, IsDateString, IsIn } from 'class-validator';
 
 export class CommonDataQueryDto {
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  includeProvisional?: string;
+
   @IsOptional()
   @IsDateString(
     {},
