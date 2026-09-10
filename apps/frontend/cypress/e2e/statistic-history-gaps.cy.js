@@ -30,6 +30,23 @@ const pages = [
 ];
 const warningTitle = 'Données manquantes sur la période';
 const gapDescription = 'Du 11/07/2026 au 31/08/2026 : 52 jours sans donnée.';
+const warningTitleFor = (page) => page.path === 'departement' ? 'Données manquantes' : warningTitle;
+const provisionalTitleFor = (page) => page.path === 'departement' ? 'Données provisoires' : "Recalcul de l'historique en cours";
+
+function noticeFor(page, title) {
+  return page.path === 'departement'
+    ? cy.get('[data-testid="statistic-series-status"]').should('contain.text', title)
+    : cy.contains('[role="status"]', title);
+}
+
+function revealDetails() {
+  cy.root().then(($root) => {
+    const details = $root.find('details').first();
+    if (details.length && !details[0].open) {
+      cy.wrap(details).find('summary').click();
+    }
+  });
+}
 
 function typeSelector() {
   return cy.contains('label', "Type d'eau").invoke('attr', 'for').then((id) => cy.get(`[id="${id}"]`));
@@ -44,11 +61,10 @@ function visitStatistics(page) {
   cy.wait('@statistics');
 }
 
-function assertGapWarning() {
-  cy.contains('[role="status"]', warningTitle).should('be.visible').within(() => {
-    cy.get('li').should('have.length', 1).should(($items) => {
-      expect($items[0].textContent.trim()).to.equal(gapDescription);
-    });
+function assertGapWarning(page) {
+  noticeFor(page, warningTitleFor(page)).should('be.visible').within(() => {
+    revealDetails();
+    cy.contains(gapDescription).should('be.visible');
   });
 }
 
@@ -251,11 +267,11 @@ describe('Trous dans les historiques statistiques publics', () => {
         cy.viewport(viewport.width, viewport.height);
         cy.intercept('GET', `**/data/${page.endpoint}?*`, { body: page.data }).as('statistics');
         visitStatistics(page);
-        assertGapWarning();
+        assertGapWarning(page);
         typeSelector().should('have.value', page.initialType);
         assertChartGap();
         typeSelector().select(page.nextType);
-        assertGapWarning();
+        assertGapWarning(page);
         assertChartGap();
         cy.document().should((document) => {
           expect(document.documentElement.scrollWidth, 'aucun debordement horizontal').to.be.at.most(document.documentElement.clientWidth);
@@ -272,14 +288,14 @@ describe('Trous dans les historiques statistiques publics', () => {
         request.reply({ body: continuous ? page.data.filter((row) => row.date >= '2026-09-01') : page.data });
       }).as('statistics');
       visitStatistics(page);
-      assertGapWarning();
+      assertGapWarning(page);
       cy.get('#dateDebut').clear().type('2026-09-01');
-      assertGapWarning();
+      assertGapWarning(page);
       cy.contains('button', 'CSV').should('be.disabled');
       cy.then(() => { continuous = true; });
       cy.contains('button', 'Calculer').click();
       cy.wait('@statistics');
-      cy.contains(warningTitle).should('not.exist');
+      cy.contains(warningTitleFor(page)).should('not.exist');
       cy.get('main canvas').should('be.visible');
       cy.get('main table tbody tr').should('have.length', 8);
       cy.contains('button', 'CSV').should('not.be.disabled');
@@ -304,10 +320,11 @@ describe('Trous dans les historiques statistiques publics', () => {
           request.reply({ body: certified ? page.data.filter((row) => row.date >= '2026-09-01') : mixedPage.data });
         }).as('statistics');
         visitStatistics(page);
-        cy.contains('[role="status"]', "Recalcul de l'historique en cours").should('be.visible').within(() => {
-          cy.contains('Du 11/07/2026 au 31/08/2026 : 52 jours de données provisoires.').should('be.visible');
+        noticeFor(page, provisionalTitleFor(page)).should('be.visible').within(() => {
+          cy.contains('11/07/2026').should('be.visible');
+          cy.contains('31/08/2026').should('be.visible');
         });
-        cy.contains(warningTitle).should('not.exist');
+        cy.contains(warningTitleFor(page)).should('not.exist');
         cy.get('main canvas').should('be.visible');
         cy.tick(1500);
         cy.get('main canvas').should(($canvas) => {
@@ -327,7 +344,7 @@ describe('Trous dans les historiques statistiques publics', () => {
           ]);
         });
         typeSelector().select(page.nextType);
-        cy.contains("Recalcul de l'historique en cours").should('be.visible');
+        cy.contains(provisionalTitleFor(page)).should('be.visible');
         cy.get('main canvas').scrollIntoView();
         cy.screenshot(`statistics-provisional-${page.path}-${viewport.name}`, { capture: 'viewport' });
         assertRawTableAndCsv(mixedPage, page.nextType, `${viewport.name}-provisional`);
@@ -339,7 +356,7 @@ describe('Trous dans les historiques statistiques publics', () => {
         cy.then(() => { certified = true; });
         cy.contains('button', 'Calculer').click();
         cy.wait('@statistics');
-        cy.contains("Recalcul de l'historique en cours").should('not.exist');
+        cy.contains(provisionalTitleFor(page)).should('not.exist');
         cy.get('main table thead').contains('Statut').should('not.exist');
         cy.get('main table tbody tr').should('have.length', 8);
       });
@@ -354,14 +371,23 @@ describe('Trous dans les historiques statistiques publics', () => {
       ];
       cy.intercept('GET', `**/data/${page.endpoint}?*`, { body: sparseData }).as('statistics');
       visitStatistics(page);
-      cy.contains('[role="status"]', "Recalcul de l'historique en cours").within(() => {
-        cy.get('li').should('have.length', 2);
-        cy.contains('Le 02/07/2026 : 1 jour de données provisoires.').should('be.visible');
-        cy.contains('Le 04/07/2026 : 1 jour de données provisoires.').should('be.visible');
-      });
-      cy.contains('[role="status"]', warningTitle).within(() => {
-        cy.contains('Le 03/07/2026 : 1 jour sans donnée.').should('be.visible');
-      });
+      if (page.path === 'departement') {
+        noticeFor(page, warningTitleFor(page)).within(() => {
+          revealDetails();
+          cy.contains('Le 02/07/2026 : 1 jour de données provisoires.').should('be.visible');
+          cy.contains('Le 04/07/2026 : 1 jour de données provisoires.').should('be.visible');
+          cy.contains('Le 03/07/2026 : 1 jour sans donnée.').should('be.visible');
+        });
+      } else {
+        cy.contains('[role="status"]', provisionalTitleFor(page)).within(() => {
+          cy.get('li').should('have.length', 2);
+          cy.contains('Le 02/07/2026 : 1 jour de données provisoires.').should('be.visible');
+          cy.contains('Le 04/07/2026 : 1 jour de données provisoires.').should('be.visible');
+        });
+        cy.contains('[role="status"]', warningTitle).within(() => {
+          cy.contains('Le 03/07/2026 : 1 jour sans donnée.').should('be.visible');
+        });
+      }
       cy.get('main table tbody tr').should('have.length', 4);
       cy.get('main table tbody').contains('03/07/2026').should('not.exist');
       cy.get('main canvas').scrollIntoView().should('be.visible');

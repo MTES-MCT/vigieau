@@ -72,8 +72,9 @@ test('limits provisional opt-in to the two aggregate chart consumers and include
     assert.match(chart, /pointStyle:.*getStatisticPointStyle/);
     // Chart.js scriptable segments reconnect numeric spanGaps, including their fill.
     assert.doesNotMatch(chart, /segment:\s*\{/);
-    assert.ok(chart.indexOf('<DonneesStatisticProvisionalData') > chart.indexOf('<div ref="screenshotZone">'));
-    assert.ok(chart.indexOf('<DonneesStatisticProvisionalData') < chart.indexOf('<Line id='));
+    const notice = name === 'Departement' ? '<DonneesStatisticDataStatus' : '<DonneesStatisticProvisionalData';
+    assert.ok(chart.indexOf(notice) > chart.indexOf('<div ref="screenshotZone">'));
+    assert.ok(chart.indexOf(notice) < chart.indexOf('<Line id='));
     const table = await readFile(new URL(`../client/components/donnees/${name}Table.vue`, import.meta.url), 'utf8');
     assert.match(table, /hasProvisionalData.value \? \{ statut: getStatisticRowStatusLabel\(stat\) \} : \{\}/);
   }

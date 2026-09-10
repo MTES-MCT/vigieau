@@ -23,8 +23,8 @@ import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
 import { isDepartmentStatisticSeries } from '../../utils/statistic-series';
-import { findMissingStatisticPeriods, MAX_DAILY_STATISTIC_GAP_MS } from '../../utils/statistic-history-gaps';
-import { findProvisionalStatisticPeriods, getStatisticPointStyle, getStatisticRowStatusLabel } from '../../utils/statistic-provisional';
+import { MAX_DAILY_STATISTIC_GAP_MS } from '../../utils/statistic-history-gaps';
+import { getStatisticPointStyle, getStatisticRowStatusLabel } from '../../utils/statistic-provisional';
 import * as Sentry from '@sentry/vue';
 
 
@@ -36,8 +36,6 @@ const chartLineData = ref(null);
 const dataDepartement = ref<any[] | null>(null);
 const loadError = ref(false);
 const hasData = computed(() => !loadError.value && (dataDepartement.value?.length ?? 0) > 0);
-const missingPeriods = computed(() => findMissingStatisticPeriods(dataDepartement.value));
-const provisionalPeriods = computed(() => findProvisionalStatisticPeriods(dataDepartement.value));
 const computeDisabled = ref(true);
 const downloadingPng = ref(false);
 const pngDownloadError = ref(false);
@@ -400,20 +398,11 @@ watch(() => refDataStore.departements, () => {
         </DsfrButton>
       </div>
     </div>
-    <div class="fr-col-12">
-      <DsfrAlert
-        title="Données historiques sur l’eau potable limitées"
-        data-html2canvas-ignore="true"
-        type="info"
-        class="fr-my-2w"
-      >
-        Nous ne sommes pas en mesure de fournir les restrictions appliquées sur l'eau potable avant le 28/04/2024. Pour
-        connaître les niveaux de restrictions en vigueur, veuillez vous référer aux niveaux de restrictions des eaux
-        superficielles et souterraines.
-      </DsfrAlert>
-    </div>
-    <DonneesStatisticProvisionalData :periods="!loading && hasData ? provisionalPeriods : []" />
-    <DonneesStatisticHistoryGaps :periods="!loading && hasData ? missingPeriods : []" />
+    <DonneesStatisticDataStatus
+      :series="dataDepartement"
+      :water-type="formData.typeEau"
+      :loading="loading"
+    />
     <div v-if="!loading && chartLineData && hasData" class="chart-container">
       <Line id="departement-chart-line"
             :options="chartLineOptions"
