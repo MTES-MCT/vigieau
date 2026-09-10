@@ -818,6 +818,7 @@ export class DataService implements OnModuleInit {
     code: string,
     dateDebut?: string,
     dateFin?: string,
+    includeProvisional = false,
   ): Promise<StatisticCommune> {
     const stat = await this.statisticCommuneRepository.findOne(<FindOneOptions>{
       select: {
@@ -907,13 +908,28 @@ export class DataService implements OnModuleInit {
           ) certified_repair ON true
           WHERE statistic_publication_state.id = 1
             AND config.id = 1
-        ), filtered_restrictions AS MATERIALIZED (
-          SELECT restriction.value, restriction.ordinality
+        ), commune_restrictions AS MATERIALIZED (
+          SELECT restriction.value, restriction.ordinality,
+            COUNT(*) OVER (PARTITION BY restriction.value ->> 'date') AS "dayCount"
           FROM statistic_commune statistic
-          CROSS JOIN publication_state state
           CROSS JOIN LATERAL jsonb_array_elements(statistic.restrictions)
             WITH ORDINALITY AS restriction(value, ordinality)
           WHERE statistic.id = $1
+        ), filtered_restrictions AS MATERIALIZED (
+          SELECT
+            CASE WHEN $5::boolean
+                AND state."certifiedHistoryRepairId" IS NULL
+                AND (restriction.value ->> 'date')::date BETWEEN
+                  state."historicDirtyFrom" AND COALESCE(
+                    state."historicDirtyThrough", state."currentPublishedDate"
+                  )
+              THEN restriction.value || $6::jsonb
+              ELSE restriction.value
+            END AS value,
+            restriction.ordinality
+          FROM commune_restrictions restriction
+          CROSS JOIN publication_state state
+          WHERE TRUE
             AND ($2::date IS NULL OR (restriction.value->>'date')::date >= $2::date)
             AND ($3::date IS NULL OR (restriction.value->>'date')::date <= $3::date)
             AND state."currentPublishedDate" IS NOT NULL
@@ -933,6 +949,30 @@ export class DataService implements OnModuleInit {
                 state."certifiedHistoryRepairId" IS NOT NULL
                 AND (restriction.value ->> 'date')::date BETWEEN
                     state."historicDirtyFrom" AND state."historicDirtyThrough"
+              )
+              OR (
+                $5::boolean
+                AND restriction."dayCount" = 1
+                AND restriction.value ?& ARRAY['SOU', 'SUP', 'AEP']
+                AND NOT EXISTS (
+                  SELECT 1 FROM unnest(ARRAY['SOU', 'SUP', 'AEP']) zone_type(value)
+                  WHERE (restriction.value -> zone_type.value) <> 'null'::jsonb
+                    AND (restriction.value ->> zone_type.value) NOT IN (
+                      'vigilance', 'alerte', 'alerte_renforcee', 'crise'
+                    )
+                )
+                AND EXISTS (
+                  SELECT 1 FROM statistic_commune_snapshot completed_snapshot
+                  WHERE completed_snapshot."snapshotDate" =
+                      (restriction.value ->> 'date')::date
+                    AND completed_snapshot.scope = 'national'
+                    AND completed_snapshot.status = 'completed'
+                    AND completed_snapshot."expectedCommuneCount" > 0
+                    AND completed_snapshot."expectedCommuneCount" =
+                        completed_snapshot."processedCommuneCount"
+                    AND completed_snapshot."expectedCommuneCount" =
+                        (SELECT COUNT(*) FROM commune)
+                )
               )
             )
             AND NOT EXISTS (
@@ -955,6 +995,8 @@ export class DataService implements OnModuleInit {
         dateBegin?.format('YYYY-MM-DD') ?? null,
         dateEnd?.format('YYYY-MM-DD') ?? null,
         this.getConfiguredStatisticCacheMode(),
+        includeProvisional,
+        JSON.stringify(PROVISIONAL_STATISTIC_STATUS),
       ],
     );
     if (result?.stateAvailable !== true) {

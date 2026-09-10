@@ -101,7 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        # Match production/compose; transaction_timeout guards require PostgreSQL 17.
+        image: postgis/postgis:17-3.5
         env:
           POSTGRES_DB: vigieau_ci
           POSTGRES_USER: postgres
@@ -144,8 +145,10 @@ jobs:
           npm --prefix apps/backend-admin test -- --runInBand
           src/config/historic-range-aware-certified-repair.postgres.spec.ts
           src/scripts/complete-certified-history-restoration.postgres.spec.ts
+          src/scripts/attest-history-by-source-equivalence.postgres.spec.ts
         env:
           REPAIR_CERTIFIED_HISTORY_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+          HISTORY_EQUIVALENCE_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - run: npm --prefix apps/backend-admin run build
       - name: Verify a fresh database
         run: node scripts/verify-admin-migrations.mjs
@@ -156,6 +159,7 @@ jobs:
           npm --prefix apps/backend test -- --runInBand
           src/data/statistic-cache-artifact.postgres.spec.ts
           src/data/historic-config-schema-repair.postgres.spec.ts
+          src/data/provisional-commune-statistics.postgres.spec.ts
         env:
           STATISTIC_CACHE_ARTIFACT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Verify Matomo collection coordination against PostgreSQL

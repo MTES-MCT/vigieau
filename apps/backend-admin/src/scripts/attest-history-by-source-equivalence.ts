@@ -128,7 +128,7 @@ export const EQUIVALENCE_ANCHOR_LOOKUP_GUARD: EquivalenceLookupGuard = {
   sequenceIncrement: '1',
   sequenceCycle: false,
 };
-interface Inspection {
+export interface Inspection {
   operatorDigest: string;
   context: RepairPublicationContext;
   inputs: ReturnType<typeof sourceEquivalenceEvidence>;
@@ -459,11 +459,12 @@ export async function releaseEquivalenceRunner(
   if (cleanupError && !preservePrimaryError) throw cleanupError;
 }
 
-async function inspect(
+export async function inspectEquivalenceState(
   database: DataSource,
   expectedDatabase: string,
   anchor: boolean,
   operatorDigest: string,
+  requirePinnedInputs = false,
 ): Promise<Inspection> {
   const runner = database.createQueryRunner();
   const deadline = Date.now() + MAX_INSPECTION_MS;
@@ -528,7 +529,8 @@ async function inspect(
     }
     await runner.query('CLOSE equivalence_inputs');
     const inputs = sourceEquivalenceEvidence(inputRows);
-    if (anchor) assertEquivalenceAnchorInputs(inputs.digest);
+    if (anchor || requirePinnedInputs)
+      assertEquivalenceAnchorInputs(inputs.digest);
     const outputs = {} as Inspection['outputs'];
     for (const kind of ['commune', 'department', 'national'] as const) {
       const all: OutputRow[] = [];
@@ -698,7 +700,11 @@ export async function applyEquivalenceAttestation(
   target: DataSource,
   inspection: Inspection,
   proof: string,
-) {
+): Promise<{
+  status: 'ALREADY_ATTESTED' | 'ATTESTED';
+  attestationId: string;
+  revision?: string;
+}> {
   const versionChecks = (
     [
       ['statistic_commune', inspection.outputs.commune.versions],
@@ -833,29 +839,36 @@ export async function attestHistoryBySourceEquivalence(
   hooks: EquivalenceConfirmationHooks = {},
 ) {
   await archiveDigest(options.archivePath);
-  const artifacts = [
-    __filename,
-    require.resolve('./history-source-equivalence'),
-    require.resolve('./restore-certified-commune-history'),
-    require.resolve('./restore-missing-commune-history'),
-    require.resolve('./complete-certified-history-restoration'),
-  ];
-  const artifactDigests: string[] = [];
-  for (const path of artifacts) artifactDigests.push(await fileDigest(path));
-  const operatorDigest = equivalenceDigest(artifactDigests);
-  const anchor = await inspect(
+  const operatorDigest = await equivalenceOperatorDigest();
+  const anchor = await inspectEquivalenceState(
     source,
     options.sourceDatabase,
     true,
     operatorDigest,
   );
-  const current = await inspect(
+  const current = await inspectEquivalenceState(
     target,
     options.targetDatabase,
     false,
     operatorDigest,
   );
   return completeEquivalenceInspection(target, anchor, current, options, hooks);
+}
+
+export async function equivalenceOperatorDigest(
+  additionalArtifacts: string[] = [],
+): Promise<string> {
+  const artifacts = [
+    __filename,
+    require.resolve('./history-source-equivalence'),
+    require.resolve('./restore-certified-commune-history'),
+    require.resolve('./restore-missing-commune-history'),
+    require.resolve('./complete-certified-history-restoration'),
+    ...additionalArtifacts,
+  ];
+  const artifactDigests: string[] = [];
+  for (const path of artifacts) artifactDigests.push(await fileDigest(path));
+  return equivalenceDigest(artifactDigests);
 }
 
 export interface EquivalencePreview {

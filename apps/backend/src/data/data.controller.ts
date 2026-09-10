@@ -127,6 +127,11 @@ export class DataController {
     @Param('codeInsee') codeInsee: string,
     @Query() query: CommuneQueryDto,
   ): Promise<any> {
-    return this.dataService.commune(codeInsee, query.dateDebut, query.dateFin);
+    return this.dataService.commune(
+      codeInsee,
+      query.dateDebut,
+      query.dateFin,
+      query.includeProvisional === 'true',
+    );
   }
 }

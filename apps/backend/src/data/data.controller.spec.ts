@@ -173,6 +173,7 @@ describe('DataController', () => {
         codeInsee,
         query.dateDebut,
         query.dateFin,
+        false,
       );
       expect(result).toEqual(expectedResult);
     });
@@ -196,6 +197,18 @@ describe('DataController', () => {
         codeInsee,
         query.dateDebut,
         query.dateFin,
+        false,
+      );
+    });
+
+    it('only includes provisional commune days on explicit opt-in', async () => {
+      mockDataService.commune.mockResolvedValue({ restrictions: [] });
+      await controller.commune('24547', { includeProvisional: 'true' });
+      expect(service.commune).toHaveBeenCalledWith(
+        '24547',
+        undefined,
+        undefined,
+        true,
       );
     });
   });

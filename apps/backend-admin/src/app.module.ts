@@ -40,6 +40,7 @@ import { bootstrapSchema } from './schema-bootstrap';
 import { areScheduledJobsDisabled } from './core/scheduling/business-cron';
 import { parseDatabasePoolMax } from './core/database-pool';
 import { HistoricBackfillModule } from './historic_backfill/historic-backfill.module';
+import { HistoryRecoveryModule } from './history_recovery/history-recovery.module';
 
 const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 const scheduledJobsEnabled = !areScheduledJobsDisabled();
@@ -132,6 +133,7 @@ const scheduledJobsEnabled = !areScheduledJobsDisabled();
     ArreteMunicipalModule,
     AbonnementMailModule,
     HistoricBackfillModule,
+    HistoryRecoveryModule,
   ],
   controllers: [AppController],
   providers: [
