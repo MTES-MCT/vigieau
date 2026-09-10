@@ -80,6 +80,29 @@ les données : les empreintes complètes des entrées et sorties doivent toujour
 correspondre à l'ancre. En cas de refus du journal, l'erreur indique désormais
 l'époque et le motif précis.
 
+### Marqueur administratif des paramètres historiques
+
+Le calcul historique choisit un paramètre par ses dates et sa règle, sans lire
+`parametres.disabled`. La fermeture normale d'un paramètre en septembre peut
+changer ce marqueur sans changer les paramètres applicables en juillet–août.
+Le calcul courant, lui, utilise ce marqueur et n'est pas modifié.
+
+La preuve `historic-parameter-disabled-irrelevant-v1` reconnaît uniquement cette
+différence. Elle conserve l'empreinte d'entrée originale `f93f95…` et les
+empreintes des résultats. La projection canonique des 110 paramètres d'origine
+est embarquée et vérifiée par son SHA-256 original `c2313897…`. Elle a été
+reconstituée en lecture seule le 10 septembre : remettre **en mémoire seulement**
+`398.disabled=false` a retrouvé exactement cette empreinte antérieure. Il ne
+s'agit ni d'une restauration de la table SQL ni d'une modification en production.
+
+Toutes les identités, règles, dates effectives et sept autres sections d'entrée
+restent strictement comparées. Une modification de `zone_alerte.disabled` n'est
+pas neutralisée. Toute divergence pertinente fait toujours refuser la validation.
+L'attestation conserve séparément les empreintes brutes, la preuve normalisée et
+la liste des marqueurs différents ; elle ne prétend pas que les entrées brutes
+sont inchangées. Ce traitement reste limité à la réparation v2 épinglée ; il ne
+modifie pas le choix des paramètres ni le calcul historique.
+
 Ne pas activer `HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED` en production : les
 anciens chemins de recalcul utiliseraient les géométries actuelles mutables.
 Ce correctif ne modifie pas ce garde et n'autorise aucun replay aveugle.

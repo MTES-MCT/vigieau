@@ -771,6 +771,37 @@ describe('atomic append-only attestation', () => {
       HISTORY_EQUIVALENCE_CONFIRMATION: 'ATTEST_HISTORY_BY_SOURCE_EQUIVALENCE',
     });
   }
+  it('records raw and normalized evidence for historical parameter status changes', async () => {
+    const f = fixture();
+    const parameterStatusEquivalence = {
+      policy: 'historic-parameter-disabled-irrelevant-v1' as const,
+      rawInputDigest: 'b'.repeat(64),
+      rawParameterSectionDigest: 'c'.repeat(64),
+      anchorParameterSectionDigest: 'd'.repeat(64),
+      normalizedInputDigest: f.inspection.inputs.digest,
+      changes: [{ key: '398', anchorDisabled: false, currentDisabled: true }],
+    };
+    const inspection = {
+      ...f.inspection,
+      inputs: { ...f.inspection.inputs, parameterStatusEquivalence },
+    };
+    expect(equivalenceProof(inspection)).not.toBe(
+      equivalenceProof(f.inspection),
+    );
+    await applyEquivalenceAttestation(
+      f.target,
+      inspection,
+      equivalenceProof(inspection),
+    );
+    const call = f.runner.query.mock.calls.find(
+      ([sql]) => sql === CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
+    );
+    const context = JSON.parse(call?.[1]?.[4] as string);
+    expect(context.parameterStatusEquivalence).toEqual(
+      parameterStatusEquivalence,
+    );
+    expect(context.inputDigest).toBe(inspection.inputs.digest);
+  });
   it('waits for exact consent on a detached preview before starting the existing CAS', async () => {
     const f = fixture();
     const proof = equivalenceProof(f.inspection);

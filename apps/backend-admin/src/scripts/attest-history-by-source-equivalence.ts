@@ -28,6 +28,10 @@ import {
   equivalenceDigest,
   sourceEquivalenceEvidence,
 } from './history-source-equivalence';
+import {
+  HistoricalInputEvidence,
+  historicalParameterStatusInputEvidence,
+} from './history-parameter-status-equivalence';
 
 export const EQUIVALENCE_ANCHOR = {
   backupId: '6a98b8a299826944b3817689',
@@ -132,7 +136,7 @@ export const EQUIVALENCE_ANCHOR_LOOKUP_GUARD: EquivalenceLookupGuard = {
 export interface Inspection {
   operatorDigest: string;
   context: RepairPublicationContext;
-  inputs: ReturnType<typeof sourceEquivalenceEvidence>;
+  inputs: HistoricalInputEvidence;
   outputs: Record<
     OutputKind,
     { count: number; days: number; digest: string; versions: RowVersion[] }
@@ -550,7 +554,15 @@ export async function inspectEquivalenceState(
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     await runner.query('CLOSE equivalence_inputs');
-    const inputs = sourceEquivalenceEvidence(inputRows);
+    // Automatic recovery can prove an administrative parameter-status change
+    // irrelevant to historical date selection. The original archive operator
+    // keeps its strict raw comparison; neither path changes the pinned digest.
+    const inputs = requirePinnedInputs
+      ? historicalParameterStatusInputEvidence(
+          inputRows,
+          EQUIVALENCE_ANCHOR.inputDigest,
+        )
+      : sourceEquivalenceEvidence(inputRows);
     if (anchor || requirePinnedInputs)
       assertEquivalenceAnchorInputs(inputs.digest);
     const outputs = {} as Inspection['outputs'];
@@ -832,6 +844,8 @@ export async function applyEquivalenceAttestation(
           inputPolicy: inspection.inputs.policy,
           inputDigest: inspection.inputs.digest,
           inputSections: inspection.inputs.sections,
+          parameterStatusEquivalence:
+            inspection.inputs.parameterStatusEquivalence ?? null,
           ledgerDigest: equivalenceDigest(inspection.ledger),
           ledgerPolicy:
             'contiguous-known-events-with-global-source-equivalence-v1',
@@ -885,6 +899,8 @@ export async function equivalenceOperatorDigest(
   const artifacts = [
     __filename,
     require.resolve('./history-source-equivalence'),
+    require.resolve('./history-parameter-status-equivalence'),
+    require.resolve('./certified-history-parameter-anchor'),
     require.resolve('./restore-certified-commune-history'),
     require.resolve('./restore-missing-commune-history'),
     require.resolve('./complete-certified-history-restoration'),
