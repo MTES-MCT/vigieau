@@ -128,10 +128,16 @@ const index = {
     );
   },
 
-  getDataArea(dateDebut: string, dateFin: string, area?: string): Promise<any> {
+  getDataArea(dateDebut: string, dateFin: string, area?: string, includeProvisional = false): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
+    const params = new URLSearchParams(area || '');
+    params.set('dateDebut', dateDebut);
+    params.set('dateFin', dateFin);
+    if (includeProvisional) {
+      params.set('includeProvisional', 'true');
+    }
     return useFetch(
-      `/data/area?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`,
+      `/data/area?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,
@@ -143,10 +149,17 @@ const index = {
     dateDebut: string,
     dateFin: string,
     area?: string,
+    includeProvisional = false,
   ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
+    const params = new URLSearchParams(area || '');
+    params.set('dateDebut', dateDebut);
+    params.set('dateFin', dateFin);
+    if (includeProvisional) {
+      params.set('includeProvisional', 'true');
+    }
     return useFetch(
-      `/data/departement?dateDebut=${dateDebut}&dateFin=${dateFin}&${area ? area : ''}`,
+      `/data/departement?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,

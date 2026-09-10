@@ -86,6 +86,7 @@ describe('DataController', () => {
         query.bassinVersant,
         query.region,
         query.departement,
+        false,
       );
       expect(result).toEqual(expectedResult);
     });
@@ -132,6 +133,7 @@ describe('DataController', () => {
         query.bassinVersant,
         query.region,
         query.departement,
+        false,
       );
       expect(result).toEqual(expectedResult);
     });

@@ -98,7 +98,11 @@ function countColorPixels(chart, rectangle, colors, minAlpha = 1, maxAlpha = 255
   return matches;
 }
 
-function assertRenderedCanvasGap(canvas) {
+function assertRenderedCanvasGap(canvas, observations = dates, samples = [
+  { date: '2026-07-05T12:00:00Z', present: true },
+  { date: '2026-09-04T12:00:00Z', present: true },
+  { date: '2026-08-06T12:00:00Z', present: false },
+]) {
   // The compiled app does not expose Vue internals. Locate the plot by its severity colors.
   const colors = ['#FFEDA0', '#FEB24C', '#FC4E2A', '#B10026'].map((color) => colorChannels(canvas, color));
   const ratio = canvas.width / canvas.getBoundingClientRect().width;
@@ -123,13 +127,9 @@ function assertRenderedCanvasGap(canvas) {
   expect(maxX - minX, 'deux periodes de donnees rendues hors legende').to.be.greaterThan(canvas.width / 2);
   expect(maxY - minY, 'surface du graphique non vide').to.be.greaterThan(20 * ratio);
   const raster = { canvas, ctx: context, currentDevicePixelRatio: ratio };
-  const interval = Date.parse(dates.at(-1)) - Date.parse(dates[0]);
-  for (const sample of [
-    { date: '2026-07-05T12:00:00Z', present: true },
-    { date: '2026-09-04T12:00:00Z', present: true },
-    { date: '2026-08-06T12:00:00Z', present: false },
-  ]) {
-    const fraction = (Date.parse(sample.date) - Date.parse(dates[0])) / interval;
+  const interval = Date.parse(observations.at(-1)) - Date.parse(observations[0]);
+  for (const sample of samples) {
+    const fraction = (Date.parse(sample.date) - Date.parse(observations[0])) / interval;
     const rectangle = {
       x: (minX + (maxX - minX) * fraction) / ratio - 1,
       y: minY / ratio,
@@ -139,7 +139,9 @@ function assertRenderedCanvasGap(canvas) {
     const borders = countColorPixels(raster, rectangle, colors, 200);
     const fills = countColorPixels(raster, rectangle, colors, 30, 199);
     if (sample.present) {
-      expect(borders, `contour visible entre jours consecutifs (${sample.date})`).to.be.greaterThan(0);
+      if (sample.contour !== false) {
+        expect(borders, `contour visible entre jours consecutifs (${sample.date})`).to.be.greaterThan(0);
+      }
       expect(fills, `remplissage visible entre jours consecutifs (${sample.date})`).to.be.greaterThan(0);
     } else {
       expect(borders, 'aucun contour au milieu des jours absents').to.equal(0);
@@ -194,15 +196,21 @@ function expectedCsvRows(page, type) {
         level,
         row.departements.filter((department) => department[type === 'SOU' ? 'niveauGraviteSou' : 'niveauGravite'] === level).length,
       ]));
-    return { date: row.date, ...values };
+    return {
+      date: row.date,
+      ...values,
+      ...(page.data.some((item) => item.dataStatus === 'provisional')
+        ? { statut: row.dataStatus === 'provisional' ? 'Provisoire (recalcul en cours)' : 'Certifiée' }
+        : {}),
+    };
   });
 }
 
 function assertRawTableAndCsv(page, type, viewportName) {
-  cy.get('main select[id$="-results-per-page"]').select('25');
-  cy.get('main table tbody tr').should('have.length', dates.length).then(($rows) => {
+  cy.get('main select[id$="-results-per-page"]').select('100');
+  cy.get('main table tbody tr').should('have.length', page.data.length).then(($rows) => {
     const renderedDates = [...$rows].map((row) => row.querySelector('td').textContent.trim());
-    const expectedDates = [...dates].reverse().map((date) => date.split('-').reverse().join('/'));
+    const expectedDates = [...page.data].reverse().map(({ date }) => date.split('-').reverse().join('/'));
     expect(renderedDates, 'aucune ligne ajoutee pour les jours absents').to.deep.equal(expectedDates);
   });
   cy.get('main table caption').scrollIntoView().should('be.visible');
@@ -275,6 +283,101 @@ describe('Trous dans les historiques statistiques publics', () => {
       cy.get('main canvas').should('be.visible');
       cy.get('main table tbody tr').should('have.length', 8);
       cy.contains('button', 'CSV').should('not.be.disabled');
+    });
+
+    for (const viewport of [
+      { name: 'desktop', width: 1280, height: 900 },
+      { name: 'mobile', width: 375, height: 812 },
+    ]) {
+      it(`${page.path} ${viewport.name}: conserve les valeurs provisoires et leur statut dans le graphique et le CSV`, () => {
+        cy.viewport(viewport.width, viewport.height);
+        const provisionalData = Array.from({ length: 52 }, (_, index) => ({
+          ...page.data[0],
+          date: new Date(Date.UTC(2026, 6, 11 + index)).toISOString().slice(0, 10),
+          dataStatus: 'provisional',
+          dataStatusReason: 'historic-recalculation',
+        }));
+        const mixedPage = { ...page, data: [...page.data, ...provisionalData].sort((a, b) => a.date.localeCompare(b.date)) };
+        let certified = false;
+        cy.intercept('GET', `**/data/${page.endpoint}?*`, (request) => {
+          expect(request.query.includeProvisional).to.equal('true');
+          request.reply({ body: certified ? page.data.filter((row) => row.date >= '2026-09-01') : mixedPage.data });
+        }).as('statistics');
+        visitStatistics(page);
+        cy.contains('[role="status"]', "Recalcul de l'historique en cours").should('be.visible').within(() => {
+          cy.contains('Du 11/07/2026 au 31/08/2026 : 52 jours de données provisoires.').should('be.visible');
+        });
+        cy.contains(warningTitle).should('not.exist');
+        cy.get('main canvas').should('be.visible');
+        cy.tick(1500);
+        cy.get('main canvas').should(($canvas) => {
+          const chart = chartForCanvas($canvas[0]);
+          if (chart) {
+            chart.stop();
+            chart.update('none');
+            expect(chart.data.labels).to.deep.equal(mixedPage.data.map((row) => row.date));
+            expect(chart.data.datasets[0].segment).to.equal(undefined);
+            expect(chart.data.datasets[0].pointStyle({ dataIndex: 10 })).to.equal('triangle');
+            expect(chart.options.plugins.tooltip.callbacks.afterTitle([{ dataIndex: 10 }])).to.equal('Provisoire (recalcul en cours)');
+          }
+          assertRenderedCanvasGap($canvas[0], mixedPage.data.map((row) => row.date), [
+            { date: '2026-07-05T12:00:00Z', present: true },
+            { date: '2026-08-06T12:00:00Z', present: true },
+            { date: '2026-09-04T12:00:00Z', present: true },
+          ]);
+        });
+        typeSelector().select(page.nextType);
+        cy.contains("Recalcul de l'historique en cours").should('be.visible');
+        cy.get('main canvas').scrollIntoView();
+        cy.screenshot(`statistics-provisional-${page.path}-${viewport.name}`, { capture: 'viewport' });
+        assertRawTableAndCsv(mixedPage, page.nextType, `${viewport.name}-provisional`);
+        cy.get('main table thead').contains('Statut').should('exist');
+        cy.get('main table tbody tr').contains('Provisoire (recalcul en cours)').should('exist');
+        cy.get('main table tbody tr').contains('Certifiée').should('exist');
+        cy.get('#dateDebut').clear().type('2026-09-01');
+        cy.contains('button', 'CSV').should('be.disabled');
+        cy.then(() => { certified = true; });
+        cy.contains('button', 'Calculer').click();
+        cy.wait('@statistics');
+        cy.contains("Recalcul de l'historique en cours").should('not.exist');
+        cy.get('main table thead').contains('Statut').should('not.exist');
+        cy.get('main table tbody tr').should('have.length', 8);
+      });
+    }
+
+    it(`${page.path}: distingue une date vraiment absente des valeurs provisoires voisines`, () => {
+      const sparseData = [
+        page.data[0],
+        { ...page.data[0], date: '2026-07-02', dataStatus: 'provisional', dataStatusReason: 'historic-recalculation' },
+        { ...page.data[0], date: '2026-07-04', dataStatus: 'provisional', dataStatusReason: 'historic-recalculation' },
+        { ...page.data[0], date: '2026-07-05' },
+      ];
+      cy.intercept('GET', `**/data/${page.endpoint}?*`, { body: sparseData }).as('statistics');
+      visitStatistics(page);
+      cy.contains('[role="status"]', "Recalcul de l'historique en cours").within(() => {
+        cy.get('li').should('have.length', 2);
+        cy.contains('Le 02/07/2026 : 1 jour de données provisoires.').should('be.visible');
+        cy.contains('Le 04/07/2026 : 1 jour de données provisoires.').should('be.visible');
+      });
+      cy.contains('[role="status"]', warningTitle).within(() => {
+        cy.contains('Le 03/07/2026 : 1 jour sans donnée.').should('be.visible');
+      });
+      cy.get('main table tbody tr').should('have.length', 4);
+      cy.get('main table tbody').contains('03/07/2026').should('not.exist');
+      cy.get('main canvas').scrollIntoView().should('be.visible');
+      cy.tick(1500);
+      cy.get('main canvas').should(($canvas) => {
+        const chart = chartForCanvas($canvas[0]);
+        if (chart) {
+          chart.stop();
+          chart.update('none');
+        }
+        assertRenderedCanvasGap($canvas[0], sparseData.map((row) => row.date), [
+          { date: '2026-07-01T12:00:00Z', present: true, contour: false },
+          { date: '2026-07-03T00:00:00Z', present: false },
+          { date: '2026-07-04T12:00:00Z', present: true, contour: false },
+        ]);
+      });
     });
   }
 });

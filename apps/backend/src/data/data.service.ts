@@ -39,6 +39,11 @@ import {
   STATISTIC_CACHE_PROTOCOL_VERSION,
 } from './statistic-cache-artifact.service';
 import { statisticSourceRevisionSql } from './statistic-cache-config';
+import {
+  PROVISIONAL_STATISTIC_STATUS,
+  ProvisionalDepartmentDay,
+  readProvisionalDepartmentDays,
+} from './provisional-department-statistics';
 
 interface StatisticPublicationState {
   revision: string;
@@ -277,6 +282,14 @@ export class DataService implements OnModuleInit {
   private readonly publicationRefreshRetryIntervalMs = 60_000;
   private readonly referenceDataRefreshIntervalMs = 2 * 60 * 60 * 1_000;
   private readonly referenceDataRefreshRetryIntervalMs = 5_000;
+  private readonly provisionalDepartmentCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      settled: boolean;
+      loading: Promise<ProvisionalDepartmentDay[]>;
+    }
+  >();
 
   private readonly releaseDate = '2023-07-11';
   private readonly beginDate = '2013-01-01';
@@ -366,14 +379,18 @@ export class DataService implements OnModuleInit {
     bassinVersant?: string,
     region?: string,
     departement?: string,
+    includeProvisional = false,
   ) {
     const cache = await this.ensureCertifiedDataCache();
-    // Filtrage des données par date
-    const filteredData = this.filterDataByDate(
+    const provisionalDays = includeProvisional
+      ? await this.getProvisionalDepartmentDays(cache, dateDebut, dateFin)
+      : [];
+    const dataArea = this.mergeProvisionalStatistics(
       cache.dataArea,
-      dateDebut,
-      dateFin,
+      this.computeDataAreaForDays(provisionalDays, cache),
     );
+    // Filtrage des données par date
+    const filteredData = this.filterDataByDate(dataArea, dateDebut, dateFin);
 
     // Filtrer par bassin versant, région ou département
     if (bassinVersant)
@@ -399,6 +416,7 @@ export class DataService implements OnModuleInit {
       ESO: d.ESO,
       ESU: d.ESU,
       AEP: d.AEP,
+      ...(d.dataStatus === 'provisional' ? PROVISIONAL_STATISTIC_STATUS : {}),
     }));
   }
 
@@ -425,6 +443,7 @@ export class DataService implements OnModuleInit {
     return data.map((d) => ({
       date: d.date,
       ...d[field].find((item: any) => item.id === entity.id),
+      ...(d.dataStatus === 'provisional' ? PROVISIONAL_STATISTIC_STATUS : {}),
     }));
   }
 
@@ -464,10 +483,17 @@ export class DataService implements OnModuleInit {
     bassinVersant?: string,
     region?: string,
     departement?: string,
+    includeProvisional = false,
   ) {
     const cache = await this.ensureCertifiedDataCache();
+    const provisionalDays = includeProvisional
+      ? await this.getProvisionalDepartmentDays(cache, dateDebut, dateFin)
+      : [];
     let dataDepartementFiltered = this.filterDataByDate(
-      cache.dataDepartement,
+      this.mergeProvisionalStatistics(
+        cache.dataDepartement,
+        this.computeDataDepartementForDays(provisionalDays, cache),
+      ),
       dateDebut,
       dateFin,
     );
@@ -487,6 +513,118 @@ export class DataService implements OnModuleInit {
       });
     }
     return dataDepartementFiltered;
+  }
+
+  private mergeProvisionalStatistics(certified: any[], provisional: any[]) {
+    if (provisional.length === 0) return certified;
+    const certifiedDates = new Set(certified.map(({ date }) => date));
+    return [
+      ...certified,
+      ...provisional
+        .filter(({ date }) => !certifiedDates.has(date))
+        .map((day) => ({ ...day, ...PROVISIONAL_STATISTIC_STATUS })),
+    ].sort((left, right) => left.date.localeCompare(right.date));
+  }
+
+  private async getProvisionalDepartmentDays(
+    referenceData: ReferenceDataCache,
+    dateDebut?: string,
+    dateFin?: string,
+    publicationRetries = 0,
+  ): Promise<ProvisionalDepartmentDay[]> {
+    try {
+      const state = await this.getPublicationState();
+      if (
+        !state.historicDirtyFrom ||
+        !state.currentPublishedDate ||
+        this.hasCertifiedHistoryRepair(state)
+      )
+        return [];
+      const from = [
+        this.beginDate,
+        state.historicDirtyFrom,
+        moment(dateDebut || this.beginDate).format('YYYY-MM-DD'),
+      ]
+        .sort()
+        .at(-1)!;
+      const through = [
+        state.currentPublishedDate,
+        state.historicDirtyThrough ?? state.currentPublishedDate,
+        this.getStatisticPublicationExpectation().today,
+        moment(dateFin || state.currentPublishedDate).format('YYYY-MM-DD'),
+      ].sort()[0];
+      if (from > through) return [];
+      const stateToken = this.getPublicationStateToken(state);
+      const key = JSON.stringify([stateToken, from, through]);
+      const now = Date.now();
+      for (const [cachedKey, entry] of this.provisionalDepartmentCache) {
+        if (entry.settled && entry.expiresAt <= now)
+          this.provisionalDepartmentCache.delete(cachedKey);
+      }
+      const cached = this.provisionalDepartmentCache.get(key);
+      if (cached) {
+        this.provisionalDepartmentCache.delete(key);
+        this.provisionalDepartmentCache.set(key, cached);
+        return cached.loading;
+      }
+      const pending = [...this.provisionalDepartmentCache.values()].filter(
+        ({ settled }) => !settled,
+      );
+      if (pending.length >= 2) {
+        await Promise.race(pending.map(({ loading }) => loading));
+        return this.getProvisionalDepartmentDays(
+          referenceData,
+          dateDebut,
+          dateFin,
+          publicationRetries,
+        );
+      }
+      if (this.provisionalDepartmentCache.size >= 8) {
+        const oldestSettled = [...this.provisionalDepartmentCache].find(
+          ([, { settled }]) => settled,
+        );
+        if (oldestSettled)
+          this.provisionalDepartmentCache.delete(oldestSettled[0]);
+      }
+      const loading = (async () => {
+        try {
+          const days = await readProvisionalDepartmentDays(
+            this.dataSource,
+            from,
+            through,
+            referenceData.departements.map(({ code }) => String(code)),
+          );
+          const latestState = await this.getPublicationState(true);
+          if (this.getPublicationStateToken(latestState) !== stateToken) {
+            this.provisionalDepartmentCache.delete(key);
+            return publicationRetries < 1
+              ? this.getProvisionalDepartmentDays(
+                  referenceData,
+                  dateDebut,
+                  dateFin,
+                  publicationRetries + 1,
+                )
+              : [];
+          }
+          return days;
+        } catch {
+          this.logger.warn('PROVISIONAL DEPARTMENT STATISTICS UNAVAILABLE');
+          return [];
+        }
+      })();
+      this.provisionalDepartmentCache.set(key, {
+        expiresAt: now + 60_000,
+        settled: false,
+        loading,
+      });
+      void loading.then(() => {
+        const entry = this.provisionalDepartmentCache.get(key);
+        if (entry?.loading === loading) entry.settled = true;
+      });
+      return loading;
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -555,7 +693,14 @@ export class DataService implements OnModuleInit {
    */
   computeDataArea(referenceData = this.getInstanceReferenceData()) {
     this.logger.log('COMPUTE DATA AREA');
-    this.dataArea = this.data.map((data) => {
+    this.dataArea = this.computeDataAreaForDays(this.data, referenceData);
+  }
+
+  private computeDataAreaForDays(
+    days: any[],
+    referenceData: ReferenceDataCache,
+  ) {
+    return days.map((data) => {
       return {
         date: data.date,
         ESO: this.computeRestriction(
@@ -4158,8 +4303,17 @@ export class DataService implements OnModuleInit {
    */
   computeDataDepartement(referenceData = this.getInstanceReferenceData()) {
     this.logger.log('COMPUTE DATA DEPARTEMENT');
-    this.dataDepartement = [];
-    for (const d of this.data) {
+    this.dataDepartement = this.computeDataDepartementForDays(
+      this.data,
+      referenceData,
+    );
+  }
+
+  private computeDataDepartementForDays(
+    days: any[],
+    referenceData: ReferenceDataCache,
+  ) {
+    return days.map((d) => {
       const tmp = {
         date: d.date,
         departements: [],
@@ -4188,8 +4342,8 @@ export class DataService implements OnModuleInit {
           ),
         });
       });
-      this.dataDepartement.push(tmp);
-    }
+      return tmp;
+    });
   }
 
   /**

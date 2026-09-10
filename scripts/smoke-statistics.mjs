@@ -451,6 +451,7 @@ if (publicHistoryCanaryEnabled) {
   const historyQuery = new URLSearchParams({
     dateDebut: publicHistoryCanaryFrom,
     dateFin: effectiveThrough,
+    includeProvisional: "true",
   });
   const [departmentHistoryResponse, areaHistoryResponse] = await Promise.all([
     requestJson(`${apiBase}/api/data/departement?${historyQuery}`),
@@ -487,10 +488,46 @@ if (publicHistoryCanaryEnabled) {
     ),
     `A public history canary day does not contain ${expectedDepartmentCount} departments`,
   );
+  const provisionalDates = (rows) =>
+    rows.flatMap((row) => {
+      if (row.dataStatus === undefined && row.dataStatusReason === undefined) {
+        return [];
+      }
+      assert.equal(
+        row.dataStatus,
+        "provisional",
+        "Unknown public history data status",
+      );
+      assert.equal(
+        row.dataStatusReason,
+        "historic-recalculation",
+        "Unknown public history data status reason",
+      );
+      assert.ok(
+        reference.health?.historicDirtyFrom &&
+          row.date >= reference.health.historicDirtyFrom &&
+          row.date <=
+            (reference.health.historicDirtyThrough ?? reference.latestDate),
+        "Provisional public history falls outside the recalculation range",
+      );
+      return [row.date];
+    });
+  const departmentProvisionalDates = provisionalDates(
+    departmentHistoryResponse.body,
+  );
+  assert.deepEqual(
+    departmentProvisionalDates,
+    provisionalDates(areaHistoryResponse.body),
+    "Department and area public history disagree on provisional dates",
+  );
   publicHistoryCanary = {
     dateFrom: publicHistoryCanaryFrom,
     dateThrough: effectiveThrough,
-    certifiedDayCount: departmentHistoryDates.length,
+    certifiedDayCount:
+      departmentHistoryDates.length - departmentProvisionalDates.length,
+    ...(departmentProvisionalDates.length > 0
+      ? { provisionalDayCount: departmentProvisionalDates.length }
+      : {}),
   };
 }
 

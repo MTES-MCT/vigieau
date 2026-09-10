@@ -24,6 +24,7 @@ import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
 import { isAreaStatisticSeries } from '../../utils/statistic-series';
 import { findMissingStatisticPeriods, MAX_DAILY_STATISTIC_GAP_MS } from '../../utils/statistic-history-gaps';
+import { findProvisionalStatisticPeriods, getStatisticPointStyle, getStatisticRowStatusLabel } from '../../utils/statistic-provisional';
 import * as Sentry from '@sentry/vue';
 
 ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, LineController, TimeScale, ArcElement, Colors, Filler);
@@ -35,6 +36,7 @@ const dataArea = ref<any[] | null>(null);
 const loadError = ref(false);
 const hasData = computed(() => !loadError.value && (dataArea.value?.length ?? 0) > 0);
 const missingPeriods = computed(() => findMissingStatisticPeriods(dataArea.value));
+const provisionalPeriods = computed(() => findProvisionalStatisticPeriods(dataArea.value));
 const computeDisabled = ref(true);
 const downloadingPng = ref(false);
 const pngDownloadError = ref(false);
@@ -136,7 +138,7 @@ async function loadData() {
       return;
     }
     loadError.value = false;
-    const { data, error } = await api.getDataArea(formData.dateDebut, formData.dateFin, formData.area);
+    const { data, error } = await api.getDataArea(formData.dateDebut, formData.dateFin, formData.area, true);
     if (error.value || !isAreaStatisticSeries(data.value, formData.typeEau)) {
       throw error.value || new Error('Invalid statistic response');
     }
@@ -204,7 +206,10 @@ function sortData() {
         borderColor: '#B10026',
         backgroundColor: '#B1002680',
       },
-    ],
+    ].map(dataset => ({
+      ...dataset,
+      pointStyle: (context: { dataIndex: number }) => getStatisticPointStyle(dataArea.value?.[context.dataIndex]),
+    })),
   };
 }
 
@@ -244,6 +249,7 @@ const chartLineOptions: ChartOptions = {
     tooltip: {
       callbacks: {
         title: tooltipTitle,
+        afterTitle: (items) => getStatisticRowStatusLabel(dataArea.value?.[items[0]?.dataIndex]),
       },
     },
     legend: {
@@ -389,6 +395,7 @@ watch(() => refDataStore.departements, () => {
         superficielles et souterraines.
       </DsfrAlert>
     </div>
+    <DonneesStatisticProvisionalData :periods="!loading && hasData ? provisionalPeriods : []" />
     <DonneesStatisticHistoryGaps :periods="!loading && hasData ? missingPeriods : []" />
     <div v-if="!loading && chartLineData && hasData" class="chart-container">
       <Line id="area-chart-line"
