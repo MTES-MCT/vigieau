@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { CurrentStatisticPriorityError } from './restore-missing-commune-history';
 import {
   EQUIVALENCE_ANCHOR,
   EQUIVALENCE_INSPECTION_SETTINGS_SQL,
@@ -109,6 +110,19 @@ export async function automaticallyAttestHistoryBySourceEquivalence(
       proof,
     };
   } catch (error) {
+    const postgresCode =
+      error && typeof error === 'object'
+        ? ((error as { code?: string; driverError?: { code?: string } }).code ??
+          (error as { driverError?: { code?: string } }).driverError?.code)
+        : undefined;
+    if (
+      error instanceof CurrentStatisticPriorityError ||
+      postgresCode === '55P03'
+    ) {
+      // Expected contention is deferred, not a failed source verification.
+      // Keep operationFailed=false so a genuine cleanup failure still throws.
+      return { status: 'BUSY' };
+    }
     operationFailed = true;
     throw error;
   } finally {

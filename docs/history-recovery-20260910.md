@@ -26,7 +26,9 @@ vérifiée. Il ne constitue pas un moteur générique de recalcul historique v3.
 `HistoryRecoverySchedulerService` s'exécute uniquement dans le processus
 `clock` : `RUN_BUSINESS_SCHEDULED_JOBS=true` et tâches planifiées non désactivées.
 Un premier passage intervient **90 secondes après le démarrage**, puis toutes
-les **30 minutes**. Un garde local et un verrou PostgreSQL de session empêchent
+les **30 minutes**, aux minutes **2 et 32** pour décaler les tentatives par rapport
+au scheduler courant qui passe toutes les cinq minutes. Un garde local et un
+verrou PostgreSQL de session empêchent
 les exécutions concurrentes. Un échec déclenche un délai minimal de 30 minutes
 avant une nouvelle tentative.
 
@@ -55,13 +57,13 @@ la connexion est détruite au lieu d'être rendue au pool avec un verrou incerta
 
 ### Signification des résultats
 
-| Résultat                    | Conséquence                                                          |
-| --------------------------- | -------------------------------------------------------------------- |
-| `ATTESTED`                  | Équivalence vérifiée, nouvelle attestation publiée.                  |
-| `ALREADY_ATTESTED`          | Aucun travail national ni nouvelle attestation nécessaire.           |
-| `NOT_APPLICABLE`            | Ancre absente ou remplacée : aucune certification effectuée.         |
-| `BUSY` / journal `DEFERRED` | Un autre traitement est prioritaire ; nouvelle tentative ultérieure. |
-| Journal `NEEDS REVIEW`      | Vérification ou publication échouée ; aucune réussite annoncée.      |
+| Résultat                    | Conséquence                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `ATTESTED`                  | Équivalence vérifiée, nouvelle attestation publiée.                                                           |
+| `ALREADY_ATTESTED`          | Aucun travail national ni nouvelle attestation nécessaire.                                                    |
+| `NOT_APPLICABLE`            | Ancre absente ou remplacée : aucune certification effectuée.                                                  |
+| `BUSY` / journal `DEFERRED` | Le courant est prioritaire ou un verrou est occupé ; nouvelle tentative ultérieure, sans contourner le garde. |
+| Journal `NEEDS REVIEW`      | Vérification ou publication échouée ; aucune réussite annoncée.                                               |
 
 **Une vraie modification historique de géométrie, de date ou de gravité n'est
 pas corrigée par cette automatisation.** Si elle change les empreintes, la

@@ -3,7 +3,6 @@ import {
   OnApplicationBootstrap,
   OnModuleDestroy,
 } from '@nestjs/common';
-import { CronExpression } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import {
@@ -59,7 +58,8 @@ export class HistoryRecoverySchedulerService
     }
   }
 
-  @BusinessCron(CronExpression.EVERY_30_MINUTES)
+  // Offset the current-computation scheduler, which runs every five minutes.
+  @BusinessCron('0 2,32 * * * *')
   async recoverIfDue(): Promise<void> {
     // Runtime checks also protect direct/bootstrap calls and shutdown races.
     if (!this.canRun() || this.inFlight || Date.now() < this.retryAfter) {

@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { CurrentStatisticPriorityError } from './restore-missing-commune-history';
 import * as equivalence from './attest-history-by-source-equivalence';
 import { CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST as PINNED } from './restore-certified-commune-history';
 import { CERTIFIED_HISTORY_V2_SOURCE_RUN_ID } from './build-certified-history-source';
@@ -189,6 +190,63 @@ describe('automatic pinned history equivalence recovery', () => {
     ).resolves.toEqual({ status: 'DRY_RUN', proof: 'proof' });
     expect(inspect).toHaveBeenCalledTimes(1);
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it.each(['inspection', 'publication'] as const)(
+    'defers current priority during %s without claiming certification',
+    async (phase) => {
+      const error = new CurrentStatisticPriorityError(
+        'Current computation has priority',
+      );
+      if (phase === 'inspection') inspect.mockRejectedValueOnce(error);
+      else apply.mockRejectedValueOnce(error);
+      await expect(
+        automaticallyAttestHistoryBySourceEquivalence(target),
+      ).resolves.toEqual({ status: 'BUSY' });
+      if (phase === 'inspection') expect(apply).not.toHaveBeenCalled();
+      expect(lease.release).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([{ code: '55P03' }, { driverError: { code: '55P03' } }])(
+    'defers PostgreSQL lock contention %j',
+    async (error) => {
+      apply.mockRejectedValueOnce(error);
+      await expect(
+        automaticallyAttestHistoryBySourceEquivalence(target),
+      ).resolves.toEqual({ status: 'BUSY' });
+      expect(lease.release).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not hide a slow inspection behind the contention classification', async () => {
+    const error = Object.assign(new Error('statement timeout'), {
+      code: '57014',
+    });
+    inspect.mockRejectedValueOnce(error);
+    await expect(
+      automaticallyAttestHistoryBySourceEquivalence(target),
+    ).rejects.toBe(error);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('propagates an unlock failure even after otherwise expected contention', async () => {
+    inspect.mockRejectedValueOnce(
+      new CurrentStatisticPriorityError('Current computation has priority'),
+    );
+    lease.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_try_advisory_lock')) return [{ locked: true }];
+      if (sql === AUTOMATIC_HISTORY_EQUIVALENCE_PREFLIGHT_SQL) return [state];
+      if (sql.includes('pg_advisory_unlock')) throw new Error('unlock failed');
+      return [];
+    });
+    await expect(
+      automaticallyAttestHistoryBySourceEquivalence(target),
+    ).rejects.toThrow('unlock failed');
+    expect(lease.releasePostgresConnection).toHaveBeenCalledWith(
+      expect.any(Error),
+    );
+    expect(lease.release).not.toHaveBeenCalled();
   });
 
   it('refuses to certify genuinely changed statistical inputs', async () => {

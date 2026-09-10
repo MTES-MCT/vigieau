@@ -12,6 +12,7 @@ import {
   CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
 } from './complete-certified-history-restoration';
 import {
+  CurrentStatisticPriorityError,
   RepairPublicationContext,
   parseBoolean,
   publicationContext,
@@ -660,7 +661,9 @@ export async function acquireEquivalenceFinalLocks(
     locks?.zone !== true ||
     locks?.promotion !== true
   )
-    throw new Error('Current computation has priority: lock busy');
+    throw new CurrentStatisticPriorityError(
+      'Current computation has priority: lock busy',
+    );
   await runner.query(
     'LOCK TABLE statistic_commune, statistic_departement, statistic, region, zone_alerte_computed, zone_alerte_computed_historic IN SHARE MODE NOWAIT',
   );

@@ -33,6 +33,7 @@ import {
   sourceEquivalenceEvidence,
 } from './history-source-equivalence';
 import { DataSource, QueryRunner } from 'typeorm';
+import { CurrentStatisticPriorityError } from './restore-missing-commune-history';
 import { PassThrough } from 'node:stream';
 import {
   CERTIFIED_COMPLETION_ATTESTATION_SQL,
@@ -563,7 +564,7 @@ describe('short optimistic validation boundary', () => {
     );
     await expect(
       acquireEquivalenceFinalLocks({ query } as unknown as QueryRunner),
-    ).rejects.toThrow('lock busy');
+    ).rejects.toBeInstanceOf(CurrentStatisticPriorityError);
     expect(query.mock.calls).toHaveLength(2);
   });
 });

@@ -95,6 +95,15 @@ describe('HistoryRecoverySchedulerService', () => {
     expect(process.env.HISTORIC_MUTABLE_GEOMETRY_REPLAY_ENABLED).toBe('false');
   });
 
+  it('offsets recurring recovery from the five-minute current-computation scheduler', () => {
+    expect(
+      Reflect.getMetadata(
+        'SCHEDULE_CRON_OPTIONS',
+        HistoryRecoverySchedulerService.prototype.recoverIfDue,
+      ),
+    ).toMatchObject({ cronTime: '0 2,32 * * * *', waitForCompletion: true });
+  });
+
   it('rechecks process eligibility when the delayed bootstrap fires', async () => {
     service.onApplicationBootstrap();
     process.env[DISABLE_SCHEDULED_JOBS_ENV] = 'true';
