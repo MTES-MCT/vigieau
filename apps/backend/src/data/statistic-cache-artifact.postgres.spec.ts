@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { StatisticCachePublication1786744800000 } from '../../../backend-admin/src/migrations/1786744800000-StatisticCachePublication';
 import { CertifiedHistoryRepairAudit1787910600000 } from '../../../backend-admin/src/migrations/1787910600000-CertifiedHistoryRepairAudit';
@@ -198,6 +198,10 @@ describeWithPostgres(
         await runner.release();
       }
       await dataSource.query(`
+        -- This suite exercises publication lifecycle, not repair attestation.
+        -- No certified repair is active in its materialization fixtures.
+        CREATE VIEW "active_certified_history_repair" AS
+          SELECT * FROM "certified_history_repair_audit" WHERE false;
         ALTER TABLE "statistic_cache_publication"
           ADD COLUMN "protocolVersion" integer NOT NULL DEFAULT 1;
         ALTER TABLE "statistic_cache_state"
@@ -607,6 +611,198 @@ describeWithPostgres(
           WHERE "statisticRevision" = 13
         `),
       ).resolves.toEqual([{ count: 0 }]);
+    }, 60_000);
+
+    it('retains one activated sparse fallback across overlays and day rollover, then collects the older fallback', async () => {
+      await dataSource.query(`
+        DELETE FROM "current_zone_recompute_request";
+        UPDATE "zone_publication_source_state" SET "revision" = 42 WHERE "id" = 1
+      `);
+      await setBoundary('20', '2026-09-11');
+      const sparseCandidate = candidate('20', '2026-09-11', 20, {
+        materializationStrategy: 'sparse-current',
+      });
+      const sparse = await firstService.materialize(
+        target(sparseCandidate),
+        async () => sparseCandidate,
+      );
+      const repairId = randomUUID();
+      await dataSource.query(
+        `
+        INSERT INTO "certified_history_repair_audit" (
+          "id", "sourceRunId", "dateFrom", "dateThrough", "communeCount",
+          "departmentCount", "dayCount", "communeHistoryDigest",
+          "departmentHistoryDigest", "statisticDigest", "provenanceDigest",
+          "sourceRevision", "historicComputeEpoch", "historicBackfillGlobalEpoch",
+          "activationKind", "publicationRevisionBefore", "publicationRevisionAfter",
+          "publicationContext"
+        ) VALUES ($1, 'fallback-lifecycle', '2026-09-10', '2026-09-10', 34943,
+          101, 1, $2, $2, $2, $2, 42, 7, 0, 'statistics-only', 20, 21,
+          '{"fixture":"lifecycle-only"}')
+      `,
+        [repairId, fingerprint('repair')],
+      );
+
+      // Seed immutable, checksummed artifacts through the real lifecycle
+      // constraints. Certification eligibility is covered by the service tests;
+      // here overlays deliberately have no active repair (the outage scenario).
+      const activateFixture = async (
+        value: StatisticCacheArtifactCandidate,
+      ) => {
+        const id = randomUUID();
+        const artifacts = (firstService as any).encodeArtifacts(value);
+        const metadata = {
+          ...value,
+          id,
+          status: 'building',
+          areaCount: value.dataArea.length,
+          compressedByteLength: artifacts.reduce(
+            (sum, row) => sum + row.compressedByteLength,
+            0,
+          ),
+          uncompressedByteLength: artifacts.reduce(
+            (sum, row) => sum + row.uncompressedByteLength,
+            0,
+          ),
+          readyAt: null,
+          activatedAt: null,
+          retiredAt: null,
+          failedAt: null,
+          lastError: null,
+          createdAt: new Date().toISOString(),
+        };
+        await dataSource.query(
+          `
+          INSERT INTO "statistic_cache_publication"
+          SELECT (jsonb_populate_record(NULL::"statistic_cache_publication",
+            to_jsonb(publication) || $1::jsonb)).*
+          FROM "statistic_cache_state" state
+          JOIN "statistic_cache_publication" publication
+            ON publication.id = state."activePublicationId"
+          WHERE state.id = 1
+        `,
+          [JSON.stringify(metadata)],
+        );
+        for (const artifact of artifacts) {
+          await dataSource.query(
+            `
+            INSERT INTO "statistic_cache_artifact" (
+              "publicationId", kind, "rowCount", "contentFingerprint", checksum,
+              "compressedByteLength", "uncompressedByteLength", payload
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `,
+            [
+              id,
+              artifact.kind,
+              artifact.rowCount,
+              artifact.contentFingerprint,
+              artifact.checksum,
+              artifact.compressedByteLength,
+              artifact.uncompressedByteLength,
+              artifact.payload,
+            ],
+          );
+        }
+        await dataSource.transaction(async (manager) => {
+          await manager.query(
+            `
+            UPDATE "statistic_cache_publication" SET status = 'ready', "readyAt" = now()
+            WHERE id = $1
+          `,
+            [id],
+          );
+          await manager.query(`
+            UPDATE "statistic_cache_publication" SET status = 'retired', "retiredAt" = now()
+            WHERE id = (SELECT "activePublicationId" FROM "statistic_cache_state" WHERE id = 1)
+          `);
+          await manager.query(
+            `
+            UPDATE "statistic_cache_publication" SET status = 'active', "activatedAt" = now()
+            WHERE id = $1
+          `,
+            [id],
+          );
+          await manager.query(
+            `
+            UPDATE "statistic_cache_state"
+            SET "previousPublicationId" = "activePublicationId",
+                "activePublicationId" = $1, "candidatePublicationId" = NULL
+            WHERE id = 1
+          `,
+            [id],
+          );
+          await (firstService as any).garbageCollectPublications(manager);
+        });
+        return id;
+      };
+      const overlay = (revision: string, date: string) =>
+        candidate(revision, date, 1, {
+          materializationStrategy: 'certified-history-overlay',
+          certifiedHistoryRepairId: repairId,
+        });
+      await dataSource.query(
+        `
+        INSERT INTO "zone_publication_instance" (
+          "instanceId", "statisticCachePublicationId", "statisticRevision",
+          "statisticPublishedDate", "statisticFingerprint"
+        ) VALUES ('web-sparse-fallback', $1, 20, '2026-09-11', $2)
+      `,
+        [sparse.identity.id, sparse.identity.contentFingerprint],
+      );
+      await activateFixture(overlay('21', '2026-09-11'));
+      await activateFixture(overlay('22', '2026-09-11'));
+      await activateFixture(overlay('23', '2026-09-12'));
+      await expect(
+        firstService.loadSparseFallback('2026-09-12'),
+      ).resolves.toMatchObject({
+        identity: {
+          id: sparse.identity.id,
+          currentPublishedDate: '2026-09-11',
+        },
+        dataArea: sparseCandidate.dataArea,
+      });
+      await expect(
+        firstService.loadSparseFallback('2026-09-10'),
+      ).resolves.toBeNull();
+      await expect(
+        dataSource.query(`
+        SELECT "statisticCachePublicationId"::text AS id
+        FROM "zone_publication_instance" WHERE "instanceId" = 'web-sparse-fallback'
+      `),
+      ).resolves.toEqual([{ id: sparse.identity.id }]);
+
+      const freshSparse = await activateFixture(
+        candidate('24', '2026-09-12', 24, {
+          materializationStrategy: 'sparse-current',
+        }),
+      );
+      await activateFixture(overlay('25', '2026-09-12'));
+      await activateFixture(overlay('26', '2026-09-12'));
+      await expect(
+        firstService.loadSparseFallback('2026-09-12'),
+      ).resolves.toMatchObject({
+        identity: { id: freshSparse, currentPublishedDate: '2026-09-12' },
+      });
+      await expect(
+        firstService.loadSparseFallback('2026-09-11'),
+      ).resolves.toBeNull();
+      await expect(
+        dataSource.query(`
+        SELECT "statisticCachePublicationId"::text AS id
+        FROM "zone_publication_instance" WHERE "instanceId" = 'web-sparse-fallback'
+      `),
+      ).resolves.toEqual([{ id: null }]);
+      await expect(
+        dataSource.query(`
+        SELECT id::text FROM "statistic_cache_publication"
+        WHERE "materializationStrategy" = 'sparse-current'
+      `),
+      ).resolves.toEqual([{ id: freshSparse }]);
+      await expect(
+        dataSource.query(`
+        SELECT count(*)::integer AS count FROM "statistic_cache_publication"
+      `),
+      ).resolves.toEqual([{ count: 3 }]);
     }, 60_000);
   },
 );

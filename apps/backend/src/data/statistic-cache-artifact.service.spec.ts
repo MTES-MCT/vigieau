@@ -138,6 +138,52 @@ describe('StatisticCacheArtifactService', () => {
     });
   });
 
+  it('reads only the retained retired publication without changing pointers', async () => {
+    const { service, dataSource } = createService();
+    dataSource.query.mockResolvedValue(createRows(service));
+    await expect(service.loadPrevious()).resolves.toMatchObject({
+      identity: { id: publicationId },
+    });
+    expect(dataSource.query).toHaveBeenCalledTimes(1);
+    const [sql, parameters] = dataSource.query.mock.calls[0];
+    expect(sql).toContain('state."previousPublicationId"');
+    expect(sql).toContain('publication."id" = state."previousPublicationId"');
+    expect(parameters).toEqual([null, 'retired']);
+    expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\b/);
+    expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+  });
+
+  it('loads the retained sparse publication for the active current date without writes', async () => {
+    const { service, dataSource } = createService();
+    dataSource.query.mockResolvedValue(
+      createRows(service).map((row) => ({
+        ...row,
+        materializationStrategy: 'sparse-current',
+      })),
+    );
+
+    await expect(
+      service.loadSparseFallback('2026-08-15'),
+    ).resolves.toMatchObject({
+      identity: {
+        id: publicationId,
+        materializationStrategy: 'sparse-current',
+      },
+      dataArea: candidate.dataArea,
+    });
+    const [sql, parameters] = dataSource.query.mock.calls[0];
+    expect(parameters).toEqual(['2026-08-15']);
+    expect(sql).toContain('publication."currentPublishedDate" <= $1::date');
+    expect(sql).toContain(
+      'sparse."currentPublishedDate" <= active."currentPublishedDate"',
+    );
+    expect(sql).toContain('sparse."activatedAt" IS NOT NULL');
+    expect(sql).toContain('sparse."certifiedHistoryRepairId" IS NULL');
+    expect(sql).toContain(`sparse."status" = 'retired'`);
+    expect(sql).toContain('LIMIT 1');
+    expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\b/);
+  });
+
   it.each([
     [
       'checksum corruption',
@@ -171,19 +217,27 @@ describe('StatisticCacheArtifactService', () => {
       },
       'invalid envelope',
     ],
-  ])('rejects %s', async (_label, corrupt, message) => {
-    const { service, dataSource } = createService();
-    const rows = createRows(service);
-    corrupt(rows);
-    dataSource.query.mockResolvedValue(rows);
+  ])(
+    'rejects %s in active and sparse fallback artifacts',
+    async (_label, corrupt, message) => {
+      for (const method of ['loadActive', 'loadSparseFallback'] as const) {
+        const { service, dataSource } = createService();
+        const rows = createRows(service);
+        corrupt(rows);
+        dataSource.query.mockResolvedValue(rows);
 
-    const load = service.loadActive();
-    if (message) {
-      await expect(load).rejects.toThrow(message);
-    } else {
-      await expect(load).rejects.toThrow();
-    }
-  });
+        const load =
+          method === 'loadActive'
+            ? service.loadActive()
+            : service.loadSparseFallback('2026-08-15');
+        if (message) {
+          await expect(load).rejects.toThrow(message);
+        } else {
+          await expect(load).rejects.toThrow();
+        }
+      }
+    },
+  );
 
   it('rejects an oversized total before decompressing any artifact', async () => {
     const { service, dataSource } = createService();
@@ -350,6 +404,17 @@ describe('StatisticCacheArtifactService', () => {
       'instance."candidateStatisticCachePublicationId"',
     );
     expect(deleteSql).toContain('instance."statisticCachePublicationId"');
+    for (const call of manager.query.mock.calls.slice(1)) {
+      expect(call[0]).toContain(
+        `sparse."materializationStrategy" = 'sparse-current'`,
+      );
+      expect(call[0]).toContain('sparse."certifiedHistoryRepairId" IS NULL');
+      expect(call[0]).toContain('sparse."activatedAt" IS NOT NULL');
+      expect(call[0]).toContain(
+        'sparse."currentPublishedDate" <= active."currentPublishedDate"',
+      );
+      expect(call[0]).toContain('LIMIT 1');
+    }
   });
 
   it.each(['40001', '23503'])(
