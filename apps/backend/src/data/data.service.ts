@@ -2133,20 +2133,29 @@ export class DataService implements OnModuleInit {
       (date < from || date > through);
     const fromMonth = from.slice(0, 7);
     const throughMonth = through.slice(0, 7);
+    // Monthly history predates the daily series (which begins in 2013).
+    // Match assertMonthlyStatisticCoverage, and validate each distinct month
+    // only once: the same sequence is repeated for every commune.
+    const validMonths = new Map<unknown, boolean>();
+    const safeMonth = (month: unknown): boolean => {
+      if (!validMonths.has(month)) {
+        validMonths.set(
+          month,
+          typeof month === 'string' &&
+            moment.utc(month, 'YYYY-MM', true).isValid() &&
+            month <= identity.latestDate.slice(0, 7) &&
+            (month < fromMonth || month > throughMonth),
+        );
+      }
+      return validMonths.get(month)!;
+    };
     return (
       payload.dataArea.every(({ date }) => safeDate(date)) &&
       payload.dataDepartement.every(({ date }) => safeDate(date)) &&
       payload.dataCommune.every(
         ({ restrictions }) =>
           Array.isArray(restrictions) &&
-          restrictions.every(
-            ({ d }) =>
-              typeof d === 'string' &&
-              moment.utc(d, 'YYYY-MM', true).isValid() &&
-              d >= this.beginDate.slice(0, 7) &&
-              d <= identity.latestDate.slice(0, 7) &&
-              (d < fromMonth || d > throughMonth),
-          ),
+          restrictions.every(({ d }) => safeMonth(d)),
       )
     );
   }

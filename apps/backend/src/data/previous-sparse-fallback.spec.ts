@@ -157,9 +157,18 @@ describe('read-only previous sparse fallback after historical revocation', () =>
   });
 
   it('serves only the validated previous sparse data as degraded while current source is newer', async () => {
+    // Production monthly aggregates begin in May 2010, unlike the daily series.
+    const oldMonths = Array.from({ length: 32 }, (_, index) => ({
+      d: new Date(Date.UTC(2010, 4 + index, 1)).toISOString().slice(0, 7),
+      p: 1,
+    }));
+    sparse.dataCommune[0].restrictions.unshift(...oldMonths);
+    fingerprint(sparse);
     const cache = await (service as any).loadArtifactBackedData(state);
     expect(cache.artifactPublicationId).toBe(previousId);
     expect(cache.dataArea).toEqual(sparse.dataArea);
+    expect(cache.dataCommune).toEqual(sparse.dataCommune);
+    expect(cache.dataCommune[0].restrictions[0].d).toBe('2010-05');
     expect(cache.artifactSourceRevision).toBe('42');
     expect(cache.fingerprint).toBe(sparse.identity.contentFingerprint);
     expect(preload).toHaveBeenCalledWith(state);
@@ -203,6 +212,21 @@ describe('read-only previous sparse fallback after historical revocation', () =>
     ).toBe(previousId);
   });
 
+  it('rechecks old monthly aggregates against a changed dirty interval', async () => {
+    sparse.dataCommune[0].restrictions.unshift({ d: '2012-12', p: 1 });
+    fingerprint(sparse);
+    await expect(
+      (service as any).loadArtifactBackedData(state),
+    ).resolves.toMatchObject({ artifactPublicationId: previousId });
+    await expect(
+      (service as any).loadArtifactBackedData({
+        ...state,
+        historicDirtyFrom: '2012-12-15',
+        historicDirtyThrough: '2013-01-15',
+      }),
+    ).rejects.toThrow('overlay does not match');
+  });
+
   it.each([
     [
       'another overlay',
@@ -222,6 +246,19 @@ describe('read-only previous sparse fallback after historical revocation', () =>
       'a monthly value intersecting a partially dirty month',
       (p: StatisticCacheArtifactPayload) => {
         p.dataCommune[0].restrictions.push({ d: '2026-07', p: 1 });
+      },
+    ],
+    [
+      'a daily value before the daily series begins',
+      (p: StatisticCacheArtifactPayload) => {
+        p.dataArea[0].date = '2012-12-31';
+        p.dataDepartement[0].date = '2012-12-31';
+      },
+    ],
+    [
+      'a malformed monthly value',
+      (p: StatisticCacheArtifactPayload) => {
+        p.dataCommune[0].restrictions.unshift({ d: '2010-13', p: 1 });
       },
     ],
     [
