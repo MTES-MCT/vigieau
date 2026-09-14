@@ -3,6 +3,7 @@ import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
 import type { Ref } from 'vue';
 import * as maplibregl from 'maplibre-gl';
+import { getGeometryBounds } from '~/utils/geometry-bounds';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -201,17 +202,12 @@ const resetSources = () => {
       map.value?.removeLayer(l);
       map.value?.removeSource(l);
     });
-  } catch (e) {}
+  } catch {}
 };
 
 const computeBounds = () => {
-  const coordinates = zones.value.map((z) => {
-    return z.geom.coordinates;
-  }).flat(3);
-
-  const bounds = coordinates.reduce(function(bounds, coord) {
-    return bounds.extend(coord);
-  }, new maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
+  const bounds = getGeometryBounds(zones.value.map((zone) => zone.geom));
+  if (!bounds) return;
 
   map.value?.fitBounds(bounds, {
     padding: 20
@@ -260,6 +256,7 @@ watch(
       <div class="map-pre-actions-card fr-p-1w fr-m-1w">
         <DsfrRadioButton
           v-for="option of typeEauTags"
+          :key="option.value"
           :modelValue="selectedTypeEau"
           v-bind="option"
           :small="true"

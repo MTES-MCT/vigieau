@@ -178,6 +178,24 @@ type StatisticCacheQueryable =
   | Pick<DataSource, 'query'>
   | Pick<EntityManager, 'query'>;
 
+// Keep one independently usable publication when successive certified overlays
+// replace each other. Both lookup and garbage collection use this exact choice.
+const RETAINED_SPARSE_PUBLICATION_ID_SQL = `
+  SELECT sparse."id"
+  FROM "statistic_cache_publication" sparse
+  JOIN "statistic_cache_publication" active
+    ON active."id" = state."activePublicationId"
+  WHERE active."status" = 'active'
+    AND sparse."status" = 'retired'
+    AND sparse."materializationStrategy" = 'sparse-current'
+    AND sparse."certifiedHistoryRepairId" IS NULL
+    AND sparse."activatedAt" IS NOT NULL
+    AND sparse."currentPublishedDate" <= active."currentPublishedDate"
+  ORDER BY sparse."currentPublishedDate" DESC, sparse."activatedAt" DESC,
+    sparse."createdAt" DESC, sparse."id" DESC
+  LIMIT 1
+`;
+
 const MAX_COMPRESSED_ARTIFACT_BYTES = 48 * 1024 * 1024;
 const MAX_TOTAL_COMPRESSED_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_UNCOMPRESSED_ARTIFACT_BYTES = 512 * 1024 * 1024;
@@ -342,6 +360,29 @@ export class StatisticCacheArtifactService {
     );
   }
 
+  async loadPrevious(
+    queryable: StatisticCacheQueryable = this.dataSource,
+  ): Promise<StatisticCacheArtifactPayload | null> {
+    return this.loadStatePublication(
+      'previousPublicationId',
+      'retired',
+      null,
+      queryable,
+    );
+  }
+
+  async loadSparseFallback(
+    currentPublishedDate: string,
+    queryable: StatisticCacheQueryable = this.dataSource,
+  ): Promise<StatisticCacheArtifactPayload | null> {
+    return this.loadSelectedPublication(
+      `publication."id" = (${RETAINED_SPARSE_PUBLICATION_ID_SQL})
+        AND publication."currentPublishedDate" <= $1::date`,
+      [currentPublishedDate],
+      queryable,
+    );
+  }
+
   async loadActiveIdentity(
     queryable: StatisticCacheQueryable = this.dataSource,
   ): Promise<StatisticCacheArtifactIdentity | null> {
@@ -454,9 +495,26 @@ export class StatisticCacheArtifactService {
   }
 
   private async loadStatePublication(
-    stateColumn: 'activePublicationId' | 'candidatePublicationId',
-    status: 'active' | 'ready',
+    stateColumn:
+      | 'activePublicationId'
+      | 'candidatePublicationId'
+      | 'previousPublicationId',
+    status: 'active' | 'ready' | 'retired',
     publicationId: string | null,
+    queryable: StatisticCacheQueryable,
+  ): Promise<StatisticCacheArtifactPayload | null> {
+    return this.loadSelectedPublication(
+      `publication."id" = COALESCE($1::uuid, state."${stateColumn}")
+        AND publication."status" = $2::varchar
+        AND publication."id" = state."${stateColumn}"`,
+      [publicationId, status],
+      queryable,
+    );
+  }
+
+  private async loadSelectedPublication(
+    selection: string,
+    parameters: Array<string | null>,
     queryable: StatisticCacheQueryable,
   ): Promise<StatisticCacheArtifactPayload | null> {
     const rows = (await queryable.query(
@@ -488,15 +546,13 @@ export class StatisticCacheArtifactService {
           artifact."uncompressedByteLength", artifact."payload"
         FROM "statistic_cache_state" state
         JOIN "statistic_cache_publication" publication
-          ON publication."id" = COALESCE($1::uuid, state."${stateColumn}")
+          ON ${selection}
         JOIN "statistic_cache_artifact" artifact
           ON artifact."publicationId" = publication."id"
         WHERE state."id" = 1
-          AND publication."status" = $2::varchar
-          AND publication."id" = state."${stateColumn}"
         ORDER BY artifact."kind"
       `,
-      [publicationId, status],
+      parameters,
     )) as ArtifactRow[];
     if (rows.length === 0) {
       return null;
@@ -1849,6 +1905,8 @@ export class StatisticCacheArtifactService {
             AND publication."id" IS DISTINCT FROM state."activePublicationId"
             AND publication."id" IS DISTINCT FROM state."previousPublicationId"
             AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
+            AND publication."id" IS DISTINCT FROM
+              (${RETAINED_SPARSE_PUBLICATION_ID_SQL})
             AND instance."statisticCachePublicationId" = publication."id"
         `,
       );
@@ -1861,6 +1919,8 @@ export class StatisticCacheArtifactService {
             AND publication."id" IS DISTINCT FROM state."activePublicationId"
             AND publication."id" IS DISTINCT FROM state."previousPublicationId"
             AND publication."id" IS DISTINCT FROM state."candidatePublicationId"
+            AND publication."id" IS DISTINCT FROM
+              (${RETAINED_SPARSE_PUBLICATION_ID_SQL})
             AND NOT EXISTS (
               SELECT 1
               FROM "zone_publication_instance" instance

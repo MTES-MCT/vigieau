@@ -106,7 +106,7 @@ export interface RestoreMissingHistorySummary {
   publicationRevision: string | null;
 }
 
-class CurrentStatisticPriorityError extends Error {}
+export class CurrentStatisticPriorityError extends Error {}
 class PublicationContextChangedError extends Error {}
 
 export function requiredEnvironment(

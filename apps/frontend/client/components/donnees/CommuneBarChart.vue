@@ -14,6 +14,7 @@ import 'chartjs-adapter-luxon';
 import { Bar } from 'vue-chartjs';
 import moment from 'moment';
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
+import { getStatisticRowStatusLabel, isProvisionalStatistic } from '../../utils/statistic-provisional';
 
 const props = defineProps<{
   typeEau: string,
@@ -40,6 +41,8 @@ function computeBarChart() {
         label: `${props.communeNom}`,
         data: props.restrictions.map(() => 1),
         backgroundColor: (context: any) => colorFunction(context),
+        borderColor: '#161616',
+        borderWidth: (context: any) => isProvisionalStatistic(props.restrictions[context.dataIndex]) ? 1 : 0,
         segment: {},
       },
     ],
@@ -134,6 +137,8 @@ const chartLineOptions: ChartOptions = {
       callbacks: {
         title: tooltipTitle,
         label: (value) => labelFunction(value),
+        afterLabel: (value) => isProvisionalStatistic(props.restrictions[value.dataIndex])
+          ? getStatisticRowStatusLabel(props.restrictions[value.dataIndex]) : '',
       },
     },
     legend: {

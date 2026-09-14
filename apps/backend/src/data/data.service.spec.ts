@@ -370,7 +370,17 @@ describe('DataService', () => {
       ]);
       expect(mockDataSource.query).toHaveBeenCalledWith(
         expect.stringContaining("status <> 'completed'"),
-        [1, null, null, 'versioned'],
+        [
+          1,
+          null,
+          null,
+          'versioned',
+          false,
+          JSON.stringify({
+            dataStatus: 'provisional',
+            dataStatusReason: 'historic-recalculation',
+          }),
+        ],
       );
     });
 
@@ -492,6 +502,11 @@ describe('DataService', () => {
         '2023-01-01',
         '2023-02-28',
         'versioned',
+        false,
+        JSON.stringify({
+          dataStatus: 'provisional',
+          dataStatusReason: 'historic-recalculation',
+        }),
       ]);
     });
 

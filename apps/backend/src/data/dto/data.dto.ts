@@ -34,6 +34,10 @@ export class CommonDataQueryDto {
 
 export class CommuneQueryDto {
   @IsOptional()
+  @IsIn(['true', 'false'])
+  includeProvisional?: string;
+
+  @IsOptional()
   @IsString({
     message: 'dateDebut doit être une date valide au format YYYY-MM',
   })

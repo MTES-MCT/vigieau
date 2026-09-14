@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { findProvisionalStatisticPeriods, getStatisticPointStyle, getStatisticRowStatusLabel } from '../client/utils/statistic-provisional.ts';
 import { findMissingStatisticPeriods } from '../client/utils/statistic-history-gaps.ts';
-import { isAreaStatisticSeries, isDepartmentStatisticSeries } from '../client/utils/statistic-series.ts';
+import { isAreaStatisticSeries, isCommuneStatisticData, isDepartmentStatisticSeries } from '../client/utils/statistic-series.ts';
 
 const provisional = (date) => ({ date, dataStatus: 'provisional', dataStatusReason: 'historic-recalculation' });
 
@@ -48,7 +48,8 @@ test('distinguishes provisional points without modifying the chart line or fille
 test('accepts explicit provisional metadata and rejects unknown or incomplete status metadata', () => {
   const area = { date: '2026-08-01', AEP: { vigilance: 0, alerte: 1, alerte_renforcee: 2, crise: 3 } };
   const department = { date: '2026-08-01', departements: [{ niveauGravite: 'crise', niveauGraviteSup: 'alerte', niveauGraviteSou: null, niveauGraviteAep: null }] };
-  for (const [row, validate] of [[area, (data) => isAreaStatisticSeries(data, 'AEP')], [department, isDepartmentStatisticSeries]]) {
+  const commune = { date: '2026-08-01', AEP: 'alerte', SUP: 'crise', SOU: null };
+  for (const [row, validate] of [[area, (data) => isAreaStatisticSeries(data, 'AEP')], [department, isDepartmentStatisticSeries], [commune, (restrictions) => isCommuneStatisticData({ commune: { nom: 'Terrasson-Lavilledieu' }, restrictions })]]) {
     assert.equal(validate([row]), true);
     assert.equal(validate([{ ...row, ...provisional(row.date) }]), true);
     for (const metadata of [
@@ -62,9 +63,9 @@ test('accepts explicit provisional metadata and rejects unknown or incomplete st
   }
 });
 
-test('limits provisional opt-in to the two aggregate chart consumers and includes their warning in PNG capture', async () => {
+test('limits provisional opt-in to chart consumers and includes their warning in PNG capture', async () => {
   const api = await readFile(new URL('../client/api/index.ts', import.meta.url), 'utf8');
-  assert.equal((api.match(/includeProvisional = false/g) ?? []).length, 2);
+  assert.equal((api.match(/includeProvisional = false/g) ?? []).length, 3);
   for (const name of ['Area', 'Departement']) {
     const chart = await readFile(new URL(`../client/components/donnees/${name}Chart.vue`, import.meta.url), 'utf8');
     assert.match(chart, new RegExp(`api.getData${name}\\(formData.dateDebut, formData.dateFin, formData.area, true\\)`));
@@ -78,4 +79,27 @@ test('limits provisional opt-in to the two aggregate chart consumers and include
     const table = await readFile(new URL(`../client/components/donnees/${name}Table.vue`, import.meta.url), 'utf8');
     assert.match(table, /hasProvisionalData.value \? \{ statut: getStatisticRowStatusLabel\(stat\) \} : \{\}/);
   }
+});
+
+test('keeps commune provisional values distinct from real gaps and exports their status', async () => {
+  const restrictions = [
+    { date: '2026-07-10', AEP: 'vigilance', SUP: 'alerte', SOU: null },
+    { ...provisional('2026-07-11'), AEP: 'alerte', SUP: 'crise', SOU: null },
+    { ...provisional('2026-07-13'), AEP: 'alerte', SUP: 'crise', SOU: null },
+  ];
+  const before = structuredClone(restrictions);
+  assert.equal(isCommuneStatisticData({ commune: { nom: 'Terrasson-Lavilledieu' }, restrictions }), true);
+  assert.deepEqual(findProvisionalStatisticPeriods(restrictions), [
+    { start: '2026-07-11', end: '2026-07-11', days: 1 },
+    { start: '2026-07-13', end: '2026-07-13', days: 1 },
+  ]);
+  assert.deepEqual(findMissingStatisticPeriods(restrictions), [{ start: '2026-07-12', end: '2026-07-12', days: 1 }]);
+  assert.deepEqual(restrictions, before);
+  const chart = await readFile(new URL('../client/components/donnees/CommuneChart.vue', import.meta.url), 'utf8');
+  assert.match(chart, /api.getDataCommune\(props.codeInsee, undefined, undefined, true\)/);
+  assert.ok(chart.indexOf('<DonneesStatisticProvisionalData') > chart.indexOf('<div ref="screenshotZone">'));
+  assert.ok(chart.indexOf('<DonneesStatisticProvisionalData') < chart.indexOf('<DonneesCommuneBarChart'));
+  assert.match(chart, /<DonneesStatisticHistoryGaps :periods="missingPeriods"/);
+  const table = await readFile(new URL('../client/components/donnees/CommuneTable.vue', import.meta.url), 'utf8');
+  assert.match(table, /hasProvisionalData.value \? \{ statut: getStatisticRowStatusLabel\(stat\) \} : \{\}/);
 });

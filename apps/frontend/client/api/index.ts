@@ -187,10 +187,15 @@ const index = {
     codeInsee: string,
     dateDebut?: string,
     dateFin?: string,
+    includeProvisional = false,
   ): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
+    const params = new URLSearchParams();
+    if (dateDebut) params.set('dateDebut', dateDebut);
+    if (dateFin) params.set('dateFin', dateFin);
+    if (includeProvisional) params.set('includeProvisional', 'true');
     return useFetch(
-      `/data/commune/${codeInsee}?${dateDebut ? 'dateDebut=' + dateDebut : ''}&${dateFin ? 'dateFin=' + dateFin : ''}`,
+      `/data/commune/${codeInsee}?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,

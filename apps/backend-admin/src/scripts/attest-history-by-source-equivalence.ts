@@ -12,6 +12,7 @@ import {
   CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
 } from './complete-certified-history-restoration';
 import {
+  CurrentStatisticPriorityError,
   RepairPublicationContext,
   parseBoolean,
   publicationContext,
@@ -27,6 +28,10 @@ import {
   equivalenceDigest,
   sourceEquivalenceEvidence,
 } from './history-source-equivalence';
+import {
+  HistoricalInputEvidence,
+  historicalParameterStatusInputEvidence,
+} from './history-parameter-status-equivalence';
 
 export const EQUIVALENCE_ANCHOR = {
   backupId: '6a98b8a299826944b3817689',
@@ -128,10 +133,10 @@ export const EQUIVALENCE_ANCHOR_LOOKUP_GUARD: EquivalenceLookupGuard = {
   sequenceIncrement: '1',
   sequenceCycle: false,
 };
-interface Inspection {
+export interface Inspection {
   operatorDigest: string;
   context: RepairPublicationContext;
-  inputs: ReturnType<typeof sourceEquivalenceEvidence>;
+  inputs: HistoricalInputEvidence;
   outputs: Record<
     OutputKind,
     { count: number; days: number; digest: string; versions: RowVersion[] }
@@ -296,23 +301,44 @@ export function assertEquivalenceLedger(
   const last = BigInt(throughEpoch);
   let expected = BigInt(EQUIVALENCE_ANCHOR.historicComputeEpoch) + 1n;
   for (const row of rows) {
+    // Calendar changes are recorded as separate map-only and statistics-only
+    // events. Neither kind proves equivalence: certification still requires
+    // exact pinned statistical inputs and outputs after this ledger check.
+    const knownCalendarScope =
+      (row.invalidatesStatistics === false && row.invalidatesMaps === true) ||
+      (row.invalidatesStatistics === true && row.invalidatesMaps === false);
     const knownCause =
       row.cause === 'published-source-mutation' ||
-      (row.cause === 'published-calendar-mutation' &&
-        row.invalidatesStatistics === false &&
-        row.invalidatesMaps === true);
-    if (
-      BigInt(row.epochAfter) !== expected ||
-      !knownCause ||
-      row.fallback !== false ||
-      (row.sourceRevision !== null && !/^\d+$/.test(row.sourceRevision))
+      (row.cause === 'published-calendar-mutation' && knownCalendarScope);
+    let reason: string | undefined;
+    if (!/^\d+$/.test(row.epochAfter)) {
+      reason = 'invalid epoch';
+    } else if (BigInt(row.epochAfter) !== expected) {
+      reason = `expected epoch ${expected}`;
+    } else if (!knownCause) {
+      reason =
+        row.cause === 'published-calendar-mutation'
+          ? 'calendar invalidation must target exactly one of maps or statistics'
+          : `unsupported cause ${row.cause}`;
+    } else if (row.fallback !== false) {
+      reason = 'fallback must be explicitly false';
+    } else if (
+      row.sourceRevision !== null &&
+      !/^\d+$/.test(row.sourceRevision)
     ) {
-      throw new Error('Unexplained historic invalidation or incomplete ledger');
+      reason = 'invalid source revision';
+    }
+    if (reason) {
+      throw new Error(
+        `Unexplained historic invalidation or incomplete ledger: epoch=${row.epochAfter}; ${reason}`,
+      );
     }
     expected++;
   }
   if (expected !== last + 1n)
-    throw new Error('Incomplete historic invalidation ledger');
+    throw new Error(
+      `Incomplete historic invalidation ledger: expected through epoch ${last}; observed through epoch ${expected - 1n}`,
+    );
 }
 
 export const EQUIVALENCE_LEDGER_SQL = `
@@ -459,11 +485,12 @@ export async function releaseEquivalenceRunner(
   if (cleanupError && !preservePrimaryError) throw cleanupError;
 }
 
-async function inspect(
+export async function inspectEquivalenceState(
   database: DataSource,
   expectedDatabase: string,
   anchor: boolean,
   operatorDigest: string,
+  requirePinnedInputs = false,
 ): Promise<Inspection> {
   const runner = database.createQueryRunner();
   const deadline = Date.now() + MAX_INSPECTION_MS;
@@ -527,8 +554,17 @@ async function inspect(
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     await runner.query('CLOSE equivalence_inputs');
-    const inputs = sourceEquivalenceEvidence(inputRows);
-    if (anchor) assertEquivalenceAnchorInputs(inputs.digest);
+    // Automatic recovery can prove an administrative parameter-status change
+    // irrelevant to historical date selection. The original archive operator
+    // keeps its strict raw comparison; neither path changes the pinned digest.
+    const inputs = requirePinnedInputs
+      ? historicalParameterStatusInputEvidence(
+          inputRows,
+          EQUIVALENCE_ANCHOR.inputDigest,
+        )
+      : sourceEquivalenceEvidence(inputRows);
+    if (anchor || requirePinnedInputs)
+      assertEquivalenceAnchorInputs(inputs.digest);
     const outputs = {} as Inspection['outputs'];
     for (const kind of ['commune', 'department', 'national'] as const) {
       const all: OutputRow[] = [];
@@ -658,7 +694,9 @@ export async function acquireEquivalenceFinalLocks(
     locks?.zone !== true ||
     locks?.promotion !== true
   )
-    throw new Error('Current computation has priority: lock busy');
+    throw new CurrentStatisticPriorityError(
+      'Current computation has priority: lock busy',
+    );
   await runner.query(
     'LOCK TABLE statistic_commune, statistic_departement, statistic, region, zone_alerte_computed, zone_alerte_computed_historic IN SHARE MODE NOWAIT',
   );
@@ -698,7 +736,11 @@ export async function applyEquivalenceAttestation(
   target: DataSource,
   inspection: Inspection,
   proof: string,
-) {
+): Promise<{
+  status: 'ALREADY_ATTESTED' | 'ATTESTED';
+  attestationId: string;
+  revision?: string;
+}> {
   const versionChecks = (
     [
       ['statistic_commune', inspection.outputs.commune.versions],
@@ -802,6 +844,8 @@ export async function applyEquivalenceAttestation(
           inputPolicy: inspection.inputs.policy,
           inputDigest: inspection.inputs.digest,
           inputSections: inspection.inputs.sections,
+          parameterStatusEquivalence:
+            inspection.inputs.parameterStatusEquivalence ?? null,
           ledgerDigest: equivalenceDigest(inspection.ledger),
           ledgerPolicy:
             'contiguous-known-events-with-global-source-equivalence-v1',
@@ -833,29 +877,38 @@ export async function attestHistoryBySourceEquivalence(
   hooks: EquivalenceConfirmationHooks = {},
 ) {
   await archiveDigest(options.archivePath);
-  const artifacts = [
-    __filename,
-    require.resolve('./history-source-equivalence'),
-    require.resolve('./restore-certified-commune-history'),
-    require.resolve('./restore-missing-commune-history'),
-    require.resolve('./complete-certified-history-restoration'),
-  ];
-  const artifactDigests: string[] = [];
-  for (const path of artifacts) artifactDigests.push(await fileDigest(path));
-  const operatorDigest = equivalenceDigest(artifactDigests);
-  const anchor = await inspect(
+  const operatorDigest = await equivalenceOperatorDigest();
+  const anchor = await inspectEquivalenceState(
     source,
     options.sourceDatabase,
     true,
     operatorDigest,
   );
-  const current = await inspect(
+  const current = await inspectEquivalenceState(
     target,
     options.targetDatabase,
     false,
     operatorDigest,
   );
   return completeEquivalenceInspection(target, anchor, current, options, hooks);
+}
+
+export async function equivalenceOperatorDigest(
+  additionalArtifacts: string[] = [],
+): Promise<string> {
+  const artifacts = [
+    __filename,
+    require.resolve('./history-source-equivalence'),
+    require.resolve('./history-parameter-status-equivalence'),
+    require.resolve('./certified-history-parameter-anchor'),
+    require.resolve('./restore-certified-commune-history'),
+    require.resolve('./restore-missing-commune-history'),
+    require.resolve('./complete-certified-history-restoration'),
+    ...additionalArtifacts,
+  ];
+  const artifactDigests: string[] = [];
+  for (const path of artifacts) artifactDigests.push(await fileDigest(path));
+  return equivalenceDigest(artifactDigests);
 }
 
 export interface EquivalencePreview {

@@ -4,6 +4,8 @@ import { downloadCsvFile } from '../../utils/csv-download';
 
 import { RestrictionNiveauGraviteFr } from '../../dto/restriction.dto';
 import { sortByDateDesc } from '../../utils/date-sort';
+import { getStatisticRowStatusLabel, isProvisionalStatistic } from '../../utils/statistic-provisional';
+import { isCommuneStatisticData } from '../../utils/statistic-series';
 
 const props = defineProps<{
   dataCommune: any,
@@ -13,11 +15,12 @@ const props = defineProps<{
   communeNom: string,
 }>();
 
-const headers = ['Date', 'Eau potable', 'Eau superficielle', 'Eau souterraine'];
+const headers = computed(() => ['Date', 'Eau potable', 'Eau superficielle', 'Eau souterraine', ...(hasProvisionalData.value ? ['Statut'] : [])]);
 const rows = ref([]);
 const downloadingCsv = ref(false);
 const csvDownloadError = ref(false);
-const validData = computed(() => Array.isArray(props.dataCommune) && props.dataCommune.every((row: any) => row && typeof row.date === 'string'));
+const validData = computed(() => isCommuneStatisticData({ commune: { nom: props.communeNom }, restrictions: props.dataCommune }));
+const hasProvisionalData = computed(() => validData.value && props.dataCommune.some(isProvisionalStatistic));
 const canDownload = computed(() => !props.disabled && validData.value && props.dataCommune.length > 0);
 
 async function downloadCsv() {
@@ -33,6 +36,7 @@ async function downloadCsv() {
         AEP: stat.AEP,
         SUP: stat.SUP,
         SOU: stat.SOU,
+        ...(hasProvisionalData.value ? { statut: getStatisticRowStatusLabel(stat) } : {}),
       };
     });
   csvDownloadError.value = !await downloadCsvFile(formatData, `commune_${props.communeNom}_${props.dateDebut}_${props.dateFin}.csv`);
@@ -50,6 +54,7 @@ watch(() => [props.dataCommune], () => {
       s.AEP ? RestrictionNiveauGraviteFr[s.AEP] : 'Pas de restrictions',
       s.SUP ? RestrictionNiveauGraviteFr[s.SUP] : 'Pas de restrictions',
       s.SOU ? RestrictionNiveauGraviteFr[s.SOU] : 'Pas de restrictions',
+      ...(hasProvisionalData.value ? [getStatisticRowStatusLabel(s)] : []),
     ];
   });
 }, { immediate: true });

@@ -33,6 +33,7 @@ import {
   sourceEquivalenceEvidence,
 } from './history-source-equivalence';
 import { DataSource, QueryRunner } from 'typeorm';
+import { CurrentStatisticPriorityError } from './restore-missing-commune-history';
 import { PassThrough } from 'node:stream';
 import {
   CERTIFIED_COMPLETION_ATTESTATION_SQL,
@@ -262,7 +263,7 @@ describe('inspection connection failure cleanup', () => {
 });
 
 describe('existing certified anchor, not manufactured provenance', () => {
-  it('accepts only non-fallback map-only calendar events in a contiguous ledger', () => {
+  it('accepts the separate non-fallback map-only and statistics-only calendar events', () => {
     const calendar = {
       ...invalidation,
       cause: 'published-calendar-mutation',
@@ -271,6 +272,21 @@ describe('existing certified anchor, not manufactured provenance', () => {
       sourceRevision: null,
     };
     expect(() => assertEquivalenceLedger([calendar], '797')).not.toThrow();
+    expect(() =>
+      assertEquivalenceLedger(
+        [
+          calendar,
+          {
+            ...calendar,
+            epochAfter: '798',
+            invalidatesStatistics: true,
+            invalidatesMaps: false,
+            affectedRange: '[2026-08-10,2026-09-10)',
+          },
+        ],
+        '798',
+      ),
+    ).not.toThrow();
     for (const change of [
       { fallback: true },
       { invalidatesStatistics: true },
@@ -283,6 +299,63 @@ describe('existing certified anchor, not manufactured provenance', () => {
       ).toThrow('Unexplained');
     }
   });
+  it.each([
+    '[2026-09-04,2026-09-09)',
+    '[2026-08-10,2026-09-10)',
+    '[2026-07-10,2026-09-10)',
+  ])(
+    'recognizes statistics calendar events for %s without asserting source equivalence',
+    (affectedRange) => {
+      expect(() =>
+        assertEquivalenceLedger(
+          [
+            {
+              ...invalidation,
+              cause: 'published-calendar-mutation',
+              invalidatesMaps: false,
+              affectedRange,
+            },
+          ],
+          '797',
+        ),
+      ).not.toThrow();
+      expect(() => assertEquivalenceAnchorInputs('a'.repeat(64))).toThrow(
+        'anchor inputs differ',
+      );
+    },
+  );
+  it.each([
+    [{ epochAfter: '798' }, 'expected epoch 797'],
+    [{ epochAfter: 'invalid' }, 'invalid epoch'],
+    [
+      { cause: 'unknown-calendar-mutation' },
+      'unsupported cause unknown-calendar-mutation',
+    ],
+    [{ fallback: true }, 'fallback must be explicitly false'],
+    [{ fallback: undefined }, 'fallback must be explicitly false'],
+    [
+      { invalidatesStatistics: true, invalidatesMaps: true },
+      'calendar invalidation must target exactly one',
+    ],
+    [
+      { invalidatesStatistics: false, invalidatesMaps: false },
+      'calendar invalidation must target exactly one',
+    ],
+    [{ sourceRevision: 'invalid' }, 'invalid source revision'],
+  ])(
+    'reports the exact failing calendar event and reason (%j)',
+    (change, reason) => {
+      const calendar = {
+        ...invalidation,
+        cause: 'published-calendar-mutation',
+        invalidatesMaps: false,
+        ...change,
+      };
+      expect(() => assertEquivalenceLedger([calendar], '797')).toThrow(
+        `Unexplained historic invalidation or incomplete ledger: epoch=${calendar.epochAfter}; ${reason}`,
+      );
+    },
+  );
   it('rejects an altered restored clone even when its old audit remains present', () => {
     expect(() =>
       assertEquivalenceAnchorInputs(EQUIVALENCE_ANCHOR.inputDigest),
@@ -563,7 +636,7 @@ describe('short optimistic validation boundary', () => {
     );
     await expect(
       acquireEquivalenceFinalLocks({ query } as unknown as QueryRunner),
-    ).rejects.toThrow('lock busy');
+    ).rejects.toBeInstanceOf(CurrentStatisticPriorityError);
     expect(query.mock.calls).toHaveLength(2);
   });
 });
@@ -698,6 +771,37 @@ describe('atomic append-only attestation', () => {
       HISTORY_EQUIVALENCE_CONFIRMATION: 'ATTEST_HISTORY_BY_SOURCE_EQUIVALENCE',
     });
   }
+  it('records raw and normalized evidence for historical parameter status changes', async () => {
+    const f = fixture();
+    const parameterStatusEquivalence = {
+      policy: 'historic-parameter-disabled-irrelevant-v1' as const,
+      rawInputDigest: 'b'.repeat(64),
+      rawParameterSectionDigest: 'c'.repeat(64),
+      anchorParameterSectionDigest: 'd'.repeat(64),
+      normalizedInputDigest: f.inspection.inputs.digest,
+      changes: [{ key: '398', anchorDisabled: false, currentDisabled: true }],
+    };
+    const inspection = {
+      ...f.inspection,
+      inputs: { ...f.inspection.inputs, parameterStatusEquivalence },
+    };
+    expect(equivalenceProof(inspection)).not.toBe(
+      equivalenceProof(f.inspection),
+    );
+    await applyEquivalenceAttestation(
+      f.target,
+      inspection,
+      equivalenceProof(inspection),
+    );
+    const call = f.runner.query.mock.calls.find(
+      ([sql]) => sql === CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
+    );
+    const context = JSON.parse(call?.[1]?.[4] as string);
+    expect(context.parameterStatusEquivalence).toEqual(
+      parameterStatusEquivalence,
+    );
+    expect(context.inputDigest).toBe(inspection.inputs.digest);
+  });
   it('waits for exact consent on a detached preview before starting the existing CAS', async () => {
     const f = fixture();
     const proof = equivalenceProof(f.inspection);

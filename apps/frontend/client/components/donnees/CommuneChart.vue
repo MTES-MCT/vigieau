@@ -6,6 +6,8 @@ import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
 import { isCommuneStatisticData } from '../../utils/statistic-series';
+import { findProvisionalStatisticPeriods } from '../../utils/statistic-provisional';
+import { findMissingStatisticPeriods } from '../../utils/statistic-history-gaps';
 import * as Sentry from '@sentry/vue';
 
 const props = defineProps<{
@@ -39,6 +41,8 @@ tmp.setFullYear(tmp.getFullYear() - 1);
 const currentDate = ref(new Date().toISOString().split('T')[0]);
 const loading = ref(false);
 const restrictionsFiltered = ref([]);
+const provisionalPeriods = computed(() => findProvisionalStatisticPeriods(restrictionsFiltered.value));
+const missingPeriods = computed(() => findMissingStatisticPeriods(restrictionsFiltered.value));
 const screenshotZone = ref();
 const downloadingPng = ref(false);
 const pngDownloadError = ref(false);
@@ -117,7 +121,7 @@ async function loadData() {
   loading.value = true;
   showError.value = false;
   try {
-    const { data, error } = await api.getDataCommune(props.codeInsee);
+    const { data, error } = await api.getDataCommune(props.codeInsee, undefined, undefined, true);
     if (error.value || !isCommuneStatisticData(data.value)) {
       throw error.value || new Error('Invalid commune statistic response');
     }
@@ -213,6 +217,11 @@ async function downloadGraph() {
             </DsfrButton>
           </div>
         </div>
+        <DonneesStatisticHistoryGaps :periods="missingPeriods" />
+        <DonneesStatisticProvisionalData :periods="provisionalPeriods" />
+        <p v-if="!restrictionsFiltered.length" role="status" class="fr-my-2w">
+          Aucune donnée disponible pour cette sélection. Cela ne signifie pas une absence de restrictions.
+        </p>
         <MixinsNiveauGraviteLegende class="show-sm fr-mb-1w" />
         <h2 class="fr-mb-1w fr-h6">Tout type d'eau</h2>
         <p class="fr-text--sm"> Niveau de gravité maximal observé parmi les niveaux de gravité relatifs aux eaux

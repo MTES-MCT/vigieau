@@ -818,6 +818,7 @@ export class DataService implements OnModuleInit {
     code: string,
     dateDebut?: string,
     dateFin?: string,
+    includeProvisional = false,
   ): Promise<StatisticCommune> {
     const stat = await this.statisticCommuneRepository.findOne(<FindOneOptions>{
       select: {
@@ -907,13 +908,28 @@ export class DataService implements OnModuleInit {
           ) certified_repair ON true
           WHERE statistic_publication_state.id = 1
             AND config.id = 1
-        ), filtered_restrictions AS MATERIALIZED (
-          SELECT restriction.value, restriction.ordinality
+        ), commune_restrictions AS MATERIALIZED (
+          SELECT restriction.value, restriction.ordinality,
+            COUNT(*) OVER (PARTITION BY restriction.value ->> 'date') AS "dayCount"
           FROM statistic_commune statistic
-          CROSS JOIN publication_state state
           CROSS JOIN LATERAL jsonb_array_elements(statistic.restrictions)
             WITH ORDINALITY AS restriction(value, ordinality)
           WHERE statistic.id = $1
+        ), filtered_restrictions AS MATERIALIZED (
+          SELECT
+            CASE WHEN $5::boolean
+                AND state."certifiedHistoryRepairId" IS NULL
+                AND (restriction.value ->> 'date')::date BETWEEN
+                  state."historicDirtyFrom" AND COALESCE(
+                    state."historicDirtyThrough", state."currentPublishedDate"
+                  )
+              THEN restriction.value || $6::jsonb
+              ELSE restriction.value
+            END AS value,
+            restriction.ordinality
+          FROM commune_restrictions restriction
+          CROSS JOIN publication_state state
+          WHERE TRUE
             AND ($2::date IS NULL OR (restriction.value->>'date')::date >= $2::date)
             AND ($3::date IS NULL OR (restriction.value->>'date')::date <= $3::date)
             AND state."currentPublishedDate" IS NOT NULL
@@ -933,6 +949,30 @@ export class DataService implements OnModuleInit {
                 state."certifiedHistoryRepairId" IS NOT NULL
                 AND (restriction.value ->> 'date')::date BETWEEN
                     state."historicDirtyFrom" AND state."historicDirtyThrough"
+              )
+              OR (
+                $5::boolean
+                AND restriction."dayCount" = 1
+                AND restriction.value ?& ARRAY['SOU', 'SUP', 'AEP']
+                AND NOT EXISTS (
+                  SELECT 1 FROM unnest(ARRAY['SOU', 'SUP', 'AEP']) zone_type(value)
+                  WHERE (restriction.value -> zone_type.value) <> 'null'::jsonb
+                    AND (restriction.value ->> zone_type.value) NOT IN (
+                      'vigilance', 'alerte', 'alerte_renforcee', 'crise'
+                    )
+                )
+                AND EXISTS (
+                  SELECT 1 FROM statistic_commune_snapshot completed_snapshot
+                  WHERE completed_snapshot."snapshotDate" =
+                      (restriction.value ->> 'date')::date
+                    AND completed_snapshot.scope = 'national'
+                    AND completed_snapshot.status = 'completed'
+                    AND completed_snapshot."expectedCommuneCount" > 0
+                    AND completed_snapshot."expectedCommuneCount" =
+                        completed_snapshot."processedCommuneCount"
+                    AND completed_snapshot."expectedCommuneCount" =
+                        (SELECT COUNT(*) FROM commune)
+                )
               )
             )
             AND NOT EXISTS (
@@ -955,6 +995,8 @@ export class DataService implements OnModuleInit {
         dateBegin?.format('YYYY-MM-DD') ?? null,
         dateEnd?.format('YYYY-MM-DD') ?? null,
         this.getConfiguredStatisticCacheMode(),
+        includeProvisional,
+        JSON.stringify(PROVISIONAL_STATISTIC_STATUS),
       ],
     );
     if (result?.stateAvailable !== true) {
@@ -983,6 +1025,7 @@ export class DataService implements OnModuleInit {
       try {
         let publicationState =
           requestedPublicationState ?? (await this.getPublicationState(true));
+        this.discardUnsafeRetainedSparseCache(publicationState);
         if (
           this.certifiedDataCache &&
           this.isCertifiedOverlayInvalid(
@@ -1153,6 +1196,27 @@ export class DataService implements OnModuleInit {
         throw new Error('No active statistic cache artifact is available');
       }
       await this.ensureReferenceDataCache();
+      if (
+        active.identity.materializationStrategy ===
+          'certified-history-overlay' &&
+        !this.isArtifactCertifiedHistoryCompatible(
+          active.identity,
+          publicationState,
+        )
+      ) {
+        // A revoked historical overlay must not take independently valid dates
+        // offline while the worker waits for a newer current snapshot. Read only
+        // the retained safe publication; never change publication pointers or
+        // acknowledge the invalid overlay as loaded.
+        const previous =
+          await artifactService.loadSparseFallback(currentPublishedDate);
+        if (
+          previous &&
+          this.isSafePreviousSparseArtifact(previous, publicationState)
+        ) {
+          return this.hydrateArtifactPayload(previous, publicationState);
+        }
+      }
       return this.hydrateArtifactPayload(active, publicationState);
     }
     const target = this.getCandidateTarget(publicationState);
@@ -1933,13 +1997,9 @@ export class DataService implements OnModuleInit {
     publicationState: StatisticPublicationState,
   ): CertifiedDataCache {
     if (
-      payload.identity.certifiedHistoryRepairId !==
-        (publicationState.certifiedHistoryRepairId ?? null) ||
-      !isCertifiedHistoryOverlayCompatible(
-        payload.identity.materializationStrategy,
-        payload.identity.statisticRevision,
-        this.hasCertifiedHistoryRepair(publicationState),
-        publicationState.certifiedHistoryRepairRevision,
+      !this.isArtifactCertifiedHistoryCompatible(
+        payload.identity,
+        publicationState,
       )
     ) {
       throw new Error(
@@ -2004,6 +2064,91 @@ export class DataService implements OnModuleInit {
       fingerprint,
       publicationState,
     };
+  }
+
+  private isArtifactCertifiedHistoryCompatible(
+    identity: StatisticCacheArtifactIdentity,
+    publicationState: StatisticPublicationState,
+  ): boolean {
+    return (
+      identity.certifiedHistoryRepairId ===
+        (publicationState.certifiedHistoryRepairId ?? null) &&
+      isCertifiedHistoryOverlayCompatible(
+        identity.materializationStrategy,
+        identity.statisticRevision,
+        this.hasCertifiedHistoryRepair(publicationState),
+        publicationState.certifiedHistoryRepairRevision,
+      )
+    );
+  }
+
+  private isSafePreviousSparseArtifact(
+    payload: StatisticCacheArtifactPayload,
+    state: StatisticPublicationState,
+  ): boolean {
+    const { identity } = payload;
+    const from = state.historicDirtyFrom;
+    const through = state.historicDirtyThrough;
+    const current = state.currentPublishedDate;
+    const notAfter = (
+      previous: string | null,
+      latest: string | null | undefined,
+    ) =>
+      Boolean(
+        previous &&
+        latest &&
+        /^\d+$/.test(previous) &&
+        /^\d+$/.test(latest) &&
+        BigInt(previous) <= BigInt(latest),
+      );
+    if (
+      this.hasCertifiedHistoryRepair(state) ||
+      identity.materializationStrategy !== 'sparse-current' ||
+      identity.mode !== 'versioned' ||
+      identity.certifiedHistoryRepairId !== null ||
+      identity.id === state.statisticCachePublicationId ||
+      !from ||
+      !through ||
+      !current ||
+      from > through ||
+      through >= current ||
+      !moment
+        .utc(identity.currentPublishedDate, 'YYYY-MM-DD', true)
+        .isValid() ||
+      identity.currentPublishedDate > current ||
+      identity.latestDate !== identity.currentPublishedDate ||
+      !notAfter(identity.statisticRevision, state.revision) ||
+      !notAfter(identity.sourceRevision, state.sourceRevision) ||
+      !notAfter(identity.historicComputeEpoch, state.historicComputeEpoch)
+    )
+      return false;
+
+    // Daily values and monthly commune aggregates have different boundaries.
+    // Reject a whole intersecting month rather than expose a partial aggregate.
+    const safeDate = (date: unknown) =>
+      typeof date === 'string' &&
+      moment.utc(date, 'YYYY-MM-DD', true).isValid() &&
+      date >= this.beginDate &&
+      date <= identity.latestDate &&
+      (date < from || date > through);
+    const fromMonth = from.slice(0, 7);
+    const throughMonth = through.slice(0, 7);
+    return (
+      payload.dataArea.every(({ date }) => safeDate(date)) &&
+      payload.dataDepartement.every(({ date }) => safeDate(date)) &&
+      payload.dataCommune.every(
+        ({ restrictions }) =>
+          Array.isArray(restrictions) &&
+          restrictions.every(
+            ({ d }) =>
+              typeof d === 'string' &&
+              moment.utc(d, 'YYYY-MM', true).isValid() &&
+              d >= this.beginDate.slice(0, 7) &&
+              d <= identity.latestDate.slice(0, 7) &&
+              (d < fromMonth || d > throughMonth),
+          ),
+      )
+    );
   }
 
   private assertArtifactCollections(
@@ -2157,6 +2302,22 @@ export class DataService implements OnModuleInit {
   }
 
   private async ensureCertifiedDataCache(): Promise<CertifiedDataCache> {
+    if (
+      this.certifiedDataCache &&
+      this.isRetainedSparseCache(this.certifiedDataCache)
+    ) {
+      // Unlike an ordinary stale cache, retained sparse data must be checked
+      // against newly dirty dates before returning a response, not afterwards.
+      try {
+        this.discardUnsafeRetainedSparseCache(await this.getPublicationState());
+      } catch {
+        // A failed state read does not invalidate the last known safe dates.
+        // The normal background refresh and status checks still report it.
+        if (this.publicationState) {
+          this.discardUnsafeRetainedSparseCache(this.publicationState);
+        }
+      }
+    }
     const currentCache = this.certifiedDataCache;
     if (currentCache) {
       this.startCertifiedDataRefresh();
@@ -2523,6 +2684,7 @@ export class DataService implements OnModuleInit {
       );
     }
 
+    if (availableState) this.discardUnsafeRetainedSparseCache(availableState);
     const cache = this.certifiedDataCache;
     const usable = Boolean(cache);
     let artifactEnabled = false;
@@ -2807,6 +2969,9 @@ export class DataService implements OnModuleInit {
   }
 
   getStatisticCacheAcknowledgement(): StatisticCacheAcknowledgement {
+    if (this.publicationState) {
+      this.discardUnsafeRetainedSparseCache(this.publicationState);
+    }
     const cache = this.certifiedDataCache;
     const candidateId =
       this.publicationState?.statisticCacheCandidatePublicationId ?? null;
@@ -3635,6 +3800,7 @@ export class DataService implements OnModuleInit {
       try {
         const state = await this.readPublicationState(this.dataSource);
         this.publicationState = state;
+        this.discardUnsafeRetainedSparseCache(state);
         this.publicationStateCheckError = null;
         this.publicationStateCheckedAt = Date.now();
         return state;
@@ -3840,6 +4006,15 @@ export class DataService implements OnModuleInit {
     if (this.isCertifiedOverlayInvalid(cache, publicationState)) {
       return false;
     }
+    if (
+      cache.artifactPublicationId &&
+      cache.artifactPublicationId !==
+        publicationState.statisticCachePublicationId &&
+      !this.isSameMaterializationState(cache.publicationState, publicationState)
+    ) {
+      // Recheck a retained fallback against every new dirty/source boundary.
+      return false;
+    }
     if (certifiedRepairActive && cachedCertifiedRepairId === null) {
       return false;
     }
@@ -3856,6 +4031,55 @@ export class DataService implements OnModuleInit {
       return true;
     }
     return this.isHistoricArtifactStateCurrent(cache, publicationState);
+  }
+
+  private isRetainedSparseCache(cache: CertifiedDataCache): boolean {
+    return Boolean(
+      cache.artifactIdentity?.materializationStrategy === 'sparse-current' &&
+      cache.artifactPublicationId &&
+      cache.artifactPublicationId !==
+        cache.publicationState.statisticCachePublicationId,
+    );
+  }
+
+  private discardUnsafeRetainedSparseCache(
+    state: StatisticPublicationState,
+  ): void {
+    const cache = this.certifiedDataCache;
+    if (
+      !cache ||
+      !this.isRetainedSparseCache(cache) ||
+      !state.historicDirtyFrom ||
+      this.hasCertifiedHistoryRepair(state)
+    )
+      return;
+
+    const from = state.historicDirtyFrom;
+    const through = state.historicDirtyThrough ?? state.currentPublishedDate;
+    if (
+      from === cache.publicationState.historicDirtyFrom &&
+      through ===
+        (cache.publicationState.historicDirtyThrough ??
+          cache.publicationState.currentPublishedDate)
+    )
+      return;
+
+    const intersects = (date: string) =>
+      !through || (date >= from && date <= through);
+    const unsafe =
+      !through ||
+      from > through ||
+      cache.dataArea.some(({ date }) => intersects(date)) ||
+      cache.dataDepartement.some(({ date }) => intersects(date)) ||
+      cache.dataCommune.some(({ restrictions }) =>
+        restrictions.some(
+          ({ d }) => d >= from.slice(0, 7) && d <= through.slice(0, 7),
+        ),
+      );
+    if (unsafe) {
+      this.certifiedDataCache = null;
+      this.lastDataCacheError = { at: new Date(), phase: 'refresh' };
+    }
   }
 
   private isCertifiedOverlayInvalid(

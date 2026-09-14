@@ -32,7 +32,7 @@ export function isDepartmentStatisticSeries(value: unknown): value is any[] {
 export function isCommuneStatisticData(value: unknown): value is { commune: { nom: string }; restrictions: any[] } {
   return isRecord(value) && isRecord(value.commune) && typeof value.commune.nom === 'string' &&
     Array.isArray(value.restrictions) && value.restrictions.every((row) =>
-      isRecord(row) && typeof row.date === 'string' &&
+      isRecord(row) && hasValidStatisticStatus(row) && typeof row.date === 'string' &&
       ['AEP', 'SUP', 'SOU'].every((waterType) => isSeverity(row[waterType])),
     );
 }
