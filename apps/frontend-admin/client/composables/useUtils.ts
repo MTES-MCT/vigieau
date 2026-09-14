@@ -4,34 +4,35 @@ import { isValidPhoneNumber } from 'libphonenumber-js';
 
 export const useUtils = () => {
   return {
-    debounce(fn: Function, delay: number) {
-      let timeoutID: any = null;
-      return function () {
-        clearTimeout(timeoutID);
-        // eslint-disable-next-line prefer-rest-params
-        const args = arguments;
-        // @ts-ignore
-        // eslint-disable-next-line @typescript-eslint/no-this-alias
-        const that = this;
-        timeoutID = setTimeout(function () {
-          fn.apply(that, args);
+    debounce<Arguments extends unknown[]>(
+      fn: (...args: Arguments) => void,
+      delay: number,
+    ) {
+      let timeoutID: ReturnType<typeof setTimeout> | null = null;
+      return function (this: unknown, ...args: Arguments) {
+        if (timeoutID !== null) {
+          clearTimeout(timeoutID);
+        }
+        timeoutID = setTimeout(() => {
+          fn.apply(this, args);
         }, delay);
       };
     },
 
     isWebglSupported() {
-      if (window.WebGLRenderingContext) {
+      if (window.WebGL2RenderingContext) {
         const canvas = document.createElement('canvas');
         try {
           // Note that { failIfMajorPerformanceCaveat: true } can be passed as a second argument
           // to canvas.getContext(), causing the check to fail if hardware rendering is not available. See
           // https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
           // for more details.
-          const context = canvas.getContext('webgl2') || canvas.getContext('webgl');
+          // MapLibre 6 requires WebGL2; WebGL1 must use the existing fallback UI.
+          const context = canvas.getContext('webgl2');
           if (context && typeof context.getParameter == 'function') {
             return true;
           }
-        } catch (e) {
+        } catch {
           // WebGL is supported, but disabled
         }
         return false;
@@ -56,7 +57,7 @@ export const useUtils = () => {
 
     fileSizeString(size: number) {
       const i = Math.floor(Math.log(size) / Math.log(1024));
-      return `${(size / Math.pow(1024, i)).toFixed(2)} ${['o', 'Ko', 'Mo', 'Go', 'To'][i]}`;
+      return `${(size / 1024 ** i).toFixed(2)} ${['o', 'Ko', 'Mo', 'Go', 'To'][i]}`;
     },
 
     askEditArreteCadre(

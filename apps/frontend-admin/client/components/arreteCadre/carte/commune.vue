@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { Ref } from 'vue';
-import { Map, NavigationControl, FullscreenControl, LngLatBounds } from 'maplibre-gl';
+import { FullscreenControl, Map, NavigationControl } from 'maplibre-gl';
 import type { Commune } from '~/dto/commune.dto';
 import type { Departement } from '~/dto/departement.dto';
+import { getGeometryBounds } from '~/utils/geometry-bounds';
 
 const props = defineProps<{
   departement: Departement;
@@ -44,7 +45,7 @@ onMounted(async () => {
   map.value?.on('load', async () => {
     // COMMUNES
     const query = `depCode=${props.departement?.code}`;
-    const { data, error } = await api.commune.listWithGeom(query);
+    const { data } = await api.commune.listWithGeom(query);
     if (data.value) {
       communes.value = data.value;
     }
@@ -110,7 +111,7 @@ const populateSources = () => {
     type: 'geojson',
     data: {
       type: 'FeatureCollection',
-      features: features,
+      features,
     },
   });
   showLayer();
@@ -126,30 +127,15 @@ const resetSources = (onlyLayers = false) => {
         map.value?.removeSource(l);
       }
     });
-  } catch (e) {
+  } catch {
   }
 };
 
 const computeBounds = () => {
-  const geoms = communes.value.filter(c => props.communes?.some(pc => pc.id === c.id))
-    .map((c) => {
-      return c.geom.coordinates;
-    });
-
-  if (!geoms || geoms.length < 1) {
-    return;
-  }
-  
-  let bounds = new LngLatBounds();
-
-  geoms.forEach(g => {
-    g.forEach(c => {
-      if (c.length === 1) {
-        c = c.flat();
-      }
-      bounds.extend(c);
-    });
-  });
+  const bounds = getGeometryBounds(communes.value
+    .filter((commune) => props.communes?.some((selected) => selected.id === commune.id))
+    .map((commune) => commune.geom));
+  if (!bounds) return;
 
   map.value?.fitBounds(bounds, {
     padding: 100,

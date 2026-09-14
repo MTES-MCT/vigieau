@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import type { Ref } from 'vue';
-import { Map, NavigationControl, FullscreenControl, LngLatBounds } from 'maplibre-gl';
+import { FullscreenControl, Map, NavigationControl } from 'maplibre-gl';
 import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
 import type { Commune } from '~/dto/commune.dto';
 import NiveauGraviteBadge from '~/components/mixins/NiveauGraviteBadge.vue';
+import { getGeometryBounds } from '~/utils/geometry-bounds';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -140,7 +141,7 @@ const loadGeom = async () => {
 
   // COMMUNES
   const query = `depCode=${props.arreteRestriction.departement?.code}`;
-  const { data, error } = await api.commune.listWithGeom(query);
+  const { data } = await api.commune.listWithGeom(query);
   if (data.value) {
     communes.value = data.value;
   }
@@ -225,7 +226,7 @@ const populateSources = () => {
       type: 'geojson',
       data: {
         type: 'FeatureCollection',
-        features: features,
+        features,
       },
     });
   }
@@ -242,26 +243,13 @@ const resetSources = (onlyLayers = false) => {
         map.value?.removeSource(l);
       }
     });
-  } catch (e) {
+  } catch {
   }
 };
 
 const computeBounds = () => {
-  const geoms = zones.value
-    .map((z) => {
-      return z.geom.coordinates;
-    });
-
-  let bounds = new LngLatBounds();
-
-  geoms.forEach(g => {
-    g.forEach(c => {
-      if(c.length === 1) {
-        c = c.flat();
-      }
-      bounds.extend(c);
-    });
-  });
+  const bounds = getGeometryBounds(zones.value.map((zone) => zone.geom));
+  if (!bounds) return;
 
   map.value?.fitBounds(bounds, {
     padding: 20,
@@ -328,6 +316,7 @@ watch(
       <div class="map-pre-actions-card fr-p-1w fr-m-1w">
         <DsfrRadioButton
           v-for="option of typeEauTags"
+          :key="option.value"
           :modelValue="selectedTypeEau"
           v-bind="option"
           :small="true"
