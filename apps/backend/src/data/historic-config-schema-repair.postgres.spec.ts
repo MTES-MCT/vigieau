@@ -4,6 +4,7 @@ import { HistoricCursorProgress1786132800000 } from '../../../backend-admin/src/
 import { HistoricDepartmentCheckpoint1786219200000 } from '../../../backend-admin/src/migrations/1786219200000-HistoricDepartmentCheckpoint';
 import { StatisticCachePublication1786744800000 } from '../../../backend-admin/src/migrations/1786744800000-StatisticCachePublication';
 import { HistoricConfigSchemaRepair1786831200000 } from '../../../backend-admin/src/migrations/1786831200000-HistoricConfigSchemaRepair';
+import { CertifiedHistoryRepairAudit1787910600000 } from '../../../backend-admin/src/migrations/1787910600000-CertifiedHistoryRepairAudit';
 import { DataService } from './data.service';
 import { StatisticCacheArtifactService } from './statistic-cache-artifact.service';
 
@@ -145,6 +146,18 @@ describeWithPostgres(
           ADD COLUMN "certifiedHistoryRepairId" uuid;
         ALTER TABLE "statistic_cache_state"
           ADD COLUMN "candidatePublicationId" uuid
+      `);
+      const runner = legacyDataSource.createQueryRunner();
+      await runner.connect();
+      try {
+        await new CertifiedHistoryRepairAudit1787910600000().up(runner);
+      } finally {
+        await runner.release();
+      }
+      await legacyDataSource.query(`
+        -- This fixture repairs config drift without an active history repair.
+        CREATE VIEW "active_certified_history_repair" AS
+          SELECT * FROM "certified_history_repair_audit" WHERE false
       `);
       await legacyDataSource.query(`
       INSERT INTO "historic_department_checkpoint" (

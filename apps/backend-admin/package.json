@@ -4,6 +4,7 @@
   "description": "",
   "author": "",
   "private": true,
+  "packageManager": "npm@11.21.1",
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
@@ -60,7 +61,7 @@
     "@sentry/nestjs": "^10.55.0",
     "@sentry/profiling-node": "^10.55.0",
     "archiver": "^7.0.1",
-    "axios": "^1.7.3",
+    "axios": "^1.20.0",
     "camelcase-keys": "^7.0.2",
     "cheerio": "1.0.0",
     "class-transformer": "^0.5.1",
@@ -70,14 +71,14 @@
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "fast-xml-parser": "5.7.3",
-    "handlebars": "^4.7.9",
+    "handlebars": "^4.7.10",
     "helmet": "^8.0.0",
     "json-2-csv": "^5.5.5",
     "jszip": "^3.10.1",
     "lodash": "^4.17.21",
-    "moment": "^2.30.1",
+    "moment": "^2.31.0",
     "nestjs-paginate": "^11.1.1",
-    "nodemailer": "^9.1.1",
+    "nodemailer": "^10.1.7",
     "openid-client": "^5.6.1",
     "passport": "^0.7.0",
     "passport-custom": "^1.1.1",
@@ -145,17 +146,21 @@
     "string-width": "4.1.0"
   },
   "overrides": {
+    "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3",
+    "@istanbuljs/load-nyc-config": {
+      "js-yaml": "4.3.2"
+    },
     "qs": "6.16.0",
-    "undici": "6.28.0",
+    "undici": "6.28.1",
     "@nestjs/platform-express": {
-      "multer": "2.3.0"
+      "multer": "2.4.0"
     },
     "@nestjs/swagger": {
       "js-yaml": "4.3.2"
     },
     "preview-email": {
       "mailparser": {
-        ".": "3.9.8",
+        ".": "3.10.0",
         "linkify-it": "5.0.2"
       },
       "nodemailer": "$nodemailer",
@@ -163,7 +168,7 @@
     }
   },
   "engines": {
-    "node": "24.x",
-    "npm": "11.x"
+    "node": "24.22.1",
+    "npm": "11.21.1"
   }
 }

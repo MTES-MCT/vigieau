@@ -26,7 +26,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Verify statistics smoke deadline policy
         run: npm run test:smoke-statistics
@@ -53,7 +53,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Wait for an atomic publication to converge
         run: node scripts/wait-zone-publication.mjs
@@ -72,7 +72,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Wait for an atomic publication to converge
         run: node scripts/wait-zone-publication.mjs
@@ -91,7 +91,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Verify admin smoke zone publication policy
         run: node --test scripts/smoke-admin.test.mjs
@@ -113,7 +113,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Verify SANDRE smoke policy
         run: node --test scripts/smoke-sandre-policy.test.mjs
@@ -131,7 +131,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Wait for an atomic publication to converge
         run: node scripts/wait-zone-publication.mjs
@@ -153,7 +153,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Collect production health without changing job outcomes
         run: node scripts/collect-production-health.mjs

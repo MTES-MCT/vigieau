@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: 24
-  NPM_VERSION: 11.17.0
+  NODE_VERSION: 24.22.1
+  NPM_VERSION: 11.21.1
 
 jobs:
   security:
@@ -65,6 +65,8 @@ jobs:
       - run: npm ci --prefix apps/backend-admin
       - run: npm ci --prefix apps/frontend
       - run: npm ci --prefix apps/frontend-admin
+      - name: Verify reproducible security fork archives
+        run: node scripts/build-listhen-security-fork.mjs --check
       - run: for script in scripts/*.mjs; do node --check "$script"; done
       - run: node --test --test-isolation=none scripts/*.test.mjs
       - run: npm run lint:changed

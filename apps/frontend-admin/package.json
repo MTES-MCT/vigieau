@@ -1,6 +1,11 @@
 {
   "name": "vigieau_admin_frontend",
   "version": "1.0.0",
+  "packageManager": "npm@11.21.1",
+  "engines": {
+    "node": "24.22.1",
+    "npm": "11.21.1"
+  },
   "scripts": {
     "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
     "start": "PORT=${PORT:-3003} nuxi preview",
@@ -31,14 +36,15 @@
     "focus-trap": "^7.5.2",
     "focus-trap-vue": "^4.0.2",
     "libphonenumber-js": "^1.11.7",
+    "listhen": "file:vendor/vigieau-listhen-1.10.1-vigieau.1.tgz",
     "lodash.deburr": "^4.1.0",
     "luxon": "^3.4.4",
     "maplibre-gl": "6.4.1",
-    "moment": "^2.30.1",
+    "moment": "^2.31.0",
     "nuxt": "3.21.11",
     "oh-vue-icons": "1.0.0-rc3",
     "pinia": "^2.2.1",
-    "vue": "^3.5.33",
+    "vue": "3.5.44",
     "vue-chartjs": "^5.3.1"
   },
   "devDependencies": {
@@ -59,7 +65,7 @@
     "@typescript-eslint/parser": "^8.0.1",
     "@vue/eslint-config-typescript": "^13.0.0",
     "@vue/tsconfig": "^0.5.1",
-    "axios": "^1.7.3",
+    "axios": "1.20.0",
     "cypress": "^15.18.1",
     "dotenv": "^17.4.2",
     "eslint": "^9.9.0",
@@ -81,8 +87,24 @@
     "typescript": "*",
     "vite-plugin-istanbul": "^6.0.2"
   },
-  "engines": {
-    "node": "24.x",
-    "npm": "11.x"
+  "overrides": {
+    "@istanbuljs/load-nyc-config": {
+      "js-yaml": "4.3.2"
+    },
+    "@nuxt/devtools": "3.4.4",
+    "@vue/server-renderer": "3.5.44",
+    "axios": "$axios",
+    "brace-expansion@1": "1.1.21",
+    "brace-expansion@2": "2.1.7",
+    "brace-expansion@5": "5.0.12",
+    "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3",
+    "devalue": "5.9.4",
+    "follow-redirects": "1.16.1",
+    "listhen": "$listhen",
+    "postcss-selector-parser": "7.1.7",
+    "seroval": "1.6.12",
+    "shell-quote": "1.12.0",
+    "source-map-js": "1.2.2",
+    "vite": "7.3.7"
   }
 }

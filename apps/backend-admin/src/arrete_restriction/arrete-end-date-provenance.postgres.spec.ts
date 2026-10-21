@@ -563,12 +563,14 @@ describeWithPostgres('ArreteEndDateProvenance PostgreSQL migration', () => {
       expect(restrictionCandidates).toEqual([
         {
           id: 330,
+          departementId: 53,
           dateDebut: '2026-07-01',
           dateFin: null,
           statut: 'publie',
         },
         {
           id: 370,
+          departementId: 53,
           dateDebut: '2026-07-01',
           dateFin: '2026-08-09',
           statut: 'publie',

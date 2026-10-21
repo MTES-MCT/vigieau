@@ -103,6 +103,15 @@ describeWithPostgres('ZonePublicationHealthService PostgreSQL health', () => {
         "updatedAt" timestamptz NOT NULL,
         PRIMARY KEY ("jobKey", "scheduledFor")
       ) ON COMMIT DROP;
+      -- These fixtures certify scheduled runs, not historical repairs.
+      CREATE TEMP VIEW "active_certified_history_repair" AS
+        SELECT NULL::uuid AS id,
+          NULL::text AS "activationKind",
+          NULL::date AS "dateFrom",
+          NULL::date AS "dateThrough",
+          NULL::bigint AS "publicationRevisionAfter",
+          NULL::bigint AS "attestedThroughEpoch"
+        WHERE false;
     `);
     await queryRunner.query(`
       INSERT INTO "zone_publication_source_state"
