@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { after, before, test } from 'node:test';
 
@@ -250,30 +251,35 @@ test('watch mode reloads a changed module and releases the watcher on close', { 
   assert.equal(listener.server.listening, false);
 });
 
-test('CLI can start and stop a real HTTP listener', { timeout: 15000 }, async () => {
-  const entry = join(directory, 'cli-handler.mjs');
-  await writeFile(entry, 'export default (_req, res) => res.end("cli-response")\n');
-  const child = spawn(process.execPath, [join(packageRoot, 'bin/listhen.mjs'), entry, '--port', '0', '--host', '127.0.0.1', '--no-qr', '--no-clipboard'], {
-    cwd: directory, env: { ...process.env, NODE_ENV: 'development', FORCE_COLOR: '0' }, stdio: ['ignore', 'pipe', 'pipe'],
+for (const forceColor of ['0', '1']) {
+  test(`CLI can start and stop a real HTTP listener (FORCE_COLOR=${forceColor})`, { timeout: 15000 }, async () => {
+    const entry = join(directory, 'cli-handler.mjs');
+    await writeFile(entry, 'export default (_req, res) => res.end("cli-response")\n');
+    const env = { ...process.env, NODE_ENV: 'development', FORCE_COLOR: forceColor };
+    if (forceColor === '1') delete env.NO_COLOR;
+    const child = spawn(process.execPath, [join(packageRoot, 'bin/listhen.mjs'), entry, '--port', '0', '--host', '127.0.0.1', '--no-qr', '--no-clipboard'], {
+      cwd: directory, env, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    try {
+      let url;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        url = stripVTControlCharacters(output).match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+        if (url) break;
+        if (child.exitCode !== null) break;
+        await delay(100);
+      }
+      assert(url, output);
+      if (forceColor === '1') assert.notEqual(output, stripVTControlCharacters(output));
+      assert.equal(await (await fetch(url)).text(), 'cli-response');
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = once(child, 'close');
+        child.kill('SIGTERM');
+        await closed;
+      }
+    }
   });
-  let output = '';
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
-  try {
-    let url;
-    for (let attempt = 0; attempt < 60; attempt++) {
-      url = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-      if (url) break;
-      if (child.exitCode !== null) break;
-      await delay(100);
-    }
-    assert(url, output);
-    assert.equal(await (await fetch(url)).text(), 'cli-response');
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      const closed = once(child, 'close');
-      child.kill('SIGTERM');
-      await closed;
-    }
-  }
-});
+}
