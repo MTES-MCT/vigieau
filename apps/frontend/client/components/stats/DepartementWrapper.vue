@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { Ref } from 'vue';
 
-defineProps<{
+const props = defineProps<{
   stats: any
 }>();
+const hasGeographicData = computed(() => Object.keys(props.stats.departementRepartition).length > 0
+  || Object.keys(props.stats.regionRepartition).length > 0);
 
 const tabs = [
   { id: 'map', label: 'Carte' },
@@ -13,8 +15,9 @@ const selectedTabIndex: Ref<number> = ref(0);
 </script>
 
 <template>
-  <DsfrCallout title="Répartition géographique des recherches sur les 30 derniers jours">
+  <DsfrCallout title="Répartition géographique des recherches sur la période affichée">
     <AccessibleTabs
+      v-if="hasGeographicData"
       v-model="selectedTabIndex"
       id-prefix="search-statistics"
       label="Présentation de la répartition géographique des recherches"
@@ -29,6 +32,9 @@ const selectedTabIndex: Ref<number> = ref(0);
         </div>
       </template>
     </AccessibleTabs>
+    <p v-else>
+      La répartition géographique des recherches n'est pas disponible pour cette période.
+    </p>
   </DsfrCallout>
 </template>
 

@@ -2,12 +2,31 @@ import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { DepartementsService } from '../departements/departements.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import {
+  FindOptionsWhere,
+  IsNull,
+  MoreThanOrEqual,
+  Not,
+  Repository,
+} from 'typeorm';
 import { Statistic } from '@shared/entities/statistic.entity';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { VigieauLogger } from '../logger/vigieau.logger';
 import { MatomoStatisticsClient } from './matomo-statistics.client';
 import { MatomoStatisticsRunService } from './matomo-statistics-run.service';
+
+const MATOMO_FIELDS = [
+  'visits',
+  'restrictionsSearch',
+  'arreteDownloads',
+  'subscriptions',
+  'profileRepartition',
+  'departementRepartition',
+  'regionRepartition',
+] as const;
+
+const completeStatisticWhere = (): FindOptionsWhere<Statistic> =>
+  Object.fromEntries(MATOMO_FIELDS.map((field) => [field, Not(IsNull())]));
 
 @Injectable()
 export class StatisticsService {
@@ -36,14 +55,16 @@ export class StatisticsService {
   }
 
   /**
-   * Charge les statistiques depuis la base de données pour les 30 derniers jours.
+   * Charge les 30 derniers jours comportant des statistiques de frequentation.
    * Les données sont ensuite agrégées pour calculer les totaux.
    */
   async loadStatistics(): Promise<void> {
     const statistics = await this.statisticRepository.find({
-      where: {
+      // Restriction snapshots share this table but contain no audience metrics.
+      where: MATOMO_FIELDS.map((field) => ({
         date: MoreThanOrEqual(this.releaseDate),
-      },
+        [field]: Not(IsNull()),
+      })),
       order: {
         date: 'DESC',
       },
@@ -65,12 +86,31 @@ export class StatisticsService {
    * @returns Les statistiques agrégées.
    */
   private aggregateStatistics(statistics: Statistic[]): any {
+    const lastDataDate = statistics.at(-1)?.date || null;
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const periodDays = statistics.length
+      ? (Date.parse(lastDataDate) - Date.parse(statistics[0].date)) /
+          (24 * 60 * 60 * 1000) +
+        1
+      : 0;
     const aggregated = {
-      subscriptions: 0,
+      subscriptions: null as number | null,
       profileRepartition: {},
       departementRepartition: {},
       regionRepartition: {},
       statsByDay: [],
+      period: statistics.length
+        ? { from: statistics[0].date, to: lastDataDate }
+        : null,
+      lastDataDate,
+      stale: !lastDataDate || lastDataDate < yesterday,
+      partial:
+        periodDays > statistics.length ||
+        statistics.some((stat) =>
+          MATOMO_FIELDS.some((field) => stat[field] == null),
+        ),
     };
 
     for (const stat of statistics) {
@@ -88,10 +128,15 @@ export class StatisticsService {
       );
     }
 
-    aggregated.subscriptions = statistics.reduce(
-      (acc, s) => acc + s.subscriptions,
-      0,
-    );
+    const subscriptions = statistics
+      .map((stat) => stat.subscriptions)
+      .filter((count) => count != null);
+    if (subscriptions.length) {
+      aggregated.subscriptions = subscriptions.reduce(
+        (sum, count) => sum + count,
+        0,
+      );
+    }
 
     aggregated.statsByDay = statistics.map((s) => ({
       date: s.date,
@@ -132,13 +177,24 @@ export class StatisticsService {
   private async collectStatistics(): Promise<void> {
     this.logger.log('COMPUTE STATISTICS');
     const lastStat = await this.statisticRepository.findOne({
-      where: { id: Not(IsNull()) },
+      where: {
+        ...completeStatisticWhere(),
+        date: MoreThanOrEqual(this.releaseDate),
+      },
       order: { date: 'DESC' },
     });
     const lastStatDate = lastStat?.date
       ? new Date(lastStat?.date)
       : new Date(this.releaseDate);
-    const matomoDate = `${this.generateDateString(lastStatDate)},${this.generateDateString(new Date())}`;
+    // Replay the last complete day and recover at most six following days per run.
+    const lastRequestedDate = new Date(lastStatDate);
+    lastRequestedDate.setUTCDate(lastRequestedDate.getUTCDate() + 6);
+    const today = new Date(
+      `${this.generateDateString(new Date())}T00:00:00.000Z`,
+    );
+    if (lastRequestedDate > today) lastRequestedDate.setTime(today.getTime());
+    if (lastStatDate > lastRequestedDate) return;
+    const matomoDate = `${this.generateDateString(lastStatDate)},${this.generateDateString(lastRequestedDate)}`;
     const [
       visitsByDay,
       oldVisitsByDay,
@@ -228,8 +284,8 @@ export class StatisticsService {
     const statsToSave: any[] = [];
     for (
       const d = new Date(lastStatDate);
-      d < new Date();
-      d.setDate(d.getDate() + 1)
+      d <= lastRequestedDate;
+      d.setUTCDate(d.getUTCDate() + 1)
     ) {
       const stat: any = { date: new Date(d) };
       const day = this.generateDateString(d);

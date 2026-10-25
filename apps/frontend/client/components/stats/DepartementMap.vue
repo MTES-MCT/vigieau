@@ -4,6 +4,7 @@ import { Ref } from "vue";
 import utils from "../../utils";
 import { getFrenchMapLocale } from '../../utils/map-locale';
 import { createStatsPopupContent } from '../../utils/map-popup-content';
+import { knownCounts, repartitionColor, repartitionScale, statisticPercentage, sumKnownCounts } from '../../utils/audience-statistics';
 
 const props = defineProps<{
   stats: any
@@ -12,14 +13,22 @@ const props = defineProps<{
 const mapContainer = shallowRef(null);
 const map: Ref<any> = shallowRef(null);
 const isMapSupported: boolean = utils.isWebglSupported();
-const legendTooltip = ref('');
-
 const initialState = [[-7.075195, 41.211722], [11.403809, 51.248163]];
-const maxDepartementSearches = Math.max(...Object.values(props.stats.departementRepartition));
-const minDepartementSearches = Math.min(...Object.values(props.stats.departementRepartition));
-const maxRegionSearches = Math.max(...Object.values(props.stats.regionRepartition));
-const minRegionSearches = Math.min(...Object.values(props.stats.regionRepartition));
-legendTooltip.value = `${minDepartementSearches} à ${maxDepartementSearches}`;
+const departments = knownCounts(props.stats.departementRepartition);
+const regions = knownCounts(props.stats.regionRepartition);
+const departmentScale = repartitionScale(departments);
+const regionScale = repartitionScale(regions);
+const selectedRepartitionTag = ref(departmentScale !== null);
+const legendTooltip = computed(() => {
+  const scale = selectedRepartitionTag.value ? departmentScale : regionScale;
+  return scale ? `${scale.min} à ${scale.max}` : 'Données indisponibles';
+});
+
+function fillColor(repartition: Record<string, number>) {
+  const scale = repartitionScale(repartition);
+  if (!scale) return 'rgba(0, 0, 0, 0)';
+  return ['match', ['get', 'code'], ...Object.entries(repartition).flatMap(([code, count]) => [code, repartitionColor(count, scale)]), 'rgba(0, 0, 0, 0)'];
+}
 
 onMounted(() => {
   if (!isMapSupported) {
@@ -62,22 +71,6 @@ onMounted(() => {
       }
     }
 
-    const matchDepartementExpression = ['match', ['get', 'code']];
-    Object.keys(props.stats.departementRepartition).forEach((d: any) => {
-      const searches = props.stats.departementRepartition[d];
-      const color = (searches - minDepartementSearches) / (maxDepartementSearches - minDepartementSearches);
-      matchDepartementExpression.push(d, `rgb(${color * (49 - 255) + 255}, ${color * (49 - 255) + 255}, ${color * (120 - 255) + 255})`);
-    });
-    matchDepartementExpression.push('rgba(0, 0, 0, 0)');
-
-    const matchRegionExpression = ['match', ['get', 'code']];
-    Object.keys(props.stats.regionRepartition).forEach((r: any) => {
-      const searches = props.stats.regionRepartition[r];
-      const color = (searches - minRegionSearches) / (maxRegionSearches - minRegionSearches);
-      matchRegionExpression.push(r, `rgb(${color * (49 - 255) + 255}, ${color * (49 - 255) + 255}, ${color * (120 - 255) + 255})`);
-    });
-    matchRegionExpression.push('rgba(0, 0, 0, 0)');
-
     map.value?.addSource('cadastre', {
       type: 'vector',
       url:
@@ -89,11 +82,11 @@ onMounted(() => {
       source: 'cadastre',
       'source-layer': 'departements',
       layout: {
-        visibility: 'visible'
+        visibility: selectedRepartitionTag.value ? 'visible' : 'none'
       },
       paint: {
         'fill-outline-color': '#888888',
-        'fill-color': matchDepartementExpression,
+        'fill-color': fillColor(departments),
         'fill-opacity': {
           stops: [[5, 1], [6, 0.8], [7, 0.7], [8, 0.6], [9, 0.5], [10, 0.4], [11, 0.3]]
         }
@@ -105,11 +98,11 @@ onMounted(() => {
       source: 'cadastre',
       'source-layer': 'regions',
       layout: {
-        visibility: 'none'
+        visibility: selectedRepartitionTag.value ? 'none' : 'visible'
       },
       paint: {
         'fill-outline-color': '#888888',
-        'fill-color': matchRegionExpression,
+        'fill-color': fillColor(regions),
         'fill-opacity': {
           stops: [[5, 1], [6, 0.8], [7, 0.7], [8, 0.6], [9, 0.5], [10, 0.4], [11, 0.3]]
         }
@@ -124,17 +117,20 @@ onMounted(() => {
     closeOnClick: false
   }).setMaxWidth('300px');
 
-  const sumSearches: number = Object.values(props.stats.departementRepartition).reduce((a: number, b: number) => {
-    return a + b;
-  });
+  const departmentTotal = sumKnownCounts(Object.values(departments));
+  const regionTotal = sumKnownCounts(Object.values(regions));
   map.value?.on('mousemove', 'departements-data', (e: any) => {
     map.value.getCanvas().style.cursor = 'pointer';
 
-    const searches = props.stats.departementRepartition[e.features[0].properties.code];
+    const searches = departments[e.features[0].properties.code];
+    if (searches === undefined) {
+      popup.remove();
+      return;
+    }
     const popupContent = createStatsPopupContent({
       name: e.features[0].properties.nom,
       code: e.features[0].properties.code,
-      summary: `${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)`,
+      summary: `${utils.numberWithSpaces(searches)} (${statisticPercentage(searches, departmentTotal)})`,
     });
 
     popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
@@ -143,10 +139,14 @@ onMounted(() => {
   map.value?.on('mousemove', 'regions-data', (e: any) => {
     map.value.getCanvas().style.cursor = 'pointer';
 
-    const searches = props.stats.regionRepartition[e.features[0].properties.code];
+    const searches = regions[e.features[0].properties.code];
+    if (searches === undefined) {
+      popup.remove();
+      return;
+    }
     const popupContent = createStatsPopupContent({
       name: e.features[0].properties.nom,
-      summary: `${utils.numberWithSpaces(searches)} (${(searches * 100 / sumSearches).toFixed(2)}%)`,
+      summary: `${utils.numberWithSpaces(searches)} (${statisticPercentage(searches, regionTotal)})`,
     });
 
     popup.setLngLat(e.lngLat).setDOMContent(popupContent).addTo(map.value);
@@ -192,14 +192,13 @@ const repartitionTags: Ref<any[]> = ref([{
   label: 'Par région',
   value: false
 }]);
-const selectedRepartitionTag: Ref<boolean> = ref(true);
 
 const flyToLocation = (bounds: any) => {
   map.value?.fitBounds(bounds);
 };
 
 const updateLayerFilter = () => {
-  legendTooltip.value = selectedRepartitionTag.value ? `${minDepartementSearches} à ${maxDepartementSearches}` : `${minRegionSearches} à ${maxRegionSearches}`;
+  if (!map.value?.getLayer('regions-data') || !map.value?.getLayer('departements-data')) return;
   map.value?.setLayoutProperty(selectedRepartitionTag.value ? 'regions-data' : 'departements-data', 'visibility', 'none');
   map.value?.setLayoutProperty(selectedRepartitionTag.value ? 'departements-data' : 'regions-data', 'visibility', 'visible');
 };
@@ -260,7 +259,7 @@ const updateLayerFilter = () => {
   <template v-else>
     <DsfrAlert
       title="Votre navigateur ne supporte pas les cartographies"
-      description="Impossible d'afficher la carte de la répartition géographique des recherches sur les 30 derniers jours"
+      description="Impossible d'afficher la carte de la répartition géographique des recherches"
       type="error"
       :closeable="false"
     />

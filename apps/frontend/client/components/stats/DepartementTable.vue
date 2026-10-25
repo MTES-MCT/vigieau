@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Ref } from 'vue';
 import utils from '../../utils';
+import { statisticPercentage } from '../../utils/audience-statistics';
 
 const props = defineProps<{
   stats: any;
@@ -20,7 +21,7 @@ const rows = Object.keys(props.stats.departementRepartition)
     return [
       departmentCode,
       utils.numberWithSpaces(searchCount),
-      `${((searchCount * 100) / sumSearches).toFixed(2)}%`,
+      statisticPercentage(searchCount, sumSearches),
     ];
   })
   .sort((firstRow, secondRow) =>
@@ -89,8 +90,7 @@ filterDepartments();
   </template>
   <template v-else>
     <p class="fr-mt-4w">
-      Une erreur est survenue dans la récupération des données. Veuillez
-      ré-essayer dans quelques instants.
+      La répartition des recherches par département n'est pas disponible pour cette période.
     </p>
   </template>
 </template>

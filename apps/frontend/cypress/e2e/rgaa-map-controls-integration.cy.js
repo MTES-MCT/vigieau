@@ -633,7 +633,7 @@ describe('Balayage Chrome des routes publiques de données à 320 px', () => {
     {
       path: '/stats',
       readySelector: '#department-search-statistics-table',
-      expectedTitle: 'Statistiques depuis le 10 Juillet 2023',
+      expectedTitle: 'Statistiques de fréquentation',
       tableCount: 1,
       openDataTab: true,
     },

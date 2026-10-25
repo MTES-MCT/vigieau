@@ -2,6 +2,7 @@
 import { ChartOptions } from "chart.js";
 import { Line } from "vue-chartjs";
 import moment from 'moment';
+import { statisticCount } from '../../utils/audience-statistics';
 
 const props = defineProps<{
   stats: any
@@ -24,6 +25,9 @@ const chartLineData = {
     }
   ]
 };
+const hasObservations = computed(() => props.stats.statsByDay.some((day: any) =>
+  [day.visits, day.restrictionsSearch, day.arreteDownloads].some(value => statisticCount(value) !== null),
+));
 
 const tooltipTitle = (tooltipItems: any[]): string => {
   return moment(tooltipItems[0].parsed.x).format('DD/MM/YYYY');
@@ -56,8 +60,13 @@ const chartLineOptions: ChartOptions = {
 
 <template>
   <DsfrCallout>
-    <Line :options="chartLineOptions"
-          :data="chartLineData"
-          :style="{'min-height': '400px'}"/>
+    <Line
+      v-if="hasObservations" :options="chartLineOptions"
+      :data="chartLineData"
+      :style="{'min-height': '400px'}"
+    />
+    <p v-else>
+      Les données de fréquentation ne sont pas disponibles pour cette période.
+    </p>
   </DsfrCallout>  
 </template>
