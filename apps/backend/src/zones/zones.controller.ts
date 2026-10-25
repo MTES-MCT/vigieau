@@ -26,8 +26,11 @@ export class ZonesController {
       "Récupérer les zones d'alertes et leurs restrictions associées à un adresse ou une commune",
   })
   @ApiResponse({
-    status: 201,
+    status: 200,
     type: ZoneDto,
+    isArray: true,
+    description:
+      'Toutes les zones applicables sont conservées. Des zones naturelles superposées de même type sont retournées ensemble uniquement si leurs prescriptions complètes sont strictement équivalentes.',
   })
   @ApiResponse({
     status: 400,
@@ -45,7 +48,7 @@ export class ZonesController {
   @ApiResponse({
     status: 500,
     description:
-      'Plusieurs zones de même type présentes, impossible de renvoyer des restrictions cohérentes.',
+      'Plusieurs zones de même type présentes dont les prescriptions complètes diffèrent ou ne peuvent pas être comparées.',
   })
   @ApiResponse({
     status: 410,
@@ -100,7 +103,12 @@ export class ZonesController {
     summary:
       "Récupérer les zones et la disponibilité certifiée des données par type d'eau",
   })
-  @ApiResponse({ status: 200, type: ZonesWithAvailabilityDto })
+  @ApiResponse({
+    status: 200,
+    type: ZonesWithAvailabilityDto,
+    description:
+      'Toutes les zones aux prescriptions équivalentes et leurs identifiants sont conservés. La cohérence de tous les types est vérifiée avant le filtrage zoneType.',
+  })
   async findAllV2(
     @Query() query: FindZonesQueryDto,
   ): Promise<ZonesWithAvailabilityDto> {

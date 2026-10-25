@@ -1,6 +1,6 @@
 import { LoggerInterceptor } from './logger.interceptor';
 import { ExecutionContext, CallHandler } from '@nestjs/common';
-import { lastValueFrom, of, throwError } from 'rxjs';
+import { lastValueFrom, of } from 'rxjs';
 import { VigieauLogger } from '../../logger/vigieau.logger';
 
 describe('LoggerInterceptor', () => {
@@ -25,6 +25,7 @@ describe('LoggerInterceptor', () => {
     // Mock du contexte d'exécution (ExecutionContext)
     mockContext = {
       switchToHttp: jest.fn().mockReturnValue({
+        getResponse: jest.fn().mockReturnValue({ locals: {} }),
         getRequest: jest.fn().mockReturnValue({
           ip: '127.0.0.1',
           method: 'GET',
@@ -47,8 +48,28 @@ describe('LoggerInterceptor', () => {
   });
 
   describe('intercept', () => {
+    it('correlates request and response logs with the validated HTTP failure id', async () => {
+      const requestId = 'd5a952e1-2847-479b-a9bc-1077bdb1bf28';
+      mockContext.switchToHttp().getResponse().locals.httpRequestId = requestId;
+
+      await lastValueFrom(
+        interceptor.intercept(
+          mockContext as ExecutionContext,
+          mockHandler as CallHandler,
+        ),
+      );
+
+      expect(mockLogger.log).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining(`REQUEST - ID: ${requestId},`),
+      );
+      expect(mockLogger.log).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining(`RESPONSE - ID: ${requestId},`),
+      );
+    });
+
     it('devrait logger la requête entrante et la réponse sortante', async () => {
-      const requestId = expect.any(String); // On ne connaît pas l'UUID exact
       const mockRequest = mockContext.switchToHttp().getRequest();
 
       await lastValueFrom(
