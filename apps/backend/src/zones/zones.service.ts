@@ -41,6 +41,7 @@ import type {
   ZoneTypeAvailabilityDto,
   ZonesWithAvailabilityDto,
 } from './dto/zone.dto';
+import { haveEquivalentZoneRestrictions } from './equivalent-zone-restrictions';
 
 type ZoneCacheError = {
   at: Date;
@@ -277,7 +278,12 @@ export class ZonesService implements OnModuleInit {
         );
       }
 
-      const zones = this.searchZonesByLonLat({ lon, lat }, false, snapshot);
+      const zones = this.searchZonesByLonLat(
+        { lon, lat },
+        false,
+        snapshot,
+        'equivalent-restrictions',
+      );
       return this.formatZones(zones, profil, zoneType, commune, snapshot);
     }
 
@@ -623,12 +629,14 @@ export class ZonesService implements OnModuleInit {
    * Recherche les zones en fonction des coordonnées géographiques (lon/lat).
    * @param coords - Coordonnées géographiques
    * @param allowMultiple - Autoriser plusieurs zones du même type
+   * @param overlapPolicy - Tolérance explicite des prescriptions équivalentes pour la consultation publique
    * @returns Les zones correspondant aux coordonnées
    */
   searchZonesByLonLat(
     coords: { lon: number; lat: number },
     allowMultiple = false,
     snapshot = this.requireSnapshot(),
+    overlapPolicy: 'strict' | 'equivalent-restrictions' = 'strict',
   ): any[] {
     const { lon, lat } = coords;
     const zones = snapshot.zoneTree
@@ -640,17 +648,34 @@ export class ZonesService implements OnModuleInit {
       .map((feature) => snapshot.zonesIndex[feature.zoneId])
       .filter(Boolean);
 
-    const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
-    zones.forEach((zone) => {
-      if (!zone.ressourceInfluencee) {
-        zoneCounts[zone.type]++;
-      }
-    });
+    const conflictingGroups = allowMultiple
+      ? []
+      : ZONE_TYPES.map((type) =>
+          zones.filter(
+            (zone) => zone.type === type && !zone.ressourceInfluencee,
+          ),
+        ).filter(
+          (group) =>
+            group.length > 1 &&
+            (overlapPolicy === 'strict' ||
+              !haveEquivalentZoneRestrictions(group)),
+        );
 
-    if (
-      !allowMultiple &&
-      (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)
-    ) {
+    if (conflictingGroups.length > 0) {
+      if (overlapPolicy === 'equivalent-restrictions') {
+        this.logger.warn(
+          JSON.stringify({
+            event: 'zone_lookup_conflict',
+            cause: 'non_equivalent_restrictions',
+            groups: conflictingGroups.map((group) => ({
+              type: group[0].type,
+              zoneIds: group
+                .map((zone) => zone.id)
+                .filter((id) => Number.isSafeInteger(id) && id > 0),
+            })),
+          }),
+        );
+      }
       throw new HttpException(
         `Un problème avec les données ne permet pas de répondre à votre demande.`,
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -1766,7 +1791,7 @@ export class ZonesService implements OnModuleInit {
    * @param profil - Profil utilisateur pour filtrer les usages
    * @param zoneType - Type de zone spécifique à sélectionner (facultatif)
    * @param commune - Code commune pour récupérer les arrêtés municipaux (facultatif)
-   * @returns Liste des zones formatées ou une zone unique si `zoneType` est fourni
+   * @returns Toutes les zones formatées correspondant au type demandé
    */
   formatZones(
     zones: readonly any[],
@@ -1789,9 +1814,11 @@ export class ZonesService implements OnModuleInit {
     const zonesToFormat = zones ?? [];
 
     if (zoneType) {
-      const toReturn = zonesToFormat.find((z) => z.type === zoneType);
-      return toReturn
-        ? [this.formatZone(toReturn, profil, communeArreteMunicipal)]
+      const toReturn = zonesToFormat.filter((z) => z.type === zoneType);
+      return toReturn.length > 0
+        ? toReturn.map((zone) =>
+            this.formatZone(zone, profil, communeArreteMunicipal),
+          )
         : arreteMunicipalUrl
           ? [municipalZone(zoneType)]
           : [];

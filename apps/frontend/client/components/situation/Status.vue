@@ -75,12 +75,16 @@ const announceSituationUpdate = async (message: string) => {
   situationUpdateAnnouncement.value = message;
 };
 
+// Native select events contain strings; keep the API's original IDs on zones.
+const zoneSelectValue = (id: string | number | null | undefined) =>
+  id === null || id === undefined ? undefined : String(id);
+
 const zonesOptions = computed(() => {
   return zones.value
     .filter((z) => z.type === typeEau.value)
     .map((z) => {
       return {
-        value: z.id,
+        value: zoneSelectValue(z.id),
         text: z.nom,
       };
     });
@@ -143,7 +147,9 @@ const selectZone = async () => {
     return;
   }
 
-  const selectedZone = zones.value.find((z) => z.id === zoneModal.value);
+  const selectedZone = zones.value.find(
+    (z) => zoneSelectValue(z.id) === zoneSelectValue(zoneModal.value),
+  );
   if (!selectedZone) {
     zoneModalError.value = 'La zone sélectionnée n’est plus disponible.';
     await nextTick();
@@ -167,7 +173,9 @@ const closeZoneModal = () => {
 };
 
 const updateZone = ($event) => {
-  zone.value = zones.value.find((z) => z.id === $event);
+  zone.value = zones.value.find(
+    (z) => zoneSelectValue(z.id) === zoneSelectValue($event),
+  );
 };
 
 const modalActions: Ref<any[]> = ref([
@@ -251,7 +259,7 @@ watch(
         <DsfrSelect
           label="Zone d’alerte concernée"
           select-id="situation-alert-zone"
-          :model-value="zone?.id"
+          :model-value="zoneSelectValue(zone?.id)"
           :options="zonesOptions"
           @update:model-value="updateZone($event)"
         />
