@@ -52,8 +52,20 @@ describe('Tableau public des départements accessible', () => {
   it('relie le filtre, sépare la pagination et annonce chaque mise à jour', () => {
     visitDepartmentTable();
 
+    const summaryLabels = [
+      'Aucune restriction confirmée',
+      'Vigilance',
+      'Alerte',
+      'Alerte renforcée',
+      'Crise',
+      'Données indisponibles',
+    ];
     cy.get('.departement-card-list > li')
-      .should('have.length', 5)
+      .should('have.length', summaryLabels.length)
+      .should(($items) => {
+        expect([...$items].map((item) => item.querySelector('.fr-badge').textContent.trim()))
+          .to.deep.equal(summaryLabels);
+      })
       .each(($item) => {
         cy.wrap($item).find('.fr-badge').should('have.length', 1);
         cy.wrap($item)
@@ -73,7 +85,7 @@ describe('Tableau public des départements accessible', () => {
 
     cy.get('#departments-table caption')
       .should('be.visible')
-      .and('contain.text', 'Niveau de gravité maximal observé');
+      .and('contain.text', "Situation de l'eau potable par département");
     cy.get('#departments-table thead th[scope="col"]')
       .should('have.length', 3);
     cy.get('#departments-table tbody')

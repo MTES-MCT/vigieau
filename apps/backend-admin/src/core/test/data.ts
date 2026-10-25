@@ -13,46 +13,55 @@ const testArretesCadre: any[] = [
   {
     numero: 'CYTEST_001',
     statut: 'a_valider',
-    dateDebut: '01/01/2024',
+    dateDebut: '2024-01-01',
+    zonesAlerte: [],
     usages: [],
   },
   {
     numero: 'CYTEST_002',
     statut: 'a_venir',
-    dateDebut: '01/01/2099',
+    dateDebut: '2099-01-01',
     usages: [],
   },
   {
     numero: 'CYTEST_003',
     statut: 'publie',
-    dateDebut: '01/01/2024',
+    dateDebut: '2024-01-01',
     usages: [],
   },
   {
     numero: 'CYTEST_004',
     statut: 'a_venir',
-    dateDebut: '01/01/2024',
+    dateDebut: '2024-01-01',
     usages: [],
   },
   {
     numero: 'CYTEST_005',
     statut: 'a_venir',
-    dateDebut: '01/01/2024',
+    dateDebut: '2024-01-01',
     usages: [],
   },
   {
     numero: 'CYTEST_006',
     statut: 'abroge',
-    dateDebut: '01/01/2024',
-    dateFin: '15/01/2024',
+    dateDebut: '2024-01-01',
+    dateFin: '2024-01-15',
+    zonesAlerte: [],
     usages: [],
   },
   {
     numero: 'CYTEST_007',
     statut: 'a_venir',
-    dateDebut: '01/01/2024',
+    dateDebut: '2024-01-01',
     usages: [],
   },
+  ...Array.from({ length: 5 }, (_, index) => ({
+    numero: `CYTEST_PAGE_${String(index + 1).padStart(3, '0')}`,
+    statut: 'publie',
+    dateDebut: '2024-01-01',
+    zonesAlerte: [],
+    usages: [],
+  })),
 ];
 
 export { testArretesCadre };

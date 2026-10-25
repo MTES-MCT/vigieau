@@ -1,193 +1,151 @@
-describe('Création d\'un arrêtés cadres', () => {
+/* global after, cy, Cypress, describe, expect, it */
 
+const selectedPanel = '.fr-tabs__panel--selected';
+const nextStep = () => cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
+const saveUsage = () => cy.contains('dialog[open] .fr-btn', 'Enregistrer')
+  .should(($button) => expect($button.text().trim()).to.equal('Enregistrer'))
+  .click();
+
+function fillUsage() {
+  cy.get('dialog[open] input[data-cy=UsageFormconcerneParticulierCheckbox]').check({ force: true });
+  cy.get('dialog[open] input[data-cy=UsageFormconcerneAepCheckbox]').check({ force: true });
+  cy.get('dialog[open] [data-cy=UsageArreteCadreFormdescriptionCriseInput]').clear().type('Description de la crise');
+}
+
+describe("Création d'un arrêté cadre", () => {
   after(() => {
     cy.resetDb('arrete-cadre');
   });
-  
-  const acNumero = `CYTEST${Math.floor(Math.random() * 10000)}`;
-  
-  describe('En tant que département', () => {
-    it(`Je peux créer un AC uniquement sur mon département`, () => {
-      cy.devLogin(Cypress.env('departementUser')); 
-      cy.get('[data-cy=ArreteCadreListAddBtn]').click();
-      cy.location('pathname').should('equal', '/arrete-cadre/nouveau/edition');
-      cy.get('h1').contains(`Création d'un arrêté cadre`).should('exist');
-      
-      // Général
-      // Mon département doit être rempli automatiquement
-      cy.get('.fr-highlight').contains('Corse-du-Sud').should('exist');
-      cy.get('.fr-select').should('not.exist');
-      cy.get('[data-cy=ArreteCadreFormDepartementsAutocomplete]').should('not.exist');
-      
-      // Je ne peux pas passer à l'étape suivante ni enregistrer sans avoir validé le formulaire courant
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-input-group--error').should('exist');
-      
-      cy.get('[data-cy=ArreteCadreFormNumeroInput]').type(acNumero);
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-input-group--error').should('not.exist');
 
-      cy.get('[data-cy=ArreteCadreFormPreviousStepBtn]').click();
-      cy.intercept({
-        method: 'POST',
-        url: '/api/arrete-cadre',
-      }).as('acCreate');
-      cy.get('[data-cy=ArreteCadreFormSaveBtn]').click();
-      cy.wait('@acCreate');
-      cy.get('.fr-alert--success').should('exist');
-      cy.get('.fr-alert--success .fr-btn--close').first().click();
-      cy.get('.fr-alert--success').should('not.exist');
-      
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
+  it('Un département peut enregistrer, compléter, publier puis abroger son arrêté', () => {
+    const numero = `CYTEST_CREATE_${Date.now()}`;
+    const customUsage = `Arrosage spécifique ${Date.now()}`;
+    cy.devLogin(Cypress.env('departementUser'));
+    cy.get('[data-cy=ArreteCadreListAddBtn]').click();
+    cy.location('pathname').should('equal', '/arrete-cadre/nouveau/edition');
+    cy.get('h1').should('contain.text', "Création d'un arrêté cadre");
+    cy.get('.fr-highlight').should('contain.text', 'Corse-du-Sud');
+    cy.get(`${selectedPanel} select`).should('not.exist');
+    cy.get('[data-cy=ArreteCadreFormDepartementsAutocomplete]').should('not.exist');
 
-      // Règles
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-input-group--error').should('exist');
-      cy.get('[data-cy=ArreteCadreFormCommuneRadio] [type="radio"]').check('aep', {force: true});
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-input-group--error').should('not.exist');
-      
-      // Zones
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-input-group--error').should('exist');
-      cy.get('.zone-alerte__title').contains('Corse-du-Sud').should('exist');
-      cy.get('.zone-alerte__body [type="checkbox"]').first().check({force: true});
-      cy.get('.zone-alerte__title').contains('1/2').should('exist');
-      cy.get('.zone-alerte__title [type="checkbox"]').first().check({force: true});
-      cy.get('.zone-alerte__title').contains('2/2').should('exist');
-      cy.get('.zone-alerte__title [type="checkbox"]').first().uncheck({force: true});
-      cy.get('.zone-alerte__title').contains('0/2').should('exist');
-      cy.get('.zone-alerte__title [type="checkbox"]').first().check({force: true});
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      
-      cy.intercept({
-        method: 'PATCH',
-        url: '/api/arrete-cadre/*',
-      }).as('acUpdate');
-      cy.get('[data-cy=ArreteCadreFormSaveBtn]').click();
-      cy.wait('@acUpdate');
-      cy.get('.fr-alert--success').should('exist');
-      cy.get('.fr-alert--success .fr-btn--close').first().click();
-      cy.get('.fr-alert--success').should('not.exist');
-      
-      // Usages
-      cy.get('.fr-tabs__panel--selected .fr-table tbody td').should('not.exist');
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-input-group--error').should('exist');
-      cy.get('[data-cy=ArreteCadreFormUsagesAutocomplete] input').type('Arrosage des espaces verts');
-      cy.get('ul li.list-item').should('exist');
-      cy.get('ul li.list-item').first().click();
-      cy.get('.usage-form-wrapper').should('exist');
-      cy.get('[data-cy=ArreteCadreFormUsagesSaveBtn]').click();
-      cy.get('.usage-form-wrapper .fr-input-group--error').should('exist');
-
-      cy.get('[data-cy=UsageArreteCadreFormconcerneParticulierCheckbox] [type="checkbox"]').check({force: true});
-      cy.get('[data-cy=UsageArreteCadreFormconcerneAepCheckbox] [type="checkbox"]').check({force: true});
-      cy.get('[data-cy=UsageArreteCadreFormdescriptionCriseInput]').type('Description de la crise');
-      cy.get('[data-cy=ArreteCadreFormUsagesSaveBtn]').click();
-      cy.get('.usage-form-wrapper').should('not.exist');
-      cy.get('.fr-tabs__panel--selected .fr-table tbody tr').should('have.length', 1);
-
-      cy.get('[data-cy=ArreteCadreFormUsagesAutocomplete] input').type('Arrosage des espaces verts très spécifique');
-      cy.get('ul li.list-item').should('have.length', 1);
-      cy.get('ul li.list-item').last().click();
-      cy.get('.fr-modal h1').contains('Création d\'un nouvel usage').should('exist');
-      cy.get('[data-cy=UsageFormSaveBtn]').click();
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('[data-cy=UsageFormNameInput]').type('Arrosage des espaces verts très spécifique');
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('.fr-select').select('Arroser');
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('[data-cy=UsageFormconcerneParticulierCheckbox] [type="checkbox"]').check({force: true});
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('[data-cy=UsageFormconcerneAepCheckbox] [type="checkbox"]').check({force: true});
-      cy.get('.fr-modal .fr-input-group--error').should('not.exist');
-      cy.intercept({
-        method: 'POST',
-        url: '/api/usage',
-      }).as('usageCreate');
-      cy.get('[data-cy=UsageFormSaveBtn]').click();
-      cy.wait('@usageCreate');
-      cy.get('.usage-form-wrapper').should('exist');
-      cy.get('[data-cy=ArreteCadreFormUsagesSaveBtn]').click();
-      cy.get('.usage-form-wrapper .fr-input-group--error').should('exist');
-      cy.get('[data-cy=UsageArreteCadreFormdescriptionCriseInput]').type('Description de la crise');
-      cy.get('[data-cy=ArreteCadreFormUsagesSaveBtn]').click();
-      cy.get('.usage-form-wrapper').should('not.exist');
-      cy.get('.fr-tabs__panel--selected .fr-table tbody tr').should('have.length', 2);
-
-      cy.intercept({
-        method: 'PATCH',
-        url: '/api/arrete-cadre/*',
-      }).as('acUpdate');
-      cy.get('[data-cy=ArreteCadreFormSaveBtn]').click();
-      cy.wait('@acUpdate');
-      cy.get('.fr-alert--success').should('exist');
-      cy.get('.fr-alert--success .fr-btn--close').first().click();
-      cy.get('.fr-alert--success').should('not.exist');
-      
-      cy.get('.fr-header__service').click();
-      cy.location('pathname').should('equal', '/arrete-cadre');
-      cy.searchAC(acNumero);
-      cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').should('have.length', 1);
-      cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard] .fr-card__title').click();
-      cy.get('h1').contains(`Edition d'un arrêté cadre`).should('exist');
-      cy.get('[data-cy=ArreteCadreFormNumeroInput]').should('have.value', acNumero);
-      cy.get('.fr-highlight').contains('Corse-du-Sud').should('exist');
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('[data-cy=ArreteCadreFormCommuneRadio] [type="radio"]').eq(0).should('not.be.checked');
-      cy.get('[data-cy=ArreteCadreFormCommuneRadio] [type="radio"]').eq(1).should('be.checked');
-      cy.get('[data-cy=ArreteCadreFormCommuneRadio] [type="radio"]').eq(2).should('not.be.checked');
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.zone-alerte__title').contains('2/2').should('exist');
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-tabs__panel--selected .fr-table tbody tr').should('have.length', 2);
-      cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-      cy.get('.fr-tabs__panel--selected .fr-table tbody tr').should('have.length', 2);
-      cy.get('[data-cy=ArreteCadreFormPublishBtn]').click();
-      
-      // Publication
-      cy.get('.fr-modal h1').contains('Date de publication').should('exist');
-      cy.get('[data-cy=PublishFormPublishBtn]').click();
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('[data-cy=PublishFormDateDebutInput]').type('2024-01-01');
-      cy.fixture('guide_propluvia.pdf', null).as('guide');
-      cy.get('input[type=file]').selectFile('@guide');
-      cy.get('[data-cy=PublishFormPublishBtn]').click();
-
-      // cy.wait();
-      cy.location('pathname').should('equal', '/arrete-cadre');
-      cy.searchAC(acNumero);
-      cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').eq(0).find('.fr-badge').contains('En vigueur').should('exist');
-      
-      // Abrogation
-      cy.get('[data-cy=ArreteCadreCardActionsBtn]').click();
-      cy.get('.fr-card__actions__menu li').contains('Abroger').click();
-      cy.get('.fr-modal h1').contains(`Abroger l'arrêté ${acNumero}`).should('exist');
-      cy.get('[data-cy=RepealFormRepealBtn]').click();
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('[data-cy=RepealFormDateDebutInput]').should('have.value', '2024-01-01');
-      cy.get('[data-cy=RepealFormDateFinInput]').type('2023-01-01');
-      cy.get('[data-cy=RepealFormRepealBtn]').click();
-      cy.get('.fr-modal .fr-input-group--error').should('exist');
-      cy.get('[data-cy=RepealFormDateFinInput]').type('2024-01-15');
-      cy.intercept({
-        method: 'GET',
-        url: '/api/arrete-cadre/search*',
-      }).as('acSearch');
-      cy.get('[data-cy=RepealFormRepealBtn]').click();
-      cy.wait('@acSearch');
-
-      cy.searchAC(acNumero, false);
-      cy.get('[data-cy=ArreteCadreListFilterAbroge]').first().click();
-      cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard] .fr-card__title').contains(acNumero).should( 'exist' );
-
+    nextStep();
+    cy.get(`${selectedPanel} .fr-input-group--error`).should('exist');
+    cy.get('[data-cy=ArreteCadreFormNumeroInput]').type(numero);
+    cy.intercept('POST', '**/api/arrete-cadre').as('create');
+    cy.get('[data-cy=ArreteCadreFormSaveBtn]').click();
+    cy.wait('@create').then(({ request, response }) => {
+      expect(response.statusCode).to.equal(201);
+      expect(request.body.departements.map((department) => department.code)).to.deep.equal(['2A']);
     });
+    cy.get('.fr-alert--success').should('contain.text', 'Enregistrement réussi');
+
+    nextStep();
+    cy.get('.fr-stepper__state').should('contain.text', '2 sur 4');
+    nextStep();
+    cy.get('.fr-stepper__state').should('contain.text', '2 sur 4');
+    cy.get('.zone-line').should('contain.text', 'Corse-du-Sud');
+    cy.get('.zone-alerte__body input[type=checkbox]').first().check({ force: true });
+    cy.get('.zone-line .fr-accordion__btn').should('contain.text', '1/2');
+    cy.contains('.zone-line label', 'Tout sélectionner').click();
+    cy.get('.zone-line .fr-accordion__btn').should('contain.text', '2/2');
+    cy.contains('.zone-line label', 'Tout sélectionner').click();
+    cy.get('.zone-line .fr-accordion__btn').should('contain.text', '0/2');
+    cy.contains('.zone-line label', 'Tout sélectionner').click();
+    nextStep();
+
+    cy.get('.fr-stepper__state').should('contain.text', '3 sur 4');
+    cy.get(`${selectedPanel} .fr-table tbody tr`).should('not.exist');
+    nextStep();
+    cy.get('.fr-stepper__state').should('contain.text', '3 sur 4');
+    cy.get('[data-cy=ArreteCadreFormUsagesAutocomplete] input').type('Arrosage des espaces verts');
+    cy.contains('ul li.list-item', 'Arrosage des espaces verts').click();
+    cy.get('dialog[open] .fr-btn--close').should('be.focused');
+    cy.get('dialog[open] [data-cy=UsageFormNameInput]').should('have.value', 'Arrosage des espaces verts');
+    cy.get('dialog[open] [data-cy=UsageArreteCadreFormdescriptionCriseInput]')
+      .focus().should('be.focused').clear().should('have.value', '');
+    saveUsage();
+    cy.get('dialog[open] .fr-input-group--error').should('exist');
+    fillUsage();
+    saveUsage();
+    cy.get('dialog[open]').should('not.exist');
+    cy.get(`${selectedPanel} .fr-table tbody tr`).should('have.length', 1);
+
+    cy.contains(`${selectedPanel} button`, 'Créer un nouvel usage').click();
+    cy.get('dialog[open] .fr-btn--close').should('be.focused');
+    saveUsage();
+    cy.get('dialog[open] .fr-input-group--error').should('exist');
+    cy.get('dialog[open] [data-cy=UsageFormNameInput]').type(customUsage);
+    cy.get('dialog[open] [data-cy=UsageFormThematiqueSelect]').select('Arroser');
+    fillUsage();
+    saveUsage();
+    cy.get('dialog[open]').should('not.exist');
+    cy.get(`${selectedPanel} .fr-table tbody tr`).should('have.length', 2);
+
+    cy.intercept('PATCH', '**/api/arrete-cadre/*').as('save');
+    cy.get('[data-cy=ArreteCadreFormSaveBtn]').click();
+    cy.wait('@save').then(({ request, response }) => {
+      expect(response.statusCode).to.equal(200);
+      expect(request.body.zonesAlerte).to.have.length(2);
+      expect(request.body.usages.map((usage) => usage.nom)).to.deep.equal(['Arrosage des espaces verts', customUsage]);
+    });
+    cy.contains('button', 'Retour à la liste').click();
+    cy.location('pathname').should('equal', '/arrete-cadre');
+    cy.searchAC(numero);
+    cy.get('[data-cy=ArreteCadreListCard] .fr-card__title a').click();
+    cy.get('[data-cy=ArreteCadreFormNumeroInput]').should('have.value', numero);
+    nextStep();
+    cy.get('.zone-line .fr-accordion__btn').should('contain.text', '2/2');
+    nextStep();
+    cy.get(`${selectedPanel} .fr-table tbody tr`).should('have.length', 2);
+    cy.get(selectedPanel).should('contain.text', customUsage);
+    nextStep();
+    cy.get('.fr-stepper__state').should('contain.text', '4 sur 4');
+    cy.get(selectedPanel).should('contain.text', 'Arrosage des espaces verts').and('contain.text', customUsage);
+    cy.get('[data-cy=ArreteCadreFormPublishBtn]').click();
+    cy.get('dialog[open] [data-cy=PublishFormPublishBtn]').click();
+    cy.get('dialog[open] .fr-input-group--error').should('exist');
+    cy.get('dialog[open] [data-cy=PublishFormDateDebutInput]').type('2024-01-01');
+    cy.fixture('guide_propluvia.pdf', null).as('guide');
+    cy.get('dialog[open] input[type=file]').selectFile('@guide');
+    cy.intercept('POST', '**/api/arrete-cadre/*/publier').as('publish');
+    cy.get('dialog[open] [data-cy=PublishFormPublishBtn]').click();
+    cy.wait('@publish').its('response.statusCode').should('equal', 201);
+    cy.location('pathname').should('equal', '/arrete-cadre');
+    cy.searchAC(numero);
+    cy.get('[data-cy=ArreteCadreListCard] .fr-badge').should('contain.text', 'En vigueur');
+
+    cy.get('[data-cy=ArreteCadreCardActionsBtn]').click();
+    cy.contains('.fr-card__actions__menu li', /^Abroger$/).click();
+    cy.get('dialog[open] .fr-modal__title').should('contain.text', numero);
+    cy.get('[data-cy=RepealFormRepealBtn]').click();
+    cy.get('dialog[open] .fr-input-group--error').should('exist');
+    cy.get('[data-cy=RepealFormDateDebutInput]').should('have.value', '2024-01-01');
+    cy.get('[data-cy=RepealFormDateFinInput]').type('2023-01-01');
+    cy.get('[data-cy=RepealFormRepealBtn]').click();
+    cy.get('dialog[open] .fr-input-group--error').should('exist');
+    cy.get('[data-cy=RepealFormDateFinInput]').clear().type('2024-01-15');
+    cy.intercept('GET', '**/api/arrete-cadre/search*').as('repealed');
+    cy.get('[data-cy=RepealFormRepealBtn]').click();
+    cy.wait('@repealed');
+    cy.searchAC(numero, false);
+    cy.get('[data-cy=ArreteCadreListFilterAbroge]').first().click();
+    cy.get('[data-cy=ArreteCadreListCard] .fr-card__title').should('contain.text', numero);
   });
 
-  describe('En tant que MTE', () => {
-    it(`Je peux créer un AC sur n'importe quel département`, () => {
-      // cy.devLogin(Cypress.env('mteUse'));
+  it('Le MTE peut créer un brouillon dans un autre département', () => {
+    const numero = `CYTEST_MTE_${Date.now()}`;
+    cy.devLogin(Cypress.env('mteUser'));
+    cy.get('[data-cy=ArreteCadreListAddBtn]').click();
+    cy.get('[data-cy=ArreteCadreFormNumeroInput]').type(numero);
+    cy.get(`${selectedPanel} select`).select('2B - Haute-Corse');
+    cy.intercept('POST', '**/api/arrete-cadre').as('createMte');
+    cy.get('[data-cy=ArreteCadreFormSaveBtn]').click();
+    cy.wait('@createMte').then(({ request, response }) => {
+      expect(response.statusCode).to.equal(201);
+      expect(request.body.departements.map((department) => department.code)).to.deep.equal(['2B']);
     });
+    cy.contains('button', 'Retour à la liste').click();
+    cy.searchAC(numero);
+    cy.get('[data-cy=ArreteCadreListCard] .fr-card__desc').should('contain.text', 'Haute-Corse');
   });
 });

@@ -19,11 +19,13 @@ export async function verifyMaplibreWorkerBuild(appDirectory) {
   const clientBundles = await Promise.all(files
     .filter((file) => file.endsWith('.js') && file !== worker)
     .map((file) => readFile(join(bundleDirectory, file), 'utf8')));
+  const escapedWorker = worker.replaceAll('.', '\\.');
+  const absoluteWorkerUrl = new RegExp(`(["'\`])/_nuxt/${escapedWorker}\\1`);
   const relativeWorkerUrl = new RegExp(
-    `new URL\\(["'](?:\\./)?${worker.replaceAll('.', '\\.')}["'],\\s*import\\.meta\\.url\\)`,
+    `new URL\\(\\s*(["'\`])(?:\\./)?${escapedWorker}\\1\\s*,\\s*import\\.meta\\.url\\s*\\)`,
   );
   assert.ok(
-    clientBundles.some((source) => source.includes(`/_nuxt/${worker}`) || relativeWorkerUrl.test(source)),
+    clientBundles.some((source) => absoluteWorkerUrl.test(source) || relativeWorkerUrl.test(source)),
     'The client must reference the published MapLibre worker URL',
   );
   return { status: 'ok', worker };

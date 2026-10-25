@@ -2061,6 +2061,11 @@ export class ArreteCadreService {
     for (const ac of testArretesCadre) {
       switch (ac.numero) {
         case 'CYTEST_001':
+        case 'CYTEST_PAGE_001':
+        case 'CYTEST_PAGE_002':
+        case 'CYTEST_PAGE_003':
+        case 'CYTEST_PAGE_004':
+        case 'CYTEST_PAGE_005':
           ac.departements = [await this.departementService.findByCode('2A')];
           break;
         case 'CYTEST_002':

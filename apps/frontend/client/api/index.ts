@@ -27,30 +27,30 @@ export interface ZonePublicationPin {
 const index = {
   searchAddresses(addressQuery: string, exactAddress = false): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(
+    return fetchAsRefResponse(() => $fetch(
       `/search/?q=${addressQuery}${_adresseOptions}${exactAddress ? '&type=housenumber' : ''}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiAdresseUrl,
         parseResponse: _formatAddresses,
       },
-    );
+    ));
   },
 
   searchAddressByLatlon(lon: string, lat: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/reverse?lon=${lon}&lat=${lat}`, {
+    return fetchAsRefResponse(() => $fetch(`/reverse?lon=${lon}&lat=${lat}`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiAdresseUrl,
-    });
+    }));
   },
 
   searchGeoByLatlon(lon: string, lat: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/communes?lon=${lon}&lat=${lat}`, {
+    return fetchAsRefResponse(() => $fetch(`/communes?lon=${lon}&lat=${lat}`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiGeoUrl,
-    });
+    }));
   },
 
   async searchZonesByAdress(
@@ -92,19 +92,20 @@ const index = {
       }
     }
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/subscriptions`, {
+    return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'POST',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
       body: form,
-    });
+      retry: false,
+    }));
   },
 
   getRefData(): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data`, {
+    return fetchAsRefResponse(() => $fetch(`/data`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    }));
   },
 
   getDepartmentsData(
@@ -119,13 +120,13 @@ const index = {
     if (publicationPin?.publicationId) {
       params.set('publicationId', publicationPin.publicationId);
     }
-    return useFetch<DepartementSituation[]>(
+    return fetchAsRefResponse(() => $fetch<DepartementSituation[]>(
       `/departements?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,
       },
-    );
+    ));
   },
 
   getDataArea(dateDebut: string, dateFin: string, area?: string, includeProvisional = false): Promise<any> {
@@ -136,13 +137,13 @@ const index = {
     if (includeProvisional) {
       params.set('includeProvisional', 'true');
     }
-    return useFetch(
+    return fetchAsRefResponse(() => $fetch(
       `/data/area?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,
       },
-    );
+    ));
   },
 
   getDataDepartement(
@@ -158,29 +159,29 @@ const index = {
     if (includeProvisional) {
       params.set('includeProvisional', 'true');
     }
-    return useFetch(
+    return fetchAsRefResponse(() => $fetch(
       `/data/departement?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,
       },
-    );
+    ));
   },
 
   getDataDuree(): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/duree`, {
+    return fetchAsRefResponse(() => $fetch(`/data/duree`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    }));
   },
 
   getDataStatus(): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/data/status`, {
+    return fetchAsRefResponse(() => $fetch(`/data/status`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    }));
   },
 
   getDataCommune(
@@ -194,21 +195,21 @@ const index = {
     if (dateDebut) params.set('dateDebut', dateDebut);
     if (dateFin) params.set('dateFin', dateFin);
     if (includeProvisional) params.set('includeProvisional', 'true');
-    return useFetch(
+    return fetchAsRefResponse(() => $fetch(
       `/data/commune/${codeInsee}?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,
       },
-    );
+    ));
   },
 
   getArretesRestrictions(date: string, area?: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/arretes_restrictions?date=${date}&${area ? area : ''}`, {
+    return fetchAsRefResponse(() => $fetch(`/arretes_restrictions?date=${date}&${area ? area : ''}`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
-    });
+    }));
   },
 
   getUserSubscriptions(token: string): Promise<any> {
@@ -224,24 +225,26 @@ const index = {
 
   unsubscribe(id: string, token: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/subscriptions/${id}`, {
+    return fetchAsRefResponse(() => $fetch(`/subscriptions/${id}`, {
       method: 'DELETE',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
+      retry: false,
       headers: {
         Authorization: `Bearer ${token}`,
       },
-    });
+    }));
   },
 
   unsubscribeAll(token: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/subscriptions/all`, {
+    return fetchAsRefResponse(() => $fetch(`/subscriptions/all`, {
       method: 'DELETE',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
+      retry: false,
       headers: {
         Authorization: `Bearer ${token}`,
       },
-    });
+    }));
   },
 
   getStats(): Promise<any> {
@@ -254,13 +257,14 @@ const index = {
 
   signalRestriction(usageId: number, feedbackComment: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/usage/feedback/${usageId}`, {
+    return fetchAsRefResponse(() => $fetch(`/usage/feedback/${usageId}`, {
       method: 'POST',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
+      retry: false,
       body: {
         feedback: feedbackComment,
       },
-    });
+    }));
   },
 
   async getZonesByDepartement(depCode: string): Promise<any> {

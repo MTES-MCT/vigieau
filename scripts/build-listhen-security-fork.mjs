@@ -78,7 +78,9 @@ try {
   const packed = JSON.parse(execFileSync(npm, ['pack', '--ignore-scripts', '--json', '--pack-destination', temporary], {
     cwd: packageRoot, encoding: 'utf8', env: { ...process.env, SOURCE_DATE_EPOCH: '0' },
   }));
-  assert.equal(packed[0].filename, artifactName);
+  // npm 12 keys pack metadata by package name; npm 11 returned an array.
+  const metadata = Array.isArray(packed) ? packed[0] : packed[manifest.name];
+  assert.equal(metadata?.filename, artifactName);
   const output = join(temporary, artifactName);
   for (const app of ['frontend', 'frontend-admin']) {
     const destination = join(root, 'apps', app, 'vendor');

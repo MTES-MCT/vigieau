@@ -225,6 +225,28 @@ function selectMainAddress() {
 }
 
 describe('Boîtes de dialogue publiques accessibles', () => {
+  it('envoie deux retours identiques lors de deux soumissions distinctes', () => {
+    visitSituation([restrictionZone]);
+    cy.intercept('POST', '**/usage/feedback/101', {
+      statusCode: 200,
+      body: { id: 'feedback-repeat' },
+    }).as('feedbackRepeat');
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      visibleRestrictionTrigger('Arrosage des jardins').click();
+      assertNativeModal('Je ne comprends pas cette restriction');
+      cy.get('@activeModal').find('textarea').type('Texte à clarifier');
+      cy.get('@activeModal')
+        .contains('button', 'Je ne comprends pas cette restriction')
+        .click();
+      cy.wait('@feedbackRepeat').its('request.body.feedback')
+        .should('equal', 'Texte à clarifier');
+      assertNativeModal('Votre retour a été envoyé');
+      cy.get('@activeModal').contains('button', 'Fermer').last().click();
+    }
+    cy.get('@feedbackRepeat.all').should('have.length', 2);
+  });
+
   it('isole le fond, boucle le focus et restitue la bonne carte après Échap', () => {
     let lockedScrollY;
     let backgroundTop;
@@ -236,11 +258,13 @@ describe('Boîtes de dialogue publiques accessibles', () => {
     visibleRestrictionTrigger('Arrosage des potagers')
       .scrollIntoView()
       .as('restrictionTrigger')
-      .then(() => {
-        cy.window().then((window) => {
+      .then(($trigger) => {
+        const window = $trigger[0].ownerDocument.defaultView;
+        // Cypress scrolls again before clicking; measure before the app opens the dialog.
+        $trigger[0].addEventListener('click', () => {
           lockedScrollY = window.scrollY;
           expect(lockedScrollY, 'initial page scroll').to.be.greaterThan(0);
-        });
+        }, { capture: true, once: true });
       });
     cy.get('@restrictionTrigger').click();
     assertNativeModal('Je ne comprends pas cette restriction');

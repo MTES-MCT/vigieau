@@ -21,11 +21,26 @@ test('accepts a bundled worker referenced by the client', async (t) => {
   assert.equal((await verifyMaplibreWorkerBuild(await fixture(t))).status, 'ok');
 });
 
-test('accepts the relative worker URL emitted by Nuxt', async (t) => {
+for (const quote of ['"', "'", '`']) {
+  test(`accepts the static relative worker URL emitted with ${quote} delimiters`, async (t) => {
+    const directory = await fixture(t);
+    await writeFile(join(directory, '.output/public/_nuxt/client.js'),
+      `setWorkerUrl(new URL(${quote}maplibre-gl-worker-test.js${quote},import.meta.url).href);`);
+    assert.equal((await verifyMaplibreWorkerBuild(directory)).status, 'ok');
+  });
+}
+
+test('rejects interpolated or malformed worker URL literals', async (t) => {
   const directory = await fixture(t);
-  await writeFile(join(directory, '.output/public/_nuxt/client.js'),
-    'setWorkerUrl(new URL("maplibre-gl-worker-test.js",import.meta.url).href);');
-  assert.equal((await verifyMaplibreWorkerBuild(directory)).status, 'ok');
+  for (const source of [
+    'setWorkerUrl(new URL(`${prefix}maplibre-gl-worker-test.js`,import.meta.url).href);',
+    'setWorkerUrl(new URL(`maplibre-gl-worker-test.js${suffix}`,import.meta.url).href);',
+    'setWorkerUrl(`/_nuxt/maplibre-gl-worker-test.js${suffix}`);',
+    'setWorkerUrl(new URL(`maplibre-gl-worker-test.js",import.meta.url).href);',
+  ]) {
+    await writeFile(join(directory, '.output/public/_nuxt/client.js'), source);
+    await assert.rejects(verifyMaplibreWorkerBuild(directory), /must reference/, source);
+  }
 });
 
 test('rejects the missing-worker regression even when the client compiles', async (t) => {

@@ -1,3 +1,5 @@
+/* global beforeEach, cy, describe, it */
+
 describe('Test de la page de Login', () => {
   beforeEach(() => {
     cy.logout();
@@ -18,12 +20,10 @@ describe('Test de la page de Login', () => {
       cy.get('.fr-select').select(1);
       cy.get('[data-cy=LoginDevBtn]').should('not.be.disabled');
       cy.get('[data-cy=LoginDevBtn]').click();
-      cy.url().should('include', '/arrete-cadre');
+      cy.location('pathname').should('equal', '/');
 
-      describe('La page de login ne doit plus être accessible', () => {
-        cy.visit('/connexion');
-        cy.url().should('include', '/arrete-cadre');
-      });
+      cy.visit('/connexion');
+      cy.location('pathname').should('equal', '/');
     });
   });
 

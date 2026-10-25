@@ -1,10 +1,20 @@
 {
   "name": "vigieau_admin_frontend",
   "version": "1.0.0",
-  "packageManager": "npm@11.21.1",
+  "packageManager": "npm@12.2.1",
   "engines": {
     "node": "24.22.1",
-    "npm": "11.21.1"
+    "npm": "12.2.1"
+  },
+  "allowScripts": {
+    "@parcel/watcher@2.5.6": true,
+    "cypress@15.18.1": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true,
+    "unrs-resolver@1.12.2": true,
+    "vue-demi@0.12.5": true,
+    "vue-demi@0.13.11": true,
+    "vue-demi@0.14.10": true
   },
   "scripts": {
     "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
@@ -41,7 +51,8 @@
     "luxon": "^3.4.4",
     "maplibre-gl": "6.4.1",
     "moment": "^2.31.0",
-    "nuxt": "3.21.11",
+    "nuxt": "4.6.2",
+    "ofetch": "^1.5.1",
     "oh-vue-icons": "1.0.0-rc3",
     "pinia": "^2.2.1",
     "vue": "3.5.44",
@@ -68,6 +79,7 @@
     "axios": "1.20.0",
     "cypress": "^15.18.1",
     "dotenv": "^17.4.2",
+    "esbuild": "0.28.2",
     "eslint": "^9.9.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-cypress": "^3.3.0",
@@ -98,13 +110,14 @@
     "brace-expansion@2": "2.1.7",
     "brace-expansion@5": "5.0.12",
     "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3",
-    "devalue": "5.9.4",
+    "devalue@5": "5.9.4",
     "follow-redirects": "1.16.1",
     "listhen": "$listhen",
     "postcss-selector-parser": "7.1.7",
     "seroval": "1.6.12",
     "shell-quote": "1.12.0",
     "source-map-js": "1.2.2",
-    "vite": "7.3.7"
+    "vite@7": "7.3.7",
+    "vite@8": "8.3.5"
   }
 }

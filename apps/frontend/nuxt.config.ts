@@ -96,6 +96,7 @@ export default defineNuxtConfig({
   ignore: ['**/*.test.*', '**/*.spec.*', '**/*.cy.*'],
 
   srcDir: 'client/',
+  dir: { public: 'client/public' },
 
   imports: {
     autoImport: true,
@@ -135,6 +136,8 @@ export default defineNuxtConfig({
   vite: {
     build: {
       target: 'es2019',
+      // DSFR includes legacy media syntax rejected by Lightning CSS.
+      cssMinify: 'esbuild',
     },
     plugins: [
       istanbul({
@@ -148,6 +151,9 @@ export default defineNuxtConfig({
 
   experimental: {
     entryImportMap: false,
+    // Preserve reactivity for existing in-place API response updates.
+    defaults: { useAsyncData: { deep: true } },
+    granularCachedData: false,
   },
 
   hooks: {

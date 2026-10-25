@@ -16,7 +16,9 @@ Cypress.Commands.add('devLogin', (email) => {
     
   }
   cy.get('[data-cy=LoginDevBtn]').click();
-  cy.url().should('match', /arrete-cadre/);
+  cy.location('pathname').should('equal', '/');
+  cy.get('main a[href="/arrete-cadre"]').click();
+  cy.location('pathname').should('equal', '/arrete-cadre');
 });
 
 Cypress.Commands.add('searchAC', (numero: string, exist: boolean = true, selectDepartement?: string) => {
@@ -31,11 +33,13 @@ Cypress.Commands.add('searchAC', (numero: string, exist: boolean = true, selectD
   cy.get('[data-cy=ArreteCadreListSearchBar] input').clear();
   cy.intercept({
     method: 'GET',
-    url: '/api/arrete-cadre/search*',
+    pathname: '/api/arrete-cadre/search',
+    query: { search: numero },
   }).as('acSearch');
   cy.get('[data-cy=ArreteCadreListSearchBar] input').type(numero);
   cy.wait('@acSearch');
   if(exist) {
+    cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').should('have.length', 1);
     cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard] .fr-card__title').contains(numero).should('exist');
   } else {
     cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard] .fr-card__title').should('not.exist');
@@ -43,6 +47,7 @@ Cypress.Commands.add('searchAC', (numero: string, exist: boolean = true, selectD
 });
 
 Cypress.Commands.add('populateDb', async (endpoint) => {
+  await axios.post(`${Cypress.env('apiUrl')}/${endpoint}/clearTestData`);
   await axios.post(`${Cypress.env('apiUrl')}/${endpoint}/populateTestData`);
 });
 

@@ -225,6 +225,20 @@ function fillPublicationForm() {
 }
 
 describe('Restriction publication errors with mocked APIs', () => {
+  it('sends every identical draft update instead of reusing a previous successful response', () => {
+    const requests = mockApplication();
+    openDuplicateFromHome();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      cy.get('[data-cy=ArreteRestrictionFormSaveBtn]').click();
+      cy.wait('@saveDraft').its('response.statusCode').should('equal', 200);
+    }
+    cy.then(() => {
+      expect(requests.mutations.filter(({ method }) => method === 'PATCH')).to.have.length(2);
+      expect(requests.save).to.have.length(3);
+      expect(requests.save[1]).to.deep.equal(requests.save[2]);
+    });
+  });
+
   it('keeps save errors visible after navigating from the home layout and preserves the draft', () => {
     const message = 'Une zone ne fait plus partie de cet arrete cadre.';
     mockApplication([usage()], { save: message });

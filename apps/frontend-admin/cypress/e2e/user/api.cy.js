@@ -1,491 +1,119 @@
+/* global Cypress, cy, describe, it, beforeEach, after, expect */
+
+const emails = [];
+const testEmail = () => {
+  const email = 'cytest_' + Cypress._.random(1000000000) + '@example.com';
+  emails.push(email);
+  return email;
+};
+const departmentRole = (codes) => ({
+  role: 'departement', roleDepartements: codes, roleCommunes: [],
+});
+const userPath = (email) => '/user/' + encodeURIComponent(email);
+const request = (method, path, status, body) => cy.request({
+  method,
+  url: Cypress.env('apiUrl').replace(/\/$/, '') + path,
+  ...(body === undefined ? {} : { body }),
+  failOnStatusCode: false,
+}).then((response) => {
+  expect(response.status, method + ' ' + path).to.equal(status);
+  return response;
+});
+
+function rejectInvalidUsers(email) {
+  for (const body of [
+    { email: 'email', ...departmentRole(['2A']) },
+    { email, ...departmentRole(['2A']), role: 'role' },
+    { email, role: 'departement', roleCommunes: [] },
+    { email, ...departmentRole(['departement']) },
+    { email },
+  ]) {
+    request('POST', '/user', 400, body);
+  }
+}
+
 describe('API utilisateurs', () => {
-  beforeEach(() => {
-    cy.logout();
-  });
+  beforeEach(() => cy.logout());
 
   after(() => {
-    cy.resetDb('user');
+    cy.devLogin(Cypress.env('mteUser'));
+    for (const email of emails) request('DELETE', userPath(email), 200);
   });
 
-  it(`Les routes de l'API ne doivent pas être accessible si on est pas connecté`, () => {
-    cy.request({
-      url: '/api/user',
-      failOnStatusCode:false,
-    }).then((resp) => {
-      expect(resp.status).to.eq(403)
-    })
-
-    cy.request({
-      url: '/api/user/me',
-      failOnStatusCode:false,
-    }).then((resp) => {
-      expect(resp.status).to.eq(403)
-    })
-
-    cy.request({
-      method: 'POST',
-      url: '/api/user',
-      body: {
-        email: 'CYTEST@test.fr',
-        role: 'mte'
-      },
-      failOnStatusCode:false,
-    }).then((resp) => {
-      expect(resp.status).to.eq(403)
-    })
-
-    cy.request({
-      method: 'PATCH',
-      url: '/api/user/2A@test.fr',
-      body: {
-        role: 'mte'
-      },
-      failOnStatusCode:false,
-    }).then((resp) => {
-      expect(resp.status).to.eq(403)
-    })
-
-    cy.request({
-      method: 'DELETE',
-      url: '/api/user/2A@test.fr',
-      failOnStatusCode:false,
-    }).then((resp) => {
-      expect(resp.status).to.eq(403)
-    })
+  it('refuse les routes utilisateurs sans authentification', () => {
+    request('GET', '/user', 403);
+    request('GET', '/user/me', 403);
+    request('POST', '/user', 403, { email: testEmail(), role: 'mte' });
+    request('PATCH', userPath(Cypress.env('departementUser')), 403, { role: 'mte' });
+    request('DELETE', userPath(Cypress.env('departementUser')), 403);
   });
 
-  describe('En tant que département', () => {
-    const userEmail = `CYTEST${Math.floor(Math.random() * 10000)}@example.com`;
+  it('limite un DDT a ses departements et refuse les escalades de droits', () => {
+    const email = testEmail();
+    cy.devLogin(Cypress.env('departementUser'));
+    request('GET', '/user', 200).then(({ body }) => {
+      expect(body.map((user) => user.email)).to.include(Cypress.env('departementUser'));
+      expect(body.map((user) => user.email)).not.to.include(Cypress.env('departementAciUser'));
+      expect(body.map((user) => user.email)).not.to.include(Cypress.env('mteUser'));
+    });
+    request('GET', '/user/me', 200).its('body.email').should('equal', Cypress.env('departementUser'));
+    request('POST', '/user', 403, { email, role: 'mte' });
+    request('POST', '/user', 403, { email, ...departmentRole(['2B']) });
+    request('POST', '/user', 403, { email, ...departmentRole(['2A', '2B']) });
+    rejectInvalidUsers(email);
 
-    it(`Test de l'API`, () => {
-      cy.devLogin(Cypress.env('departementUser'));
-
-      cy.request({
-        url: '/api/user',
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-      cy.request({
-        url: '/api/user/me',
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Création d'un utilisateur MTE impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'mte'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Création d'un utilisateur sur un autre département impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: '2B'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Création d'un utilisateur avec email invalide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: 'email',
-          role: 'departement',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur avec role invalide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'role',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur avec département vide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur avec département invalide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: 'departement'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-      
-      // Création d'un utilisateur en double impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode:true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(201)
-      })
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Création d'un utilisateur avec body vide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Modification d'un utilisateur avec rôle MTE impossible
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userEmail}`,
-        body: {
-          role: 'mte'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Modification d'un utilisateur sur un autre département impossible
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userEmail}`,
-        body: {
-          role: 'departement',
-          roleDepartement: '2B'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Modification d'un autre utilisateur sur un autre département impossible
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userEmail}`,
-        body: {
-          role: 'departement',
-          roleDepartement: '2B'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Suppression d'un utilisateur sur un autre département impossible
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${Cypress.env('departementAciUser')}`,
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Suppression d'un utilisateur MTE impossible
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${Cypress.env('mteUser')}`,
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Suppression d'un utilisateur sur son département
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${userEmail}`,
-        failOnStatusCode:true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Suppression d'un utilisateur inexistant
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${userEmail}`,
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
+    request('POST', '/user', 201, { email, ...departmentRole(['2A']) })
+      .its('body.roleDepartements').should('deep.equal', ['2A']);
+    request('POST', '/user', 403, { email, ...departmentRole(['2A']) });
+    request('PATCH', userPath(email), 403, { role: 'mte' });
+    request('PATCH', userPath(email), 403, departmentRole(['2B']));
+    request('PATCH', userPath(Cypress.env('departementAciUser')), 403, { role: 'mte' });
+    request('DELETE', userPath(Cypress.env('departementAciUser')), 403);
+    request('DELETE', userPath(Cypress.env('mteUser')), 403);
+    request('DELETE', userPath(email), 200);
+    request('DELETE', userPath(email), 400);
+    request('GET', '/user', 200).then(({ body }) => {
+      expect(body.map((user) => user.email)).not.to.include(email);
     });
   });
 
-  describe('En tant que MTE', () => {
-    const userEmail = `CYTEST${Math.floor(Math.random() * 10000)}@example.com`;
-    const userMteEmail = `CYTEST${Math.floor(Math.random() * 10000)}@example.com`;
+  it('permet au MTE de gerer les roles et les droits multi-departements', () => {
+    const email = testEmail();
+    const mteEmail = testEmail();
+    const otherDepartmentEmail = testEmail();
+    cy.devLogin(Cypress.env('mteUser'));
+    request('GET', '/user', 200).then(({ body }) => {
+      expect(body.map((user) => user.email)).to.include.members([
+        Cypress.env('departementUser'), Cypress.env('departementAciUser'), Cypress.env('mteUser'),
+      ]);
+    });
+    request('GET', '/user/me', 200).its('body.email').should('equal', Cypress.env('mteUser'));
+    rejectInvalidUsers(email);
+    request('POST', '/user', 201, { email: mteEmail, role: 'mte' });
+    request('POST', '/user', 201, { email: otherDepartmentEmail, ...departmentRole(['2B']) });
+    request('POST', '/user', 201, { email, ...departmentRole(['2A']) });
+    request('POST', '/user', 403, { email, ...departmentRole(['2A']) });
 
-    it(`Test de l'API`, () => {
-      cy.devLogin(Cypress.env('mteUser'));
-
-      cy.request({
-        url: '/api/user',
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-      cy.request({
-        url: '/api/user/me',
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Création d'un utilisateur avec email invalide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: 'email',
-          role: 'departement',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur avec role invalide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'role',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur avec département vide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur avec département invalide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: 'departement'
-        },
-        failOnStatusCode:false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Création d'un utilisateur MTE possible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userMteEmail,
-          role: 'mte'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(201)
-      })
-
-      // Création d'un utilisateur sur un autre département possible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: `CYTEST${Math.floor(Math.random() * 10000)}@example.com`,
-          role: 'departement',
-          roleDepartement: '2B'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(201)
-      })
-
-      // Création d'un utilisateur en double impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(201)
-      })
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-          role: 'departement',
-          roleDepartement: '2A'
-        },
-        failOnStatusCode: false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(403)
-      })
-
-      // Création d'un utilisateur avec body vide impossible
-      cy.request({
-        method: 'POST',
-        url: '/api/user',
-        body: {
-          email: userEmail,
-        },
-        failOnStatusCode: false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(400)
-      })
-
-      // Modification d'un utilisateur avec rôle MTE possible
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userEmail}`,
-        body: {
-          role: 'mte'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Modification d'un utilisateur sur un autre département possible
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userMteEmail}`,
-        body: {
-          role: 'departement',
-          roleDepartement: '2B'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userMteEmail}`,
-        body: {
-          role: 'mte'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Modification d'un autre utilisateur sur un autre département possible
-      cy.request({
-        method: 'PATCH',
-        url: `/api/user/${userEmail}`,
-        body: {
-          role: 'departement',
-          roleDepartement: '2B'
-        },
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Suppression d'un utilisateur sur un autre département possible
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${userEmail}`,
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Suppression d'un utilisateur MTE possible
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${userMteEmail}`,
-        failOnStatusCode: true,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
-
-      // Suppression d'un utilisateur inexistant
-      // Pas de check quand on est MTE
-      cy.request({
-        method: 'DELETE',
-        url: `/api/user/${userEmail}`,
-        failOnStatusCode: false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200)
-      })
+    request('PATCH', userPath(email), 200, { role: 'mte' })
+      .its('body.role').should('equal', 'mte');
+    request('PATCH', userPath(mteEmail), 200, departmentRole(['2B']))
+      .its('body.roleDepartements').should('deep.equal', ['2B']);
+    request('PATCH', userPath(mteEmail), 200, { role: 'mte' })
+      .its('body.roleDepartements').should('be.null');
+    request('PATCH', userPath(email), 200, departmentRole(['2A', '2B']))
+      .its('body.roleDepartements').should('deep.equal', ['2A', '2B']);
+    request('GET', '/user', 200).then(({ body }) => {
+      expect(body.find((user) => user.email === email).roleDepartements).to.deep.equal(['2A', '2B']);
     });
 
+    request('DELETE', userPath(email), 200);
+    request('DELETE', userPath(mteEmail), 200);
+    request('DELETE', userPath(otherDepartmentEmail), 200);
+    request('DELETE', userPath(email), 200);
+    request('GET', '/user', 200).then(({ body }) => {
+      for (const removed of [email, mteEmail, otherDepartmentEmail]) {
+        expect(body.map((user) => user.email)).not.to.include(removed);
+      }
+    });
   });
-
-})
+});

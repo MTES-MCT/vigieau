@@ -7,7 +7,12 @@ const appName = "VigiEau Admin";
 export default defineNuxtConfig({
   ssr: false,
   sourcemap: { client: 'hidden', server: false },
-  experimental: { entryImportMap: false },
+  experimental: {
+    entryImportMap: false,
+    // Preserve reactivity for existing in-place API response updates.
+    defaults: { useAsyncData: { deep: true } },
+    granularCachedData: false,
+  },
 
   app: {
     head: {
@@ -52,6 +57,7 @@ export default defineNuxtConfig({
 
   ignore: ['**/*.test.*', '**/*.spec.*', '**/*.cy.*'],
   srcDir: 'client/',
+  dir: { public: 'client/public' },
 
   imports: {
     autoImport: true,
@@ -79,6 +85,8 @@ export default defineNuxtConfig({
   vite: {
     build: {
       target: 'es2019',
+      // Keep the existing DSFR CSS minification behavior.
+      cssMinify: 'esbuild',
     },
     plugins: [
       istanbulPlugin({

@@ -4,7 +4,13 @@
   "description": "",
   "author": "",
   "private": true,
-  "packageManager": "npm@11.21.1",
+  "packageManager": "npm@12.2.1",
+  "allowScripts": {
+    "@nestjs/core": false,
+    "@scarf/scarf": false,
+    "@sentry-internal/node-cpu-profiler@2.4.1": true,
+    "fsevents@2.3.3": true
+  },
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
@@ -150,10 +156,10 @@
     "@istanbuljs/load-nyc-config": {
       "js-yaml": "4.3.2"
     },
-    "qs": "6.16.0",
-    "undici": "6.28.1",
+    "qs": "6.16.1",
+    "undici": "6.29.1",
     "@nestjs/platform-express": {
-      "multer": "2.4.0"
+      "multer": "2.5.0"
     },
     "@nestjs/swagger": {
       "js-yaml": "4.3.2"
@@ -169,6 +175,6 @@
   },
   "engines": {
     "node": "24.22.1",
-    "npm": "11.21.1"
+    "npm": "12.2.1"
   }
 }
