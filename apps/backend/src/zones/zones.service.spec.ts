@@ -1556,6 +1556,235 @@ describe('ZonesService', () => {
     });
   });
 
+  describe('equivalent coordinate overlaps', () => {
+    const comparableZone = (id: number, type = 'SUP') => ({
+      ...makeZone(id, type),
+      departement: '34',
+      niveauGravite: 'vigilance',
+      arrete: {
+        id: 38231,
+        dateDebutValidite: '2026-10-10T00:00:00.000Z',
+        dateFinValidite: '2026-12-31T00:00:00.000Z',
+        cheminFichier: 'https://example.test/restriction.pdf',
+        cheminFichierArreteCadre: 'https://example.test/cadre.pdf',
+      },
+      usages: [
+        {
+          id: id * 10,
+          nom: 'Arrosage',
+          thematique: 'Arroser',
+          description: 'Sensibiliser le public.',
+          concerneParticulier: true,
+          concerneEntreprise: true,
+          concerneCollectivite: true,
+          concerneExploitation: false,
+        },
+        {
+          id: id * 10 + 1,
+          nom: 'Irrigation',
+          thematique: 'Irriguer',
+          description: 'Sensibiliser les agriculteurs.',
+          concerneParticulier: false,
+          concerneEntreprise: false,
+          concerneCollectivite: false,
+          concerneExploitation: true,
+        },
+      ],
+    });
+
+    const installOverlaps = (
+      zones = [comparableZone(7260843), comparableZone(7260839)],
+    ) => {
+      const base = installSnapshot();
+      const snapshot = service['deepFreeze']({
+        ...base,
+        zones,
+        zonesIndex: Object.fromEntries(zones.map((zone) => [zone.id, zone])),
+        zonesCommunesIndex: { '34028': zones },
+        features: zones.map((zone) => ({
+          zoneId: zone.id,
+          geometry: JSON.stringify(polygon),
+        })),
+        zoneTree: { search: () => zones.map((_, index) => index) },
+      });
+      service['activeSnapshot'] = snapshot as any;
+      return snapshot;
+    };
+
+    it('returns every equivalent source in V1, including with zoneType and profile', async () => {
+      const snapshot = installOverlaps();
+      const before = JSON.stringify(snapshot);
+
+      for (const zoneType of [undefined, 'SUP']) {
+        const result = await service.find(
+          '1',
+          '1',
+          '34028',
+          'particulier',
+          zoneType,
+        );
+        expect(result.map((zone) => zone.id)).toEqual([7260843, 7260839]);
+        expect(result.map((zone) => zone.idSandre)).toEqual([7260943, 7260939]);
+        expect(result.every((zone) => zone.arrete.id === 38231)).toBe(true);
+        expect(result.every((zone) => zone.usages.length === 1)).toBe(true);
+      }
+      expect(JSON.stringify(snapshot)).toBe(before);
+    });
+
+    it('returns every equivalent source in V2 and keeps the availability contract', async () => {
+      installOverlaps();
+      mockZonePublicationRepository.query.mockResolvedValue([
+        { sourcePublicRevision: '41', zoneType: null },
+      ]);
+
+      const result = await service.findWithAvailability(
+        '1',
+        '1',
+        '34028',
+        'particulier',
+        'SUP',
+      );
+
+      expect(result.zones.map((zone) => zone.id)).toEqual([7260843, 7260839]);
+      expect(result.availability.SUP.status).toBe('available');
+      expect(Object.keys(result.availability).sort()).toEqual([
+        'AEP',
+        'SOU',
+        'SUP',
+      ]);
+    });
+
+    it('preserves a pinned publication and all its source identifiers', async () => {
+      const publicationId = '37fec02d-4d5f-45ae-8f8c-9cae2b725f80';
+      const snapshot = installOverlaps();
+      service['activeSnapshot'] = {
+        ...snapshot,
+        publication: makeVersionedSnapshot(publicationId).publication,
+      } as any;
+
+      const result = await service.find(
+        '1',
+        '1',
+        '34028',
+        undefined,
+        'SUP',
+        publicationId,
+      );
+
+      expect(result.map((zone) => zone.id)).toEqual([7260843, 7260839]);
+      expect(mockZonePublicationRepository.findOne).not.toHaveBeenCalled();
+      expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
+    });
+
+    it('rejects differences hidden by profile filtering and logs only stable cause and IDs', async () => {
+      const zones = [comparableZone(1), comparableZone(2)];
+      zones[1].usages[1].description = 'Irrigation interdite.';
+      installOverlaps(zones);
+      const warning = jest
+        .spyOn(service['logger'], 'warn')
+        .mockImplementation();
+
+      await expect(
+        service.find('1', '1', '34028', 'particulier', 'SUP'),
+      ).rejects.toMatchObject({ status: 500 });
+
+      expect(JSON.parse(warning.mock.calls[0][0] as string)).toEqual({
+        event: 'zone_lookup_conflict',
+        cause: 'non_equivalent_restrictions',
+        groups: [{ type: 'SUP', zoneIds: [1, 2] }],
+      });
+    });
+
+    it('checks all V2 types even when the requested type has equivalent restrictions', async () => {
+      const zones = [
+        comparableZone(1),
+        comparableZone(2),
+        comparableZone(3, 'SOU'),
+        comparableZone(4, 'SOU'),
+      ];
+      zones[3].usages[0].description = 'Arrosage interdit.';
+      installOverlaps(zones);
+
+      await expect(
+        service.findWithAvailability('1', '1', '34028', undefined, 'SUP'),
+      ).rejects.toMatchObject({ status: 500 });
+      expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
+    });
+
+    it('keeps incomplete evidence blocked and subscriptions on the strict default', async () => {
+      installOverlaps();
+      expect(() => service.searchZonesByLonLat({ lon: 1, lat: 1 })).toThrow(
+        HttpException,
+      );
+      const zones = [comparableZone(1), comparableZone(2)];
+      zones.forEach((zone) => (zone.usages = []));
+      installOverlaps(zones);
+
+      await expect(service.find('1', '1', '34028')).rejects.toMatchObject({
+        status: 500,
+      });
+    });
+
+    it('retains the commune-only 409 and the existing influenced-resource behavior', async () => {
+      installOverlaps();
+      await expect(
+        service.find(undefined, undefined, '34028'),
+      ).rejects.toMatchObject({ status: HttpStatus.CONFLICT });
+      const zones = [comparableZone(1), comparableZone(2)];
+      zones[1].ressourceInfluencee = true;
+      zones[1].usages[0].description =
+        'Prescription propre à la ressource influencée.';
+      installOverlaps(zones);
+
+      const result = await service.find('1', '1', '34028', undefined, 'SUP');
+      expect(result.map((zone) => zone.id)).toEqual([1, 2]);
+      expect(result[1].usages[0].description).toBe(
+        zones[1].usages[0].description,
+      );
+    });
+
+    it('retains municipal decrees for all matching sources and for an absent type', () => {
+      const snapshot = installOverlaps();
+      service['activeSnapshot'] = service['deepFreeze']({
+        ...snapshot,
+        communeArretesMunicipaux: [
+          {
+            code: '34028',
+            arretesMunicipaux: [
+              { fichier: { url: 'https://example.test/municipal.pdf' } },
+            ],
+          },
+        ],
+      }) as any;
+      const before = JSON.stringify(service['activeSnapshot']);
+
+      const result = service.formatZones(
+        snapshot.zones,
+        undefined,
+        'SUP',
+        '34028',
+      );
+      expect(result).toHaveLength(2);
+      expect(
+        result.every(
+          (zone) =>
+            zone.arreteMunicipalCheminFichier ===
+            'https://example.test/municipal.pdf',
+        ),
+      ).toBe(true);
+      expect(
+        service.formatZones(snapshot.zones, undefined, 'AEP', '34028'),
+      ).toEqual([
+        {
+          id: null,
+          type: 'AEP',
+          arreteMunicipalCheminFichier: 'https://example.test/municipal.pdf',
+        },
+      ]);
+      expect(JSON.stringify(service['activeSnapshot'])).toBe(before);
+    });
+  });
+
   it('keeps the existing validation and ambiguity status codes', async () => {
     installSnapshot();
     await expect(service.find('181', '43')).rejects.toMatchObject({

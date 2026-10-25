@@ -8,12 +8,16 @@ import { ValidationPipe } from '@nestjs/common';
 import { json, urlencoded } from 'express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import { createHttpFailureLoggingMiddleware } from './core/middleware/http-failure-logging.middleware';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   // Logger personnalisé
   app.useLogger(app.get(VigieauLogger));
+
+  // Observe final HTTP outcomes, including failures before Nest interceptors.
+  app.use(createHttpFailureLoggingMiddleware());
 
   // Middlewares de sécurité
   app.use(helmet());

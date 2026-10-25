@@ -21,7 +21,8 @@ export class LoggerInterceptor implements NestInterceptor {
    * @returns Un Observable qui permet de continuer le traitement et de logger la réponse.
    */
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    const requestId = randomUUID();
+    const response = context.switchToHttp().getResponse();
+    const requestId = response.locals?.httpRequestId || randomUUID();
     const req = context.switchToHttp().getRequest();
     const { ip, method, originalUrl, body, headers, session } = req;
 
