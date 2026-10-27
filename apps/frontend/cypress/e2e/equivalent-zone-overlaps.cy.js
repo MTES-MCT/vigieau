@@ -119,3 +119,83 @@ describe('Consultation des zones équivalentes avec identifiants numériques', (
     });
   }
 });
+
+describe('Disponibilite des restrictions par ressource', () => {
+  const stubPartialAvailability = (municipal = false) => {
+    cy.intercept('GET', '**/search/?q=*', {
+      body: { type: 'FeatureCollection', features: [addressFeature] },
+    });
+    cy.intercept('GET', '**/zones/publication', {
+      body: {
+        id: publicationId,
+        revision: '480',
+        pmtilesUrl: 'https://example.test/zones/480.pmtiles',
+        pmtilesChecksum: 'a'.repeat(64),
+      },
+    });
+    cy.intercept('GET', '**/zones/v2?*', {
+      body: {
+        zones: [
+          zone(7260844, 'SOU', 'Nappe amont'),
+          ...(municipal ? [{
+            id: null,
+            type: 'SUP',
+            nom: '',
+            departement: '34',
+            niveauGravite: null,
+            arreteMunicipalCheminFichier: 'https://example.test/arrete-municipal.pdf',
+            usages: [],
+          }] : []),
+        ],
+        availability: {
+          SUP: { status: 'unavailable' },
+          SOU: { status: 'available' },
+          AEP: { status: 'confirmed_none' },
+        },
+      },
+    }).as('partialZones');
+    cy.intercept('GET', '**/zones?*', { statusCode: 409, body: {} }).as('legacyZones');
+  };
+
+  for (const width of [390, 1280]) {
+    it(`conserve les ressources disponibles sans afficher une absence pour le conflit (${width}px)`, () => {
+      cy.viewport(width, 850);
+      stubPartialAvailability();
+      cy.visit('/situation?adresse=Adresse+de+test+Herault&profil=particulier&typeEau=SUP');
+      cy.wait('@partialZones');
+      cy.get('dialog[open]').should('not.exist');
+      cy.get('.situation-status-header h1')
+        .should('contain.text', 'ne peuvent pas être confirmées')
+        .and('not.contain.text', 'pas concernée par des restrictions');
+      cy.get('#situation-alert-zone').should('not.exist');
+      cy.get('@legacyZones.all').should('have.length', 0);
+
+      cy.get('#situation-water-type').select('SOU');
+      cy.get('.situation-status-header h1')
+        .should('contain.text', 'nappes')
+        .and('contain.text', 'vigilance')
+        .and('not.contain.text', 'ne peuvent pas être confirmées');
+      cy.get('#situation-water-type').select('AEP');
+      cy.get('.situation-status-header h1').should('contain.text', 'pas concernée par des restrictions');
+      cy.get('#situation-water-type').select('SUP');
+      cy.get('.situation-status-header h1').should('contain.text', 'ne peuvent pas être confirmées');
+      cy.get('dialog[open]').should('not.exist');
+      cy.get('body').then($body => {
+        expect($body[0].scrollWidth).to.be.at.most(width);
+      });
+    });
+  }
+
+  it('conserve l acces a un arrete municipal sans certifier une absence de restriction', () => {
+    stubPartialAvailability(true);
+    cy.visit('/situation?adresse=Adresse+de+test+Herault&profil=particulier&typeEau=SUP');
+    cy.wait('@partialZones');
+    cy.get('.situation-status-header h1')
+      .should('contain.text', 'Un arrêté municipal')
+      .and('not.contain.text', 'pas concernée par des restrictions');
+    cy.get('a[href="https://example.test/arrete-municipal.pdf"]').should('be.visible');
+    cy.get('@legacyZones.all').should('have.length', 0);
+    cy.get('#situation-water-type').select('SOU');
+    cy.get('.situation-status-header h1').should('contain.text', 'vigilance');
+  });
+});

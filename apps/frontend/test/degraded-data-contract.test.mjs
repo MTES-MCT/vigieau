@@ -116,6 +116,39 @@ test('une réponse legacy vide reste indisponible pour tous les types', () => {
   assert.equal(response.availability.SOU.status, 'unavailable');
 });
 
+test('un conflit localise conserve les autres ressources sans certifier une absence', () => {
+  const zone = makeZone({ id: 42, type: 'SOU' });
+  const response = normalizeZoneSearchResponse({
+    zones: [zone],
+    availability: {
+      SUP: { status: 'unavailable' },
+      SOU: { status: 'available' },
+      AEP: { status: 'confirmed_none' },
+    },
+  });
+
+  assert.deepEqual(response.zones, [zone]);
+  assert.equal(getZoneSituationState(undefined, response.availability.SUP), 'unavailable');
+  assert.equal(getZoneSituationState(zone, response.availability.SOU), 'restricted');
+  assert.equal(getZoneSituationState(undefined, response.availability.AEP), 'confirmed_none');
+});
+
+test('une ressource indisponible ne masque pas un arrete municipal conserve', () => {
+  const zone = makeZone({
+    id: null,
+    type: 'SUP',
+    niveauGravite: null,
+    arreteMunicipalCheminFichier: 'https://example.test/arrete-municipal.pdf',
+  });
+  const response = normalizeZoneSearchResponse({
+    zones: [zone],
+    availability: { SUP: { status: 'unavailable' } },
+  });
+
+  assert.equal(getZoneSituationState(response.zones[0], response.availability.SUP), 'municipal');
+  assert.equal(getZoneSituationState(undefined, response.availability.AEP), 'unavailable');
+});
+
 test('respecte une absence AEP explicitement certifiée par zones v2', () => {
   const response = normalizeZoneSearchResponse(
     {

@@ -260,6 +260,37 @@ export class ZonesService implements OnModuleInit {
     profil?: string,
     zoneType?: string,
   ): any[] {
+    const { zones, byCoordinates } = this.lookupZonesInSnapshot(
+      snapshot,
+      queryLon,
+      queryLat,
+      commune,
+    );
+    const requestedZones = zoneType
+      ? zones.filter((zone) => zone.type === zoneType)
+      : zones;
+    const conflicts = this.findConflictingZoneGroups(
+      requestedZones,
+      byCoordinates ? 'equivalent-restrictions' : 'strict',
+    );
+    if (conflicts.length > 0) {
+      this.rejectZoneLookupConflict(conflicts, byCoordinates);
+    }
+    return this.formatZones(
+      requestedZones,
+      profil,
+      zoneType,
+      commune,
+      snapshot,
+    );
+  }
+
+  private lookupZonesInSnapshot(
+    snapshot: ZoneCacheSnapshot,
+    queryLon?: string,
+    queryLat?: string,
+    commune?: string,
+  ): { zones: readonly any[]; byCoordinates: boolean } {
     if (queryLon && queryLat) {
       const lon = parseFloat(queryLon);
       const lat = parseFloat(queryLat);
@@ -278,18 +309,17 @@ export class ZonesService implements OnModuleInit {
         );
       }
 
-      const zones = this.searchZonesByLonLat(
-        { lon, lat },
-        false,
-        snapshot,
-        'equivalent-restrictions',
-      );
-      return this.formatZones(zones, profil, zoneType, commune, snapshot);
+      return {
+        zones: this.searchZonesByLonLat({ lon, lat }, true, snapshot),
+        byCoordinates: true,
+      };
     }
 
     if (commune) {
-      const zones = this.searchZonesByCommune(commune, false, snapshot);
-      return this.formatZones(zones, profil, zoneType, commune, snapshot);
+      return {
+        zones: this.searchZonesByCommune(commune, true, snapshot) ?? [],
+        byCoordinates: false,
+      };
     }
 
     throw new HttpException(
@@ -307,18 +337,36 @@ export class ZonesService implements OnModuleInit {
     publicationId?: string,
   ): Promise<ZonesWithAvailabilityDto> {
     const snapshot = await this.resolveSnapshot(publicationId);
-    const allZones = this.findInSnapshot(
+    const { zones: matchingZones, byCoordinates } = this.lookupZonesInSnapshot(
       snapshot,
       queryLon,
       queryLat,
       commune,
+    );
+    const conflicts = this.findConflictingZoneGroups(
+      matchingZones,
+      byCoordinates ? 'equivalent-restrictions' : 'strict',
+    );
+    if (!byCoordinates && conflicts.length > 0) {
+      this.rejectZoneLookupConflict(conflicts, false);
+    }
+    const unavailableTypes = new Set(conflicts.map((group) => group[0].type));
+    if (conflicts.length > 0) {
+      this.logZoneLookupConflict(conflicts, byCoordinates);
+    }
+    // Remove contradictory prescriptions before adding municipal orders: a
+    // municipal link must not make a conflicting prefectural zone publishable.
+    const allZones = this.formatZones(
+      matchingZones.filter((zone) => !unavailableTypes.has(zone.type)),
       profil,
       undefined,
+      commune,
+      snapshot,
     );
     const zones = zoneType
       ? allZones.filter((zone) => zone.type === zoneType)
       : allZones;
-    const departmentCode = this.resolveDepartmentCode(commune, allZones);
+    const departmentCode = this.resolveDepartmentCode(commune, matchingZones);
     const context = departmentCode
       ? await this.loadZoneTypeAvailability(departmentCode, publicationId)
       : {
@@ -333,9 +381,8 @@ export class ZonesService implements OnModuleInit {
       snapshot.version;
 
     const availability = Object.fromEntries(
-      ZONE_TYPES.map((type) => [
-        type,
-        this.buildZoneTypeAvailability(
+      ZONE_TYPES.map((type) => {
+        const typeAvailability = this.buildZoneTypeAvailability(
           type,
           allZones,
           departmentCode,
@@ -350,8 +397,14 @@ export class ZonesService implements OnModuleInit {
           publishedAt,
           context.freshness,
           context.pendingSince,
-        ),
-      ]),
+        );
+        return [
+          type,
+          unavailableTypes.has(type)
+            ? { ...typeAvailability, status: 'unavailable' }
+            : typeAvailability,
+        ];
+      }),
     ) as Record<ZoneType, ZoneTypeAvailabilityDto>;
 
     const certifiedZones = zones.filter(
@@ -650,31 +703,11 @@ export class ZonesService implements OnModuleInit {
 
     const conflictingGroups = allowMultiple
       ? []
-      : ZONE_TYPES.map((type) =>
-          zones.filter(
-            (zone) => zone.type === type && !zone.ressourceInfluencee,
-          ),
-        ).filter(
-          (group) =>
-            group.length > 1 &&
-            (overlapPolicy === 'strict' ||
-              !haveEquivalentZoneRestrictions(group)),
-        );
+      : this.findConflictingZoneGroups(zones, overlapPolicy);
 
     if (conflictingGroups.length > 0) {
       if (overlapPolicy === 'equivalent-restrictions') {
-        this.logger.warn(
-          JSON.stringify({
-            event: 'zone_lookup_conflict',
-            cause: 'non_equivalent_restrictions',
-            groups: conflictingGroups.map((group) => ({
-              type: group[0].type,
-              zoneIds: group
-                .map((zone) => zone.id)
-                .filter((id) => Number.isSafeInteger(id) && id > 0),
-            })),
-          }),
-        );
+        this.logZoneLookupConflict(conflictingGroups, true);
       }
       throw new HttpException(
         `Un problème avec les données ne permet pas de répondre à votre demande.`,
@@ -683,6 +716,52 @@ export class ZonesService implements OnModuleInit {
     }
 
     return zones;
+  }
+
+  private findConflictingZoneGroups(
+    zones: readonly any[],
+    overlapPolicy: 'strict' | 'equivalent-restrictions',
+  ): any[][] {
+    return ZONE_TYPES.map((type) =>
+      zones.filter((zone) => zone.type === type && !zone.ressourceInfluencee),
+    ).filter(
+      (group) =>
+        group.length > 1 &&
+        (overlapPolicy === 'strict' || !haveEquivalentZoneRestrictions(group)),
+    );
+  }
+
+  private logZoneLookupConflict(
+    groups: readonly any[][],
+    byCoordinates: boolean,
+  ) {
+    this.logger.warn(
+      JSON.stringify({
+        event: 'zone_lookup_conflict',
+        cause: byCoordinates
+          ? 'non_equivalent_restrictions'
+          : 'multiple_commune_zones',
+        groups: groups.map((group) => ({
+          type: group[0].type,
+          zoneIds: group
+            .map((zone) => zone.id)
+            .filter((id) => Number.isSafeInteger(id) && id > 0),
+        })),
+      }),
+    );
+  }
+
+  private rejectZoneLookupConflict(
+    groups: readonly any[][],
+    byCoordinates: boolean,
+  ): never {
+    this.logZoneLookupConflict(groups, byCoordinates);
+    throw new HttpException(
+      byCoordinates
+        ? `Un problème avec les données ne permet pas de répondre à votre demande.`
+        : `La commune comporte plusieurs zones d’alerte de même type.`,
+      byCoordinates ? HttpStatus.INTERNAL_SERVER_ERROR : HttpStatus.CONFLICT,
+    );
   }
 
   /**

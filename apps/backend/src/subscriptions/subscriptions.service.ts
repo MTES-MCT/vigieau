@@ -14,6 +14,10 @@ import { BrevoService } from '../brevo/brevo.service';
 import { MattermostService } from '../mattermost/mattermost.service';
 import { CronService } from '../cron/cron.service';
 
+const ADDRESS_TIMEOUT_MS = 3_000;
+const ADDRESS_UNAVAILABLE_MESSAGE =
+  'La vérification de l’adresse est momentanément indisponible. Réessayez dans quelques instants ou sélectionnez un point sur la carte.';
+
 @Injectable()
 export class SubscriptionsService {
   private readonly logger = new VigieauLogger('SubscriptionsService');
@@ -67,7 +71,7 @@ export class SubscriptionsService {
     }
 
     if (subscription.idAdresse) {
-      if (!subscription.lon || !subscription.lat) {
+      if (!this.hasValidCoordinates(subscription)) {
         throw new HttpException(
           `lon/lat requis dans le cas d’une inscription à l’adresse.`,
           HttpStatus.BAD_REQUEST,
@@ -78,7 +82,7 @@ export class SubscriptionsService {
         libelle,
         commune,
         communeNom: adresseCommuneNom,
-      } = await this.resolveIdAdresse(subscription.idAdresse);
+      } = await this.resolveIdAdresse(subscription.idAdresse, subscription);
 
       subscription.commune = commune;
       subscription.libelleLocalisation = libelle;
@@ -138,31 +142,155 @@ export class SubscriptionsService {
    * @param idAdresse - L'identifiant unique de l'adresse.
    * @returns Un objet contenant le libellé et la commune associée.
    */
-  async resolveIdAdresse(idAdresse) {
+  async resolveIdAdresse(
+    idAdresse: string,
+    coordinates?: { lon: number; lat: number },
+  ) {
     try {
       const result = await firstValueFrom(
         this.httpService.get(
-          `https://plateforme.adresse.data.gouv.fr/lookup/${idAdresse}`,
+          `https://plateforme.adresse.data.gouv.fr/lookup/${encodeURIComponent(idAdresse)}`,
+          { timeout: ADDRESS_TIMEOUT_MS },
         ),
       );
 
+      if (
+        !this.isCommuneCode(result.data?.commune?.code) ||
+        !this.isAddressText(result.data?.commune?.nom)
+      ) {
+        throw new Error('Invalid address response');
+      }
       return {
         libelle: this.buildLibelle(result.data),
         commune: result.data.commune.code,
         communeNom: result.data.commune.nom,
       };
     } catch (error) {
-      if (error.response?.statusCode === 404) {
+      if ([400, 404].includes(error.response?.status)) {
         throw new HttpException(
           `L’adresse renseignée n’existe pas`,
           HttpStatus.BAD_REQUEST,
         );
       }
-      throw new HttpException(
-        `Une erreur inattendue est survenue`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      this.logAddressResolutionFailure('ban', error);
     }
+
+    if (this.hasValidCoordinates(coordinates)) {
+      const fallback = await this.resolveAddressFallback(
+        idAdresse,
+        coordinates,
+      );
+      if (fallback) return fallback;
+    }
+    throw new HttpException(
+      ADDRESS_UNAVAILABLE_MESSAGE,
+      HttpStatus.SERVICE_UNAVAILABLE,
+    );
+  }
+
+  private async resolveAddressFallback(
+    idAdresse: string,
+    coordinates: { lon: number; lat: number },
+  ) {
+    const parts = idAdresse.split('_');
+    const types =
+      parts.length >= 3
+        ? ['housenumber']
+        : parts.length === 2
+          ? ['street', 'locality']
+          : [undefined];
+
+    for (const type of types) {
+      try {
+        const { data } = await firstValueFrom(
+          this.httpService.get('https://data.geopf.fr/geocodage/reverse', {
+            timeout: ADDRESS_TIMEOUT_MS,
+            params: {
+              lon: coordinates.lon,
+              lat: coordinates.lat,
+              index: 'address',
+              limit: 50,
+              ...(type ? { type } : {}),
+            },
+          }),
+        );
+        if (
+          data?.type !== 'FeatureCollection' ||
+          !Array.isArray(data.features)
+        ) {
+          throw new Error('Invalid address response');
+        }
+        // A nearby address is not proof of the address selected by the user.
+        const matches = data.features.filter(
+          (feature) => feature?.properties?.id === idAdresse,
+        );
+        if (!matches.length) continue;
+        const feature = matches.length === 1 ? matches[0] : undefined;
+        const properties = feature?.properties;
+        if (
+          feature?.type !== 'Feature' ||
+          feature.geometry?.type !== 'Point' ||
+          !Array.isArray(feature.geometry.coordinates) ||
+          feature.geometry.coordinates.length !== 2 ||
+          !this.hasValidCoordinates({
+            lon: feature.geometry.coordinates[0],
+            lat: feature.geometry.coordinates[1],
+          }) ||
+          !['housenumber', 'street', 'locality'].includes(properties?.type) ||
+          !this.isCommuneCode(properties?.citycode) ||
+          !this.isAddressText(properties?.city) ||
+          !this.isAddressText(properties?.label)
+        ) {
+          throw new Error('Invalid address response');
+        }
+        return {
+          libelle: properties.label,
+          commune: properties.citycode,
+          communeNom: properties.city,
+        };
+      } catch (error) {
+        this.logAddressResolutionFailure('geoplateforme', error);
+        return null;
+      }
+    }
+    return null;
+  }
+
+  private hasValidCoordinates(value?: { lon: number; lat: number }): boolean {
+    return Boolean(
+      value &&
+      Number.isFinite(value.lon) &&
+      Number.isFinite(value.lat) &&
+      value.lon >= -180 &&
+      value.lon <= 180 &&
+      value.lat >= -90 &&
+      value.lat <= 90,
+    );
+  }
+
+  private isCommuneCode(value: unknown): value is string {
+    return typeof value === 'string' && /^(?:\d{5}|2[AB]\d{3})$/.test(value);
+  }
+
+  private isAddressText(value: unknown): value is string {
+    return (
+      typeof value === 'string' &&
+      value.trim().length > 0 &&
+      value.length <= 500
+    );
+  }
+
+  private logAddressResolutionFailure(provider: string, error: any) {
+    this.logger.warn(
+      JSON.stringify({
+        event: 'subscription_address_resolution_failed',
+        provider,
+        status: Number.isInteger(error?.response?.status)
+          ? error.response.status
+          : null,
+        timeout: ['ECONNABORTED', 'ETIMEDOUT'].includes(error?.code),
+      }),
+    );
   }
 
   /**
@@ -171,17 +299,28 @@ export class SubscriptionsService {
    * @returns Une chaîne lisible représentant l'adresse.
    */
   buildLibelle(adresse: any): string {
-    if (adresse.type === 'voie' || adresse.type === 'lieu-dit') {
+    if (
+      (adresse?.type === 'voie' || adresse?.type === 'lieu-dit') &&
+      this.isAddressText(adresse.nomVoie) &&
+      this.isAddressText(adresse.commune?.nom)
+    ) {
       return `${adresse.nomVoie}, ${adresse.commune.nom}`;
     }
 
-    if (adresse.type === 'numero') {
+    if (
+      adresse?.type === 'numero' &&
+      ((Number.isSafeInteger(adresse.numero) && adresse.numero >= 0) ||
+        (typeof adresse.numero === 'string' && /^\d+$/.test(adresse.numero))) &&
+      this.isAddressText(adresse.voie?.nomVoie) &&
+      this.isAddressText(adresse.commune?.nom) &&
+      (adresse.suffixe == null || typeof adresse.suffixe === 'string')
+    ) {
       return `${adresse.numero}${adresse.suffixe || ''}, ${adresse.voie.nomVoie}, ${adresse.commune.nom}`;
     }
 
     throw new HttpException(
-      `Une erreur inattendue est survenue`,
-      HttpStatus.INTERNAL_SERVER_ERROR,
+      ADDRESS_UNAVAILABLE_MESSAGE,
+      HttpStatus.SERVICE_UNAVAILABLE,
     );
   }
 
@@ -204,14 +343,39 @@ export class SubscriptionsService {
     lat,
     commune,
   }: {
-    lon: number;
-    lat: number;
+    lon: number | string;
+    lat: number | string;
     commune: string;
   }) {
-    const zones =
-      lon || lat
-        ? this.zonesService.searchZonesByLonLat({ lon, lat })
-        : this.zonesService.searchZonesByCommune(commune);
+    // PostgreSQL decimal columns are returned as strings for stored subscriptions.
+    const [longitude, latitude] = [lon, lat].map((value) =>
+      typeof value === 'string' &&
+      /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(value.trim())
+        ? Number(value)
+        : typeof value === 'number'
+          ? value
+          : undefined,
+    );
+    const coordinates = { lon: longitude, lat: latitude };
+    if (
+      (lon != null || lat != null) &&
+      !this.hasValidCoordinates(coordinates)
+    ) {
+      throw new HttpException(
+        'Les coordonnées de cet abonnement sont invalides.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    const zones = this.hasValidCoordinates(coordinates)
+      ? this.zonesService.searchZonesByLonLat(coordinates)
+      : this.zonesService.searchZonesByCommune(commune);
+
+    if (!Array.isArray(zones)) {
+      throw new HttpException(
+        'Les données de restrictions sont momentanément indisponibles.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
 
     return {
       SUP:
@@ -237,7 +401,6 @@ export class SubscriptionsService {
         profil: true,
         typesEau: true,
         libelleLocalisation: true,
-        // @ts-ignore
         situation: true,
       },
       where: { email },
@@ -325,7 +488,6 @@ export class SubscriptionsService {
       }
 
       try {
-        // @ts-ignore
         const { AEP, SOU, SUP } = this.computeNiveauxAlerte(subscription);
 
         // Vérifie les changements pour chaque type d'eau (AEP, SOU, SUP)

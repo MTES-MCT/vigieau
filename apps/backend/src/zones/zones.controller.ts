@@ -30,7 +30,7 @@ export class ZonesController {
     type: ZoneDto,
     isArray: true,
     description:
-      'Toutes les zones applicables sont conservées. Des zones naturelles superposées de même type sont retournées ensemble uniquement si leurs prescriptions complètes sont strictement équivalentes.',
+      'Toutes les zones applicables sont conservées. Des zones naturelles superposées de même type sont retournées ensemble uniquement si leurs prescriptions complètes sont strictement équivalentes. Avec zoneType, seul le type demandé est vérifié.',
   })
   @ApiResponse({
     status: 400,
@@ -107,7 +107,7 @@ export class ZonesController {
     status: 200,
     type: ZonesWithAvailabilityDto,
     description:
-      'Toutes les zones aux prescriptions équivalentes et leurs identifiants sont conservés. La cohérence de tous les types est vérifiée avant le filtrage zoneType.',
+      'Toutes les zones aux prescriptions équivalentes et leurs identifiants sont conservés. Pour une recherche par coordonnées, un type en conflit est signalé indisponible sans masquer les autres types ni les arrêtés municipaux. Une commune ambiguë nécessite toujours une adresse précise (409).',
   })
   async findAllV2(
     @Query() query: FindZonesQueryDto,

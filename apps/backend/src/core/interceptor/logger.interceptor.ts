@@ -3,11 +3,13 @@ import {
   NestInterceptor,
   ExecutionContext,
   CallHandler,
+  HttpException,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { VigieauLogger } from '../../logger/vigieau.logger';
 import { randomUUID } from 'crypto';
+import * as Sentry from '@sentry/nestjs';
 
 @Injectable()
 export class LoggerInterceptor implements NestInterceptor {
@@ -40,10 +42,56 @@ export class LoggerInterceptor implements NestInterceptor {
 
     // Intercepte et log la réponse
     return next.handle().pipe(
-      tap(() => {
-        this._logger.log(
-          `RESPONSE - ID: ${requestId}, URL: ${originalUrl}, User: ${userEmail}`,
-        );
+      tap({
+        next: () => {
+          this._logger.log(
+            `RESPONSE - ID: ${requestId}, URL: ${originalUrl}, User: ${userEmail}`,
+          );
+        },
+        error: (error: unknown) => {
+          // The Nest Sentry filter skips HttpException, including explicit 5xx.
+          // Health failures are already tracked by the production checks.
+          if (!(error instanceof HttpException)) return;
+          const status = error.getStatus();
+          const route =
+            typeof req.route?.path === 'string'
+              ? req.route.path
+              : '<unmatched>';
+          if (
+            status < 500 ||
+            status > 599 ||
+            /^\/api\/health(?:\/|$)/.test(route)
+          ) {
+            return;
+          }
+          const safeMethod = /^[A-Z]{1,16}$/.test(method) ? method : 'UNKNOWN';
+          Sentry.withScope((scope) => {
+            scope.setFingerprint([
+              'http-server-error',
+              safeMethod,
+              route,
+              String(status),
+            ]);
+            scope.setTags({
+              component: 'http-server-error',
+              route,
+              method: safeMethod,
+              status,
+            });
+            scope.setContext('httpFailure', { requestId, statusCode: status });
+            scope.addEventProcessor((event) => {
+              // Do not attach subscription addresses, credentials or request bodies.
+              delete event.request;
+              delete event.user;
+              delete event.breadcrumbs;
+              delete event.extra;
+              return event;
+            });
+            Sentry.captureException(
+              new Error(`HTTP ${status} ${safeMethod} ${route}`),
+            );
+          });
+        },
       }),
     );
   }

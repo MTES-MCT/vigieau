@@ -1695,7 +1695,7 @@ describe('ZonesService', () => {
       });
     });
 
-    it('checks all V2 types even when the requested type has equivalent restrictions', async () => {
+    it('isolates a conflicting V2 type while preserving equivalent restrictions', async () => {
       const zones = [
         comparableZone(1),
         comparableZone(2),
@@ -1704,11 +1704,190 @@ describe('ZonesService', () => {
       ];
       zones[3].usages[0].description = 'Arrosage interdit.';
       installOverlaps(zones);
+      mockZonePublicationRepository.query.mockResolvedValue([
+        { sourcePublicRevision: '41', zoneType: null },
+      ]);
 
-      await expect(
-        service.findWithAvailability('1', '1', '34028', undefined, 'SUP'),
-      ).rejects.toMatchObject({ status: 500 });
+      for (const zoneType of [undefined, 'SUP']) {
+        const result = await service.findWithAvailability(
+          '1',
+          '1',
+          '34028',
+          undefined,
+          zoneType,
+        );
+        expect(result.zones.map((zone) => zone.id)).toEqual([1, 2]);
+        expect(result.availability.SUP.status).toBe('available');
+        expect(result.availability.SOU.status).toBe('unavailable');
+      }
+      const conflictingType = await service.findWithAvailability(
+        '1',
+        '1',
+        '34028',
+        undefined,
+        'SOU',
+      );
+      expect(conflictingType.zones).toEqual([]);
+      expect(conflictingType.availability.SOU.status).toBe('unavailable');
+    });
+
+    it.each([true, false])(
+      'checks only the requested V1 type (coordinates: %s)',
+      async (byCoordinates) => {
+        const zones = [
+          comparableZone(1),
+          comparableZone(2),
+          comparableZone(3, 'AEP'),
+        ];
+        zones[1].usages[0].description = 'Arrosage interdit.';
+        installOverlaps(zones);
+        const lon = byCoordinates ? '1' : undefined;
+        const lat = byCoordinates ? '1' : undefined;
+
+        const result = await service.find(
+          lon,
+          lat,
+          '34028',
+          'particulier',
+          'AEP',
+        );
+        expect(result.map((zone) => zone.id)).toEqual([3]);
+        for (const zoneType of [undefined, 'SUP']) {
+          await expect(
+            service.find(lon, lat, '34028', 'particulier', zoneType),
+          ).rejects.toMatchObject({ status: byCoordinates ? 500 : 409 });
+        }
+      },
+    );
+
+    it('keeps the V2 commune ambiguity response requesting a precise address', async () => {
+      installOverlaps([
+        comparableZone(1),
+        comparableZone(2),
+        comparableZone(3, 'AEP'),
+      ]);
+      for (const zoneType of [undefined, 'AEP']) {
+        await expect(
+          service.findWithAvailability(
+            undefined,
+            undefined,
+            '34028',
+            undefined,
+            zoneType,
+          ),
+        ).rejects.toMatchObject({ status: HttpStatus.CONFLICT });
+      }
       expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
+    });
+
+    it('preserves conflict metadata and department resolution without a commune', async () => {
+      const zones = [comparableZone(1), comparableZone(2)];
+      zones[1].usages[1].description = 'Irrigation interdite.';
+      installOverlaps(zones);
+      const pendingSince = '2026-10-27T10:00:00.000Z';
+      const asOf = '2026-10-26T10:00:00.000Z';
+      mockZonePublicationRepository.query.mockResolvedValue([
+        {
+          sourcePublicRevision: '41',
+          zoneType: 'SUP',
+          status: 'confirmed_none',
+          availabilityPublicRevision: '41',
+          asOf,
+          pendingSince,
+          officialUrl: 'https://example.test/official',
+        },
+      ]);
+
+      const result = await service.findWithAvailability(
+        '1',
+        '1',
+        undefined,
+        'particulier',
+      );
+      expect(result.zones).toEqual([]);
+      expect(result.availability.SUP).toEqual({
+        status: 'unavailable',
+        sourceRevision: '41',
+        asOf: version.toISOString(),
+        freshness: 'updating',
+        pendingSince,
+        officialUrl: 'https://example.test/official',
+      });
+      expect(mockZonePublicationRepository.query.mock.calls[0][1]).toEqual([
+        '34',
+        null,
+      ]);
+    });
+
+    it('keeps only the municipal order for a conflicting type in V2', async () => {
+      const zones = [
+        comparableZone(1),
+        comparableZone(2),
+        comparableZone(3, 'AEP'),
+      ];
+      zones[1].usages[0].description = 'Arrosage interdit.';
+      const snapshot = installOverlaps(zones);
+      service['activeSnapshot'] = service['deepFreeze']({
+        ...snapshot,
+        communeArretesMunicipaux: [
+          {
+            code: '34028',
+            arretesMunicipaux: [
+              { fichier: { url: 'https://example.test/municipal.pdf' } },
+            ],
+          },
+        ],
+      }) as any;
+      mockZonePublicationRepository.query.mockResolvedValue([
+        { sourcePublicRevision: '41', zoneType: null },
+      ]);
+      const before = JSON.stringify(service['activeSnapshot']);
+
+      const result = await service.findWithAvailability('1', '1', '34028');
+      expect(result.zones.find((zone) => zone.type === 'SUP')).toEqual({
+        id: null,
+        type: 'SUP',
+        arreteMunicipalCheminFichier: 'https://example.test/municipal.pdf',
+      });
+      expect(result.zones.find((zone) => zone.type === 'AEP')).toMatchObject({
+        id: 3,
+        arreteMunicipalCheminFichier: 'https://example.test/municipal.pdf',
+      });
+      expect(result.availability.SUP.status).toBe('unavailable');
+      expect(result.availability.AEP.status).toBe('available');
+      expect(JSON.stringify(service['activeSnapshot'])).toBe(before);
+    });
+
+    it('does not treat invalid input or spatial lookup errors as partial availability', async () => {
+      const snapshot = installOverlaps();
+      await expect(
+        service.findWithAvailability('NaN', '1'),
+      ).rejects.toMatchObject({ status: 400 });
+      const failure = new Error('Spatial index unavailable');
+      service['activeSnapshot'] = {
+        ...snapshot,
+        zoneTree: {
+          search: () => {
+            throw failure;
+          },
+        },
+      } as any;
+      await expect(service.findWithAvailability('1', '1')).rejects.toBe(
+        failure,
+      );
+      expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
+    });
+
+    it('keeps incomplete overlapping evidence unavailable in V2', async () => {
+      const zones = [comparableZone(1), comparableZone(2)];
+      zones.forEach((zone) => (zone.usages = []));
+      installOverlaps(zones);
+      mockZonePublicationRepository.query.mockResolvedValue([
+        { sourcePublicRevision: '41', zoneType: null },
+      ]);
+      const result = await service.findWithAvailability('1', '1', '34028');
+      expect(result.zones).toEqual([]);
+      expect(result.availability.SUP.status).toBe('unavailable');
     });
 
     it('keeps incomplete evidence blocked and subscriptions on the strict default', async () => {

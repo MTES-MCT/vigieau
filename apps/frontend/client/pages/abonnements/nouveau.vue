@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue';
 import api from '../../api';
+import { getHttpErrorStatus } from '../../utils/zone-publication';
 
 definePageMeta({
   layout: 'basic',
@@ -14,6 +15,7 @@ const router = useRouter();
 const mailForm = ref<{ focus: () => void } | null>(null);
 const resultModal = ref<'success' | 'error' | null>(null);
 const subscribing = ref(false);
+const serviceUnavailable = ref(false);
 const resultModalOpened = computed(() => resultModal.value !== null);
 const resultModalId = computed(() => (
   resultModal.value === 'success'
@@ -28,7 +30,9 @@ const resultModalTitle = computed(() => (
 const resultModalDescription = computed(() => (
   resultModal.value === 'success'
     ? 'Vous êtes désormais abonné. Vous recevrez un e-mail très prochainement. Vous souhaitez recevoir les alertes pour plusieurs adresses ? Il vous suffit de remplir de nouveau le formulaire avec la ou les nouvelles adresses.'
-    : 'Veuillez réessayer avec une autre adresse.'
+    : serviceUnavailable.value
+      ? 'Le service est temporairement indisponible. Veuillez réessayer dans quelques instants.'
+      : 'Veuillez réessayer avec une autre adresse.'
 ));
 
 const closeResultModal = async () => {
@@ -50,15 +54,18 @@ const closeResultModal = async () => {
 const subscribe = async (form: any) => {
   subscribing.value = true;
   resultModal.value = null;
+  serviceUnavailable.value = false;
 
   try {
     const { error } = await api.subscribeMail(form);
     if (!error.value) {
       resultModal.value = 'success';
     } else {
+      serviceUnavailable.value = getHttpErrorStatus(error.value) === 503;
       resultModal.value = 'error';
     }
-  } catch {
+  } catch (error) {
+    serviceUnavailable.value = getHttpErrorStatus(error) === 503;
     resultModal.value = 'error';
   } finally {
     subscribing.value = false;

@@ -304,6 +304,37 @@ describe('Formulaire public d’abonnement accessible', () => {
       .should('not.be.visible');
     subscriptionSubmit().should('have.focus');
   });
+
+  it('conserve le formulaire sur une indisponibilite temporaire sans renvoyer automatiquement', () => {
+    stubAddressSearch();
+    let attempts = 0;
+    cy.intercept('POST', '**/subscriptions', request => {
+      attempts += 1;
+      request.reply(attempts === 1
+        ? { statusCode: 503, body: { message: 'Service indisponible' } }
+        : { statusCode: 201, body: { id: 42 } });
+    }).as('subscriptionRequest');
+    cy.visit('/abonnements/nouveau');
+    fillValidSubscription();
+
+    subscriptionSubmit().click();
+    cy.wait('@subscriptionRequest');
+    assertNamedModal('subscription-error-title', 'L’abonnement n’a pas pu être enregistré');
+    cy.get('dialog[open]')
+      .should('contain.text', 'Le service est temporairement indisponible')
+      .and('contain.text', 'Veuillez réessayer dans quelques instants')
+      .and('not.contain.text', 'une autre adresse');
+    cy.get('@subscriptionRequest.all').should('have.length', 1);
+
+    cy.press(Cypress.Keyboard.Keys.ESC);
+    subscriptionSubmit().should('have.focus');
+    subscriptionAddress().should('have.value', addressFeature.properties.label);
+    cy.get('#subscription-email').should('have.value', 'test@exemple.com');
+    subscriptionSubmit().click();
+    cy.wait('@subscriptionRequest');
+    cy.get('@subscriptionRequest.all').should('have.length', 2);
+    assertNamedModal('subscription-success-title', 'Abonnement confirmé');
+  });
 });
 
 describe('Formulaire public de recherche des restrictions', () => {
@@ -351,9 +382,16 @@ describe('Formulaire public de recherche des restrictions', () => {
       statusCode: 200,
       body: validZonePublication,
     });
-    cy.intercept('GET', '**/zones?*', {
+    cy.intercept('GET', '**/zones/v2?*', {
       statusCode: 200,
-      body: [],
+      body: {
+        zones: [],
+        availability: {
+          AEP: { status: 'unavailable' },
+          SUP: { status: 'unavailable' },
+          SOU: { status: 'unavailable' },
+        },
+      },
     }).as('zoneSearch');
     cy.visit('/');
     selectAddress(mainAddress);
