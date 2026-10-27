@@ -100,6 +100,9 @@
     "vite-plugin-istanbul": "^6.0.2"
   },
   "overrides": {
+    "@cypress/request": {
+      "qs": "6.16.1"
+    },
     "@istanbuljs/load-nyc-config": {
       "js-yaml": "4.3.2"
     },
