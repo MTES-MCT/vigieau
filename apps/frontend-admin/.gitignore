@@ -234,6 +234,7 @@ web_modules/
 # Output of 'npm pack'
 *.tgz
 !/vendor/vigieau-listhen-1.10.1-vigieau.1.tgz
+!/vendor/vigieau-deepmerge-4.3.1-vigieau.1.tgz
 
 # Yarn Integrity file
 .yarn-integrity
