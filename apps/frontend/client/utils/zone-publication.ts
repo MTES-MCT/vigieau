@@ -52,6 +52,11 @@ export const createLocalDateRollover = (
 export const getHttpErrorStatus = (error: any): number | undefined =>
   error?.response?.status ?? error?.statusCode ?? error?.status;
 
+export const isZoneRestrictionsConflict = (error: any): boolean =>
+  getHttpErrorStatus(error) === 409 &&
+  (error?.data?.code ?? error?.response?._data?.code) ===
+    'ZONE_RESTRICTIONS_CONFLICT';
+
 export const classifyManifestFailure = (
   error: unknown,
   hasValidPublication = false,

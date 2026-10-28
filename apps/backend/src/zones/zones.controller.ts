@@ -11,6 +11,7 @@ import { ApiOperation, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import {
   FindZonesQueryDto,
   ZoneDto,
+  ZoneLookupConflictDto,
   ZonePublicationDto,
   ZonePublicationQueryDto,
   ZonesWithAvailabilityDto,
@@ -42,13 +43,13 @@ export class ZonesController {
   })
   @ApiResponse({
     status: 409,
+    type: ZoneLookupConflictDto,
     description:
-      'Plusieurs zones de même type présentes sur une commune, utilisez les lon / lat.',
+      'ZONE_LOCATION_AMBIGUOUS : plusieurs zones sur la commune, précisez lon/lat. ZONE_RESTRICTIONS_CONFLICT : chevauchement non résolu aux coordonnées demandées ; /api/zones/v2 conserve les autres types disponibles. Aucun de ces conflits ne signifie une absence de restrictions.',
   })
   @ApiResponse({
     status: 500,
-    description:
-      'Plusieurs zones de même type présentes dont les prescriptions complètes diffèrent ou ne peuvent pas être comparées.',
+    description: 'Erreur technique inattendue.',
   })
   @ApiResponse({
     status: 410,
@@ -108,6 +109,12 @@ export class ZonesController {
     type: ZonesWithAvailabilityDto,
     description:
       'Toutes les zones aux prescriptions équivalentes et leurs identifiants sont conservés. Pour une recherche par coordonnées, un type en conflit est signalé indisponible sans masquer les autres types ni les arrêtés municipaux. Une commune ambiguë nécessite toujours une adresse précise (409).',
+  })
+  @ApiResponse({
+    status: 409,
+    type: ZoneLookupConflictDto,
+    description:
+      'ZONE_LOCATION_AMBIGUOUS : plusieurs zones de même type sur la commune, précisez lon/lat.',
   })
   async findAllV2(
     @Query() query: FindZonesQueryDto,

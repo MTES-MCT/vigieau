@@ -15,6 +15,7 @@ import {
 } from './map-popup-content';
 import type { RestrictionPopupEmptyState } from './map-popup-content';
 import { openAccessibleTallyPopup } from './tally-popup';
+import { getHttpErrorStatus, isZoneRestrictionsConflict } from './zone-publication';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 // We need to duplicate the base string to have a longer string
@@ -240,7 +241,16 @@ const index = {
       modalOpened.value = false;
     };
 
-    switch (error?.statusCode) {
+    if (isZoneRestrictionsConflict(error)) {
+      return {
+        title: 'Restrictions non confirmées',
+        text: 'Les restrictions applicables à cette adresse ne peuvent pas être confirmées en raison d’un chevauchement de zones non résolu. Consultez les arrêtés publiés par votre préfecture.',
+        icon: 'ri-error-warning-line',
+        actions: [{ label: 'Fermer', onClick: _closeModal }],
+      };
+    }
+
+    switch (getHttpErrorStatus(error)) {
       case 404:
       case undefined:
         return {

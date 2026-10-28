@@ -47,6 +47,61 @@ const zones = [
   zone(7260840, 'SOU', 'Nappe aval'),
 ];
 
+describe('Conflits explicites de l’API V1 de repli', () => {
+  for (const width of [390, 1280]) {
+    it(`distingue une commune à préciser d’un conflit de restrictions (${width}px)`, () => {
+      cy.viewport(width, 850);
+      cy.intercept('GET', '**/search/?q=*', {
+        statusCode: 200,
+        body: { type: 'FeatureCollection', features: [addressFeature] },
+      }).as('addressSearch');
+      cy.intercept('GET', '**/zones/publication', {
+        statusCode: 200,
+        body: {
+          id: publicationId,
+          revision: '480',
+          pmtilesUrl: 'https://example.test/zones/480.pmtiles',
+          pmtilesChecksum: 'a'.repeat(64),
+        },
+      });
+      cy.intercept('GET', '**/zones/v2?*', { statusCode: 404, body: {} });
+      let code = 'ZONE_LOCATION_AMBIGUOUS';
+      cy.intercept('GET', '**/zones?*', request => request.reply({
+        statusCode: 409,
+        body: { statusCode: 409, error: 'Conflict', code, message: 'Conflit de test' },
+      })).as('legacyConflict');
+      cy.visit('/');
+      cy.get('#main-search-address').type('Adresse de test');
+      cy.wait('@addressSearch');
+      cy.get('[role="listbox"] [role="option"]').first().click();
+      cy.get('[data-cy="MainRestrictionSearchSubmit"]').click();
+      cy.wait('@legacyConflict');
+      cy.get('dialog[open]')
+        .should('contain.text', 'Nous avons besoin de plus de précision')
+        .contains('button', 'Entrer une adresse plus précise').click();
+      cy.get('#main-search-address').should('have.focus');
+
+      cy.then(() => { code = 'ZONE_RESTRICTIONS_CONFLICT'; });
+      cy.get('[data-cy="MainRestrictionSearchSubmit"]').click();
+      cy.wait('@legacyConflict');
+      cy.get('dialog[open]')
+        .should('contain.text', 'Restrictions non confirmées')
+        .and('contain.text', 'chevauchement de zones non résolu')
+        .and('contain.text', 'votre préfecture')
+        .and('not.contain.text', 'Entrer une adresse plus précise')
+        .and('not.contain.text', 'Aucune restriction');
+      cy.screenshot(`zone-restrictions-conflict-${width}`, { capture: 'viewport' });
+      cy.get('dialog[open]').contains('button', 'Fermer').click();
+      cy.get('[data-cy="MainRestrictionSearchSubmit"]').should('have.focus');
+      cy.get('#main-search-address').should('have.value', addressFeature.properties.label);
+      cy.get('@legacyConflict.all').should('have.length', 4);
+      cy.get('body').then($body => {
+        expect($body[0].scrollWidth).to.be.at.most(width);
+      });
+    });
+  }
+});
+
 describe('Consultation des zones équivalentes avec identifiants numériques', () => {
   for (const useV2 of [true, false]) {
     it(`permet de choisir et changer de ressource avec la réponse ${useV2 ? 'V2' : 'V1 de repli'}`, () => {

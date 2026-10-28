@@ -38,6 +38,7 @@ import {
 } from '@shared/zone_publication_materialization';
 import type {
   ZoneAvailabilityStatus,
+  ZoneLookupConflictDto,
   ZoneTypeAvailabilityDto,
   ZonesWithAvailabilityDto,
 } from './dto/zone.dto';
@@ -706,13 +707,7 @@ export class ZonesService implements OnModuleInit {
       : this.findConflictingZoneGroups(zones, overlapPolicy);
 
     if (conflictingGroups.length > 0) {
-      if (overlapPolicy === 'equivalent-restrictions') {
-        this.logZoneLookupConflict(conflictingGroups, true);
-      }
-      throw new HttpException(
-        `Un problème avec les données ne permet pas de répondre à votre demande.`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      this.rejectZoneLookupConflict(conflictingGroups, true, overlapPolicy);
     }
 
     return zones;
@@ -734,12 +729,17 @@ export class ZonesService implements OnModuleInit {
   private logZoneLookupConflict(
     groups: readonly any[][],
     byCoordinates: boolean,
+    overlapPolicy:
+      | 'strict'
+      | 'equivalent-restrictions' = 'equivalent-restrictions',
   ) {
     this.logger.warn(
       JSON.stringify({
         event: 'zone_lookup_conflict',
         cause: byCoordinates
-          ? 'non_equivalent_restrictions'
+          ? overlapPolicy === 'strict'
+            ? 'multiple_coordinate_zones'
+            : 'non_equivalent_restrictions'
           : 'multiple_commune_zones',
         groups: groups.map((group) => ({
           type: group[0].type,
@@ -754,14 +754,23 @@ export class ZonesService implements OnModuleInit {
   private rejectZoneLookupConflict(
     groups: readonly any[][],
     byCoordinates: boolean,
+    overlapPolicy:
+      | 'strict'
+      | 'equivalent-restrictions' = 'equivalent-restrictions',
   ): never {
-    this.logZoneLookupConflict(groups, byCoordinates);
-    throw new HttpException(
-      byCoordinates
-        ? `Un problème avec les données ne permet pas de répondre à votre demande.`
+    this.logZoneLookupConflict(groups, byCoordinates, overlapPolicy);
+    const response: ZoneLookupConflictDto = {
+      statusCode: HttpStatus.CONFLICT,
+      error: 'Conflict',
+      code: byCoordinates
+        ? 'ZONE_RESTRICTIONS_CONFLICT'
+        : 'ZONE_LOCATION_AMBIGUOUS',
+      message: byCoordinates
+        ? `Les zones d’alerte se chevauchent à cette localisation et ne permettent pas de déterminer les restrictions applicables.`
         : `La commune comporte plusieurs zones d’alerte de même type.`,
-      byCoordinates ? HttpStatus.INTERNAL_SERVER_ERROR : HttpStatus.CONFLICT,
-    );
+      zoneTypes: groups.map((group) => group[0].type),
+    };
+    throw new HttpException(response, HttpStatus.CONFLICT);
   }
 
   /**
@@ -776,21 +785,11 @@ export class ZonesService implements OnModuleInit {
     snapshot = this.requireSnapshot(),
   ) {
     const zones = snapshot.zonesCommunesIndex[commune];
-    const zoneCounts = { SUP: 0, SOU: 0, AEP: 0 };
-    zones?.forEach((zone) => {
-      if (!zone.ressourceInfluencee) {
-        zoneCounts[zone.type]++;
-      }
-    });
-
-    if (
-      !allowMultiple &&
-      (zoneCounts.SUP > 1 || zoneCounts.SOU > 1 || zoneCounts.AEP > 1)
-    ) {
-      throw new HttpException(
-        `La commune comporte plusieurs zones d’alerte de même type.`,
-        HttpStatus.CONFLICT,
-      );
+    const conflicts = allowMultiple
+      ? []
+      : this.findConflictingZoneGroups(zones ?? [], 'strict');
+    if (conflicts.length > 0) {
+      this.rejectZoneLookupConflict(conflicts, false);
     }
 
     return zones;

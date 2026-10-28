@@ -117,6 +117,27 @@ export class FindZonesQueryDto {
   publicationId?: string;
 }
 
+export class ZoneLookupConflictDto {
+  @ApiProperty({ enum: [409] })
+  statusCode: 409;
+
+  @ApiProperty({ example: 'Conflict' })
+  error: 'Conflict';
+
+  @ApiProperty({
+    enum: ['ZONE_RESTRICTIONS_CONFLICT', 'ZONE_LOCATION_AMBIGUOUS'],
+    description:
+      'ZONE_LOCATION_AMBIGUOUS demande une adresse précise. ZONE_RESTRICTIONS_CONFLICT signale un chevauchement non résolu à des coordonnées déjà précises ; utiliser /api/zones/v2 pour consulter les autres types disponibles.',
+  })
+  code: 'ZONE_RESTRICTIONS_CONFLICT' | 'ZONE_LOCATION_AMBIGUOUS';
+
+  @ApiProperty()
+  message: string;
+
+  @ApiProperty({ enum: ['AEP', 'SUP', 'SOU'], isArray: true })
+  zoneTypes: Array<'AEP' | 'SUP' | 'SOU'>;
+}
+
 export class ZonePublicationQueryDto {
   @IsOptional()
   @IsUUID()

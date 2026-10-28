@@ -14,6 +14,7 @@ import {
   getNextSuccessfulRefreshVersion,
   isCurrentMapDate,
   isZonePublication,
+  isZoneRestrictionsConflict,
   resolveCurrentZonePmtilesUrl,
   selectLegacyPmtilesEtag,
   shouldRefreshZonePublication,
@@ -72,6 +73,26 @@ test('extracts an HTTP status from ofetch and Nuxt errors', () => {
   assert.equal(getHttpErrorStatus({ statusCode: 410 }), 410);
   assert.equal(getHttpErrorStatus({ status: 503 }), 503);
   assert.equal(getHttpErrorStatus(new Error('network')), undefined);
+});
+
+test('distinguishes restriction conflicts from an imprecise location or a server failure', () => {
+  assert.equal(isZoneRestrictionsConflict({
+    statusCode: 409,
+    data: { code: 'ZONE_RESTRICTIONS_CONFLICT' },
+  }), true);
+  assert.equal(isZoneRestrictionsConflict({
+    response: { status: 409, _data: { code: 'ZONE_RESTRICTIONS_CONFLICT' } },
+  }), true);
+  for (const error of [
+    { statusCode: 409, data: { code: 'ZONE_LOCATION_AMBIGUOUS' } },
+    { statusCode: 409 },
+    { statusCode: 500, data: { code: 'ZONE_RESTRICTIONS_CONFLICT' } },
+    { statusCode: 503 },
+    new Error('network'),
+    null,
+  ]) {
+    assert.equal(isZoneRestrictionsConflict(error), false);
+  }
 });
 
 test('allows the legacy fallback for old API route responses', () => {

@@ -1686,7 +1686,15 @@ describe('ZonesService', () => {
 
       await expect(
         service.find('1', '1', '34028', 'particulier', 'SUP'),
-      ).rejects.toMatchObject({ status: 500 });
+      ).rejects.toMatchObject({
+        status: HttpStatus.CONFLICT,
+        response: {
+          statusCode: HttpStatus.CONFLICT,
+          error: 'Conflict',
+          code: 'ZONE_RESTRICTIONS_CONFLICT',
+          zoneTypes: ['SUP'],
+        },
+      });
 
       expect(JSON.parse(warning.mock.calls[0][0] as string)).toEqual({
         event: 'zone_lookup_conflict',
@@ -1755,7 +1763,15 @@ describe('ZonesService', () => {
         for (const zoneType of [undefined, 'SUP']) {
           await expect(
             service.find(lon, lat, '34028', 'particulier', zoneType),
-          ).rejects.toMatchObject({ status: byCoordinates ? 500 : 409 });
+          ).rejects.toMatchObject({
+            status: HttpStatus.CONFLICT,
+            response: {
+              code: byCoordinates
+                ? 'ZONE_RESTRICTIONS_CONFLICT'
+                : 'ZONE_LOCATION_AMBIGUOUS',
+              zoneTypes: ['SUP'],
+            },
+          });
         }
       },
     );
@@ -1775,7 +1791,15 @@ describe('ZonesService', () => {
             undefined,
             zoneType,
           ),
-        ).rejects.toMatchObject({ status: HttpStatus.CONFLICT });
+        ).rejects.toMatchObject({
+          status: HttpStatus.CONFLICT,
+          response: {
+            code: 'ZONE_LOCATION_AMBIGUOUS',
+            zoneTypes: ['SUP'],
+            message:
+              'La commune comporte plusieurs zones d’alerte de même type.',
+          },
+        });
       }
       expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
     });
@@ -1863,6 +1887,9 @@ describe('ZonesService', () => {
       await expect(
         service.findWithAvailability('NaN', '1'),
       ).rejects.toMatchObject({ status: 400 });
+      await expect(service.find('NaN', '1')).rejects.toMatchObject({
+        status: HttpStatus.BAD_REQUEST,
+      });
       const failure = new Error('Spatial index unavailable');
       service['activeSnapshot'] = {
         ...snapshot,
@@ -1875,6 +1902,7 @@ describe('ZonesService', () => {
       await expect(service.findWithAvailability('1', '1')).rejects.toBe(
         failure,
       );
+      await expect(service.find('1', '1')).rejects.toBe(failure);
       expect(mockZonePublicationRepository.query).not.toHaveBeenCalled();
     });
 
@@ -1892,16 +1920,56 @@ describe('ZonesService', () => {
 
     it('keeps incomplete evidence blocked and subscriptions on the strict default', async () => {
       installOverlaps();
-      expect(() => service.searchZonesByLonLat({ lon: 1, lat: 1 })).toThrow(
-        HttpException,
-      );
+      let conflict: HttpException;
+      try {
+        service.searchZonesByLonLat({ lon: 1, lat: 1 });
+      } catch (error) {
+        conflict = error;
+      }
+      expect(conflict).toBeInstanceOf(HttpException);
+      expect(conflict.getStatus()).toBe(HttpStatus.CONFLICT);
+      expect(conflict.getResponse()).toMatchObject({
+        code: 'ZONE_RESTRICTIONS_CONFLICT',
+        zoneTypes: ['SUP'],
+      });
       const zones = [comparableZone(1), comparableZone(2)];
       zones.forEach((zone) => (zone.usages = []));
       installOverlaps(zones);
 
       await expect(service.find('1', '1', '34028')).rejects.toMatchObject({
-        status: 500,
+        status: HttpStatus.CONFLICT,
+        response: { code: 'ZONE_RESTRICTIONS_CONFLICT' },
       });
+    });
+
+    it('returns a bounded conflict response without private query or prescription data', async () => {
+      const zones = [
+        comparableZone(1),
+        comparableZone(2),
+        comparableZone(3, 'SOU'),
+        comparableZone(4, 'SOU'),
+      ];
+      zones[1].usages[0].description = 'Arrosage interdit.';
+      zones[3].usages[0].description = 'Arrosage interdit.';
+      const snapshot = installOverlaps(zones);
+      const before = JSON.stringify(snapshot);
+
+      let conflict: HttpException;
+      try {
+        await service.find('1', '1', '34028');
+      } catch (error) {
+        conflict = error;
+      }
+      expect(conflict).toBeInstanceOf(HttpException);
+      expect(conflict.getResponse()).toEqual({
+        statusCode: HttpStatus.CONFLICT,
+        error: 'Conflict',
+        code: 'ZONE_RESTRICTIONS_CONFLICT',
+        message:
+          'Les zones d’alerte se chevauchent à cette localisation et ne permettent pas de déterminer les restrictions applicables.',
+        zoneTypes: ['SUP', 'SOU'],
+      });
+      expect(JSON.stringify(snapshot)).toBe(before);
     });
 
     it('retains the commune-only 409 and the existing influenced-resource behavior', async () => {
@@ -1981,6 +2049,10 @@ describe('ZonesService', () => {
       service.searchZonesByCommune('65440');
     } catch (error) {
       expect((error as HttpException).getStatus()).toBe(HttpStatus.CONFLICT);
+      expect((error as HttpException).getResponse()).toMatchObject({
+        code: 'ZONE_LOCATION_AMBIGUOUS',
+        zoneTypes: ['SUP'],
+      });
     }
   });
 

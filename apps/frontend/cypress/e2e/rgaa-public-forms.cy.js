@@ -335,6 +335,34 @@ describe('Formulaire public d’abonnement accessible', () => {
     cy.get('@subscriptionRequest.all').should('have.length', 2);
     assertNamedModal('subscription-success-title', 'Abonnement confirmé');
   });
+
+  it('signale un conflit de restrictions sans demander une autre adresse ni renvoyer le formulaire', () => {
+    stubAddressSearch();
+    cy.intercept('POST', '**/subscriptions', {
+      statusCode: 409,
+      body: {
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'ZONE_RESTRICTIONS_CONFLICT',
+        message: 'Les restrictions sont contradictoires.',
+      },
+    }).as('subscriptionRequest');
+    cy.visit('/abonnements/nouveau');
+    fillValidSubscription();
+    subscriptionSubmit().click();
+    cy.wait('@subscriptionRequest');
+    assertNamedModal('subscription-error-title', 'L’abonnement n’a pas pu être enregistré');
+    cy.get('dialog[open]')
+      .should('contain.text', 'chevauchement de zones non résolu')
+      .and('contain.text', 'votre préfecture')
+      .and('not.contain.text', 'une autre adresse')
+      .and('not.contain.text', 'Abonnement confirmé');
+    cy.press(Cypress.Keyboard.Keys.ESC);
+    subscriptionSubmit().should('have.focus');
+    subscriptionAddress().should('have.value', addressFeature.properties.label);
+    cy.get('#subscription-email').should('have.value', 'test@exemple.com');
+    cy.get('@subscriptionRequest.all').should('have.length', 1);
+  });
 });
 
 describe('Formulaire public de recherche des restrictions', () => {

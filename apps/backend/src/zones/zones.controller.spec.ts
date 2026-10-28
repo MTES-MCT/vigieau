@@ -1,9 +1,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ValidationPipe } from '@nestjs/common';
+import {
+  HttpException,
+  INestApplication,
+  ValidationPipe,
+} from '@nestjs/common';
 import { HEADERS_METADATA } from '@nestjs/common/constants';
 import { ZonesController } from './zones.controller';
 import { ZonesService } from './zones.service';
 import { ZoneDto, ZonePublicationQueryDto } from './dto/zone.dto';
+import request from 'supertest';
 
 jest.mock('./zones.service', () => ({
   ZonesService: class ZonesService {},
@@ -12,6 +17,7 @@ jest.mock('./zones.service', () => ({
 describe('ZonesController', () => {
   let zonesController: ZonesController;
   let zonesService: ZonesService;
+  let app: INestApplication;
 
   const mockZone: ZoneDto = {
     id: 1,
@@ -47,6 +53,13 @@ describe('ZonesController', () => {
 
     zonesController = <ZonesController>module.get(ZonesController);
     zonesService = <ZonesService>module.get(ZonesService);
+    app = module.createNestApplication({ logger: false });
+    app.setGlobalPrefix('api');
+  });
+
+  afterEach(async () => {
+    await app.close();
+    jest.clearAllMocks();
   });
 
   it('should be defined', () => {
@@ -54,6 +67,45 @@ describe('ZonesController', () => {
   });
 
   describe('findAll', () => {
+    it.each(['ZONE_RESTRICTIONS_CONFLICT', 'ZONE_LOCATION_AMBIGUOUS'])(
+      'serializes %s as an explicit conflict, not an empty successful result',
+      async (code) => {
+        const conflict = {
+          statusCode: 409,
+          error: 'Conflict',
+          code,
+          message: 'Restrictions non confirmées.',
+          zoneTypes: ['SUP'],
+        };
+        mockZonesService.find.mockRejectedValue(
+          new HttpException(conflict, 409),
+        );
+        await app.init();
+
+        const response = await request(app.getHttpServer())
+          .get('/api/zones?lon=1&lat=1&commune=34028')
+          .expect(409);
+
+        expect(response.body).toEqual(conflict);
+      },
+    );
+
+    it('keeps unexpected failures as server errors', async () => {
+      mockZonesService.find.mockRejectedValue(
+        new Error('Spatial index failed'),
+      );
+      await app.init();
+
+      const response = await request(app.getHttpServer())
+        .get('/api/zones?lon=1&lat=1')
+        .expect(500);
+
+      expect(response.body).toEqual({
+        statusCode: 500,
+        message: 'Internal server error',
+      });
+    });
+
     it('should return a list of zones when called with valid query parameters', async () => {
       const mockResult = [mockZone];
       mockZonesService.find.mockResolvedValue(mockResult);
