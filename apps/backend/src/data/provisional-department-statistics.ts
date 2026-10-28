@@ -23,8 +23,18 @@ export function completeProvisionalDepartmentDays(
   from: string,
   through: string,
 ): ProvisionalDepartmentDay[] {
+  if (new Set(expectedCodes).size !== 101 || expectedCodes.length !== 101)
+    return [];
+  return completeDepartmentDays(rows, expectedCodes, from, through);
+}
+
+function completeDepartmentDays(
+  rows: ProvisionalDepartmentRow[],
+  expectedCodes: string[],
+  from: string,
+  through: string,
+): ProvisionalDepartmentDay[] {
   const expected = new Set(expectedCodes);
-  if (expected.size !== 101 || expectedCodes.length !== 101) return [];
   const days = new Map<string, Map<string, Record<string, any>>>();
   const invalid = new Set<string>();
   for (const row of rows) {
@@ -70,7 +80,8 @@ export function completeProvisionalDepartmentDays(
   }
   return [...days]
     .filter(
-      ([date, departments]) => !invalid.has(date) && departments.size === 101,
+      ([date, departments]) =>
+        !invalid.has(date) && departments.size === expected.size,
     )
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([date, departments]) => ({
@@ -85,6 +96,31 @@ export async function readProvisionalDepartmentDays(
   through: string,
   expectedCodes: string[],
 ): Promise<ProvisionalDepartmentDay[]> {
+  const rows = await readDepartmentRows(dataSource, from, through);
+  return completeProvisionalDepartmentDays(rows, expectedCodes, from, through);
+}
+
+export async function readSingleDepartmentSurfaceDays(
+  dataSource: DataSource,
+  from: string,
+  through: string,
+  departmentCode: string,
+): Promise<ProvisionalDepartmentDay[]> {
+  const rows = await readDepartmentRows(
+    dataSource,
+    from,
+    through,
+    departmentCode,
+  );
+  return completeDepartmentDays(rows, [departmentCode], from, through);
+}
+
+async function readDepartmentRows(
+  dataSource: DataSource,
+  from: string,
+  through: string,
+  departmentCode?: string,
+): Promise<ProvisionalDepartmentRow[]> {
   const runner = dataSource.createQueryRunner();
   let transactionStarted = false;
   try {
@@ -106,18 +142,14 @@ export async function readProvisionalDepartmentDays(
           COALESCE(statistic.restrictions, '[]'::jsonb)
         ) restriction(value)
         WHERE restriction.value ->> 'date' BETWEEN $1::text AND $2::text
+          ${departmentCode ? 'AND department.code = $3::text' : ''}
         ORDER BY date, department.code
       `,
-      [from, through],
+      departmentCode ? [from, through, departmentCode] : [from, through],
     );
     await runner.commitTransaction();
     transactionStarted = false;
-    return completeProvisionalDepartmentDays(
-      rows,
-      expectedCodes,
-      from,
-      through,
-    );
+    return rows;
   } catch (error) {
     if (transactionStarted) await runner.rollbackTransaction();
     throw error;

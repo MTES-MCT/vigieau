@@ -171,6 +171,65 @@ describe('readProvisionalDepartmentDays', () => {
     expect(runner.rollbackTransaction).toHaveBeenCalled();
     expect(runner.release).toHaveBeenCalled();
   });
+
+  it('restricts surface recovery to one known department without weakening national coverage', async () => {
+    runner.query.mockImplementation(async (sql: string) =>
+      sql.includes('SELECT department.code')
+        ? rawDay('2026-07-11').filter((row) => row.departement === '11')
+        : [],
+    );
+    const days = await provisional.readSingleDepartmentSurfaceDays(
+      source as any,
+      '2026-07-11',
+      '2026-07-12',
+      '11',
+    );
+    expect(days).toHaveLength(1);
+    expect(days[0].departements).toHaveLength(1);
+    expect(days[0].departements[0].departement).toBe('11');
+    expect(runner.query).toHaveBeenCalledWith(
+      expect.stringContaining('AND department.code = $3::text'),
+      ['2026-07-11', '2026-07-12', '11'],
+    );
+    expect(runner.query).toHaveBeenCalledWith('SET TRANSACTION READ ONLY');
+    expect(runner.query).toHaveBeenCalledWith(
+      "SET LOCAL statement_timeout = '5s'",
+    );
+    expect(
+      provisional.completeProvisionalDepartmentDays(
+        rawDay('2026-07-11').filter((row) => row.departement === '11'),
+        ['11'],
+        '2026-07-11',
+        '2026-07-12',
+      ),
+    ).toEqual([]);
+  });
+
+  it.each(['duplicate', 'missing', 'invalid', 'unexpected'])(
+    'refuses %s raw department data during surface recovery',
+    async (failure) => {
+      const row = rawDay('2026-07-11').find(
+        (item) => item.departement === '11',
+      )!;
+      let rows = [row];
+      if (failure === 'duplicate') rows = [row, row];
+      if (failure === 'missing') rows = [];
+      if (failure === 'invalid') row.restriction.SUP.alerte = 'NaN';
+      if (failure === 'unexpected') row.departement = '34';
+      runner.query.mockImplementation(async (sql: string) =>
+        sql.includes('SELECT department.code') ? rows : [],
+      );
+      await expect(
+        provisional.readSingleDepartmentSurfaceDays(
+          source as any,
+          '2026-07-11',
+          '2026-07-12',
+          '11',
+        ),
+      ).resolves.toEqual([]);
+      expect(runner.release).toHaveBeenCalled();
+    },
+  );
 });
 
 describe('provisional public department and area opt-in', () => {

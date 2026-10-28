@@ -43,6 +43,7 @@ import {
   PROVISIONAL_STATISTIC_STATUS,
   ProvisionalDepartmentDay,
   readProvisionalDepartmentDays,
+  readSingleDepartmentSurfaceDays,
 } from './provisional-department-statistics';
 
 interface StatisticPublicationState {
@@ -282,6 +283,14 @@ export class DataService implements OnModuleInit {
   private readonly publicationRefreshRetryIntervalMs = 60_000;
   private readonly referenceDataRefreshIntervalMs = 2 * 60 * 60 * 1_000;
   private readonly referenceDataRefreshRetryIntervalMs = 5_000;
+  private readonly departmentSurfaceRecoveryCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      settled: boolean;
+      loading: Promise<ProvisionalDepartmentDay[]>;
+    }
+  >();
   private readonly provisionalDepartmentCache = new Map<
     string,
     {
@@ -402,13 +411,20 @@ export class DataService implements OnModuleInit {
       );
     if (region)
       return this.filterByEntity(filteredData, region, 'regions', cache);
-    if (departement)
-      return this.filterByEntity(
+    if (departement) {
+      const rows = this.filterByEntity(
         filteredData,
         departement,
         'departements',
         cache,
       );
+      return this.recoverDepartmentSurfaceRows(
+        rows,
+        cache,
+        departement,
+        includeProvisional,
+      );
+    }
 
     // Données globales
     return filteredData.map((d) => ({
@@ -418,6 +434,126 @@ export class DataService implements OnModuleInit {
       AEP: d.AEP,
       ...(d.dataStatus === 'provisional' ? PROVISIONAL_STATISTIC_STATUS : {}),
     }));
+  }
+
+  private isFiniteSurfaceRow(row: any): boolean {
+    return ['ESO', 'ESU', 'AEP'].every((type) =>
+      ['vigilance', 'alerte', 'alerte_renforcee', 'crise'].every((level) => {
+        const value = row?.[type]?.[level];
+        return (
+          (typeof value === 'number' ||
+            (typeof value === 'string' && value.trim() !== '')) &&
+          Number.isFinite(Number(value)) &&
+          Number(value) >= 0
+        );
+      }),
+    );
+  }
+
+  private async recoverDepartmentSurfaceRows(
+    rows: any[],
+    cache: CertifiedDataCache,
+    departmentId: string,
+    includeProvisional: boolean,
+  ): Promise<any[]> {
+    const invalid = rows.filter((row) => !this.isFiniteSurfaceRow(row));
+    if (invalid.length === 0) return rows;
+    const unavailable = () =>
+      new HttpException(
+        'Les statistiques de surface de ce département sont temporairement indisponibles.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    if (!includeProvisional) throw unavailable();
+    const department = this.getEntityById(
+      cache.departements,
+      departmentId,
+      'Département',
+    );
+    const area = Number(department.area);
+    if (!Number.isFinite(area) || area <= 0) throw unavailable();
+    const from = invalid[0].date;
+    const through = invalid.at(-1).date;
+    const state = await this.getPublicationState();
+    const stateToken = this.getPublicationStateToken(state);
+    const key = JSON.stringify([
+      cache.fingerprint,
+      stateToken,
+      department.code,
+      from,
+      through,
+    ]);
+    for (const [cachedKey, entry] of this.departmentSurfaceRecoveryCache) {
+      if (entry.settled && entry.expiresAt <= Date.now())
+        this.departmentSurfaceRecoveryCache.delete(cachedKey);
+    }
+    let entry = this.departmentSurfaceRecoveryCache.get(key);
+    if (!entry) {
+      const pending = [...this.departmentSurfaceRecoveryCache.values()].filter(
+        (item) => !item.settled,
+      );
+      if (pending.length >= 2) {
+        await Promise.race(
+          pending.map((item) => item.loading.catch(() => undefined)),
+        );
+        return this.recoverDepartmentSurfaceRows(
+          rows,
+          cache,
+          departmentId,
+          includeProvisional,
+        );
+      }
+      if (this.departmentSurfaceRecoveryCache.size >= 8) {
+        const oldest = [...this.departmentSurfaceRecoveryCache].find(
+          ([, item]) => item.settled,
+        );
+        if (oldest) this.departmentSurfaceRecoveryCache.delete(oldest[0]);
+      }
+      const loading = readSingleDepartmentSurfaceDays(
+        this.dataSource,
+        from,
+        through,
+        String(department.code),
+      );
+      entry = { expiresAt: Date.now() + 60_000, settled: false, loading };
+      this.departmentSurfaceRecoveryCache.set(key, entry);
+      void loading.then(
+        () => {
+          entry.settled = true;
+        },
+        () => this.departmentSurfaceRecoveryCache.delete(key),
+      );
+    }
+    let days: ProvisionalDepartmentDay[];
+    try {
+      days = await entry.loading;
+    } catch {
+      throw unavailable();
+    }
+    if (
+      this.getPublicationStateToken(await this.getPublicationState(true)) !==
+      stateToken
+    ) {
+      this.departmentSurfaceRecoveryCache.delete(key);
+      throw unavailable();
+    }
+    const daysByDate = new Map(days.map((day) => [day.date, day]));
+    // Old artifacts contain invalid departmental divisions. Rebuilt raw values
+    // remain provisional; they must never mutate or recertify the artifact.
+    return rows.map((row) => {
+      if (this.isFiniteSurfaceRow(row)) return row;
+      const day = daysByDate.get(row.date);
+      if (!day) throw unavailable();
+      const recovered = {
+        date: row.date,
+        id: department.id,
+        ESO: this.computeRestriction(day.departements, 'SOU', area),
+        ESU: this.computeRestriction(day.departements, 'SUP', area),
+        AEP: this.computeRestriction(day.departements, 'AEP', area),
+        ...PROVISIONAL_STATISTIC_STATUS,
+      };
+      if (!this.isFiniteSurfaceRow(recovered)) throw unavailable();
+      return recovered;
+    });
   }
 
   /**
@@ -440,11 +576,21 @@ export class DataService implements OnModuleInit {
       );
     }
 
-    return data.map((d) => ({
+    const rows = data.map((d) => ({
       date: d.date,
       ...d[field].find((item: any) => item.id === entity.id),
       ...(d.dataStatus === 'provisional' ? PROVISIONAL_STATISTIC_STATUS : {}),
     }));
+    if (
+      field !== 'departements' &&
+      rows.some((row) => !this.isFiniteSurfaceRow(row))
+    ) {
+      throw new HttpException(
+        'Les statistiques de surface de ce territoire sont temporairement indisponibles.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    return rows;
   }
 
   /**
@@ -730,7 +876,10 @@ export class DataService implements OnModuleInit {
         ),
         departements: this.computeEntityRestrictions(
           data,
-          referenceData.departements,
+          referenceData.departements.map((department) => ({
+            ...department,
+            departements: [{ id: department.id }],
+          })),
           referenceData.departements,
         ),
       };
@@ -745,21 +894,26 @@ export class DataService implements OnModuleInit {
     entities: any[],
     departements: any[],
   ) {
-    return entities.map((entity) => {
-      const filteredDeps = departements.filter((dep) =>
-        entity.departements?.some((d) => d.id === dep.id),
-      );
-      const area = filteredDeps.reduce((acc, dep) => acc + dep.area, 0);
-      const restrictions = data.departements.filter((dep) =>
-        filteredDeps.some((d) => d.code === dep.departement),
-      );
-      return {
-        id: entity.id,
-        ESO: this.computeRestriction(restrictions, 'SOU', area),
-        ESU: this.computeRestriction(restrictions, 'SUP', area),
-        AEP: this.computeRestriction(restrictions, 'AEP', area),
-      };
-    });
+    return entities
+      .filter((entity) => entity.departements?.length > 0)
+      .map((entity) => {
+        const filteredDeps = departements.filter((dep) =>
+          entity.departements?.some((d) => d.id === dep.id),
+        );
+        const area = filteredDeps.reduce(
+          (acc, dep) => acc + Number(dep.area),
+          0,
+        );
+        const restrictions = data.departements.filter((dep) =>
+          filteredDeps.some((d) => d.code === dep.departement),
+        );
+        return {
+          id: entity.id,
+          ESO: this.computeRestriction(restrictions, 'SOU', area),
+          ESU: this.computeRestriction(restrictions, 'SUP', area),
+          AEP: this.computeRestriction(restrictions, 'AEP', area),
+        };
+      });
   }
 
   private getInstanceReferenceData(): ReferenceDataCache {
@@ -780,6 +934,12 @@ export class DataService implements OnModuleInit {
     zoneType: string,
     area: number,
   ) {
+    if (!Number.isFinite(area) || area <= 0) {
+      throw new HttpException(
+        'La surface de référence des statistiques est indisponible.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
     const compute = (key: string) =>
       (
         (restrictions.reduce(
@@ -4240,6 +4400,7 @@ export class DataService implements OnModuleInit {
           .getRawMany()
       ).map((departement) => ({
         ...departement,
+        area: Number(departement.area),
         bounds: {
           minLat: departement.bounds.split('(')[1].split(' ')[0],
           maxLat: departement.bounds.split(',')[1].split(' ')[0],
