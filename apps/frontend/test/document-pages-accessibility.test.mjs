@@ -209,16 +209,11 @@ test('preserves the corrected institutional labels', () => {
     sources.accessibility,
     /Parmis|responsable de Potentiel|a été créé le|Cohésion des territoires/,
   );
-  assert.match(sources.accessibility, /Parmi les points bloquants/);
   assert.match(sources.accessibility, /#plan-2026/);
   assert.match(sources.accessibility, /a été créée le/);
   assert.match(
     sources.accessibility,
     /Ministère de la Transition écologique, de la Biodiversité et des Négociations internationales/,
-  );
-  assert.match(
-    sources.accessibility,
-    /constats ci-dessous sont ceux de l’audit de janvier 2025/,
   );
 
   assert.doesNotMatch(
@@ -241,4 +236,33 @@ test('preserves the corrected institutional labels', () => {
   );
   assert.match(sources.legalNotice, /directeur général de/);
   assert.match(sources.legalNotice, /newsletter est gérée/);
+});
+
+test('publishes the October 2026 counter-audit results and scope', () => {
+  const source = sources.accessibility;
+  assert.match(source, /partiellement conforme/);
+  assert.match(source, /RGAA version 4\.1\.2 réalisé du 16 au 23 octobre 2026/);
+  assert.match(source, /86,54&nbsp;%/);
+  assert.match(source, /90,21&nbsp;%/);
+  assert.match(source, /45 critères sont conformes, 7 sont non conformes et 54 sont non applicables/);
+  assert.match(source, /mise à jour le 3 novembre 2026/);
+  assert.match(source, /n’ont donc pas pu être réévalués/);
+  assert.match(source, /Aucune dérogation pour charge disproportionnée/);
+  assert.match(source, /NVDA 2026\.1\.1 et Firefox 158/);
+  assert.match(source, /Jaws 2025 et Firefox 158/);
+  assert.match(source, /VoiceOver et Safari/);
+  assert.match(source, /PDF Accessibility Checker 2024/);
+  assert.doesNotMatch(source, /65,38|80,12|constats ci-dessous sont ceux de l’audit de janvier 2025/);
+
+  const criteria = source.match(/<ul id="criteres-non-conformes">([\s\S]*?)<\/ul>/)?.[1];
+  assert.ok(criteria);
+  assert.deepEqual(
+    [...criteria.matchAll(/<li>(\d+\.\d+) :/g)].map(match => match[1]),
+    ['1.1', '6.1', '7.1', '7.5', '8.9', '12.8', '13.3'],
+  );
+  const pages = source.match(/<ul id="pages-auditees">([\s\S]*?)<\/ul>/)?.[1];
+  assert.ok(pages);
+  assert.equal([...pages.matchAll(/<a href=/g)].length, 7);
+  assert.match(pages, /12\+rue\+de\+la\+Mairie\+51100\+Reims/);
+  assert.match(pages, /10\+Rue\+des\+Aspres\+66240\+Saint-Est%C3%A8ve/);
 });
