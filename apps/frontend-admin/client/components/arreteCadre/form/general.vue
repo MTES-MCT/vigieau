@@ -6,7 +6,7 @@ import type { Departement } from '~/dto/departement.dto';
 import { useAuthStore } from '~/stores/auth';
 import { useRefDataStore } from '~/stores/refData';
 import deburr from 'lodash.deburr';
-import { maxLength, helpers, required } from '@vuelidate/validators';
+import { helpers, maxLength, required } from '@vuelidate/validators';
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
@@ -23,8 +23,10 @@ const isAci: Ref<boolean> = ref(props.arreteCadre.departements.length > 1);
 const assignDepartement = (force = false) => {
   if (!props.arreteCadre.id || force) {
     if (props.arreteCadre.departements.length < 1) {
-      props.arreteCadre.departements = authStore.user.role === 'departement' ?
-        [refDataStore.departements.find((d) => authStore.user.roleDepartements.includes(d.code))] : [];
+      props.arreteCadre.departements =
+        authStore.user.role === 'departement'
+          ? [refDataStore.departements.find((d) => authStore.user.roleDepartements.includes(d.code))]
+          : [];
     } else if (props.arreteCadre.departements.length > 1 && !isAci.value) {
       props.arreteCadre.departements = [props.arreteCadre.departements[0]];
     }
@@ -35,30 +37,29 @@ const assignDepartement = (force = false) => {
 const rules = computed(() => {
   return {
     numero: {
-      required: helpers.withMessage('Le numéro de l\'arrêté est obligatoire', required),
-      maxLength: helpers.withMessage('Le numéro de l\'arrêté ne doit pas dépasser 50 caractères.', maxLength(50)),
+      required: helpers.withMessage("Le numéro de l'arrêté est obligatoire", required),
+      maxLength: helpers.withMessage("Le numéro de l'arrêté ne doit pas dépasser 50 caractères.", maxLength(50)),
     },
     departements: {
-      required: helpers.withMessage('L\'arrêté doit être lié à au moins un département', required),
+      required: helpers.withMessage("L'arrêté doit être lié à au moins un département", required),
     },
     arreteCadreAbroge: {},
   };
 });
 
 const filterDepartements = () => {
-  let tmp = refDataStore.departements
-    .filter((d) => !props.arreteCadre.departements.map((ad) => ad.id).includes(d.id));
+  let tmp = refDataStore.departements.filter((d) => !props.arreteCadre.departements.map((ad) => ad.id).includes(d.id));
   if (query.value) {
     tmp = tmp.filter((d) => {
-      return (deburr(d.nom)
-          .replace(/[\s\-\_]/g, '')
+      return (
+        deburr(d.nom)
+          .replace(/[\s\-_]/g, '')
           .toLowerCase()
           .includes(
             deburr(query.value)
-              .replace(/[\s\-\_]/g, '')
+              .replace(/[\s\-_]/g, '')
               .toLowerCase(),
-          ) ||
-        d.code.toLowerCase().includes(query.value.toLowerCase())
+          ) || d.code.toLowerCase().includes(query.value.toLowerCase())
       );
     });
   }
@@ -70,7 +71,7 @@ const filterDepartements = () => {
 };
 
 const departementsOptions = refDataStore.departements
-  .filter(d => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code))
+  .filter((d) => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code))
   .map((d) => {
     return {
       value: d.id,
@@ -169,9 +170,7 @@ defineExpose({
     <div class="fr-grid-row">
       <div class="fr-col-12 fr-col-lg-6">
         <h6>Généralité</h6>
-        <DsfrInputGroup
-          v-if="arreteCadre.arreteCadreAbroge"
-          :error-message="utils.showInputError(v$, 'arreteCadreAbroge')">
+        <DsfrInputGroup v-if="arreteCadre.arreteCadreAbroge" :error-message="utils.showInputError(v$, 'arreteCadreAbroge')">
           <DsfrInput
             disabled
             :model-value="arreteCadre.arreteCadreAbroge?.numero"

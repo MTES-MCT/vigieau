@@ -46,9 +46,24 @@ test('adds a framework usage only to compatible restrictions of that framework',
     thematique: { id: 5 },
   };
   const restrictions = [
-    { id: 1, arreteCadre: { id: 10 }, isAep: false, zoneAlerte: { type: 'SOU' } },
-    { id: 2, arreteCadre: { id: 11 }, isAep: false, zoneAlerte: { type: 'SOU' } },
-    { id: 3, arreteCadre: { id: 10 }, isAep: false, zoneAlerte: { type: 'SUP' } },
+    {
+      id: 1,
+      arreteCadre: { id: 10 },
+      isAep: false,
+      zoneAlerte: { type: 'SOU' },
+    },
+    {
+      id: 2,
+      arreteCadre: { id: 11 },
+      isAep: false,
+      zoneAlerte: { type: 'SOU' },
+    },
+    {
+      id: 3,
+      arreteCadre: { id: 10 },
+      isAep: false,
+      zoneAlerte: { type: 'SUP' },
+    },
   ];
   const frameworks = [
     { id: 10, usages: [targetUsage] },
@@ -77,8 +92,18 @@ test('keeps each framework template when labels match but instructions differ', 
     descriptionCrise: 'Autorisé par AC 11',
   };
   const restrictions = [
-    { id: 1, arreteCadre: { id: 10 }, isAep: false, zoneAlerte: { type: 'SOU' } },
-    { id: 2, arreteCadre: { id: 11 }, isAep: false, zoneAlerte: { type: 'SOU' } },
+    {
+      id: 1,
+      arreteCadre: { id: 10 },
+      isAep: false,
+      zoneAlerte: { type: 'SOU' },
+    },
+    {
+      id: 2,
+      arreteCadre: { id: 11 },
+      isAep: false,
+      zoneAlerte: { type: 'SOU' },
+    },
   ];
 
   const assignments = getUsageTargetAssignments(
@@ -106,8 +131,18 @@ test('adds a custom usage to every compatible resource when no framework defines
     thematique: { id: 8 },
   };
   const restrictions = [
-    { id: 1, arreteCadre: { id: 10 }, isAep: false, zoneAlerte: { type: 'SUP' } },
-    { id: 2, arreteCadre: { id: 11 }, isAep: false, zoneAlerte: { type: 'SOU' } },
+    {
+      id: 1,
+      arreteCadre: { id: 10 },
+      isAep: false,
+      zoneAlerte: { type: 'SUP' },
+    },
+    {
+      id: 2,
+      arreteCadre: { id: 11 },
+      isAep: false,
+      zoneAlerte: { type: 'SOU' },
+    },
     { id: 3, arreteCadre: { id: 11 }, isAep: true, zoneAlerte: null },
   ];
 

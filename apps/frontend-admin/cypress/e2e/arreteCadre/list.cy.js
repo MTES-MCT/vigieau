@@ -14,9 +14,9 @@ describe('Liste des arrêtés cadres', () => {
     cy.devLogin(Cypress.env('departementUser'));
     cy.url().should('match', /arrete-cadre/);
     cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').should('exist');
-    cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').each(card => {
+    cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').each((card) => {
       cy.wrap(card).find('.fr-card__desc').should('contain.text', 'Corse-du-Sud');
-    })
+    });
 
     cy.searchAC('CYTEST_007', false);
     cy.get('[data-cy=ArreteCadreList] [data-cy=ArreteCadreListCard]').should('have.length', 0);

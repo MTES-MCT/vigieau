@@ -1,5 +1,5 @@
 import { BaseApiPagination } from '~/api/base-api-pagination';
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class ArreteCadreApi extends BaseApiPagination {
   publish = (id: string, payload: any) => {

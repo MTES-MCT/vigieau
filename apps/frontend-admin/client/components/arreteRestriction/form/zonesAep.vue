@@ -193,7 +193,9 @@ const loadCommunes = async () => {
   }
 };
 
-watch(() => props.arreteRestriction.departement, loadCommunes, { immediate: true });
+watch(() => props.arreteRestriction.departement, loadCommunes, {
+  immediate: true,
+});
 
 watch(selectedZoneKeys, () => {
   const zonesAepSelected = zonesAep.value.filter((r) => selectedZoneKeys.value.includes(getZoneKey(r)));

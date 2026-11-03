@@ -44,7 +44,7 @@ const indexEdited: Ref<number | null> = ref(null);
 const rules = computed(() => {
   return {
     usages: {
-      required: helpers.withMessage('L\'arrêté doit être lié à au moins un usage', required),
+      required: helpers.withMessage("L'arrêté doit être lié à au moins un usage", required),
     },
   };
 });
@@ -53,17 +53,18 @@ const v$ = useVuelidate(rules, props.arreteCadre);
 
 const filterUsages = () => {
   let tmp: any[] = [];
-  tmp = query.value ? refDataStore.usages.filter((u) => {
-    const nom = deburr(u.nom)
-      .replace(/[\-\_]/g, '');
-    const queryWords = deburr(query.value)
-      .replace(/[\-\_]/g, '')
-      .split(' ')
-      .map(s => s.replace(/^/, '(').replace(/$/, ')'))
-      .join('*');
-    const regex = new RegExp(`${queryWords}`, 'gi');
-    return nom.match(regex);
-  }) : refDataStore.usages;
+  tmp = query.value
+    ? refDataStore.usages.filter((u) => {
+        const nom = deburr(u.nom).replace(/[\-_]/g, '');
+        const queryWords = deburr(query.value)
+          .replace(/[\-_]/g, '')
+          .split(' ')
+          .map((s) => s.replace(/^/, '(').replace(/$/, ')'))
+          .join('*');
+        const regex = new RegExp(`${queryWords}`, 'gi');
+        return nom.match(regex);
+      })
+    : refDataStore.usages;
   tmp = tmp.filter((u) => {
     return props.arreteCadre.usages.findIndex((uac) => uac.nom === u.nom) < 0;
   });
@@ -84,13 +85,13 @@ const selectUsage = (usage: Usage | string, isUsageArreteCadre: boolean = false)
   }
   componentKey.value += 1;
   if (!isUsageArreteCadre) {
-    let usageArreteCadre = props.arreteCadre.usages.find((uac) => uac.nom === (<Usage>usage).nom);
+    let usageArreteCadre = props.arreteCadre.usages.find((uac) => uac.nom === (usage as Usage).nom);
     if (!usageArreteCadre) {
-      usageArreteCadre = new Usage(<Usage>usage);
+      usageArreteCadre = new Usage(usage as Usage);
     }
     askCreateEditUsage(null, usageArreteCadre);
   } else {
-    askCreateEditUsage(props.arreteCadre.usages.findIndex(u => u.nom === usage.nom));
+    askCreateEditUsage(props.arreteCadre.usages.findIndex((u) => u.nom === usage.nom));
   }
 };
 
@@ -174,9 +175,7 @@ defineExpose({
       <div class="fr-col-12 fr-col-lg-6">
         <div class="usage-card">
           <h6>Il manque un usage dans votre liste ?</h6>
-          <p>
-            Retrouvez les usages utilisés dans un arrêté précédent&nbsp;:
-          </p>
+          <p>Retrouvez les usages utilisés dans un arrêté précédent&nbsp;:</p>
           <DsfrInputGroup :error-message="utils.showInputError(v$, 'usagesArreteCadre')">
             <MixinsAutoComplete
               class="show-label"
@@ -190,14 +189,13 @@ defineExpose({
             />
           </DsfrInputGroup>
           <div class="fr-grid-row fr-grid-row--middle fr-mb-2w">
-            <div style="flex: 1;" class="divider" />
+            <div style="flex: 1" class="divider" />
             <span class="fr-mx-4w">ou</span>
-            <div style="flex: 1;" class="divider" />
+            <div style="flex: 1" class="divider" />
           </div>
           <div class="fr-grid-row fr-grid-row--middle fr-grid-row--space-between">
             <span>L'usage n'existe pas</span>
-            <DsfrButton label="Créer un nouvel usage"
-                        @click="askCreateEditUsage()" />
+            <DsfrButton label="Créer un nouvel usage" @click="askCreateEditUsage()" />
           </div>
         </div>
       </div>
@@ -208,7 +206,8 @@ defineExpose({
       :opened="modalOpened"
       title="Création / édition d'un usage"
       :actions="modalActions"
-      @close="modalOpened = utils.closeModal(modalOpened);">
+      @close="modalOpened = utils.closeModal(modalOpened)"
+    >
       <ArreteCadreFormCreateEditUsage
         v-if="modalOpened"
         ref="createEditUsageFormRef"

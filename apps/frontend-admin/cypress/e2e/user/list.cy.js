@@ -23,9 +23,16 @@ function showUsers(fromMenu = false) {
 
 function selectDepartment(code) {
   cy.get(departmentInput).should('have.length', 1).clear().type(code);
-  cy.get(departmentInput).closest('.search-autocomplete').contains('li', code + ' - ').should('exist');
+  cy.get(departmentInput)
+    .closest('.search-autocomplete')
+    .contains('li', code + ' - ')
+    .should('exist');
   cy.get(departmentInput).blur().focus();
-  cy.get(departmentInput).closest('.search-autocomplete').contains('li', code + ' - ').should('be.visible').click();
+  cy.get(departmentInput)
+    .closest('.search-autocomplete')
+    .contains('li', code + ' - ')
+    .should('be.visible')
+    .click();
   cy.contains('.fr-modal .fr-tag', code + ' - ').should('be.visible');
 }
 
@@ -47,7 +54,9 @@ describe('Liste des utilisateurs', () => {
       cy.request({
         method: 'DELETE',
         url: Cypress.env('apiUrl').replace(/\/$/, '') + '/user/' + encodeURIComponent(email),
-      }).its('status').should('equal', 200);
+      })
+        .its('status')
+        .should('equal', 200);
     }
   });
 

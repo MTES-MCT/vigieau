@@ -66,7 +66,9 @@ jobs:
       - run: npm ci --prefix apps/frontend
       - run: npm ci --prefix apps/frontend-admin
       - name: Verify reproducible security fork archives
-        run: node scripts/build-listhen-security-fork.mjs --check
+        run: |
+          node scripts/build-listhen-security-fork.mjs --check
+          node scripts/build-minimatch-security-fork.mjs --check
       - run: for script in scripts/*.mjs; do node --check "$script"; done
       - run: node --test --test-isolation=none scripts/*.test.mjs
       - run: npm run lint:changed

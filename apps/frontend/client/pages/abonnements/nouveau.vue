@@ -17,6 +17,8 @@ const resultModal = ref<'success' | 'error' | null>(null);
 const subscribing = ref(false);
 const serviceUnavailable = ref(false);
 const restrictionsConflict = ref(false);
+const confirmationUnavailable = ref(false);
+const requestsLimited = ref(false);
 const resultModalOpened = computed(() => resultModal.value !== null);
 const resultModalId = computed(() => (
   resultModal.value === 'success'
@@ -26,17 +28,28 @@ const resultModalId = computed(() => (
 const resultModalTitle = computed(() => (
   resultModal.value === 'success'
     ? 'Abonnement confirmé'
-    : 'L’abonnement n’a pas pu être enregistré'
+    : confirmationUnavailable.value
+      ? 'Abonnement enregistré, e-mail non envoyé'
+      : 'L’abonnement n’a pas pu être enregistré'
 ));
-const resultModalDescription = computed(() => (
-  resultModal.value === 'success'
-    ? 'Vous êtes désormais abonné. Vous recevrez un e-mail très prochainement. Vous souhaitez recevoir les alertes pour plusieurs adresses ? Il vous suffit de remplir de nouveau le formulaire avec la ou les nouvelles adresses.'
-    : restrictionsConflict.value
-      ? 'Les restrictions applicables à cette adresse ne peuvent pas être confirmées en raison d’un chevauchement de zones non résolu. Consultez les arrêtés publiés par votre préfecture.'
-      : serviceUnavailable.value
-        ? 'Le service est temporairement indisponible. Veuillez réessayer dans quelques instants.'
-        : 'Veuillez réessayer avec une autre adresse.'
-));
+const resultModalDescription = computed(() => {
+  if (resultModal.value === 'success') {
+    return 'Vous êtes désormais abonné. Vous recevrez un e-mail très prochainement. Vous souhaitez recevoir les alertes pour plusieurs adresses ? Il vous suffit de remplir de nouveau le formulaire avec la ou les nouvelles adresses.';
+  }
+  if (confirmationUnavailable.value) {
+    return 'Votre abonnement est enregistré, mais l’e-mail de confirmation n’a pas pu être envoyé. Fermez cette fenêtre et réessayez avec le même formulaire pour recevoir votre confirmation.';
+  }
+  if (requestsLimited.value) {
+    return 'Trop de demandes ont été effectuées. Patientez 15 minutes avant de réessayer.';
+  }
+  if (restrictionsConflict.value) {
+    return 'Les restrictions applicables à cette adresse ne peuvent pas être confirmées en raison d’un chevauchement de zones non résolu. Consultez les arrêtés publiés par votre préfecture.';
+  }
+  if (serviceUnavailable.value) {
+    return 'Le service est temporairement indisponible. Veuillez réessayer dans quelques instants.';
+  }
+  return 'Veuillez réessayer avec une autre adresse.';
+});
 
 const closeResultModal = async () => {
   if (!resultModal.value) {
@@ -55,27 +68,37 @@ const closeResultModal = async () => {
 };
 
 const subscribe = async (form: any) => {
+  if (subscribing.value) return;
   subscribing.value = true;
   resultModal.value = null;
   serviceUnavailable.value = false;
   restrictionsConflict.value = false;
+  confirmationUnavailable.value = false;
+  requestsLimited.value = false;
 
   try {
     const { error } = await api.subscribeMail(form);
     if (!error.value) {
       resultModal.value = 'success';
     } else {
-      serviceUnavailable.value = getHttpErrorStatus(error.value) === 503;
-      restrictionsConflict.value = isZoneRestrictionsConflict(error.value);
+      setSubscriptionError(error.value);
       resultModal.value = 'error';
     }
   } catch (error) {
-    serviceUnavailable.value = getHttpErrorStatus(error) === 503;
-    restrictionsConflict.value = isZoneRestrictionsConflict(error);
+    setSubscriptionError(error);
     resultModal.value = 'error';
   } finally {
     subscribing.value = false;
   }
+};
+
+const setSubscriptionError = (error: any) => {
+  const status = getHttpErrorStatus(error);
+  requestsLimited.value = status === 429;
+  serviceUnavailable.value = !status || status >= 500;
+  restrictionsConflict.value = isZoneRestrictionsConflict(error);
+  confirmationUnavailable.value = (error?.data?.code ?? error?.response?._data?.code)
+    === 'SUBSCRIPTION_CONFIRMATION_UNAVAILABLE';
 };
 </script>
 

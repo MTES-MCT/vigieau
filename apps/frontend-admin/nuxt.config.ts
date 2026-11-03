@@ -1,7 +1,7 @@
-import {defineNuxtConfig} from 'nuxt/config';
-import istanbulPlugin from "vite-plugin-istanbul";
+import { defineNuxtConfig } from 'nuxt/config';
+import istanbulPlugin from 'vite-plugin-istanbul';
 
-const appName = "VigiEau Admin";
+const appName = 'VigiEau Admin';
 
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
@@ -18,24 +18,27 @@ export default defineNuxtConfig({
     head: {
       title: appName,
       meta: [
-        {charset: 'utf-8'},
-        {name: 'viewport', content: 'width=device-width, initial-scale=1'},
+        { charset: 'utf-8' },
+        { name: 'viewport', content: 'width=device-width, initial-scale=1' },
         {
           name: 'description',
           content: `Plateforme d'administration ${appName}`,
         },
-        {name: 'format-detection', content: 'telephone=no'},
-        {property: 'og:title', content: appName},
+        { name: 'format-detection', content: 'telephone=no' },
+        { property: 'og:title', content: appName },
         {
           property: 'og:description',
           content: `Plateforme d'administration ${appName}`,
         },
-        {property: 'og:type', content: 'website'},
-        {property: 'og:url', content: `https://${process.env.DOMAIN_NAME}`},
-        {property: 'og:locale', content: 'fr_FR'},
-        {property: 'og:image', content: `https://${process.env.DOMAIN_NAME}/favicon.svg`},
+        { property: 'og:type', content: 'website' },
+        { property: 'og:url', content: `https://${process.env.DOMAIN_NAME}` },
+        { property: 'og:locale', content: 'fr_FR' },
+        {
+          property: 'og:image',
+          content: `https://${process.env.DOMAIN_NAME}/favicon.svg`,
+        },
       ],
-      link: [{rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg'}],
+      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
       htmlAttrs: {
         lang: 'fr',
       },
@@ -92,9 +95,9 @@ export default defineNuxtConfig({
       istanbulPlugin({
         exclude: ['node_modules', 'test/', 'coverage/'],
         extension: ['.js', '.ts', '.vue'],
-        cypress: true
+        cypress: true,
       }),
-    ]
+    ],
   },
 
   nitro: {

@@ -12,7 +12,7 @@ useHead({
 
 <template>
   <div class="ar-list">
-    <ArreteRestrictionList />    
+    <ArreteRestrictionList />
   </div>
 </template>
 

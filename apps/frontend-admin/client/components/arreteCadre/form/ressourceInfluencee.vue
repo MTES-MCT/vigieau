@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type {ArreteCadre} from '~/dto/arrete_cadre.dto';
-import type {Ref} from 'vue';
-import type {Departement} from '~/dto/departement.dto';
-import type {ZoneAlerte} from '~/dto/zone_alerte.dto';
-import {useRefDataStore} from '~/stores/refData';
-import type {Commune} from '~/dto/commune.dto';
+import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
+import type { Ref } from 'vue';
+import type { Departement } from '~/dto/departement.dto';
+import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
+import { useRefDataStore } from '~/stores/refData';
+import type { Commune } from '~/dto/commune.dto';
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
@@ -14,7 +14,7 @@ const refDataStore = useRefDataStore();
 const utils = useUtils();
 
 const departementsFiletered: Ref<any[]> = ref([]);
-const zonesInfluenceesSelected: Ref<ZoneAlerte[]> = ref(props.arreteCadre.zonesAlerte.filter(z => z.ressourceInfluencee));
+const zonesInfluenceesSelected: Ref<ZoneAlerte[]> = ref(props.arreteCadre.zonesAlerte.filter((z) => z.ressourceInfluencee));
 const communes: Ref<Commune[]> = ref([]);
 const expandedId = ref();
 const modalCommunesOpened = ref(false);
@@ -40,12 +40,14 @@ const modalActions = ref([
 
 const computeDepSelected = () => {
   departementsFiletered.value.forEach((d) => {
-    d.nbZonesInfluenceesSelected = zonesInfluenceesSelected.value.filter((z) => d.zonesAlerte.map((za: ZoneAlerte) => za.id).includes(z.id)).length;
+    d.nbZonesInfluenceesSelected = zonesInfluenceesSelected.value.filter((z) =>
+      d.zonesAlerte.map((za: ZoneAlerte) => za.id).includes(z.id),
+    ).length;
   });
 };
 
 const zonesOptions = (dep: Departement) => {
-  return zonesInfluenceesSelected.value.filter(z => dep.zonesAlerte.some(dz => dz.id === z.id));
+  return zonesInfluenceesSelected.value.filter((z) => dep.zonesAlerte.some((dz) => dz.id === z.id));
 };
 
 const createEditGroupementCommunes = (zone: ZoneAlerte) => {
@@ -54,8 +56,8 @@ const createEditGroupementCommunes = (zone: ZoneAlerte) => {
 };
 
 const createEditGroupement = async (zone: ZoneAlerte) => {
-  const z = props.arreteCadre.zonesAlerte.find(z => z.id === zone.id);
-  const zBis = zonesInfluenceesSelected.value.find(z => z.id === zone.id);
+  const z = props.arreteCadre.zonesAlerte.find((z) => z.id === zone.id);
+  const zBis = zonesInfluenceesSelected.value.find((z) => z.id === zone.id);
   if (z && zBis) {
     z.communes = JSON.parse(JSON.stringify(zone.communes));
     zBis.communes = JSON.parse(JSON.stringify(zone.communes));
@@ -68,8 +70,8 @@ const createEditGroupement = async (zone: ZoneAlerte) => {
 
 const sortCommunes = () => {
   props.arreteCadre.zonesAlerte
-    .filter(z => z.communes)
-    .forEach(z => {
+    .filter((z) => z.communes)
+    .forEach((z) => {
       z.communes = z.communes?.sort((a, b) => {
         if (a.code < b.code) {
           return -1;
@@ -83,7 +85,7 @@ const sortCommunes = () => {
 };
 
 const loadCommunes = async () => {
-  const depCodes = props.arreteCadre.departements?.map(d => d.code).filter(Boolean) || [];
+  const depCodes = props.arreteCadre.departements?.map((d) => d.code).filter(Boolean) || [];
   if (depCodes.length < 1) {
     communes.value = [];
     return;
@@ -93,7 +95,7 @@ const loadCommunes = async () => {
   try {
     await refDataStore.ensureCommunesLoaded(depCodes);
     const regex = new RegExp(`^(${depCodes.join('|')})`);
-    communes.value = refDataStore.communes.filter(c => regex.test(c.code));
+    communes.value = refDataStore.communes.filter((c) => regex.test(c.code));
   } finally {
     loading.value = false;
   }
@@ -112,13 +114,13 @@ watch(
     computeDepSelected();
     await loadCommunes();
   },
-  {immediate: true},
+  { immediate: true },
 );
 
 watch(
   () => props.arreteCadre.zonesAlerte,
   async () => {
-    zonesInfluenceesSelected.value = props.arreteCadre.zonesAlerte.filter(z => z.ressourceInfluencee);
+    zonesInfluenceesSelected.value = props.arreteCadre.zonesAlerte.filter((z) => z.ressourceInfluencee);
     computeDepSelected();
   },
 );
@@ -128,18 +130,16 @@ watch(
   <form @submit.prevent="">
     <div class="zone-alerte-influencee fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 fr-col-lg-6">
-        <p>
-          Sélectionner les communes où ces ressources seront proposées.
-        </p>
+        <p>Sélectionner les communes où ces ressources seront proposées.</p>
         <p v-if="loading" class="fr-mt-2w">
           <VIcon name="ri-loader-4-line" animation="spin" />
           Chargement des communes...
         </p>
-        <template v-for="(d, index) in departementsFiletered">
+        <template v-for="(d, index) in departementsFiletered" :key="index">
           <div class="divider fr-mb-2w"></div>
           <h6>Ressources influencées - {{ d.nom }} ({{ d.nbZonesInfluenceesSelected }})</h6>
           <div class="fr-grid-row fr-grid-row--space-between full-width">
-            <div class="zone-item" v-for="option in zonesOptions(d)">
+            <div class="zone-item" v-for="(option, optionIndex) in zonesOptions(d)" :key="optionIndex">
               <div class="fr-grid-row fr-grid-row--space-between fr-grid-row--middle">
                 <div>{{ option.code }} {{ option.nom }}</div>
                 <DsfrButton
@@ -147,17 +147,18 @@ watch(
                   secondary
                   @click="createEditGroupementCommunes(option)"
                   :disabled="loading"
-                  :key="option.id + '-' + accordionKey"
+                  :key="`${option.id}-${accordionKey}`"
                 />
               </div>
-              <DsfrAccordion v-if="option.communes?.length > 0"
-                             class="full-width fr-accordion--no-shadow fr-mt-1w"
-                             :title="'Voir les ' + option.communes.length + ' communes'"
-                             :expanded-id="expandedId"
-                             @expand="expandedId = $event"
-                             :key="option.id + '-' + accordionKey"
+              <DsfrAccordion
+                v-if="option.communes?.length > 0"
+                class="full-width fr-accordion--no-shadow fr-mt-1w"
+                :title="`Voir les ${option.communes.length} communes`"
+                :expanded-id="expandedId"
+                @expand="expandedId = $event"
+                :key="`${option.id}-${accordionKey}`"
               >
-                <span v-for="c of option.communes"> {{ c.code }} - {{ c.nom }}<br/> </span>
+                <span v-for="(c, cIndex) of option.communes" :key="cIndex"> {{ c.code }} - {{ c.nom }}<br /> </span>
               </DsfrAccordion>
             </div>
           </div>
@@ -167,16 +168,19 @@ watch(
     </div>
   </form>
 
-
-  <DsfrModal :opened="modalCommunesOpened"
-             :title="zoneToEdit?.code + ' ' + zoneToEdit?.nom"
-             :actions="modalActions"
-             size="xl"
-             @close="modalCommunesOpened = utils.closeModal(modalCommunesOpened);">
-    <ArreteCadreFormGroupementCommunes :zoneAlerte="zoneToEdit"
-                                       ref="groupementCommunesFormRef"
-                                       :communes="communes"
-                                       @createEdit="createEditGroupement($event)"/>
+  <DsfrModal
+    :opened="modalCommunesOpened"
+    :title="`${zoneToEdit?.code} ${zoneToEdit?.nom}`"
+    :actions="modalActions"
+    size="xl"
+    @close="modalCommunesOpened = utils.closeModal(modalCommunesOpened)"
+  >
+    <ArreteCadreFormGroupementCommunes
+      :zoneAlerte="zoneToEdit"
+      ref="groupementCommunesFormRef"
+      :communes="communes"
+      @createEdit="createEditGroupement($event)"
+    />
   </DsfrModal>
 </template>
 

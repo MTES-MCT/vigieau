@@ -1,5 +1,5 @@
 import { BaseApi } from '~/api/base-api';
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class UserApi extends BaseApi {
   me = () => {
@@ -14,11 +14,11 @@ export class UserApi extends BaseApi {
       baseURL: '/api',
     });
   };
-  
+
   checkRules = () => {
     return useCustomFetch(`/${this.resource}/check_rules`, {
       method: 'POST',
       baseURL: '/api',
-    });    
-  }
+    });
+  };
 }

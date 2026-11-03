@@ -1,7 +1,8 @@
 import {
   ArcElement,
   CategoryScale,
-  Chart, Colors,
+  Chart,
+  Colors,
   Legend,
   LinearScale,
   LineController,
@@ -14,5 +15,17 @@ import {
 import 'chartjs-adapter-luxon';
 
 export default defineNuxtPlugin(() => {
-  Chart.register(ArcElement, Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, LineController, TimeScale, Colors);
+  Chart.register(
+    ArcElement,
+    Title,
+    Tooltip,
+    Legend,
+    LineElement,
+    CategoryScale,
+    LinearScale,
+    PointElement,
+    LineController,
+    TimeScale,
+    Colors,
+  );
 });

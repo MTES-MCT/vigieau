@@ -100,7 +100,8 @@ const populateSources = () => {
     return;
   }
   resetSources();
-  const features = communes.value.filter(c => props.communes?.some(pc => pc.id === c.id))
+  const features = communes.value
+    .filter((c) => props.communes?.some((pc) => pc.id === c.id))
     .map((c) => {
       return {
         type: 'Feature',
@@ -127,14 +128,13 @@ const resetSources = (onlyLayers = false) => {
         map.value?.removeSource(l);
       }
     });
-  } catch {
-  }
+  } catch {}
 };
 
 const computeBounds = () => {
-  const bounds = getGeometryBounds(communes.value
-    .filter((commune) => props.communes?.some((selected) => selected.id === commune.id))
-    .map((commune) => commune.geom));
+  const bounds = getGeometryBounds(
+    communes.value.filter((commune) => props.communes?.some((selected) => selected.id === commune.id)).map((commune) => commune.geom),
+  );
   if (!bounds) return;
 
   map.value?.fitBounds(bounds, {
@@ -151,7 +151,15 @@ const showLayer = () => {
     paint: {
       'fill-color': '#ccc',
       'fill-opacity': {
-        stops: [[5, 1], [6, 0.8], [7, 0.7], [8, 0.6], [9, 0.5], [10, 0.4], [11, 0.3]],
+        stops: [
+          [5, 1],
+          [6, 0.8],
+          [7, 0.7],
+          [8, 0.6],
+          [9, 0.5],
+          [10, 0.4],
+          [11, 0.3],
+        ],
       },
       'fill-outline-color': '#000',
     },

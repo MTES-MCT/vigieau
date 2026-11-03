@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useAlertStore } from "~/stores/alert";
+import { useAlertStore } from '~/stores/alert';
 
 const alertStore = useAlertStore();
 
@@ -10,7 +10,7 @@ onUnmounted(() => {
 
 <template>
   <div class="alert-wrapper">
-    <template v-for="alert of alertStore.alerts">
+    <template v-for="(alert, alertIndex) of alertStore.alerts" :key="alertIndex">
       <DsfrAlert
         v-if="alert"
         :type="alert.type"
@@ -20,20 +20,20 @@ onUnmounted(() => {
         :closeable="true"
         @close="alertStore.clearAlert(alert.id)"
       />
-    </template>    
+    </template>
   </div>
 </template>
 
 <style lang="scss">
 .alert-wrapper {
-position: fixed;
+  position: fixed;
   top: 20px;
   right: 20px;
   z-index: 9999;
   width: 50vw;
   gap: 1rem;
   margin: 0 auto;
-  
+
   .fr-alert {
     background-color: var(--background-default-grey);
   }

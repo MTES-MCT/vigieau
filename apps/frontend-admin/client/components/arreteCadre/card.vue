@@ -78,14 +78,18 @@ const arreteCadreActions: Ref<any> = ref([
 
 const arEnVigueurSameDepartement = computed(() => {
   return props.arreteCadre.arretesRestriction?.filter(
-    (ar) => ['a_venir', 'publie'].includes(ar.statut) &&
+    (ar) =>
+      ['a_venir', 'publie'].includes(ar.statut) &&
       (authStore.user?.role === 'mte' || (ar.departement && authStore.user?.roleDepartements.includes(ar.departement.code))),
   );
 });
 const arEnVigueurOtherDepartement = computed(() => {
   return props.arreteCadre.arretesRestriction?.filter(
-    (ar) => ['a_venir', 'publie'].includes(ar.statut) &&
-      authStore.user?.role !== 'mte' && ar.departement && !authStore.user?.roleDepartements.includes(ar.departement.code),
+    (ar) =>
+      ['a_venir', 'publie'].includes(ar.statut) &&
+      authStore.user?.role !== 'mte' &&
+      ar.departement &&
+      !authStore.user?.roleDepartements.includes(ar.departement.code),
   );
 });
 
@@ -154,7 +158,7 @@ const deleteArreteCadre = async (id: string) => {
     return;
   }
   loading.value = true;
-  const { data, error } = await api.arreteCadre.delete(id);
+  const { data: _data, error } = await api.arreteCadre.delete(id);
   if (!error.value) {
     emit('delete');
   }
@@ -204,7 +208,7 @@ const repealArrete = async (ac: ArreteCadre) => {
     return;
   }
   loading.value = true;
-  const { data, error } = await api.arreteCadre.repeal(ac.id?.toString(), ac);
+  const { data: _data, error } = await api.arreteCadre.repeal(ac.id?.toString(), ac);
   if (!error.value) {
     utils.closeModal(repealModalOpened);
     emit('repeal');
@@ -233,10 +237,9 @@ const depString = computed(() => {
     <div class="fr-card__body">
       <div class="fr-card__content">
         <h3 class="fr-card__title">
-          <NuxtLink
-            :to="`/arrete-cadre/${arreteCadre.id}${arreteCadre.statut === 'a_valider' && canUpdate ? '/edition' : ''}`"
-            v-html="numeroToDisplay"
-          ></NuxtLink>
+          <NuxtLink :to="`/arrete-cadre/${arreteCadre.id}${arreteCadre.statut === 'a_valider' && canUpdate ? '/edition' : ''}`">
+            <span v-html="numeroToDisplay" />
+          </NuxtLink>
         </h3>
         <p class="fr-card__desc">Dep&nbsp;: <span v-html="depString" /></p>
         <div class="fr-card__start">
@@ -254,7 +257,7 @@ const depString = computed(() => {
             {{ utils.formatDate(arreteCadre.dateDebut) }}
             <span v-if="arreteCadre.dateFin"> &nbsp;au {{ utils.formatDate(arreteCadre.dateFin) }} </span>
           </p>
-          <div :id="'action_' + arreteCadre.id" class="fr-card__actions" v-if="arreteCadreActions.some((a: any) => a.show)">
+          <div :id="`action_${arreteCadre.id}`" class="fr-card__actions" v-if="arreteCadreActions.some((a: any) => a.show)">
             <DsfrButton
               label="Actions"
               data-cy="ArreteCadreCardActionsBtn"
@@ -266,7 +269,7 @@ const depString = computed(() => {
             <div v-if="actionsOpened" class="fr-card__actions__menu">
               <div class="fr-menu">
                 <ul class="fr-menu__list">
-                  <template v-for="action of arreteCadreActions">
+                  <template v-for="(action, actionIndex) of arreteCadreActions" :key="actionIndex">
                     <li v-if="action.show">
                       <a
                         class="fr-nav__link"
@@ -286,18 +289,10 @@ const depString = computed(() => {
         </div>
       </div>
       <div class="fr-card__footer fr-grid-row" v-if="arreteCadre.arretesRestriction.length > 0">
-        <a
-          @click="goToArs()"
-          v-if="arEnVigueurSameDepartement.length > 0"
-          class="fr-link fr-icon-arrow-right-line fr-link--icon-right"
-        >
+        <a @click="goToArs()" v-if="arEnVigueurSameDepartement.length > 0" class="fr-link fr-icon-arrow-right-line fr-link--icon-right">
           {{ arEnVigueurSameDepartement.length }} arrêté(s) de restriction en vigueur
         </a>
-        <NuxtLink
-          disabled
-          v-if="arEnVigueurOtherDepartement.length > 0"
-          class="fr-link"
-        >
+        <NuxtLink disabled v-if="arEnVigueurOtherDepartement.length > 0" class="fr-link">
           {{ arEnVigueurOtherDepartement.length }} arrêté(s) de restriction en vigueur sur d'autres départements
         </NuxtLink>
         <!--        <NuxtLink-->
@@ -317,11 +312,13 @@ const depString = computed(() => {
       </div>
     </div>
   </div>
-  <DsfrModal :opened="modalOpened"
-             icon="ri-arrow-right-line"
-             :title="modalTitle"
-             :actions="modalActions"
-             @close="modalOpened = utils.closeModal(modalOpened);">
+  <DsfrModal
+    :opened="modalOpened"
+    icon="ri-arrow-right-line"
+    :title="modalTitle"
+    :actions="modalActions"
+    @close="modalOpened = utils.closeModal(modalOpened)"
+  >
     <div v-html="modalDescription"></div>
   </DsfrModal>
   <DsfrModal
@@ -329,7 +326,7 @@ const depString = computed(() => {
     icon="ri-arrow-right-line"
     :title="`Abroger l'arrêté ${arreteCadre.numero}`"
     :actions="repealModalActions"
-    @close="repealModalOpened = utils.closeModal(repealModalOpened);"
+    @close="repealModalOpened = utils.closeModal(repealModalOpened)"
   >
     <ArreteCadreFormAbroger ref="abrogerFormRef" :arrete-cadre="arreteCadre" @abroger="repealArrete($event)" />
   </DsfrModal>
@@ -370,16 +367,20 @@ const depString = computed(() => {
       }
     }
   }
-  
+
   &__footer {
     a {
       color: var(--text-action-high-blue-france);
       background-image: var(--underline-img), var(--underline-img);
-      background-position: var(--underline-x) 100%, var(--underline-x) calc(100% - var(--underline-thickness));
+      background-position:
+        var(--underline-x) 100%,
+        var(--underline-x) calc(100% - var(--underline-thickness));
       background-repeat: no-repeat, no-repeat;
-      background-size: var(--underline-hover-width) calc(var(--underline-thickness)* 2), var(--underline-idle-width) var(--underline-thickness);
+      background-size:
+        var(--underline-hover-width) calc(var(--underline-thickness) * 2),
+        var(--underline-idle-width) var(--underline-thickness);
       transition: background-size 0s;
-      
+
       &:hover {
         --underline-hover-width: var(--underline-max-width);
       }

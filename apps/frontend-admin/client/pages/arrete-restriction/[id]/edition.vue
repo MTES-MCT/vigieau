@@ -9,15 +9,15 @@ useHead({
   title: `Edition arrêté de restriction - ${useRuntimeConfig().public.appName}`,
 });
 
-
 const route = useRoute();
 const breadcrumb = [
   {
-    to: "/arrete-restriction",
-    text: "Arrêtés de restriction"
-  }, {
-    text: route.params.id === 'nouveau' ? 'Création' : 'Edition'
-  }
+    to: '/arrete-restriction',
+    text: 'Arrêtés de restriction',
+  },
+  {
+    text: route.params.id === 'nouveau' ? 'Création' : 'Edition',
+  },
 ];
 </script>
 

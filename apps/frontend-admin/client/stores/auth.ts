@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
-import type { Ref } from "vue";
-import type { User } from "~/dto/user.dto";
+import type { Ref } from 'vue';
+import type { User } from '~/dto/user.dto';
 
 export const useAuthStore = defineStore('auth', () => {
   const user: Ref<User | null> = ref(null);
@@ -11,7 +11,7 @@ export const useAuthStore = defineStore('auth', () => {
       return true;
     }
     // GET USER
-    const { data, error } = await api.user.me();
+    const { data, error: _error } = await api.user.me();
     if (data.value) {
       user.value = data.value;
       return true;

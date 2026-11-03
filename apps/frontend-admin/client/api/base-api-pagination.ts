@@ -1,5 +1,5 @@
 import { BaseApi } from '~/api/base-api';
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class BaseApiPagination extends BaseApi {
   paginate(pageToGet: number = 1, query?: string, filter?: any[], limit?: number) {
@@ -10,9 +10,9 @@ export class BaseApiPagination extends BaseApi {
     };
 
     if (filter) {
-      filter.forEach(f => {
-        params['filter.' + f.attribute] = f.filter;        
-      })
+      filter.forEach((f) => {
+        params['filter.' + f.attribute] = f.filter;
+      });
     }
 
     return useCustomFetch(`/${this.resource}/search`, {

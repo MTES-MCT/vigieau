@@ -15,5 +15,5 @@ export interface StatisticDepartement {
     alerte: number;
     alerteRenforcee: number;
     crise: number;
-  }
+  };
 }

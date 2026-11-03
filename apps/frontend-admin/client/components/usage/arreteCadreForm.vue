@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import useVuelidate from '@vuelidate/core/dist';
-import { helpers, required, maxLength } from '@vuelidate/validators';
+import { helpers, maxLength, required } from '@vuelidate/validators';
 import { UsageArreteCadre } from '~/dto/usage_arrete_cadre.dto';
 
 const props = defineProps<{
@@ -139,16 +139,21 @@ defineExpose({
 <template>
   <h6>{{ usageArreteCadre.usage.nom }}</h6>
   <div>
-    Thématique affichée sur VigiEau&nbsp;: <b>{{ usageArreteCadre.usage.thematique?.nom }}</b>
+    Thématique affichée sur VigiEau&nbsp;:
+    <b>{{ usageArreteCadre.usage.thematique?.nom }}</b>
   </div>
   <div>
     <div class="fr-my-2w">Usagers</div>
     <DsfrInputGroup :error-message="utils.showInputError(v$, 'concerne')">
-      <DsfrInputGroup v-for="concerne of concernes" :error-message="utils.showInputError(v$, concerne.attribute)">
+      <DsfrInputGroup
+        v-for="(concerne, concerneIndex) of concernes"
+        :key="concerneIndex"
+        :error-message="utils.showInputError(v$, concerne.attribute)"
+      >
         <DsfrCheckbox
           :label="concerne.name"
           :name="concerne.attribute"
-          :data-cy="'UsageArreteCadreForm' + concerne.attribute + 'Checkbox'"
+          :data-cy="`UsageArreteCadreForm${concerne.attribute}Checkbox`"
           v-model="usageArreteCadre[concerne.attribute]"
         />
       </DsfrInputGroup>
@@ -156,11 +161,15 @@ defineExpose({
 
     <div class="fr-my-2w">À quelle(s) ressource(s) cet usage est-il associé ?</div>
     <DsfrInputGroup :error-message="utils.showInputError(v$, 'ressource')">
-      <DsfrInputGroup v-for="ressource of resssources" :error-message="utils.showInputError(v$, ressource.attribute)">
+      <DsfrInputGroup
+        v-for="(ressource, ressourceIndex) of resssources"
+        :key="ressourceIndex"
+        :error-message="utils.showInputError(v$, ressource.attribute)"
+      >
         <DsfrCheckbox
           :label="ressource.name"
           :name="ressource.attribute"
-          :data-cy="'UsageArreteCadreForm' + ressource.attribute + 'Checkbox'"
+          :data-cy="`UsageArreteCadreForm${ressource.attribute}Checkbox`"
           v-model="usageArreteCadre[ressource.attribute]"
         />
       </DsfrInputGroup>
@@ -175,7 +184,7 @@ defineExpose({
         listées dans l’arrêté préfectoral” lorsque le texte est trop long
       </b>
     </DsfrAlert>
-    <template v-for="(niveau, index) of niveauxRestriction">
+    <template v-for="(niveau, index) of niveauxRestriction" :key="index">
       <div v-if="index !== 0" class="fr-mb-2w divider" />
       <DsfrBadge :label="niveau.name" :type="niveau.badgeType" />
       <DsfrInputGroup :error-message="utils.showInputError(v$, niveau.attribute)">
@@ -186,7 +195,7 @@ defineExpose({
           label="Ajouter un texte libre"
           label-visible
           type="text"
-          :data-cy="'UsageArreteCadreForm' + niveau.attribute + 'Input'"
+          :data-cy="`UsageArreteCadreForm${niveau.attribute}Input`"
           :name="niveau.attribute"
           :required="niveau.required"
         />

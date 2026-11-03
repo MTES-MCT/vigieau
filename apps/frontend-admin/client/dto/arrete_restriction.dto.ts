@@ -1,6 +1,6 @@
-import type { ArreteCadre } from "~/dto/arrete_cadre.dto";
-import type { Departement } from "~/dto/departement.dto";
-import type { Restriction } from "~/dto/restriction.dto";
+import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
+import type { Departement } from '~/dto/departement.dto';
+import type { Restriction } from '~/dto/restriction.dto';
 
 export class ArreteRestriction {
   id: number | null;
@@ -43,9 +43,9 @@ export class ArreteRestriction {
   }
 }
 
-export enum ArreteRestrictionStatutFr {
-  a_valider = 'Brouillon',
-  a_venir = 'En vigueur prochainement',
-  publie = 'En vigueur prochainement',
-  abroge = 'Abrogé',
-}
+export const ArreteRestrictionStatutFr = {
+  a_valider: 'Brouillon',
+  a_venir: 'En vigueur prochainement',
+  publie: 'En vigueur prochainement',
+  abroge: 'Abrogé',
+} as const;

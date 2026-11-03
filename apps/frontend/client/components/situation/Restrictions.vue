@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Ref } from 'vue';
+import { storeToRefs } from 'pinia';
 import { Zone } from '../../dto/zone.dto';
 import { Usage } from '~/client/dto/usage.dto';
 import { Icon } from '@iconify/vue';
@@ -18,7 +19,7 @@ const props = defineProps<{
 
 const selectedTagIndex: Ref<number> = ref(0);
 const addressStore = useAddressStore();
-const { address, geo } = addressStore;
+const { address, geo } = storeToRefs(addressStore);
 const thematiqueTags: Ref<TagProps[]> = ref([
   {
     label: 'Arroser',
@@ -116,10 +117,10 @@ const formatDate = (date: string) => {
 };
 
 const getCommuneCode = () => {
-  if (address) {
-    return address.properties.citycode;
-  } else if (geo) {
-    return geo.code;
+  if (address.value) {
+    return address.value.properties.citycode;
+  } else if (geo.value) {
+    return geo.value.code;
   }
 };
 

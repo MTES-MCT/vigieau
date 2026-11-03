@@ -54,6 +54,7 @@ for (const [method, args, path] of [
   ['searchAddresses', ['Paris', true], '/search/?q=Paris&limit=10&type=housenumber'],
   ['searchAddressByLatlon', ['2.3', '48.8'], '/reverse?lon=2.3&lat=48.8'],
   ['searchGeoByLatlon', ['2.3', '48.8'], '/communes?lon=2.3&lat=48.8'],
+  ['getUserSubscriptions', ['test-token'], '/subscriptions'],
 ]) {
   test(`${method} requests fresh data again after a successful HTTP response`, async () => {
     const responses = [{ fresh: false }, undefined, { fresh: true }];
@@ -101,6 +102,19 @@ test('imperative address search preserves municipality label formatting', async 
   ]);
 });
 
+test('address geocoding preserves ampersands, plus signs and fragments in its query', async () => {
+  const address = '12 rue A & B + C #1';
+  const api = createApi(async (url) => {
+    const parsed = new URL(url, 'http://localhost');
+    assert.equal(parsed.searchParams.get('q'), address);
+    assert.equal(parsed.searchParams.get('limit'), '10');
+    assert.equal(parsed.hash, '');
+    return {};
+  });
+  const result = await api.searchAddresses(address);
+  assert.equal(result.error.value, null);
+});
+
 test('statistic refresh retains HTTP errors without poisoning the next request', async () => {
   const failure = { statusCode: 503 };
   let requests = 0;
@@ -123,7 +137,8 @@ for (const [method, args, verb, path, body] of [
   ['subscribeMail', [{ email: 'test@example.test', commune: '75107', unused: '' }], 'POST', '/subscriptions', { email: 'test@example.test', commune: '75107' }],
   ['signalRestriction', [101, 'Clarification'], 'POST', '/usage/feedback/101', { feedback: 'Clarification' }],
   ['unsubscribe', [101, 'test-token'], 'DELETE', '/subscriptions/101'],
-  ['unsubscribeAll', ['test-token'], 'DELETE', '/subscriptions/all'],
+  ['unsubscribeAll', ['test-token'], 'DELETE', '/subscriptions'],
+  ['requestSubscriptionManagementLink', ['test@example.test'], 'POST', '/subscriptions/management-link', { email: 'test@example.test' }],
 ]) {
   test(`${method} sends identical actions again and never retries a failed mutation`, async () => {
     let requests = 0;
@@ -158,3 +173,20 @@ for (const [method, args, verb, path, body] of [
     assert.equal(requests, 4);
   });
 }
+
+test('subscription payload preserves zero coordinates and never changes the live form', async () => {
+  const form = {
+    email: 'test@example.test', lon: 0, lat: 0, commune: null,
+    idAdresse: undefined, unused: '', confirmSubscription: true,
+  };
+  const before = { ...form };
+  const api = createApi(async (_url, options) => {
+    assert.deepEqual(JSON.parse(JSON.stringify(options.body)), {
+      email: 'test@example.test', lon: 0, lat: 0, confirmSubscription: true,
+    });
+    throw Object.assign(new Error('Service unavailable'), { statusCode: 503 });
+  });
+
+  await api.subscribeMail(form);
+  assert.deepEqual(form, before);
+});

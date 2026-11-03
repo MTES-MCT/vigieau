@@ -26,7 +26,7 @@ const checkSaveArrete = async () => {
   }
   v$.value.$validate();
   if (v$.value.$error) {
-    showErrors(v$.value.$errors, 'Impossible de publier l\'arrêté municipal');
+    showErrors(v$.value.$errors, "Impossible de publier l'arrêté municipal");
     return;
   }
   loading.value = true;
@@ -43,13 +43,19 @@ const checkSaveArrete = async () => {
 
 const showErrors = (errors: any, title: string | null) => {
   alertStore.addAlert({
-    title: title,
-    description: errors.filter((e: any) => e.$message).map((e: any) => {
-      if (Array.isArray(e.$message)) {
-        return e.$message.flat().filter((m: any) => m).join(', ');
-      }
-      return e.$message;
-    }).join(', '),
+    title,
+    description: errors
+      .filter((e: any) => e.$message)
+      .map((e: any) => {
+        if (Array.isArray(e.$message)) {
+          return e.$message
+            .flat()
+            .filter((m: any) => m)
+            .join(', ');
+        }
+        return e.$message;
+      })
+      .join(', '),
     type: 'error',
   });
 };
@@ -67,7 +73,7 @@ const saveArrete = async () => {
   const phoneNumber = parsePhoneNumberWithError(props.arreteMunicipal.userPhone, 'FR');
   props.arreteMunicipal.userPhone = phoneNumber.formatInternational();
 
-  const { data, error } = props.arreteMunicipal.id
+  const { data, error: _error } = props.arreteMunicipal.id
     ? await api.arreteMunicipal.update(props.arreteMunicipal.id.toString(), props.arreteMunicipal)
     : await api.arreteMunicipal.create(props.arreteMunicipal);
   if (data.value?.id) {
@@ -81,12 +87,11 @@ const saveArrete = async () => {
 </script>
 
 <template>
-  <ArreteMunicipalFormGeneral
-    ref="generalFormRef"
-    :arreteMunicipal="arreteMunicipal" />
+  <ArreteMunicipalFormGeneral :arreteMunicipal="arreteMunicipal" />
 
   <ul
-    class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w">
+    class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w"
+  >
     <li>
       <DsfrButton
         :label="arreteMunicipal.statut === 'a_valider' ? 'Publier' : 'Modifier'"
@@ -97,13 +102,8 @@ const saveArrete = async () => {
         @click="askEditPublishArrete()"
       />
     </li>
-    <li style="margin-left: auto;">
-      <DsfrButton
-        label="Retour à la liste"
-        icon="ri-arrow-left-line"
-        secondary
-        @click="router.push('/arrete-municipal')"
-      />
+    <li style="margin-left: auto">
+      <DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="router.push('/arrete-municipal')" />
     </li>
   </ul>
   <MixinsConfirmationModal

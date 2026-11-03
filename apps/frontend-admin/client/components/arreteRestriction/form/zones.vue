@@ -12,7 +12,7 @@ const props = defineProps<{
   selected: boolean;
 }>();
 
-const refDataStore = useRefDataStore();
+const _refDataStore = useRefDataStore();
 const utils = useUtils();
 const zonesSelected: Ref<{ zoneId: number; acId: number }[]> = ref(
   props.arreteRestriction.restrictions
@@ -35,9 +35,8 @@ const rules = computed(() => {
 
 const v$ = useVuelidate(rules, props.arreteRestriction);
 
-const zonesOptionsCheckBox = (ac: ArreteCadre, type: string, ressourceInfluencee?: boolean) => {
+const zonesOptionsCheckBox = (ac: ArreteCadre & { zonesAlerteFiltered?: ZoneAlerte[] }, type: string, ressourceInfluencee?: boolean) => {
   const arsAssociated = ac.arretesRestriction.filter((ar) => ar.id !== props.arreteRestriction.id);
-  //@ts-ignore
   return ac.zonesAlerteFiltered
     ?.filter((z: any) => {
       const matchType = z.type === type;
@@ -57,7 +56,9 @@ const zonesOptionsCheckBox = (ac: ArreteCadre, type: string, ressourceInfluencee
 
 const selectAll = (ac: any) => {
   if (ac.nbZonesSelected >= ac.zonesAlerteFiltered?.length) {
-    zonesSelected.value = zonesSelected.value.filter((z) => !(ac.zonesAlerteFiltered?.some((za: any) => za.id === z.zoneId) && z.acId === ac.id));
+    zonesSelected.value = zonesSelected.value.filter(
+      (z) => !(ac.zonesAlerteFiltered?.some((za: any) => za.id === z.zoneId) && z.acId === ac.id),
+    );
   } else {
     zonesSelected.value = useUtils().mergeArrays(
       zonesSelected.value,
@@ -65,7 +66,7 @@ const selectAll = (ac: any) => {
         return {
           zoneId: za.id,
           acId: ac.id,
-        }
+        };
       }),
     );
   }
@@ -81,7 +82,7 @@ const computeZonesSelected = () => {
 
 const onChange = ({ zoneId, checked, acId }: { zoneId: number; checked: boolean; acId: number }) => {
   zonesSelected.value = checked
-    ? [...zonesSelected.value, { zoneId: zoneId, acId: acId }]
+    ? [...zonesSelected.value, { zoneId, acId }]
     : zonesSelected.value.filter((z) => !(z.zoneId === zoneId && z.acId === acId));
 };
 
@@ -102,11 +103,11 @@ const loadZones = () => {
     acFiltered.value.some((ac) => ac.id === z.acId && ac.zonesAlerteFiltered.some((za) => za.id === z.zoneId)),
   );
   computeZonesSelected();
-}
+};
 
 watch(zonesSelected, () => {
   props.arreteRestriction.restrictions = props.arreteRestriction.restrictions.filter(
-    (r) => r.isAep || zonesSelected.value.some((zs) => zs.zoneId === r.zoneAlerte.id && zs.acId === r.arreteCadre.id)
+    (r) => r.isAep || zonesSelected.value.some((zs) => zs.zoneId === r.zoneAlerte.id && zs.acId === r.arreteCadre.id),
   );
   const allZones = acFiltered.value
     .map((ac) => {
@@ -115,15 +116,12 @@ watch(zonesSelected, () => {
       });
     })
     .flat();
-  const allZonesSelected = allZones.filter(
-    (z) => zonesSelected.value.some(zs => zs.zoneId === z.zoneAlerte.id && zs.acId === z.acId )
-  );
-  const newZones = allZonesSelected.filter((z) => 
-    !props.arreteRestriction.restrictions.some((r) => r.zoneAlerte?.id === z.zoneAlerte.id && r.arreteCadre?.id === z.acId)
+  const allZonesSelected = allZones.filter((z) => zonesSelected.value.some((zs) => zs.zoneId === z.zoneAlerte.id && zs.acId === z.acId));
+  const newZones = allZonesSelected.filter(
+    (z) => !props.arreteRestriction.restrictions.some((r) => r.zoneAlerte?.id === z.zoneAlerte.id && r.arreteCadre?.id === z.acId),
   );
   newZones.forEach((z) => {
-    let ac = props.arreteRestriction.arretesCadre
-      .find((ac) => ac.id === z.acId);
+    const ac = props.arreteRestriction.arretesCadre.find((ac) => ac.id === z.acId);
     props.arreteRestriction.restrictions.push({
       id: null,
       zoneAlerte: z.zoneAlerte,
@@ -176,14 +174,17 @@ defineExpose({
     <div class="fr-grid-row">
       <div class="fr-col-12 fr-col-lg-6">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'restrictions')">
-          <div v-for="ac of acFiltered">
+          <div v-for="(ac, acIndex) of acFiltered" :key="acIndex">
             <div class="zone-alerte__title">
               <h6>Zones d'alerte de l'arrêté {{ ac.numero }} ({{ ac.nbZonesSelected }}/{{ ac.zonesAlerteFiltered?.length }})</h6>
               <div>
                 Tout sélectionner
                 <DsfrCheckbox
                   :onUpdate:modelValue="() => selectAll(ac)"
-                  :disabled="ac.zonesAlerteFiltered?.length < 1 || zonesSelected.some((z) => ac.zonesAlerteFiltered?.some(za => za.id === z.zoneId) && z.acId !== ac.id)"
+                  :disabled="
+                    ac.zonesAlerteFiltered?.length < 1 ||
+                    zonesSelected.some((z) => ac.zonesAlerteFiltered?.some((za) => za.id === z.zoneId) && z.acId !== ac.id)
+                  "
                   :checked="ac.nbZonesSelected === ac.zonesAlerteFiltered?.length"
                 />
               </div>
@@ -191,20 +192,25 @@ defineExpose({
             <div class="zone-alerte__body" v-if="zonesOptionsCheckBox(ac, 'SUP').length > 0">
               <p><b>Eaux superficielles</b></p>
               <div class="form-group fr-fieldset fr-mt-2w">
-                <template v-for="ressourceInfluencee in [false, true]"
-                          :key="ressourceInfluencee">
+                <template v-for="ressourceInfluencee in [false, true]" :key="ressourceInfluencee">
                   <p v-if="ressourceInfluencee && zonesOptionsCheckBox(ac, 'SUP', ressourceInfluencee).length > 0" class="fr-ml-2w">
                     <u>Ressources influencées</u>
                   </p>
                   <DsfrCheckbox
                     v-for="option in zonesOptionsCheckBox(ac, 'SUP', ressourceInfluencee)"
-                    :id="ac.id + ' ' + option.id"
+                    :id="`${ac.id} ${option.id}`"
                     :key="option.id || option.name"
                     :name="option.name"
                     :model-value="zonesSelected.some((z) => z.zoneId === option.id && z.acId === ac.id)"
                     :small="false"
                     :disabled="zonesSelected.some((z) => z.zoneId === option.id && z.acId !== ac.id)"
-                    @update:model-value="onChange({ zoneId: option.id, checked: $event, acId: ac.id })"
+                    @update:model-value="
+                      onChange({
+                        zoneId: option.id,
+                        checked: $event,
+                        acId: ac.id,
+                      })
+                    "
                   >
                     <template #label>
                       {{ option.label }}
@@ -220,20 +226,25 @@ defineExpose({
             <div class="zone-alerte__body" v-if="zonesOptionsCheckBox(ac, 'SOU').length > 0">
               <p><b>Eaux souterraines</b></p>
               <div class="form-group fr-fieldset fr-mt-2w">
-                <template v-for="ressourceInfluencee in [false, true]"
-                          :key="ressourceInfluencee">
+                <template v-for="ressourceInfluencee in [false, true]" :key="ressourceInfluencee">
                   <p v-if="ressourceInfluencee && zonesOptionsCheckBox(ac, 'SOU', ressourceInfluencee).length > 0" class="fr-ml-2w">
                     <u>Ressources influencées</u>
                   </p>
                   <DsfrCheckbox
                     v-for="option in zonesOptionsCheckBox(ac, 'SOU', ressourceInfluencee)"
-                    :id="ac.id + ' ' + option.id"
+                    :id="`${ac.id} ${option.id}`"
                     :key="option.id || option.name"
                     :name="option.name"
                     :model-value="zonesSelected.some((z) => z.zoneId === option.id && z.acId === ac.id)"
                     :small="false"
                     :disabled="zonesSelected.some((z) => z.zoneId === option.id && z.acId !== ac.id)"
-                    @update:model-value="onChange({ zoneId: option.id, checked: $event, acId: ac.id })"
+                    @update:model-value="
+                      onChange({
+                        zoneId: option.id,
+                        checked: $event,
+                        acId: ac.id,
+                      })
+                    "
                   >
                     <template #label>
                       {{ option.label }}

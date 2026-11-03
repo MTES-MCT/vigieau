@@ -3,7 +3,6 @@ import type { Ref } from 'vue';
 import type { User } from '~/dto/user.dto';
 import { UserRole } from '~/dto/user.dto';
 import { useAuthStore } from '~/stores/auth';
-import { Usage } from '~/dto/usage.dto';
 import deburr from 'lodash.deburr';
 
 const headers = ['Nom', 'Prénom', 'Email', 'Rôle', '', ''];
@@ -62,7 +61,7 @@ const generateRows = () => {
 };
 
 const api = useApi();
-const { data, error } = await api.user.list();
+const { data, error: _error } = await api.user.list();
 if (data.value) {
   users.value = data.value;
   usersFiltered.value = users.value;
@@ -137,7 +136,7 @@ const closeModal = () => {
 };
 
 const deleteUser = async () => {
-  const { data, error } = await api.user.delete(userToEdit.value.email);
+  const { data: _data, error } = await api.user.delete(userToEdit.value.email);
   closeModal();
   if (!error.value) {
     users.value = users.value.filter((u: User) => u.email !== userToEdit.value.email);
@@ -173,10 +172,10 @@ const validateEditUserForm = () => {
 const filterUsers = () => {
   usersFiltered.value = query.value
     ? users.value.filter((u) => {
-        const nom = deburr(u.lastName).replace(/[\-\_]/g, '');
-        const prenom = deburr(u.firstName).replace(/[\-\_]/g, '');
+        const nom = deburr(u.lastName).replace(/[\-_]/g, '');
+        const prenom = deburr(u.firstName).replace(/[\-_]/g, '');
         const queryWords = deburr(query.value)
-          .replace(/[\-\_]/g, '')
+          .replace(/[\-_]/g, '')
           .split(' ')
           .map((s) => s.replace(/^/, '(').replace(/$/, ')'))
           .join('*');

@@ -13,12 +13,15 @@ for (const failure of [
     const captured = [];
     let attempts = 0;
     const source = { id: 47, restrictions: [{ usages: [{ id: 101 }] }] };
-    const state = useRetryableLoad(async () => {
-      if (++attempts === 1) {
-        throw failure;
-      }
-      return source;
-    }, (error) => captured.push(error));
+    const state = useRetryableLoad(
+      async () => {
+        if (++attempts === 1) {
+          throw failure;
+        }
+        return source;
+      },
+      (error) => captured.push(error),
+    );
 
     await state.load();
     assert.equal(state.data.value, null);
@@ -40,7 +43,9 @@ test('does not start duplicate reads while the current request is pending', asyn
   let calls = 0;
   const state = useRetryableLoad(() => {
     calls++;
-    return new Promise((done) => { resolve = done; });
+    return new Promise((done) => {
+      resolve = done;
+    });
   });
   const pending = state.load();
   assert.equal(state.loading.value, true);
@@ -52,8 +57,16 @@ test('does not start duplicate reads while the current request is pending', asyn
 });
 
 test('fresh creation needs no existing source and returns the supplied draft', async () => {
-  const state = useRetryableLoad(async () => ({ id: null, statut: 'a_valider', restrictions: [] }));
+  const state = useRetryableLoad(async () => ({
+    id: null,
+    statut: 'a_valider',
+    restrictions: [],
+  }));
   await state.load();
-  assert.deepEqual(state.data.value, { id: null, statut: 'a_valider', restrictions: [] });
+  assert.deepEqual(state.data.value, {
+    id: null,
+    statut: 'a_valider',
+    restrictions: [],
+  });
   assert.equal(state.error.value, null);
 });

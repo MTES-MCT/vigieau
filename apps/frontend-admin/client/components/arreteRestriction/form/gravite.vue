@@ -21,7 +21,7 @@ const emit = defineEmits<{
 const rules = computed(() => {
   return {
     restrictions: {
-      required: helpers.withMessage('L\'arrêté doit être lié à au moins une zone d\'alerte', required),
+      required: helpers.withMessage("L'arrêté doit être lié à au moins une zone d'alerte", required),
     },
   };
 });
@@ -73,7 +73,7 @@ const applyToAllRestrictions = (restriction: Restriction, usage: UsageArreteCadr
     restriction.isAep ? 'AEP' : restriction.zoneAlerte.type,
     restriction.arreteCadre?.id,
   );
-  restrictions.forEach(r => {
+  restrictions.forEach((r) => {
     r.usages = setRestrictionUsageChoice(r, usage, false);
   });
 };
@@ -105,29 +105,35 @@ watch(
 watch(
   () => props.arreteRestriction.restrictions,
   () => {
-    acFiltered.value = props.arreteRestriction.arretesCadre.filter(ac => {
-      return props.arreteRestriction.restrictions.some(r => r.arreteCadre?.id === ac.id);
+    acFiltered.value = props.arreteRestriction.arretesCadre.filter((ac) => {
+      return props.arreteRestriction.restrictions.some((r) => r.arreteCadre?.id === ac.id);
     });
   },
   { immediate: true },
 );
 
-watch(() => props.arreteRestriction.departement, async () => {
-  if (props.arreteRestriction.departement) {
-    const { data } = await api.parametres.get(props.arreteRestriction.departement.code);
-    if (data.value) {
-      departementParametres.value = data.value;
+watch(
+  () => props.arreteRestriction.departement,
+  async () => {
+    if (props.arreteRestriction.departement) {
+      const { data } = await api.parametres.get(props.arreteRestriction.departement.code);
+      if (data.value) {
+        departementParametres.value = data.value;
+      }
     }
-  }
-}, { immediate: true });
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
   <form @submit.prevent="">
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 fr-col-lg-6">
-        <div v-if="arreteRestriction.restrictions.length > 1"
-             class="fr-grid-row fr-p-2w fr-mb-2w fr-grid-row--bottom fr-notice fr-notice--info">
+        <div
+          v-if="arreteRestriction.restrictions.length > 1"
+          class="fr-grid-row fr-p-2w fr-mb-2w fr-grid-row--bottom fr-notice fr-notice--info"
+        >
           <div class="fr-col-10">
             <h6>Niveau de gravité commun aux zones d'alerte</h6>
             <p>Appliquer le même niveau de gravité pour toutes les zones d’alerte</p>
@@ -180,17 +186,10 @@ watch(() => props.arreteRestriction.departement, async () => {
       </div>
       <div class="fr-col-12 fr-col-lg-6">
         <div class="fr-card fr-mb-2w fr-p-2w">
-          <h3 class="fr-h6">
-            Vous souhaitez ajouter ou modifier un usage&nbsp;?
-          </h3>
-          
+          <h3 class="fr-h6">Vous souhaitez ajouter ou modifier un usage&nbsp;?</h3>
+
           <div class="fr-grid-row fr-grid-row--right">
-            <DsfrButton
-              label="Modifier les usages"
-              icon="ri-edit-2-fill"
-              :secondary="true"
-              @click="emit('editUsages')"
-            />
+            <DsfrButton label="Modifier les usages" icon="ri-edit-2-fill" :secondary="true" @click="emit('editUsages')" />
           </div>
         </div>
 

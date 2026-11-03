@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
-import { ArreteCadre, ArreteCadreStatutFr } from "~/dto/arrete_cadre.dto";
+import { ArreteCadre, ArreteCadreStatutFr } from '~/dto/arrete_cadre.dto';
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
@@ -10,8 +10,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   abroger: any;
 }>();
-const utils = useUtils()
-const ac = ref({...props.arreteCadre});
+const utils = useUtils();
+const ac = ref({ ...props.arreteCadre });
 
 const rules = computed(() => {
   return {
@@ -81,8 +81,8 @@ defineExpose({
     </div>
     <p v-if="arEnVigueur.length > 0" class="fr-mt-4w">
       Les arrêtés de restriction suivant seront abrogés :
-      <template v-for="ar of arEnVigueur">
-        <br/>- {{ ar.numero }} - {{ arreteCadreStatutFr[ar.statut] }}
+      <template v-for="(ar, arIndex) of arEnVigueur" :key="arIndex">
+        <br />- {{ ar.numero }} - {{ arreteCadreStatutFr[ar.statut] }}
       </template>
     </p>
   </form>

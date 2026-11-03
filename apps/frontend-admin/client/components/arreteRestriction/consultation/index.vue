@@ -9,14 +9,14 @@ const router = useRouter();
 const utils = useUtils();
 const authStore = useAuthStore();
 
-const { data, error } = await api.arreteRestriction.get(<string>route.params.id);
+const { data, error } = await api.arreteRestriction.get(route.params.id as string);
 if (!data.value) {
   throw createError({
     statusCode: error.value?.statusCode || 404,
     statusMessage: 'Arrêté de restriction introuvable',
   });
 }
-const arreteRestriction: Ref<ArreteRestriction> = ref(<ArreteRestriction>data.value);
+const arreteRestriction: Ref<ArreteRestriction> = ref(data.value as ArreteRestriction);
 arreteRestriction.value.restrictions.map((r) => {
   if (!r.zoneAlerte) {
     r.isAep = true;

@@ -18,8 +18,6 @@ import {
   normalizeZoneSearchResponse,
 } from '../utils/zone-availability';
 
-const _adresseOptions: string = '&limit=10';
-
 export interface ZonePublicationPin {
   publicationId: string | null;
 }
@@ -27,8 +25,10 @@ export interface ZonePublicationPin {
 const index = {
   searchAddresses(addressQuery: string, exactAddress = false): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
+    const params = new URLSearchParams({ q: addressQuery, limit: '10' });
+    if (exactAddress) params.set('type', 'housenumber');
     return fetchAsRefResponse(() => $fetch(
-      `/search/?q=${addressQuery}${_adresseOptions}${exactAddress ? '&type=housenumber' : ''}`,
+      `/search/?${params.toString()}`,
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiAdresseUrl,
@@ -86,16 +86,14 @@ const index = {
   },
 
   subscribeMail(form: any): Promise<any> {
-    for (const key in form) {
-      if (!form[key]) {
-        delete form[key];
-      }
-    }
+    const body = Object.fromEntries(Object.entries(form).filter(
+      ([, value]) => value !== null && value !== undefined && value !== '',
+    ));
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'POST',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
-      body: form,
+      body,
       retry: false,
     }));
   },
@@ -214,13 +212,24 @@ const index = {
 
   getUserSubscriptions(token: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return useFetch(`/subscriptions`, {
+    return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'GET',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
+      retry: false,
       headers: {
         Authorization: `Bearer ${token}`,
       },
-    });
+    }));
+  },
+
+  requestSubscriptionManagementLink(email: string): Promise<any> {
+    const runtimeConfig = useRuntimeConfig();
+    return fetchAsRefResponse(() => $fetch('/subscriptions/management-link', {
+      method: 'POST',
+      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      body: { email },
+      retry: false,
+    }));
   },
 
   unsubscribe(id: string, token: string): Promise<any> {
@@ -237,7 +246,7 @@ const index = {
 
   unsubscribeAll(token: string): Promise<any> {
     const runtimeConfig = useRuntimeConfig();
-    return fetchAsRefResponse(() => $fetch(`/subscriptions/all`, {
+    return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'DELETE',
       baseURL: runtimeConfig.public.apiSecheresseUrl,
       retry: false,

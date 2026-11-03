@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import JwtStrategy from './jwt.strategy';
 import { Test, TestingModule } from '@nestjs/testing';
+import { UnauthorizedException } from '@nestjs/common';
 
 describe('JwtStrategy', () => {
   let jwtStrategy: JwtStrategy;
@@ -36,19 +37,34 @@ describe('JwtStrategy', () => {
   });
 
   describe('validate', () => {
-    it('devrait retourner le payload enrichi si valide', async () => {
+    it('returns only the authenticated subscription email', async () => {
       const payload = {
-        userId: '12345',
-        username: 'johndoe',
-        roles: ['admin'],
+        email: 'user@example.com',
+        iat: 12345,
+        exp: 23456,
       };
 
       const result = await jwtStrategy.validate(payload);
       expect(result).toEqual({
-        userId: '12345',
-        username: 'johndoe',
-        roles: ['admin'],
+        email: 'user@example.com',
       });
     });
+
+    it.each([
+      undefined,
+      null,
+      {},
+      { email: null },
+      { email: '' },
+      { email: 'invalid' },
+      { email: ['user@example.com'] },
+    ])(
+      'rejects an invalid email claim before any subscription query (%j)',
+      async (payload) => {
+        await expect(jwtStrategy.validate(payload)).rejects.toThrow(
+          UnauthorizedException,
+        );
+      },
+    );
   });
 });

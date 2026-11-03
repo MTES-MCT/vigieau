@@ -1,13 +1,10 @@
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
-import type { ArreteRestriction } from "~/dto/arrete_restriction.dto";
+import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { isValidPhoneNumber } from 'libphonenumber-js';
 
 export const useUtils = () => {
   return {
-    debounce<Arguments extends unknown[]>(
-      fn: (...args: Arguments) => void,
-      delay: number,
-    ) {
+    debounce<Arguments extends unknown[]>(fn: (...args: Arguments) => void, delay: number) {
       let timeoutID: ReturnType<typeof setTimeout> | null = null;
       return function (this: unknown, ...args: Arguments) {
         if (timeoutID !== null) {
@@ -109,24 +106,24 @@ Vous confirmez prendre en compte que les modifications faites à cet arrêté vo
       modalActions: Ref<any>,
       modalOpened: Ref<boolean>,
       callBackFunction: any,
-      ) {
+    ) {
       modalActions.value = [
         {
-          label: "Confirmer",
-          "data-cy": "ConfirmEditFormBtn",
+          label: 'Confirmer',
+          'data-cy': 'ConfirmEditFormBtn',
           onclick: () => {
             callBackFunction(arreteRestriction.id);
-          }
+          },
         },
         {
-          label: "Annuler",
+          label: 'Annuler',
           secondary: true,
           onclick: () => {
             this.closeModal(modalOpened);
-          }
-        }
+          },
+        },
       ];
-      if (arreteRestriction.statut === "a_valider") {
+      if (arreteRestriction.statut === 'a_valider') {
         callBackFunction(arreteRestriction.id);
       } else {
         modalTitle.value = `Modification d’un arrêté de restriction en vigueur`;
@@ -149,26 +146,26 @@ Vous confirmez prendre en compte que les modifications faites à cet arrêté vo
 
     closeModal(modalBoolean: any): boolean {
       document.body.classList.remove('modal-open');
-      if(typeof modalBoolean != 'boolean') {
-        modalBoolean.value = false;        
+      if (typeof modalBoolean != 'boolean') {
+        modalBoolean.value = false;
       }
       return false;
     },
-    
+
     formatDate(date: string | null): string {
-      if(!date) {
+      if (!date) {
         return '';
       }
       const dateObject = new Date(date);
       return dateObject ? dateObject.toLocaleDateString('fr') : '';
     },
-    
+
     scrollToTop() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    
+
     phoneValidator(value: string) {
       return isValidPhoneNumber(value, 'FR');
-    }
+    },
   };
 };

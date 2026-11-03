@@ -16,12 +16,12 @@
     "vue-demi@0.14.10": true
   },
   "scripts": {
-    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
-    "start": "PORT=${PORT:-3000} nuxi preview",
+    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/prepare-static-preview.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
+    "start": "PORT=${PORT:-3000} node .output/preview.mjs",
     "dev": "nuxi dev",
     "format": "eslint . --fix",
     "lint": "eslint .",
-    "preview": "nuxt preview",
+    "preview": "npm run start --",
     "cy:open": "cypress open",
     "cy:run": "cypress run",
     "cy:e2e": "start-server-and-test dev http://localhost:3000 cy:run",
@@ -48,10 +48,11 @@
     "luxon": "^3.4.3",
     "maplibre-gl": "6.4.1",
     "moment": "^2.31.0",
-    "nuxt": "4.6.2",
+    "nuxt": "4.6.4",
     "ofetch": "^1.5.1",
     "pinia": "^2.2.1",
     "pmtiles": "^3.0.6",
+    "sirv": "3.0.2",
     "vue": "3.5.44",
     "vue-chartjs": "^5.2.0",
     "vue-dsfr-nuxt-module": "^2.0.0",
@@ -85,6 +86,8 @@
     "eslint-plugin-vue": "^9.29.0",
     "istanbul-lib-coverage": "^3.2.0",
     "jsdom": "^25.0.1",
+    "minimatch-legacy": "file:vendor/vigieau-minimatch-legacy-10.2.6-vigieau.1.tgz",
+    "minimatch-modern": "file:vendor/vigieau-minimatch-10.2.6-vigieau.1.tgz",
     "npm-run-all": "^4.1.5",
     "nyc": "^18.0.0",
     "sass": "^1.79.5",
@@ -94,13 +97,13 @@
     "vite-plugin-istanbul": "^6.0.2"
   },
   "overrides": {
-    "deepmerge": "$deepmerge",
     "@cypress/request": {
       "qs": "6.16.1"
     },
     "@istanbuljs/load-nyc-config": {
       "js-yaml": "4.3.2"
     },
+    "@nuxt/cli": "4.0.3",
     "@nuxt/devtools": "3.4.4",
     "@vue/server-renderer": "3.5.44",
     "ajv": {
@@ -111,13 +114,19 @@
     "brace-expansion@2": "2.1.7",
     "brace-expansion@5": "5.0.12",
     "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3",
+    "deepmerge": "$deepmerge",
     "devalue@5": "5.9.4",
-    "follow-redirects": "1.16.1",
+    "follow-redirects": "1.16.2",
+    "glob@>=9 <14.0.2": "14.0.3",
+    "joi@18": "18.3.1",
     "listhen": "$listhen",
+    "minimatch@<6": "$minimatch-legacy",
+    "minimatch@>=9 <11": "$minimatch-modern",
     "postcss-selector-parser": "7.1.7",
     "seroval": "1.6.12",
     "shell-quote": "1.12.0",
     "source-map-js": "1.2.2",
+    "systeminformation": "5.33.19",
     "vite@7": "7.3.7",
     "vite@8": "8.3.5",
     "vue-dsfr-nuxt-module": {

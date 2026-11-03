@@ -36,43 +36,43 @@ const generateRows = () => {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
           html: `<b>${u.nom}</b><br/><br/>Thématique&nbsp;: <b>${u.thematique?.nom}</b>`,
-          onClickEdit: () => editUsage(u)
+          onClickEdit: () => editUsage(u),
         },
         {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
-          html:  u.descriptionVigilance,
-          onClickEdit: () => editUsage(u)
+          html: u.descriptionVigilance,
+          onClickEdit: () => editUsage(u),
         },
         {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
-          html:  u.descriptionAlerte,
-          onClickEdit: () => editUsage(u)
+          html: u.descriptionAlerte,
+          onClickEdit: () => editUsage(u),
         },
         {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
-          html:  u.descriptionAlerteRenforcee,
-          onClickEdit: () => editUsage(u)
+          html: u.descriptionAlerteRenforcee,
+          onClickEdit: () => editUsage(u),
         },
         {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
-          html:  u.descriptionCrise,
-          onClickEdit: () => editUsage(u)
+          html: u.descriptionCrise,
+          onClickEdit: () => editUsage(u),
         },
         {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
-          html:  generateUsagers(u),
-          onClickEdit: () => editUsage(u)
+          html: generateUsagers(u),
+          onClickEdit: () => editUsage(u),
         },
         {
           component: arreteCadreRecapitulatifCell,
           viewOnly: props.viewOnly,
-          html:  generateRessources(u),
-          onClickEdit: () => editUsage(u)
+          html: generateRessources(u),
+          onClickEdit: () => editUsage(u),
         },
       ];
     }),
@@ -81,29 +81,46 @@ const generateRows = () => {
 };
 
 const generateUsagers = (u: Usage) => {
-  let toReturn = [];
-  u.concerneParticulier ? toReturn.push('Particulier') : '';
-  u.concerneEntreprise ? toReturn.push('Entreprise') : '';
-  u.concerneCollectivite ? toReturn.push('Collectivité') : '';
-  u.concerneExploitation ? toReturn.push('Exploitant agricole') : '';
+  const toReturn = [];
+  if (u.concerneParticulier) {
+    toReturn.push('Particulier');
+  }
+  if (u.concerneEntreprise) {
+    toReturn.push('Entreprise');
+  }
+  if (u.concerneCollectivite) {
+    toReturn.push('Collectivité');
+  }
+  if (u.concerneExploitation) {
+    toReturn.push('Exploitant agricole');
+  }
   return toReturn.join(', ');
 };
 
 const generateRessources = (u: Usage) => {
-  let toReturn = [];
-  u.concerneEso ? toReturn.push('ESO') : '';
-  u.concerneEsu ? toReturn.push('ESU') : '';
-  u.concerneAep ? toReturn.push('AEP') : '';
+  const toReturn = [];
+  if (u.concerneEso) {
+    toReturn.push('ESO');
+  }
+  if (u.concerneEsu) {
+    toReturn.push('ESU');
+  }
+  if (u.concerneAep) {
+    toReturn.push('AEP');
+  }
   return toReturn.join(', ');
 };
 
 generateRows();
 
-const v$ = useVuelidate(rules, props.arreteCadre);
+const _v$ = useVuelidate(rules, props.arreteCadre);
 
-watch(() => props.arreteCadre.usages, () => {
-  generateRows();
-});
+watch(
+  () => props.arreteCadre.usages,
+  () => {
+    generateRows();
+  },
+);
 </script>
 
 <template>
@@ -130,5 +147,4 @@ watch(() => props.arreteCadre.usages, () => {
   </DsfrTable>
 </template>
 
-<style lang="scss">
-</style>
+<style lang="scss"></style>

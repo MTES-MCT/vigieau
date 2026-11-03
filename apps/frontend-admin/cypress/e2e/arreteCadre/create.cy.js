@@ -2,13 +2,17 @@
 
 const selectedPanel = '.fr-tabs__panel--selected';
 const nextStep = () => cy.get('[data-cy=ArreteCadreFormNextStepBtn]').click();
-const saveUsage = () => cy.contains('dialog[open] .fr-btn', 'Enregistrer')
-  .should(($button) => expect($button.text().trim()).to.equal('Enregistrer'))
-  .click();
+const saveUsage = () =>
+  cy
+    .contains('dialog[open] .fr-btn', 'Enregistrer')
+    .should(($button) => expect($button.text().trim()).to.equal('Enregistrer'))
+    .click();
 
 function fillUsage() {
   cy.get('dialog[open] input[data-cy=UsageFormconcerneParticulierCheckbox]').check({ force: true });
-  cy.get('dialog[open] input[data-cy=UsageFormconcerneAepCheckbox]').check({ force: true });
+  cy.get('dialog[open] input[data-cy=UsageFormconcerneAepCheckbox]').check({
+    force: true,
+  });
   cy.get('dialog[open] [data-cy=UsageArreteCadreFormdescriptionCriseInput]').clear().type('Description de la crise');
 }
 
@@ -62,7 +66,10 @@ describe("Création d'un arrêté cadre", () => {
     cy.get('dialog[open] .fr-btn--close').should('be.focused');
     cy.get('dialog[open] [data-cy=UsageFormNameInput]').should('have.value', 'Arrosage des espaces verts');
     cy.get('dialog[open] [data-cy=UsageArreteCadreFormdescriptionCriseInput]')
-      .focus().should('be.focused').clear().should('have.value', '');
+      .focus()
+      .should('be.focused')
+      .clear()
+      .should('have.value', '');
     saveUsage();
     cy.get('dialog[open] .fr-input-group--error').should('exist');
     fillUsage();

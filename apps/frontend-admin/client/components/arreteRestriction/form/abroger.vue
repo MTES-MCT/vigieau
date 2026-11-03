@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
-import type { ArreteRestriction } from "~/dto/arrete_restriction.dto";
+import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -10,8 +10,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   abroger: any;
 }>();
-const utils = useUtils()
-const ar = ref({...props.arreteRestriction});
+const utils = useUtils();
+const ar = ref({ ...props.arreteRestriction });
 
 const rules = computed(() => {
   return {

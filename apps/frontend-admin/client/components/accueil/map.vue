@@ -3,9 +3,10 @@ import { useAuthStore } from '~/stores/auth';
 
 const authStore = useAuthStore();
 
-const departementCode = authStore.user?.role === 'departement' && authStore.user.roleDepartements ? 
-  authStore.user.roleDepartements[0] : null;
-const iframeSrc = departementCode ? `https://${useRuntimeConfig().public.domainName}/carte/?depCode=${departementCode}`
+const departementCode =
+  authStore.user?.role === 'departement' && authStore.user.roleDepartements ? authStore.user.roleDepartements[0] : null;
+const iframeSrc = departementCode
+  ? `https://${useRuntimeConfig().public.domainName}/carte/?depCode=${departementCode}`
   : `https://${useRuntimeConfig().public.domainName}/carte/`;
 </script>
 

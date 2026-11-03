@@ -18,7 +18,7 @@ const chartData = ref({
     RestrictionNiveauGraviteFr.vigilance,
     RestrictionNiveauGraviteFr.alerte,
     RestrictionNiveauGraviteFr.alerte_renforcee,
-    RestrictionNiveauGraviteFr.crise
+    RestrictionNiveauGraviteFr.crise,
   ],
   datasets: [
     {

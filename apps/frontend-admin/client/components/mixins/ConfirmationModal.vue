@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Ref } from 'vue';
 
-const props = defineProps<{
+const _props = defineProps<{
   opened: string;
   title: string;
   description: string;
@@ -30,13 +30,7 @@ const modalActions: Ref<any[]> = ref([
 </script>
 
 <template>
-  <DsfrModal
-    :opened="opened"
-    icon="ri-arrow-right-line"
-    :title="title"
-    :actions="modalActions"
-    @close="emit('close')"
-  >
+  <DsfrModal :opened="opened" icon="ri-arrow-right-line" :title="title" :actions="modalActions" @close="emit('close')">
     <div v-html="description" />
   </DsfrModal>
 </template>

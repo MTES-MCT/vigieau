@@ -1,5 +1,5 @@
 import type { Departement } from '~/dto/departement.dto';
-import type { ArreteCadre } from "~/dto/arrete_cadre.dto";
+import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 import type { Commune } from '~/dto/commune.dto';
 
 export interface ZoneAlerte {
@@ -11,10 +11,10 @@ export interface ZoneAlerte {
   departement: Departement;
   arretesCadre: ArreteCadre[];
   disabled: boolean;
-  
+
   geom?: any;
   communes: Commune[];
-  
+
   // FRONT ONLY
   communesText: string | undefined;
 }

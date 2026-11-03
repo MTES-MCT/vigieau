@@ -62,8 +62,8 @@ const {
     captureClientError(error, {
       action: 'load',
       entity: 'arrete_cadre',
-    mode: props.duplicate ? 'duplication' : isNewArreteCadre ? 'creation' : 'edition',
-    departement: authStore.user?.roleDepartements?.length === 1 ? authStore.user.roleDepartements[0] : undefined,
+      mode: props.duplicate ? 'duplication' : isNewArreteCadre ? 'creation' : 'edition',
+      departement: authStore.user?.roleDepartements?.length === 1 ? authStore.user.roleDepartements[0] : undefined,
     }),
 );
 
@@ -72,19 +72,22 @@ void load();
 
 <template>
   <h1>
-    {{ duplicate ? 'Duplication' : isNewArreteCadre ? 'Création' : 'Edition' }} d'un arrêté cadre
+    {{ duplicate ? 'Duplication' : isNewArreteCadre ? 'Création' : 'Edition' }}
+    d'un arrêté cadre
     <MixinsStatutBadge v-if="arreteCadre" :statut="arreteCadre.statut" />
   </h1>
-  <p v-if="loading" role="status" data-cy="ArreteLoadPending">
-    Chargement de l’arrêté en cours.
-  </p>
+  <p v-if="loading" role="status" data-cy="ArreteLoadPending">Chargement de l’arrêté en cours.</p>
   <template v-else-if="loadError">
     <DsfrAlert title="Chargement de l’arrêté impossible" type="error" class="fr-mb-2w" data-cy="ArreteLoadError">
       {{ getApiErrorMessage(loadError) }}
     </DsfrAlert>
     <ul class="fr-btns-group fr-btns-group--inline-md">
-      <li><DsfrButton label="Réessayer" icon="ri-refresh-line" data-cy="ArreteLoadRetry" @click="load" /></li>
-      <li><DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="navigateTo('/arrete-cadre')" /></li>
+      <li>
+        <DsfrButton label="Réessayer" icon="ri-refresh-line" data-cy="ArreteLoadRetry" @click="load" />
+      </li>
+      <li>
+        <DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="navigateTo('/arrete-cadre')" />
+      </li>
     </ul>
   </template>
   <ArreteCadreFormWrapper v-if="arreteCadre" :arrete-cadre="arreteCadre" />

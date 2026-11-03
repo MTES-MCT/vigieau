@@ -1,5 +1,6 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { isEmail } from 'class-validator';
 import { PassportStrategy } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 
@@ -25,6 +26,9 @@ export default class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
    * @returns Les informations validées pour le contexte utilisateur
    */
   async validate(payload: any) {
-    return payload;
+    if (typeof payload?.email !== 'string' || !isEmail(payload.email)) {
+      throw new UnauthorizedException();
+    }
+    return { email: payload.email };
   }
 }

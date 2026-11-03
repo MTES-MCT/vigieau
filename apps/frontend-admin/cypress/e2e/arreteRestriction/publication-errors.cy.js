@@ -1,4 +1,9 @@
-const department = { id: 47, code: '47', nom: 'Lot-et-Garonne', subscriptions: 12 };
+const department = {
+  id: 47,
+  code: '47',
+  nom: 'Lot-et-Garonne',
+  subscriptions: 12,
+};
 const theme = { id: 1, nom: 'Arroser' };
 const zone = {
   id: 4701,
@@ -30,7 +35,12 @@ const usage = (overrides = {}) => ({
 
 const page = (data) => ({
   data,
-  meta: { totalItems: data.length, totalPages: 1, currentPage: 1, itemsPerPage: 9 },
+  meta: {
+    totalItems: data.length,
+    totalPages: 1,
+    currentPage: 1,
+    itemsPerPage: 9,
+  },
   links: {},
 });
 
@@ -63,15 +73,17 @@ function mockApplication(usages = [usage()], failures = {}, options = {}) {
     arretesCadre: frameworks,
     niveauGraviteSpecifiqueEap: null,
     ressourceEapCommunique: null,
-    restrictions: options.restrictions ?? [{
-      id: 471,
-      zoneAlerte: zone,
-      arreteCadre: { id: framework.id },
-      niveauGravite: 'alerte',
-      isAep: false,
-      communes: [],
-      usages: sourceUsages,
-    }],
+    restrictions: options.restrictions ?? [
+      {
+        id: 471,
+        zoneAlerte: zone,
+        arreteCadre: { id: framework.id },
+        niveauGravite: 'alerte',
+        isAep: false,
+        communes: [],
+        usages: sourceUsages,
+      },
+    ],
   };
   const requests = { save: [], check: [], publish: [], mutations: [] };
 
@@ -81,12 +93,21 @@ function mockApplication(usages = [usage()], failures = {}, options = {}) {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       requests.mutations.push({ method: request.method, path });
     }
-    if ((request.method === 'POST' && path === '/api/arrete-restriction') ||
-        (request.method === 'PATCH' && ['/api/arrete-restriction/90001', '/api/arrete-restriction/37731'].includes(path))) {
+    if (
+      (request.method === 'POST' && path === '/api/arrete-restriction') ||
+      (request.method === 'PATCH' && ['/api/arrete-restriction/90001', '/api/arrete-restriction/37731'].includes(path))
+    ) {
       request.alias = 'saveDraft';
       requests.save.push(request.body);
       if (failures.save) {
-        request.reply({ statusCode: 400, body: { statusCode: 400, message: failures.save, error: 'Bad Request' } });
+        request.reply({
+          statusCode: 400,
+          body: {
+            statusCode: 400,
+            message: failures.save,
+            error: 'Bad Request',
+          },
+        });
       } else {
         request.reply({
           ...request.body,
@@ -94,20 +115,39 @@ function mockApplication(usages = [usage()], failures = {}, options = {}) {
           restrictions: request.body.restrictions.map((restriction, index) => ({
             ...restriction,
             id: restriction.id ?? 1000 + index,
-            usages: restriction.usages.map((item, usageIndex) => ({ ...item, id: item.id ?? 2000 + index * 100 + usageIndex })),
+            usages: restriction.usages.map((item, usageIndex) => ({
+              ...item,
+              id: item.id ?? 2000 + index * 100 + usageIndex,
+            })),
           })),
         });
       }
     } else if (request.method === 'POST' && path.endsWith('/check')) {
       request.alias = 'checkDraft';
       requests.check.push(request.body);
-      request.reply(failures.check
-        ? { statusCode: 400, body: { statusCode: 400, message: failures.check, error: 'Bad Request' } }
-        : { errors: [], warnings: [] });
+      request.reply(
+        failures.check
+          ? {
+              statusCode: 400,
+              body: {
+                statusCode: 400,
+                message: failures.check,
+                error: 'Bad Request',
+              },
+            }
+          : { errors: [], warnings: [] },
+      );
     } else if (request.method === 'POST' && path.endsWith('/publier')) {
       request.alias = 'publishDraft';
       requests.publish.push(request.body);
-      request.reply({ statusCode: 400, body: { statusCode: 400, message: failures.publish || 'Publication refusee pour ce test.', error: 'Bad Request' } });
+      request.reply({
+        statusCode: 400,
+        body: {
+          statusCode: 400,
+          message: failures.publish || 'Publication refusee pour ce test.',
+          error: 'Bad Request',
+        },
+      });
     } else if (path === '/api/user/me') {
       request.reply({
         email: 'ddt47@example.test',
@@ -130,7 +170,10 @@ function mockApplication(usages = [usage()], failures = {}, options = {}) {
     } else if (path === '/api/arrete-cadre') {
       request.reply(frameworks);
     } else if (path === '/api/parametres/47') {
-      request.reply({ superpositionCommune: 'no_all', departement: department });
+      request.reply({
+        superpositionCommune: 'no_all',
+        departement: department,
+      });
     } else if (path === '/api/usage_feedback/search') {
       request.reply(page([]));
     } else {
@@ -192,15 +235,17 @@ function assertResetPreviewLayout(mobile = false) {
   cy.get('dialog[open] .fr-modal__body, dialog[open] [data-cy=RestrictionUsageResetPreview]').each(($element) => {
     expect($element[0].scrollWidth).to.be.at.most($element[0].clientWidth + 1);
   });
-  cy.get('dialog[open] .restriction-usage-reset-columns').children().then(($columns) => {
-    const before = $columns[0].getBoundingClientRect();
-    const after = $columns[1].getBoundingClientRect();
-    if (mobile) {
-      expect(after.top).to.be.at.least(before.bottom - 1);
-    } else {
-      expect(after.left).to.be.at.least(before.right - 1);
-    }
-  });
+  cy.get('dialog[open] .restriction-usage-reset-columns')
+    .children()
+    .then(($columns) => {
+      const before = $columns[0].getBoundingClientRect();
+      const after = $columns[1].getBoundingClientRect();
+      if (mobile) {
+        expect(after.top).to.be.at.least(before.bottom - 1);
+      } else {
+        expect(after.left).to.be.at.least(before.right - 1);
+      }
+    });
 }
 
 function openPublicationModal() {
@@ -216,11 +261,14 @@ function fillPublicationForm() {
     .trigger('input')
     .trigger('change')
     .should('have.value', '2026-09-07');
-  cy.get('dialog[open] input[type=file]').selectFile({
-    contents: Cypress.Buffer.from('%PDF-1.4\nPublication test\n%%EOF'),
-    fileName: 'arrete-test.pdf',
-    mimeType: 'application/pdf',
-  }, { force: true });
+  cy.get('dialog[open] input[type=file]').selectFile(
+    {
+      contents: Cypress.Buffer.from('%PDF-1.4\nPublication test\n%%EOF'),
+      fileName: 'arrete-test.pdf',
+      mimeType: 'application/pdf',
+    },
+    { force: true },
+  );
   cy.get('[data-cy=PublishFormDateDebutInput]').should('have.value', '2026-09-07');
 }
 
@@ -261,10 +309,7 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('reports conflicting variants before sending a create request', () => {
-    const requests = mockApplication([
-      usage(),
-      usage({ id: 102, descriptionAlerte: 'Autorise sans restriction.' }),
-    ]);
+    const requests = mockApplication([usage(), usage({ id: 102, descriptionAlerte: 'Autorise sans restriction.' })]);
     openDuplicateFromHome();
     cy.get('[data-cy=ArreteRestrictionFormPublishBtn]').click();
     cy.get('[data-cy=ArreteRestrictionErrorSummary]').should('be.visible').and('contain.text', 'Arrosage des jardins');
@@ -279,7 +324,12 @@ describe('Restriction publication errors with mocked APIs', () => {
   it('does not discard same-name variants when another usage is unchecked', () => {
     const requests = mockApplication([
       usage(),
-      usage({ id: 102, concerneParticulier: false, concerneEntreprise: true, descriptionAlerte: 'Autorise pour les entreprises.' }),
+      usage({
+        id: 102,
+        concerneParticulier: false,
+        concerneEntreprise: true,
+        descriptionAlerte: 'Autorise pour les entreprises.',
+      }),
       usage({ id: 103, nom: 'Nettoyage des cours' }),
     ]);
     openDuplicateFromHome();
@@ -304,8 +354,14 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('preserves copied selections when framework variants become applicable at another severity', () => {
-    const original = usage({ descriptionCrise: 'Consigne historique de crise.' });
-    const alternative = usage({ id: 201, descriptionAlerte: '', descriptionCrise: 'Consigne actuelle de crise.' });
+    const original = usage({
+      descriptionCrise: 'Consigne historique de crise.',
+    });
+    const alternative = usage({
+      id: 201,
+      descriptionAlerte: '',
+      descriptionCrise: 'Consigne actuelle de crise.',
+    });
     const requests = mockApplication([original], {}, { frameworkUsages: [alternative] });
     openDuplicateFromHome();
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').click();
@@ -325,9 +381,19 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('keeps true variants explicit and lets the user replace one without changing another zone', () => {
-    const original = usage({ descriptionCrise: 'Consigne historique de crise.' });
-    const alternative = usage({ id: 201, descriptionCrise: 'Consigne actuelle de crise.' });
-    const secondZone = { ...zone, id: 4702, code: 'TEST-47-B', nom: 'Seconde zone' };
+    const original = usage({
+      descriptionCrise: 'Consigne historique de crise.',
+    });
+    const alternative = usage({
+      id: 201,
+      descriptionCrise: 'Consigne actuelle de crise.',
+    });
+    const secondZone = {
+      ...zone,
+      id: 4702,
+      code: 'TEST-47-B',
+      nom: 'Seconde zone',
+    };
     const restrictions = [zone, secondZone].map((item, index) => ({
       id: 471 + index,
       zoneAlerte: item,
@@ -337,16 +403,21 @@ describe('Restriction publication errors with mocked APIs', () => {
       communes: [],
       usages: [{ ...original, id: original.id + index }],
     }));
-    const requests = mockApplication([original], {}, {
-      frameworkUsages: [alternative],
-      zones: [zone, secondZone],
-      restrictions,
-    });
+    const requests = mockApplication(
+      [original],
+      {},
+      {
+        frameworkUsages: [alternative],
+        zones: [zone, secondZone],
+        restrictions,
+      },
+    );
     openDuplicateFromHome();
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').click();
     cy.get('#arrete-restriction-zone-0 .fr-checkbox-group').should('have.length', 2);
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').should('have.length', 1);
-    cy.get('#arrete-restriction-zone-0').should('contain.text', 'Consigne historique de crise.')
+    cy.get('#arrete-restriction-zone-0')
+      .should('contain.text', 'Consigne historique de crise.')
       .and('contain.text', 'Consigne actuelle de crise.');
     cy.get('#arrete-restriction-zone-0 [data-cy=RestrictionUsageVariantDetails] summary').click({ multiple: true });
     cy.get('#arrete-restriction-zone-0 [data-cy=RestrictionUsageVariantDetails]').should('have.attr', 'open');
@@ -354,7 +425,9 @@ describe('Restriction publication errors with mocked APIs', () => {
     cy.viewport(390, 844);
     cy.get('#arrete-restriction-zone-0').scrollIntoView();
     cy.screenshot('copied-usage-variants-mobile', { capture: 'fullPage' });
-    cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').uncheck({ force: true });
+    cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').uncheck({
+      force: true,
+    });
     cy.contains('dialog[open] button', 'Appliquer seulement').click();
     cy.get('#arrete-restriction-zone-0 .fr-checkbox-group').last().find('input[type=checkbox]').check({ force: true });
     cy.get('[data-cy=ArreteRestrictionFormPublishBtn]').click();
@@ -369,15 +442,22 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('groups typographic equivalents without replacing or deleting selected source usages', () => {
-    const original = usage({ nom: "Remplissage des fontaines d'ornement", descriptionCrise: 'Interdit.\nSauf exception.' });
+    const original = usage({
+      nom: "Remplissage des fontaines d'ornement",
+      descriptionCrise: 'Interdit.\nSauf exception.',
+    });
     const equivalent = usage({
       id: 102,
       nom: 'Remplissage  des fontaines d’ornement',
       descriptionCrise: 'Interdit.\r\nSauf exception.',
     });
-    const requests = mockApplication([original, equivalent], {}, {
-      frameworkUsages: [{ ...equivalent, id: 201 }],
-    });
+    const requests = mockApplication(
+      [original, equivalent],
+      {},
+      {
+        frameworkUsages: [{ ...equivalent, id: 201 }],
+      },
+    );
     openDuplicateFromHome();
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').click();
     cy.get('#arrete-restriction-zone-0 .fr-checkbox-group').should('have.length', 1);
@@ -389,9 +469,7 @@ describe('Restriction publication errors with mocked APIs', () => {
       const saved = requests.save[0].restrictions[0].usages;
       expect(saved).to.have.length(2);
       expect(saved.map((item) => item.nom)).to.deep.equal([original.nom, equivalent.nom]);
-      expect(saved.map((item) => item.descriptionCrise)).to.deep.equal([
-        original.descriptionCrise, equivalent.descriptionCrise,
-      ]);
+      expect(saved.map((item) => item.descriptionCrise)).to.deep.equal([original.descriptionCrise, equivalent.descriptionCrise]);
     });
   });
 
@@ -399,7 +477,9 @@ describe('Restriction publication errors with mocked APIs', () => {
     const requests = mockApplication();
     openDuplicateFromHome();
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').click();
-    cy.get('#arrete-restriction-zone-0 input[type=checkbox]').uncheck({ force: true });
+    cy.get('#arrete-restriction-zone-0 input[type=checkbox]').uncheck({
+      force: true,
+    });
     cy.get('#arrete-restriction-zone-0 select').select('crise');
     cy.get('#arrete-restriction-zone-0 select').select('alerte');
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').should('not.exist');
@@ -409,13 +489,27 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('initializes an added blank zone from the current framework instead of another zone history', () => {
-    const original = usage({ descriptionCrise: 'Consigne historique de crise.' });
-    const current = usage({ id: 201, descriptionCrise: 'Consigne actuelle de crise.' });
-    const additionalZone = { ...zone, id: 4702, code: 'TEST-47-B', nom: 'Zone additionnelle' };
-    const requests = mockApplication([original], {}, {
-      frameworkUsages: [current],
-      zones: [zone, additionalZone],
+    const original = usage({
+      descriptionCrise: 'Consigne historique de crise.',
     });
+    const current = usage({
+      id: 201,
+      descriptionCrise: 'Consigne actuelle de crise.',
+    });
+    const additionalZone = {
+      ...zone,
+      id: 4702,
+      code: 'TEST-47-B',
+      nom: 'Zone additionnelle',
+    };
+    const requests = mockApplication(
+      [original],
+      {},
+      {
+        frameworkUsages: [current],
+        zones: [zone, additionalZone],
+      },
+    );
     openDuplicateFromHome(() => {
       cy.contains('.fr-checkbox-group', 'Zone additionnelle').find('input[type=checkbox]').check({ force: true });
     });
@@ -434,18 +528,22 @@ describe('Restriction publication errors with mocked APIs', () => {
 
   it('previews and resets only one zone to its framework without carrying historical usages back', () => {
     const targetZone = { ...zone, id: 2239, nom: 'La Bonnette', type: 'SOU' };
-    const historical = Array.from({ length: 58 }, (_, index) => usage({
-      id: 1000 + index,
-      nom: `Ancienne mesure ${String(index + 1).padStart(2, '0')}`,
-      concerneEsu: false,
-      concerneEso: true,
-    }));
-    const authoritative = Array.from({ length: 17 }, (_, index) => usage({
-      id: 2000 + index,
-      nom: `Mesure AC ${String(index + 1).padStart(2, '0')}`,
-      concerneEsu: false,
-      concerneEso: true,
-    }));
+    const historical = Array.from({ length: 58 }, (_, index) =>
+      usage({
+        id: 1000 + index,
+        nom: `Ancienne mesure ${String(index + 1).padStart(2, '0')}`,
+        concerneEsu: false,
+        concerneEso: true,
+      }),
+    );
+    const authoritative = Array.from({ length: 17 }, (_, index) =>
+      usage({
+        id: 2000 + index,
+        nom: `Mesure AC ${String(index + 1).padStart(2, '0')}`,
+        concerneEsu: false,
+        concerneEso: true,
+      }),
+    );
     const surface = usage({ id: 2100, nom: 'Usage superficiel exclu' });
     const additionalFrameworks = Array.from({ length: 4 }, (_, index) => ({
       id: 480 + index,
@@ -454,41 +552,55 @@ describe('Restriction publication errors with mocked APIs', () => {
       dateDebut: '2026-01-01',
       dateFin: null,
       departements: [department],
-      zonesAlerte: [{ ...zone, id: 4800 + index, code: `TEST-48-${index}`, nom: `Autre zone ${index + 1}` }],
+      zonesAlerte: [
+        {
+          ...zone,
+          id: 4800 + index,
+          code: `TEST-48-${index}`,
+          nom: `Autre zone ${index + 1}`,
+        },
+      ],
       arretesRestriction: [],
       usages: [usage({ id: 3000 + index, nom: `Mesure autre AC ${index + 1}` })],
     }));
-    const restrictions = [{
-      id: 471,
-      zoneAlerte: targetZone,
-      arreteCadre: { id: 470 },
-      niveauGravite: 'alerte',
-      isAep: false,
-      communes: [],
-      usages: historical,
-    }, ...additionalFrameworks.map((framework, index) => ({
-      id: 480 + index,
-      zoneAlerte: framework.zonesAlerte[0],
-      arreteCadre: { id: framework.id },
-      niveauGravite: 'alerte',
-      isAep: false,
-      communes: [],
-      usages: framework.usages,
-    }))];
-    const requests = mockApplication(historical, {}, {
-      frameworkUsages: [...authoritative, surface],
-      zones: [targetZone],
-      additionalFrameworks,
-      restrictions,
-    });
+    const restrictions = [
+      {
+        id: 471,
+        zoneAlerte: targetZone,
+        arreteCadre: { id: 470 },
+        niveauGravite: 'alerte',
+        isAep: false,
+        communes: [],
+        usages: historical,
+      },
+      ...additionalFrameworks.map((framework, index) => ({
+        id: 480 + index,
+        zoneAlerte: framework.zonesAlerte[0],
+        arreteCadre: { id: framework.id },
+        niveauGravite: 'alerte',
+        isAep: false,
+        communes: [],
+        usages: framework.usages,
+      })),
+    ];
+    const requests = mockApplication(
+      historical,
+      {},
+      {
+        frameworkUsages: [...authoritative, surface],
+        zones: [targetZone],
+        additionalFrameworks,
+        restrictions,
+      },
+    );
     const originalRestrictions = JSON.parse(JSON.stringify(restrictions));
     openDuplicateFromHome();
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').click();
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').should('have.length', 58);
     cy.get('#arrete-restriction-zone-0 [data-cy=RestrictionUsageResetButton]').click();
-    cy.get('[data-cy=RestrictionUsageResetDialog]:visible').should('contain.text', 'Avant : 58')
-      .and('contain.text', 'Après : 17');
-    cy.get('dialog[open] [data-cy=RestrictionUsageResetPreview]').should('contain.text', 'Ancienne mesure')
+    cy.get('[data-cy=RestrictionUsageResetDialog]:visible').should('contain.text', 'Avant : 58').and('contain.text', 'Après : 17');
+    cy.get('dialog[open] [data-cy=RestrictionUsageResetPreview]')
+      .should('contain.text', 'Ancienne mesure')
       .and('contain.text', 'Mesure AC');
     cy.then(() => expect(requests.save).to.have.length(0));
     cy.get('dialog[open] [data-cy=RestrictionUsageResetCancel]').click();
@@ -497,8 +609,7 @@ describe('Restriction publication errors with mocked APIs', () => {
     cy.get('dialog[open] [data-cy=RestrictionUsageResetConfirm]').click();
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]').should('have.length', 17);
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').should('have.length', 17);
-    cy.get('#arrete-restriction-zone-0').should('not.contain.text', 'Ancienne mesure')
-      .and('not.contain.text', 'Usage superficiel exclu');
+    cy.get('#arrete-restriction-zone-0').should('not.contain.text', 'Ancienne mesure').and('not.contain.text', 'Usage superficiel exclu');
     cy.get('#arrete-restriction-zone-0 select').select('crise');
     cy.get('#arrete-restriction-zone-0 select').select('alerte');
     cy.get('#arrete-restriction-zone-0 input[type=checkbox]:checked').should('have.length', 17);
@@ -528,7 +639,12 @@ describe('Restriction publication errors with mocked APIs', () => {
         expect(restriction.zoneAlerte.id).to.equal(additionalFrameworks[index].zonesAlerte[0].id);
         expect(restriction.arreteCadre.id).to.equal(additionalFrameworks[index].id);
         expect(restriction.usages).to.have.length(1);
-        expect(restriction.usages).to.deep.equal(additionalFrameworks[index].usages.map((item) => ({ ...item, id: null })));
+        expect(restriction.usages).to.deep.equal(
+          additionalFrameworks[index].usages.map((item) => ({
+            ...item,
+            id: null,
+          })),
+        );
       });
       expect(requests.mutations).to.deep.equal([{ method: 'POST', path: '/api/arrete-restriction' }]);
     });
@@ -544,20 +660,32 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('restores the intended historical choice after crossing a severity with no applicable description', () => {
-    const original = usage({ descriptionAlerte: '', descriptionCrise: 'Consigne historique de crise.' });
-    const current = usage({ id: 201, descriptionCrise: 'Consigne actuelle de crise.' });
-    const requests = mockApplication([original], { save: 'Echec simule pour conserver ce formulaire.' }, {
-      frameworkUsages: [current],
-      restrictions: [{
-        id: 471,
-        zoneAlerte: zone,
-        arreteCadre: { id: 470 },
-        niveauGravite: 'crise',
-        isAep: false,
-        communes: [],
-        usages: [original],
-      }],
+    const original = usage({
+      descriptionAlerte: '',
+      descriptionCrise: 'Consigne historique de crise.',
     });
+    const current = usage({
+      id: 201,
+      descriptionCrise: 'Consigne actuelle de crise.',
+    });
+    const requests = mockApplication(
+      [original],
+      { save: 'Echec simule pour conserver ce formulaire.' },
+      {
+        frameworkUsages: [current],
+        restrictions: [
+          {
+            id: 471,
+            zoneAlerte: zone,
+            arreteCadre: { id: 470 },
+            niveauGravite: 'crise',
+            isAep: false,
+            communes: [],
+            usages: [original],
+          },
+        ],
+      },
+    );
     openDuplicateFromHome();
     cy.get('#arrete-restriction-zone-0 .fr-accordion__btn').click();
     cy.get('#arrete-restriction-zone-0 select').select('alerte');
@@ -577,13 +705,28 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('initializes a new zone at its first applicable severity even after an empty vigilance level', () => {
-    const original = usage({ descriptionCrise: 'Consigne historique de crise.' });
-    const current = usage({ id: 201, descriptionVigilance: '', descriptionCrise: 'Consigne actuelle de crise.' });
-    const additionalZone = { ...zone, id: 4702, code: 'TEST-47-B', nom: 'Zone additionnelle' };
-    const requests = mockApplication([original], {}, {
-      frameworkUsages: [current],
-      zones: [zone, additionalZone],
+    const original = usage({
+      descriptionCrise: 'Consigne historique de crise.',
     });
+    const current = usage({
+      id: 201,
+      descriptionVigilance: '',
+      descriptionCrise: 'Consigne actuelle de crise.',
+    });
+    const additionalZone = {
+      ...zone,
+      id: 4702,
+      code: 'TEST-47-B',
+      nom: 'Zone additionnelle',
+    };
+    const requests = mockApplication(
+      [original],
+      {},
+      {
+        frameworkUsages: [current],
+        zones: [zone, additionalZone],
+      },
+    );
     openDuplicateFromHome(() => {
       cy.contains('.fr-checkbox-group', 'Zone additionnelle').find('input[type=checkbox]').check({ force: true });
     });
@@ -603,27 +746,41 @@ describe('Restriction publication errors with mocked APIs', () => {
   });
 
   it('shows a true before-after comparison and does not reuse a saved usage ID after its removal', () => {
-    const original = usage({ descriptionAlerte: '', descriptionCrise: 'Consigne historique de crise.' });
-    const current = usage({ id: 201, descriptionCrise: 'Consigne actuelle de crise.' });
-    const requests = mockApplication([original], {}, {
-      sourceStatus: 'a_valider',
-      frameworkUsages: [current],
-      restrictions: [{
-        id: 471,
-        zoneAlerte: zone,
-        arreteCadre: { id: 470 },
-        niveauGravite: 'crise',
-        isAep: false,
-        communes: [],
-        usages: [original],
-      }],
+    const original = usage({
+      descriptionAlerte: '',
+      descriptionCrise: 'Consigne historique de crise.',
     });
+    const current = usage({
+      id: 201,
+      descriptionCrise: 'Consigne actuelle de crise.',
+    });
+    const requests = mockApplication(
+      [original],
+      {},
+      {
+        sourceStatus: 'a_valider',
+        frameworkUsages: [current],
+        restrictions: [
+          {
+            id: 471,
+            zoneAlerte: zone,
+            arreteCadre: { id: 470 },
+            niveauGravite: 'crise',
+            isAep: false,
+            communes: [],
+            usages: [original],
+          },
+        ],
+      },
+    );
     openExistingEdition();
     cy.get('#arrete-restriction-zone-0 [data-cy=RestrictionUsageResetButton]').click();
-    cy.get('dialog[open] [data-cy=RestrictionUsageResetPreview] details').should('have.length', 1)
-      .find('summary').click();
-    cy.get('dialog[open] [data-cy=RestrictionUsageResetPreview]').should('contain.text', original.descriptionCrise)
-      .and('contain.text', current.descriptionCrise).and('contain.text', 'Avant').and('contain.text', 'Après');
+    cy.get('dialog[open] [data-cy=RestrictionUsageResetPreview] details').should('have.length', 1).find('summary').click();
+    cy.get('dialog[open] [data-cy=RestrictionUsageResetPreview]')
+      .should('contain.text', original.descriptionCrise)
+      .and('contain.text', current.descriptionCrise)
+      .and('contain.text', 'Avant')
+      .and('contain.text', 'Après');
     assertResetPreviewLayout();
     cy.screenshot('usage-reset-before-after-desktop', { capture: 'viewport' });
     cy.viewport(390, 844);
@@ -678,11 +835,15 @@ describe('Restriction publication errors with mocked APIs', () => {
       if (phase === 'check') {
         cy.then(() => expect(requests.publish).to.have.length(0));
       } else {
-        cy.screenshot('publication-error-modal-desktop', { capture: 'viewport' });
+        cy.screenshot('publication-error-modal-desktop', {
+          capture: 'viewport',
+        });
         cy.viewport(390, 844);
         cy.get('[data-cy=ArreteRestrictionPublicationErrorSummary]').should('be.visible').and('contain.text', message);
         cy.get('[data-cy=PublishFormPublishBtn]').should('not.be.disabled');
-        cy.screenshot('publication-error-modal-mobile', { capture: 'viewport' });
+        cy.screenshot('publication-error-modal-mobile', {
+          capture: 'viewport',
+        });
       }
     });
   }

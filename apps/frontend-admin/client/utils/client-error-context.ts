@@ -1,5 +1,5 @@
 const record = (value: unknown): Record<string, unknown> =>
-  value !== null && typeof value === 'object' ? value as Record<string, unknown> : {};
+  value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 
 export const getClientErrorTags = (error: unknown, context: Record<string, unknown>): Record<string, string> => {
   const tags: Record<string, string> = {};

@@ -1,8 +1,7 @@
 import { BaseApiPagination } from '~/api/base-api-pagination';
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class ArreteMunicipalApi extends BaseApiPagination {
-  
   create(payload: any) {
     const formData = new FormData();
     formData.append('file', payload.file);
@@ -13,7 +12,7 @@ export class ArreteMunicipalApi extends BaseApiPagination {
     formData.append('userPhone', payload.userPhone);
     formData.append('userFirstName', payload.userFirstName);
     formData.append('userLastName', payload.userLastName);
-    
+
     return useCustomFetch(`/${this.resource}`, {
       method: 'POST',
       baseURL: '/api',
@@ -31,14 +30,14 @@ export class ArreteMunicipalApi extends BaseApiPagination {
     formData.append('userPhone', payload.userPhone);
     formData.append('userFirstName', payload.userFirstName);
     formData.append('userLastName', payload.userLastName);
-    
+
     return useCustomFetch(`/${this.resource}/${id}`, {
       method: 'PATCH',
       baseURL: '/api',
       body: formData,
     });
   }
-  
+
   publish = (id: string, payload: any) => {
     const formData = new FormData();
     formData.append('file', payload.file);

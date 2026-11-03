@@ -88,11 +88,10 @@ a.fr-pagination__link:not([aria-current]):not([href]):not([disabled]) {
 // SELECT
 .fr-select {
   &-group--inline {
-    
     .fr-select-group {
       display: flex;
       align-items: center;
-      
+
       .fr-label {
         flex: none;
         margin-right: 0.5rem;
@@ -108,7 +107,7 @@ a.fr-pagination__link:not([aria-current]):not([href]):not([disabled]) {
       flex: none;
     }
   }
-  
+
   &--no-shadow:before {
     box-shadow: none;
   }
@@ -118,7 +117,7 @@ a.fr-pagination__link:not([aria-current]):not([href]):not([disabled]) {
 .fr-input-group {
   &__sub-hint {
     color: var(--text-mention-grey);
-    font-size: .75rem;
+    font-size: 0.75rem;
     display: block;
     text-align: right;
   }
@@ -135,7 +134,7 @@ a.fr-pagination__link:not([aria-current]):not([href]):not([disabled]) {
     background-color: #e8edff;
     color: #161616;
   }
-  
+
   &--vigilance {
     background-color: #ffeda0;
     color: #161616;

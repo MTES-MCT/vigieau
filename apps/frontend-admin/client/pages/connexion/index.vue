@@ -9,7 +9,7 @@ const userSelected = ref(null);
 const userList = ref([]);
 const route = useRoute();
 const isError = !!route.query.error;
-const { data, error } = await api.user.listDev();
+const { data, error: _error } = await api.user.listDev();
 if (data.value) {
   userList.value = data.value.map((user: any) => {
     return {
@@ -28,7 +28,9 @@ const loginAgentConnect = () => {
 };
 
 const loginDev = () => {
-  navigateTo(`${runTimeConfig.apiUrl}/auth/login/dev/${userSelected.value}`, { external: true });
+  navigateTo(`${runTimeConfig.apiUrl}/auth/login/dev/${userSelected.value}`, {
+    external: true,
+  });
 };
 </script>
 
@@ -58,8 +60,7 @@ const loginDev = () => {
               >
             </p>
           </div>
-          <div class="fr-mb-6v" 
-               v-if="!+runTimeConfig.isProd">
+          <div class="fr-mb-6v" v-if="!+runTimeConfig.isProd">
             <h2>Se connecter (DEV Only)</h2>
             <DsfrSelect v-model="userSelected" :options="userList" />
             <DsfrButton label="Se connecter" data-cy="LoginDevBtn" @click="loginDev()" :disabled="!userSelected" />

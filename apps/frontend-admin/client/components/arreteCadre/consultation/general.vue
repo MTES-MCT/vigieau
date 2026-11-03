@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import type { ArreteCadre } from "~/dto/arrete_cadre.dto";
+import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 
-const props = defineProps<{
+const _props = defineProps<{
   arreteCadre: ArreteCadre;
 }>();
 
@@ -10,11 +10,17 @@ const utils = useUtils();
 
 <template>
   <h2>Généralité</h2>
-  <p>Cet arrêté est {{ arreteCadre.departements.length > 1 ? 'interdépartemental' : 'départemental'}}</p>
+  <p>
+    Cet arrêté est
+    {{ arreteCadre.departements.length > 1 ? 'interdépartemental' : 'départemental' }}
+  </p>
   <DsfrHighlight>
-    <span v-for="d of arreteCadre.departements">{{ d.nom }}<br/></span>
+    <span v-for="(d, dIndex) of arreteCadre.departements" :key="dIndex">{{ d.nom }}<br /></span>
   </DsfrHighlight>
-  <p>Date d'entrée en vigueur&nbsp;: {{ utils.formatDate(arreteCadre.dateDebut) }}</p>
+  <p>
+    Date d'entrée en vigueur&nbsp;:
+    {{ utils.formatDate(arreteCadre.dateDebut) }}
+  </p>
   <p>Date de fin&nbsp;: {{ utils.formatDate(arreteCadre.dateFin) }}</p>
   <DsfrFileDownload
     v-if="arreteCadre.fichier"

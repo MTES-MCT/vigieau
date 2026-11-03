@@ -5,7 +5,7 @@ import type { Ref } from 'vue';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 import { useAuthStore } from '~/stores/auth';
 import { useRefDataStore } from '~/stores/refData';
-import { maxLength, helpers, required } from '@vuelidate/validators';
+import { helpers, maxLength, required } from '@vuelidate/validators';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -23,7 +23,9 @@ const loading = ref(false);
 const assignDepartement = (force = false) => {
   if ((!props.arreteRestriction.id && !props.arreteRestriction.departement) || force) {
     props.arreteRestriction.departement =
-      authStore.user?.role === 'departement' ? refDataStore.departements.filter((d) => authStore.user?.roleDepartements.includes(d.code))[0] : null;
+      authStore.user?.role === 'departement'
+        ? refDataStore.departements.filter((d) => authStore.user?.roleDepartements.includes(d.code))[0]
+        : null;
   }
   if (props.arreteRestriction.departement) {
     loadArretes();
@@ -33,14 +35,14 @@ const assignDepartement = (force = false) => {
 const rules = computed(() => {
   return {
     departement: {
-      required: helpers.withMessage('Le département de l\'arrêté est obligatoire', required),
+      required: helpers.withMessage("Le département de l'arrêté est obligatoire", required),
     },
     numero: {
-      required: helpers.withMessage('Le numéro de l\'arrêté est obligatoire', required),
-      maxLength: helpers.withMessage('Le numéro de l\'arrêté ne doit pas dépasser 50 caractères.', maxLength(50)),
+      required: helpers.withMessage("Le numéro de l'arrêté est obligatoire", required),
+      maxLength: helpers.withMessage("Le numéro de l'arrêté ne doit pas dépasser 50 caractères.", maxLength(50)),
     },
     arretesCadre: {
-      required: helpers.withMessage('L\'arrêté doit être lié à au moins un arrêté cadre', required),
+      required: helpers.withMessage("L'arrêté doit être lié à au moins un arrêté cadre", required),
     },
     arreteRestrictionAbroge: {},
   };
@@ -54,7 +56,7 @@ const arretesCadre: Ref<any> = ref([]);
 const loadArretes = async () => {
   const query = `depCode=${props.arreteRestriction.departement.code}`;
   loading.value = true;
-  const { data, error } = await api.arreteCadre.list(query);
+  const { data, error: _error } = await api.arreteCadre.list(query);
   if (data.value) {
     arretesCadre.value = data.value;
     filterArretesCadre();
@@ -122,7 +124,7 @@ const departementChange = (depId: string) => {
 };
 
 const departementsOptions = refDataStore.departements
-  .filter(d => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code))
+  .filter((d) => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code))
   .map((d) => {
     return {
       value: d.id,
@@ -215,10 +217,12 @@ watch(
       </div>
       <div class="fr-col-12 fr-col-lg-6"></div>
 
-      <ArreteRestrictionFormPublier v-if="arreteRestriction.statut !== 'a_valider'"
-                                    :arreteRestriction="arreteRestriction"
-                                    :warnings="checkReturn?.warnings"
-                                    :errors="checkReturn?.errors" />
+      <ArreteRestrictionFormPublier
+        v-if="arreteRestriction.statut !== 'a_valider'"
+        :arreteRestriction="arreteRestriction"
+        :warnings="checkReturn?.warnings"
+        :errors="checkReturn?.errors"
+      />
     </div>
   </form>
 </template>

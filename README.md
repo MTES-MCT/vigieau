@@ -4,8 +4,8 @@ Monorepo contenant les applications VigiEau (`frontend`, `backend`) et VigiEau A
 
 ## Pré-requis
 
-- Node.js 24.x
-- npm 11.x
+- Node.js 24.22.1
+- npm 12.2.1
 - Docker avec Docker Compose
 
 Node n’est pas dockerisé : les applications Node/Nuxt/Nest se lancent en local. Docker ne sert ici qu’à lancer les dépendances nécessaires au développement local.
@@ -173,6 +173,23 @@ Terminal 4 :
 ```bash
 npm run dev:admin-frontend
 ```
+
+Pour prévisualiser les fichiers de production des interfaces, construire puis
+lancer l'application concernée :
+
+```bash
+npm --prefix apps/frontend run build
+npm --prefix apps/frontend start
+
+npm --prefix apps/frontend-admin run build
+npm --prefix apps/frontend-admin start
+```
+
+Les ports par défaut restent 3000 et 3003. `PORT` et `HOST` permettent de changer
+l'écoute ; `npm run preview` dans chaque frontend utilise le même serveur statique.
+Le lanceur inclus dans `.output/preview.mjs` sert seulement `.output/public`, sans
+téléchargement supplémentaire et sans dépendre des sources du monorepo au runtime.
+Sur Scalingo, les buildpacks et Nginx restent responsables du service des fichiers.
 
 ## URLs
 

@@ -1,6 +1,6 @@
 /* global after, before, cy, Cypress, describe, it */
 
-describe('Edition d\'un arrêté cadre', () => {
+describe("Edition d'un arrêté cadre", () => {
   before(() => {
     cy.populateDb('arrete-cadre');
   });

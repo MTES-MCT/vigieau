@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import type { Ref } from "vue";
-import { type ArreteRestriction, ArreteRestrictionStatutFr } from "~/dto/arrete_restriction.dto";
-import { useAuthStore } from "~/stores/auth";
-import { useAlertStore } from "~/stores/alert";
+import type { Ref } from 'vue';
+import { type ArreteRestriction, ArreteRestrictionStatutFr } from '~/dto/arrete_restriction.dto';
+import { useAuthStore } from '~/stores/auth';
+import { useAlertStore } from '~/stores/alert';
 
 const props = defineProps<{
   arreteRestriction: ArreteRestriction;
@@ -16,22 +16,30 @@ const emit = defineEmits<{
 const authStore = useAuthStore();
 const alertStore = useAlertStore();
 const utils = useUtils();
-const isArOnDepartementUser: boolean = authStore.isMte || authStore.user?.roleDepartements.includes(props.arreteRestriction.departement?.code);
-const isZaOutdated: boolean = props.arreteRestriction.statut !== 'abroge' && props.arreteRestriction.restrictions.some((r) => r.zoneAlerte?.disabled);
-const canUpdate = authStore.isMte
-  || (props.arreteRestriction.statut !== "abroge" && isArOnDepartementUser && !isZaOutdated);
-const arreteRestrictionStatutFr = ArreteRestrictionStatutFr;
+const isArOnDepartementUser: boolean =
+  authStore.isMte || authStore.user?.roleDepartements.includes(props.arreteRestriction.departement?.code);
+const isZaOutdated: boolean =
+  props.arreteRestriction.statut !== 'abroge' && props.arreteRestriction.restrictions.some((r) => r.zoneAlerte?.disabled);
+const canUpdate = authStore.isMte || (props.arreteRestriction.statut !== 'abroge' && isArOnDepartementUser && !isZaOutdated);
+const _arreteRestrictionStatutFr = ArreteRestrictionStatutFr;
 const actionsOpened: Ref<boolean> = ref(false);
 const arreteRestrictionActions: Ref<any> = ref([
   {
     text: props.arreteRestriction.statut === 'a_valider' ? 'Modifier' : 'Corriger',
     show: canUpdate,
     onclick: () => {
-      utils.askEditArreteRestriction(props.arreteRestriction, modalTitle, modalDescription, modalActions, modalOpened, editArreteRestriction);
-    }
+      utils.askEditArreteRestriction(
+        props.arreteRestriction,
+        modalTitle,
+        modalDescription,
+        modalActions,
+        modalOpened,
+        editArreteRestriction,
+      );
+    },
   },
   {
-    text: "Dupliquer",
+    text: 'Dupliquer',
     onclick: () => {
       navigateTo(`/arrete-restriction/${props.arreteRestriction.id}/duplication`);
     },
@@ -45,19 +53,19 @@ const arreteRestrictionActions: Ref<any> = ref([
     },
   },
   {
-    text: "Abroger",
-    show: ["a_venir", "publie"].includes(props.arreteRestriction.statut) && isArOnDepartementUser,
+    text: 'Abroger',
+    show: ['a_venir', 'publie'].includes(props.arreteRestriction.statut) && isArOnDepartementUser,
     onclick: () => {
       repealModalOpened.value = true;
-    }
+    },
   },
   {
-    text: "Supprimer",
-    show: authStore.isMte || (isArOnDepartementUser && props.arreteRestriction.statut === "a_valider"),
+    text: 'Supprimer',
+    show: authStore.isMte || (isArOnDepartementUser && props.arreteRestriction.statut === 'a_valider'),
     onclick: () => {
       askDeleteArreteRestriction(props.arreteRestriction);
-    }
-  }
+    },
+  },
   // {
   //   text: 'Exporter',
   //   onclick: () => {
@@ -67,7 +75,7 @@ const arreteRestrictionActions: Ref<any> = ref([
 ]);
 
 const onKeyDown = (e: KeyboardEvent) => {
-  if (e.key === "Escape") {
+  if (e.key === 'Escape') {
     actionsOpened.value = false;
   }
 };
@@ -90,12 +98,12 @@ const handleElementClick = (el: HTMLElement) => {
 };
 
 onMounted(() => {
-  document.addEventListener("click", onDocumentClick);
-  document.addEventListener("keydown", onKeyDown);
+  document.addEventListener('click', onDocumentClick);
+  document.addEventListener('keydown', onKeyDown);
 });
 onUnmounted(() => {
-  document.removeEventListener("click", onDocumentClick);
-  document.removeEventListener("keydown", onKeyDown);
+  document.removeEventListener('click', onDocumentClick);
+  document.removeEventListener('keydown', onKeyDown);
 });
 
 const api = useApi();
@@ -105,15 +113,15 @@ const askDeleteArreteRestriction = async (arreteRestriction: ArreteRestriction) 
       label: 'Confirmer',
       onclick: () => {
         deleteArreteRestriction(arreteRestriction.id);
-      }
+      },
     },
     {
       label: 'Annuler',
       secondary: true,
       onclick: () => {
         utils.closeModal(modalOpened);
-      }
-    }
+      },
+    },
   ];
   modalTitle.value = `Suppression d’un arrêté de restriction`;
   modalDescription.value = `Vous confirmez que la suppression de cet arrêté de restriction est justifiée par une erreur de saisie.`;
@@ -124,9 +132,9 @@ const deleteArreteRestriction = async (id: string) => {
     return;
   }
   loading.value = true;
-  const { data, error } = await api.arreteRestriction.delete(id);
+  const { data: _data, error } = await api.arreteRestriction.delete(id);
   if (!error.value) {
-    emit("delete");
+    emit('delete');
   }
   utils.closeModal(modalOpened);
   loading.value = false;
@@ -135,7 +143,7 @@ const deleteArreteRestriction = async (id: string) => {
 // Permet de faire un retour à la ligne sur les underscores
 const numeroToDisplay = computed(() => {
   let num = props.arreteRestriction.numero;
-  num = num.replace(/_/g, "_<wbr/>");
+  num = num.replace(/_/g, '_<wbr/>');
   return num;
 });
 
@@ -145,8 +153,8 @@ const editArreteRestriction = (id: string) => {
 };
 
 const modalOpened: Ref<boolean> = ref(false);
-const modalTitle: Ref<string> = ref("");
-const modalDescription: Ref<string> = ref("");
+const modalTitle: Ref<string> = ref('');
+const modalDescription: Ref<string> = ref('');
 const modalActions: Ref<any[]> = ref([]);
 
 const abrogerFormRef = ref(null);
@@ -154,19 +162,19 @@ const loading = ref(false);
 const repealModalOpened: Ref<boolean> = ref(false);
 const repealModalActions: Ref<any[]> = ref([
   {
-    label: "Abroger",
-    "data-cy": "RepealFormRepealBtn",
+    label: 'Abroger',
+    'data-cy': 'RepealFormRepealBtn',
     onclick: () => {
       abrogerFormRef.value?.submitForm();
-    }
+    },
   },
   {
-    label: "Annuler",
+    label: 'Annuler',
     secondary: true,
     onclick: () => {
       utils.closeModal(repealModalOpened);
-    }
-  }
+    },
+  },
 ]);
 
 const repealArrete = async (ar: ArreteRestriction) => {
@@ -174,10 +182,10 @@ const repealArrete = async (ar: ArreteRestriction) => {
     return;
   }
   loading.value = true;
-  const { data, error } = await api.arreteRestriction.repeal(ar.id?.toString(), ar);
+  const { data: _data, error } = await api.arreteRestriction.repeal(ar.id?.toString(), ar);
   if (!error.value) {
     utils.closeModal(repealModalOpened);
-    emit("repeal");
+    emit('repeal');
     alertStore.addAlert({
       description: 'Abrogation réussie',
       type: 'success',
@@ -194,10 +202,13 @@ const repealArrete = async (ar: ArreteRestriction) => {
         <h3 class="fr-card__title">
           <NuxtLink
             :to="`/arrete-restriction/${arreteRestriction.id}${arreteRestriction.statut === 'a_valider' && canUpdate ? '/edition' : ''}`"
-            v-html="numeroToDisplay"
-          ></NuxtLink>
+          >
+            <span v-html="numeroToDisplay" />
+          </NuxtLink>
         </h3>
-        <p class="fr-card__desc">Dep&nbsp;: <span>{{ arreteRestriction.departement?.nom }}</span></p>
+        <p class="fr-card__desc">
+          Dep&nbsp;: <span>{{ arreteRestriction.departement?.nom }}</span>
+        </p>
         <div class="fr-card__start">
           <ul class="fr-badges-group">
             <li v-if="isZaOutdated">
@@ -207,7 +218,7 @@ const repealArrete = async (ar: ArreteRestriction) => {
               <MixinsStatutBadge :statut="arreteRestriction.statut" />
             </li>
           </ul>
-          <p class="fr-card__detail">
+          <div class="fr-card__detail">
             <div class="fr-grid-row">
               <VIcon name="ri-calendar-fill" />
               &nbsp;
@@ -217,20 +228,20 @@ const repealArrete = async (ar: ArreteRestriction) => {
                 signé le {{ utils.formatDate(arreteRestriction.dateSignature) }}
               </div>
             </div>
-          </p>
-          <div :id="'action_' + arreteRestriction.id" class="fr-card__actions"
-               v-if="arreteRestrictionActions.some((a: any) => a.show)">
-            <DsfrButton 
+          </div>
+          <div :id="`action_${arreteRestriction.id}`" class="fr-card__actions" v-if="arreteRestrictionActions.some((a: any) => a.show)">
+            <DsfrButton
               label="Actions"
               data-cy="ArreteRestrictionCardActionsBtn"
               icon-only
-              secondary 
-              icon="ri-more-2-fill" 
-              @click="actionsOpened = !actionsOpened" />
+              secondary
+              icon="ri-more-2-fill"
+              @click="actionsOpened = !actionsOpened"
+            />
             <div v-if="actionsOpened" class="fr-card__actions__menu">
               <div class="fr-menu">
                 <ul class="fr-menu__list">
-                  <template v-for="action of arreteRestrictionActions">
+                  <template v-for="(action, actionIndex) of arreteRestrictionActions" :key="actionIndex">
                     <li v-if="action.show">
                       <a
                         class="fr-nav__link"
@@ -251,11 +262,13 @@ const repealArrete = async (ar: ArreteRestriction) => {
       </div>
     </div>
   </div>
-  <DsfrModal :opened="modalOpened"
-             icon="ri-arrow-right-line"
-             :title="modalTitle"
-             :actions="modalActions"
-             @close="modalOpened = utils.closeModal(modalOpened);">
+  <DsfrModal
+    :opened="modalOpened"
+    icon="ri-arrow-right-line"
+    :title="modalTitle"
+    :actions="modalActions"
+    @close="modalOpened = utils.closeModal(modalOpened)"
+  >
     <div v-html="modalDescription"></div>
   </DsfrModal>
   <DsfrModal
@@ -263,7 +276,7 @@ const repealArrete = async (ar: ArreteRestriction) => {
     icon="ri-arrow-right-line"
     :title="`Abroger l'arrêté ${arreteRestriction.numero}`"
     :actions="repealModalActions"
-    @close="repealModalOpened = utils.closeModal(repealModalOpened);"
+    @close="repealModalOpened = utils.closeModal(repealModalOpened)"
   >
     <ArreteRestrictionFormAbroger ref="abrogerFormRef" :arreteRestriction="arreteRestriction" @abroger="repealArrete($event)" />
   </DsfrModal>

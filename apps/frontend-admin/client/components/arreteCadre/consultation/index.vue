@@ -9,14 +9,14 @@ const router = useRouter();
 const utils = useUtils();
 const authStore = useAuthStore();
 
-const { data, error } = await api.arreteCadre.get(<string>route.params.id);
+const { data, error } = await api.arreteCadre.get(route.params.id as string);
 if (!data.value) {
   throw createError({
     statusCode: error.value?.statusCode || 404,
     statusMessage: 'Arrêté cadre introuvable',
   });
 }
-const arreteCadre: Ref<ArreteCadre> = ref(<ArreteCadre>data.value);
+const arreteCadre: Ref<ArreteCadre> = ref(data.value as ArreteCadre);
 
 const isAcOnDepartementUser: boolean =
   authStore.isMte || arreteCadre.value.departements.some((d) => authStore.user?.roleDepartements?.includes(d.code));
@@ -57,7 +57,10 @@ const modalActions: Ref<any[]> = ref([]);
 
 <template>
   <template v-if="arreteCadre">
-    <h1>Arrêté cadre&nbsp;: {{ arreteCadre.numero }} <MixinsStatutBadge :statut="arreteCadre.statut" /></h1>
+    <h1>
+      Arrêté cadre&nbsp;: {{ arreteCadre.numero }}
+      <MixinsStatutBadge :statut="arreteCadre.statut" />
+    </h1>
 
     <ArreteCadreConsultationGeneral :arreteCadre="arreteCadre" />
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { RestrictionNiveauGraviteFr } from "~/dto/restriction.dto";
+import { RestrictionNiveauGraviteFr } from '~/dto/restriction.dto';
 
-const props = defineProps<{
+const _props = defineProps<{
   niveauGravite: string;
 }>();
 

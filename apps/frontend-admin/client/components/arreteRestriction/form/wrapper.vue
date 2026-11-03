@@ -27,12 +27,14 @@ const operationErrors = ref<string[]>([]);
 const errorSummaryRef = ref<HTMLElement | null>(null);
 const showConflictErrors = ref(false);
 const usageConflicts = computed(() => findRestrictionUsageConflicts(props.arreteRestriction.restrictions));
-const visibleConflicts = computed(() => showConflictErrors.value ? usageConflicts.value : []);
-const publicationErrors = computed(() => [...new Set([
-  ...operationErrors.value,
-  ...(checkReturn.value?.errors ?? []),
-  ...visibleConflicts.value.map((conflict) => getConflictMessage(conflict)),
-])]);
+const visibleConflicts = computed(() => (showConflictErrors.value ? usageConflicts.value : []));
+const publicationErrors = computed(() => [
+  ...new Set([
+    ...operationErrors.value,
+    ...(checkReturn.value?.errors ?? []),
+    ...visibleConflicts.value.map((conflict) => getConflictMessage(conflict)),
+  ]),
+]);
 
 const currentStep: Ref<number> = ref(1);
 
@@ -271,11 +273,7 @@ const checkArrete = async (ar: ArreteRestriction): Promise<boolean> => {
     return true;
   } catch (error) {
     checkReturn.value = null;
-    reportOperationError(
-      error,
-      'check_before_publish_exception',
-      'Une erreur technique empêche la vérification avant publication.',
-    );
+    reportOperationError(error, 'check_before_publish_exception', 'Une erreur technique empêche la vérification avant publication.');
     return false;
   } finally {
     loading.value = false;
@@ -317,11 +315,7 @@ const publishArrete = async (ar: ArreteRestriction): Promise<boolean> => {
     const { data, error } = await api.arreteRestriction.publish(ar.id?.toString(), ar);
 
     if (error.value) {
-      reportOperationError(
-        error.value,
-        'publish',
-        'La publication n’a pas abouti. Vérifiez les informations puis réessayez.',
-      );
+      reportOperationError(error.value, 'publish', 'La publication n’a pas abouti. Vérifiez les informations puis réessayez.');
       return false;
     }
 
@@ -337,11 +331,7 @@ const publishArrete = async (ar: ArreteRestriction): Promise<boolean> => {
     });
     return true;
   } catch (error) {
-    reportOperationError(
-      error,
-      'publish_exception',
-      'Une erreur technique empêche la publication de l’arrêté de restriction.',
-    );
+    reportOperationError(error, 'publish_exception', 'Une erreur technique empêche la publication de l’arrêté de restriction.');
     return false;
   } finally {
     loading.value = false;
@@ -542,7 +532,8 @@ const graviteFormRef = ref(null);
           {{ getRestrictionByNiveauDeGravite('alerte').length }} zone(s) en alerte
         </li>
         <li v-if="getRestrictionByNiveauDeGravite('alerte_renforcee').length > 0">
-          {{ getRestrictionByNiveauDeGravite('alerte_renforcee').length }} zone(s) en alerte renforcée
+          {{ getRestrictionByNiveauDeGravite('alerte_renforcee').length }}
+          zone(s) en alerte renforcée
         </li>
         <li v-if="getRestrictionByNiveauDeGravite('crise').length > 0">
           {{ getRestrictionByNiveauDeGravite('crise').length }} zone(s) en crise

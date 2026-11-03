@@ -13,7 +13,8 @@ const breadcrumb = [
   {
     to: '/arrete-restriction',
     text: 'Arrêtés de restriction',
-  }, {
+  },
+  {
     text: 'Consultation',
   },
 ];

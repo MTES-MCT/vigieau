@@ -1,7 +1,7 @@
 <script setup lang="ts">
 const liensUtiles = [
   {
-    label: 'Etat étiage (visualiser facilement l\'état des cours d’eau) :',
+    label: "Etat étiage (visualiser facilement l'état des cours d’eau) :",
     labelHref: 'https://www.etat-etiage.fr',
     href: 'https://www.etat-etiage.fr',
   },
@@ -11,7 +11,7 @@ const liensUtiles = [
     href: 'https://pro.meteofrance.com/',
   },
   {
-    label: 'Bulletin de situation hydrologique (suivre l\'évolution mensuelle des ressources en eau) :',
+    label: "Bulletin de situation hydrologique (suivre l'évolution mensuelle des ressources en eau) :",
     labelHref: 'Bulletins de situation hydrologique | Eaufrance',
     href: 'https://www.eaufrance.fr/publications/bsh',
   },
@@ -32,7 +32,7 @@ const liensUtiles = [
   <div class="fr-card fr-p-2w">
     <h2>Liens utiles</h2>
     <ul>
-      <li v-for="lien in liensUtiles" class="fr-mb-2w">
+      <li v-for="(lien, lienIndex) in liensUtiles" :key="lienIndex" class="fr-mb-2w">
         {{ lien.label }}<br />
         <a class="fr-link" :href="lien.href" target="_blank">{{ lien.labelHref }}</a>
       </li>

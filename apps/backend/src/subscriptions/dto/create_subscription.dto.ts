@@ -3,20 +3,23 @@ import {
   IsArray,
   IsEmail,
   IsIn,
-  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
   Length,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 
 export class CreateSubscriptionDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsEmail()
   @IsNotEmpty()
+  @MaxLength(255)
   @ApiProperty({
     example: 'test@exemple.com',
     description: "Email de l'utilisateur",
@@ -55,6 +58,8 @@ export class CreateSubscriptionDto {
   commune: string;
 
   @IsString()
+  @IsNotEmpty()
+  @MaxLength(255)
   @IsOptional()
   @ApiProperty({
     example: 'x',
