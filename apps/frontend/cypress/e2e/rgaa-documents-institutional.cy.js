@@ -145,12 +145,20 @@ describe('Documents et pages institutionnelles accessibles', () => {
         .should('be.visible')
         .and('contain.text', 'Amélioration et contact');
       cy.contains('responsable de VigiEau').should('be.visible');
-      cy.contains('Parmi les points bloquants').should('be.visible');
+      cy.contains('Le taux de conformité global est de 86,54').should('be.visible');
+      cy.contains('Le taux de conformité moyen est de 90,21').should('be.visible');
+      cy.contains('45 critères sont conformes, 7 sont non conformes et 54 sont non applicables')
+        .should('be.visible');
+      cy.get('#criteres-non-conformes > li').should('have.length', 7);
+      cy.get('#pages-auditees a').should('have.length', 7);
       cy.contains('Cette déclaration d’accessibilité a été créée').should(
         'be.visible',
       );
-      cy.contains('constats ci-dessous sont ceux de l’audit de janvier 2025')
+      cy.contains('réalisé du 16 au 23 octobre 2026')
         .should('be.visible');
+      cy.contains('n’ont donc pas pu être réévalués').should('be.visible');
+      cy.contains('NVDA 2026.1.1 et Firefox 158').should('be.visible');
+      cy.contains('Aucune dérogation pour charge disproportionnée').should('be.visible');
       cy.get('a[href*="#plan-2024"]').should('not.exist');
       cy.get(
         'a[href="https://beta.gouv.fr/accessibilite/schema-pluriannuel#plan-2026"]',
@@ -159,6 +167,8 @@ describe('Documents et pages institutionnelles accessibles', () => {
       cy.get('a[href^="tel:"]').should('be.visible');
       cy.root()
         .should('not.contain.text', 'Parmis')
+        .and('not.contain.text', '65,38')
+        .and('not.contain.text', '80,12')
         .and('not.contain.text', 'responsable de Potentiel');
     });
   });
