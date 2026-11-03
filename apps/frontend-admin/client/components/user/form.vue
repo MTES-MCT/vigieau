@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import type {Ref} from 'vue';
-import {email, helpers, required, requiredIf} from '@vuelidate/validators';
+import type { Ref } from 'vue';
+import { email, helpers, required, requiredIf } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
-import type {User} from '~/dto/user.dto';
-import {UserRole} from '~/dto/user.dto';
-import {useAuthStore} from '~/stores/auth';
+import type { User } from '~/dto/user.dto';
+import { UserRole } from '~/dto/user.dto';
+import { useAuthStore } from '~/stores/auth';
 import deburr from 'lodash.deburr';
-import {useRefDataStore} from '~/stores/refData';
-import type {Departement} from '~/dto/departement.dto';
-import type {Commune} from "~/dto/commune.dto";
+import { useRefDataStore } from '~/stores/refData';
+import type { Departement } from '~/dto/departement.dto';
+import type { Commune } from '~/dto/commune.dto';
 
 const props = defineProps<{
   user: User | null;
@@ -46,7 +46,11 @@ const formData = reactive({
   firstName: props.user ? props.user.firstName : null,
   lastName: props.user ? props.user.lastName : null,
   role: props.user ? props.user.role : rolesAvailable.length > 1 ? null : rolesAvailable[0].value,
-  roleDepartements: props.user ? props.user.roleDepartements || [] : authStore.user.role === 'departement' ? authStore.user.roleDepartements : [],
+  roleDepartements: props.user
+    ? props.user.roleDepartements || []
+    : authStore.user.role === 'departement'
+      ? authStore.user.roleDepartements
+      : [],
   roleCommunes: props.user ? props.user.roleCommunes || [] : [],
   isNewUser: !props.user,
 });
@@ -55,8 +59,8 @@ const errorMessage: Ref<string> = ref('');
 const rules = computed(() => {
   return {
     email: {
-      required: helpers.withMessage('L\'email est obligatoire.', required),
-      email: helpers.withMessage('L\'email n\'est pas valide.', email),
+      required: helpers.withMessage("L'email est obligatoire.", required),
+      email: helpers.withMessage("L'email n'est pas valide.", email),
     },
     firstName: {},
     lastName: {},
@@ -66,13 +70,13 @@ const rules = computed(() => {
     roleDepartements: {
       requiredIf: helpers.withMessage('Le département est obligatoire.', requiredIf(formData.role === 'departement')),
       $each: {
-        regex: helpers.withMessage('Le département n\'existe pas', helpers.regex(/^([0|2][1-9]|[1|3-8][0-9]|9[0-5]|97[1-4]|2[AB]|976)$/)),
+        regex: helpers.withMessage("Le département n'existe pas", helpers.regex(/^([0|2][1-9]|[1|3-8]\d|9[0-5]|97[1-4]|2[AB]|976)$/)),
       },
     },
     roleCommunes: {
       requiredIf: helpers.withMessage('La commune est obligatoire.', requiredIf(formData.role === 'commune')),
       $each: {
-        regex: helpers.withMessage('La commune n\'existe pas', helpers.regex(/^([0|2][1-9]|[1|3-8][0-9]|9[0-5]|97[1-4]|2[AB]|976)$/)),
+        regex: helpers.withMessage("La commune n'existe pas", helpers.regex(/^([0|2][1-9]|[1|3-8]\d|9[0-5]|97[1-4]|2[AB]|976)$/)),
       },
     },
   };
@@ -96,18 +100,18 @@ const submitForm = async () => {
 const filterDepartements = () => {
   let tmp = refDataStore.departements
     .filter((d) => !formData.roleDepartements?.includes(d.code))
-    .filter(d => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code));
+    .filter((d) => authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(d.code));
   if (queryDep.value) {
     tmp = tmp.filter((d) => {
-      return (deburr(d.nom)
-          .replace(/[\s\-\_]/g, '')
+      return (
+        deburr(d.nom)
+          .replace(/[\s\-_]/g, '')
           .toLowerCase()
           .includes(
             deburr(queryDep.value)
-              .replace(/[\s\-\_]/g, '')
+              .replace(/[\s\-_]/g, '')
               .toLowerCase(),
-          ) ||
-        d.code.toLowerCase().includes(queryDep.value.toLowerCase())
+          ) || d.code.toLowerCase().includes(queryDep.value.toLowerCase())
       );
     });
   }
@@ -155,15 +159,15 @@ const filtercommunes = () => {
   let tmp = refDataStore.communes;
   if (queryCom.value) {
     tmp = tmp.filter((c) => {
-      return (deburr(c.nom)
-          .replace(/[\s\-\_]/g, '')
+      return (
+        deburr(c.nom)
+          .replace(/[\s\-_]/g, '')
           .toLowerCase()
           .includes(
             deburr(queryCom.value)
-              .replace(/[\s\-\_]/g, '')
+              .replace(/[\s\-_]/g, '')
               .toLowerCase(),
-          ) ||
-        c.code.toLowerCase().includes(queryCom.value.toLowerCase())
+          ) || c.code.toLowerCase().includes(queryCom.value.toLowerCase())
       );
     });
   }
@@ -251,7 +255,7 @@ defineExpose({
 
 <template>
   <form @submit.prevent="">
-    <DsfrInputGroup :error-message="errorMessage" :valid-message="''">
+    <DsfrInputGroup :error-message="errorMessage" valid-message="">
       <DsfrInput
         id="email"
         data-cy="UserFormEmailInput"
@@ -303,8 +307,7 @@ defineExpose({
           required
         />
       </div>
-      <div class="fr-mt-2w"
-           v-if="formData.role === 'departement'">
+      <div class="fr-mt-2w" v-if="formData.role === 'departement'">
         <MixinsAutoComplete
           label="Ajouter un/des départements"
           data-cy="UserFormRoleDepartementInput"
@@ -322,10 +325,9 @@ defineExpose({
           :required="true"
         />
 
-        <DsfrTags class="fr-mt-2w" :tags="departementsTags"/>
+        <DsfrTags class="fr-mt-2w" :tags="departementsTags" />
       </div>
-      <div class="fr-mt-2w"
-           v-if="formData.role === 'commune'">
+      <div class="fr-mt-2w" v-if="formData.role === 'commune'">
         <MixinsAutoComplete
           label="Ajouter une/des communes"
           data-cy="UserFormRoleCommuneInput"
@@ -348,7 +350,7 @@ defineExpose({
           Chargement des communes...
         </p>
 
-        <DsfrTags class="fr-mt-2w" :tags="communesTags"/>
+        <DsfrTags class="fr-mt-2w" :tags="communesTags" />
       </div>
     </DsfrInputGroup>
   </form>

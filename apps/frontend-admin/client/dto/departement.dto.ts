@@ -5,7 +5,7 @@ export interface Departement {
   code: string;
   nom: string;
   zonesAlerte: ZoneAlerte[];
-  
+
   // Nombre d'abonnées aux alertes mails sur le département
   subscriptions: number;
 }

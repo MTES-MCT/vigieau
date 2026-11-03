@@ -12,11 +12,12 @@ useHead({
 const route = useRoute();
 const breadcrumb = [
   {
-    to: "/arrete-cadre",
-    text: "Arrêtés cadre"
-  }, {
-    text: route.params.id === 'nouveau' ? 'Création' : 'Edition'
-  }
+    to: '/arrete-cadre',
+    text: 'Arrêtés cadre',
+  },
+  {
+    text: route.params.id === 'nouveau' ? 'Création' : 'Edition',
+  },
 ];
 </script>
 

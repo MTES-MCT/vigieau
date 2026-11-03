@@ -52,10 +52,7 @@ export const useRefDataStore = defineStore('refDataStore', () => {
     if (communesLoaded.value) {
       return;
     }
-    if (
-      normalizedDepCodes.length > 0 &&
-      normalizedDepCodes.every((depCode) => communesDepCodesLoaded.value.includes(depCode))
-    ) {
+    if (normalizedDepCodes.length > 0 && normalizedDepCodes.every((depCode) => communesDepCodesLoaded.value.includes(depCode))) {
       return;
     }
 
@@ -75,9 +72,7 @@ export const useRefDataStore = defineStore('refDataStore', () => {
 
       if (normalizedDepCodes.length > 0) {
         mergeCommunes(<Commune[]>data.value);
-        communesDepCodesLoaded.value = [
-          ...new Set([...communesDepCodesLoaded.value, ...normalizedDepCodes]),
-        ].sort();
+        communesDepCodesLoaded.value = [...new Set([...communesDepCodesLoaded.value, ...normalizedDepCodes])].sort();
       } else {
         setCommunes(<Commune[]>data.value);
       }

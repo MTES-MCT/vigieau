@@ -20,7 +20,7 @@ const options = [
 ];
 
 onMounted(() => {
-  const { theme, scheme, setScheme } = useScheme();
+  const { theme: _theme, scheme, setScheme: _setScheme } = useScheme();
   currentScheme.value = scheme.value;
 });
 

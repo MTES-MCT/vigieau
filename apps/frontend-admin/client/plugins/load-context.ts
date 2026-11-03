@@ -4,7 +4,7 @@ import type { Usage } from '~/dto/usage.dto';
 import { useAuthStore } from '~/stores/auth';
 import { useRefDataStore } from '~/stores/refData';
 
-export default defineNuxtPlugin((nuxtApp) => {
+export default defineNuxtPlugin((_nuxtApp) => {
   const authStore = useAuthStore();
   const api = useApi();
 

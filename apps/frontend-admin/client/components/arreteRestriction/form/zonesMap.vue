@@ -210,9 +210,9 @@ const computeBounds = () => {
   if (!bounds) return;
 
   map.value?.fitBounds(bounds, {
-    padding: 20
+    padding: 20,
   });
-}
+};
 
 const showLayer = () => {
   if (selectedTypeEau.value === 'SUP') {

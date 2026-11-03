@@ -1,5 +1,4 @@
 <script setup lang="ts">
-
 import { useRefDataStore } from '~/stores/refData';
 import { helpers, maxLength, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
@@ -94,12 +93,14 @@ const rules = computed(() => {
     nom: {
       required: helpers.withMessage('Le nom est obligatoire.', required),
       maxLength: helpers.withMessage('Le nom ne doit pas dépasser 150 caractères.', maxLength(150)),
-      different: helpers.withMessage('Ce nom d\'usage existe déjà, veuillez en choisir un autre.', (value: string) => {
+      different: helpers.withMessage("Ce nom d'usage existe déjà, veuillez en choisir un autre.", (value: string) => {
         const existingNames = props.otherUsages.map((u) => u.nom).filter((n) => n !== initialName);
         return !existingNames.includes(value);
       }),
     },
-    thematique: { required: helpers.withMessage('La thématique est obligatoire.', required) },
+    thematique: {
+      required: helpers.withMessage('La thématique est obligatoire.', required),
+    },
     concerneParticulier: { required },
     concerneEntreprise: { required },
     concerneCollectivite: { required },
@@ -113,7 +114,7 @@ const rules = computed(() => {
       }),
     },
     concerne: {
-      shouldBeChecked: helpers.withMessage('Au moins un type d\'usager doit être renseigné.', () => {
+      shouldBeChecked: helpers.withMessage("Au moins un type d'usager doit être renseigné.", () => {
         return (
           props.usage.concerneParticulier ||
           props.usage.concerneEntreprise ||
@@ -148,12 +149,13 @@ const submitForm = async () => {
 };
 
 const thematiqueSelected = ($event: number) => {
-  props.usage.thematique = refDataStore.thematiques.find((t) => t.id == $event);
+  props.usage.thematique = refDataStore.thematiques.find((t) => t.id === Number($event));
 };
 
 const thematiqueDescription = computed(() => {
-  return `Pour éviter les incompréhensions des usagers de VigiEau, vérifiez que la thématique choisie est bien cohérente avec l’usage. Par exemple ${props
-    .usage.thematique?.nom} peut être associé avec&nbsp;: ${ThematiqueExamples[props.usage.thematique?.nom]}.`;
+  return `Pour éviter les incompréhensions des usagers de VigiEau, vérifiez que la thématique choisie est bien cohérente avec l’usage. Par exemple ${
+    props.usage.thematique?.nom
+  } peut être associé avec&nbsp;: ${ThematiqueExamples[props.usage.thematique?.nom]}.`;
 });
 
 defineExpose({
@@ -174,7 +176,6 @@ defineExpose({
         data-cy="UsageFormNameInput"
         name="usage_nom"
         :required="true"
-        ref="usageFormNameInput"
         :disabled="disableUsageName"
       />
       <span class="fr-input-group__sub-hint">{{ usage.nom ? usage.nom.length : 0 }}/150</span>
@@ -197,10 +198,11 @@ defineExpose({
     <div class="fr-my-2w">Usagers</div>
     <DsfrInputGroup :error-message="utils.showInputError(v$, 'concerne')">
       <DsfrCheckbox
-        v-for="concerne of concernes"
+        v-for="(concerne, concerneIndex) of concernes"
+        :key="concerneIndex"
         :label="concerne.name"
         :name="concerne.attribute"
-        :data-cy="'UsageForm' + concerne.attribute + 'Checkbox'"
+        :data-cy="`UsageForm${concerne.attribute}Checkbox`"
         v-model="usage[concerne.attribute]"
       />
     </DsfrInputGroup>
@@ -208,10 +210,11 @@ defineExpose({
     <div class="fr-my-2w">À quelle(s) ressource(s) cet usage est-il associé ?</div>
     <DsfrInputGroup :error-message="utils.showInputError(v$, 'ressource')">
       <DsfrCheckbox
-        v-for="ressource of resssources"
+        v-for="(ressource, ressourceIndex) of resssources"
+        :key="ressourceIndex"
         :label="ressource.name"
         :name="ressource.attribute"
-        :data-cy="'UsageForm' + ressource.attribute + 'Checkbox'"
+        :data-cy="`UsageForm${ressource.attribute}Checkbox`"
         v-model="usage[ressource.attribute]"
       />
     </DsfrInputGroup>
@@ -221,12 +224,11 @@ defineExpose({
     <DsfrAlert type="warning" title="Rédaction des mesures" class="fr-mb-2w">
       Pour permettre aux usagers de VigiEau une bonne compréhension des mesures&nbsp;:
       <b>
-        <br />-&nbsp;éviter les acronymes <br />-&nbsp;simplifier au maximum les tournures de phrases <br />-&nbsp;ajouter “voir
-        exceptions
+        <br />-&nbsp;éviter les acronymes <br />-&nbsp;simplifier au maximum les tournures de phrases <br />-&nbsp;ajouter “voir exceptions
         listées dans l’arrêté préfectoral” lorsque le texte est trop long
       </b>
     </DsfrAlert>
-    <template v-for="(niveau, index) of niveauxRestriction">
+    <template v-for="(niveau, index) of niveauxRestriction" :key="index">
       <div v-if="index !== 0" class="fr-mb-2w divider" />
       <DsfrBadge :label="niveau.name" :type="niveau.badgeType" />
       <DsfrInputGroup :error-message="utils.showInputError(v$, niveau.attribute)">
@@ -238,13 +240,11 @@ defineExpose({
           label-visible
           type="text"
           rows="4"
-          :data-cy="'UsageArreteCadreForm' + niveau.attribute + 'Input'"
+          :data-cy="`UsageArreteCadreForm${niveau.attribute}Input`"
           :name="niveau.attribute"
           :required="niveau.required"
         />
-        <span class="fr-input-group__sub-hint">
-          {{ usage[niveau.attribute] ? usage[niveau.attribute].length : 0 }}/500
-        </span>
+        <span class="fr-input-group__sub-hint"> {{ usage[niveau.attribute] ? usage[niveau.attribute].length : 0 }}/500 </span>
       </DsfrInputGroup>
     </template>
   </form>

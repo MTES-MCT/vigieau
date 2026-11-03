@@ -3,7 +3,7 @@ import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class ZoneAlerteApi extends BaseApi {
   importTmp = (departementCode: string, zoneType: string, file: any) => {
-    let formData = new FormData();
+    const formData = new FormData();
     formData.append('file', file);
 
     return useCustomFetch(`/${this.resource}/${departementCode}/${zoneType}/check`, {
@@ -43,5 +43,5 @@ export class ZoneAlerteApi extends BaseApi {
       method: 'GET',
       baseURL: '/api',
     });
-  }
+  };
 }

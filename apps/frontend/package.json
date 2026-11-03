@@ -16,12 +16,12 @@
     "vue-demi@0.14.10": true
   },
   "scripts": {
-    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
-    "start": "PORT=${PORT:-3000} nuxi preview",
+    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/prepare-static-preview.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
+    "start": "PORT=${PORT:-3000} node .output/preview.mjs",
     "dev": "nuxi dev",
     "format": "eslint . --fix",
     "lint": "eslint .",
-    "preview": "nuxt preview",
+    "preview": "npm run start --",
     "cy:open": "cypress open",
     "cy:run": "cypress run",
     "cy:e2e": "start-server-and-test dev http://localhost:3000 cy:run",
@@ -52,6 +52,7 @@
     "ofetch": "^1.5.1",
     "pinia": "^2.2.1",
     "pmtiles": "^3.0.6",
+    "sirv": "3.0.2",
     "vue": "3.5.44",
     "vue-chartjs": "^5.2.0",
     "vue-dsfr-nuxt-module": "^2.0.0",

@@ -32,7 +32,11 @@ export function getGeometryBounds(geometries: readonly unknown[]): GeometryBound
 
   const visitGeometry = (value: unknown): void => {
     if (!value || typeof value !== 'object') return;
-    const geometry = value as { type?: string; coordinates?: unknown; geometries?: unknown };
+    const geometry = value as {
+      type?: string;
+      coordinates?: unknown;
+      geometries?: unknown;
+    };
     if (geometry.type === 'GeometryCollection') {
       if (Array.isArray(geometry.geometries)) geometry.geometries.forEach(visitGeometry);
       return;
@@ -43,5 +47,10 @@ export function getGeometryBounds(geometries: readonly unknown[]): GeometryBound
   };
 
   geometries.forEach(visitGeometry);
-  return west === Infinity ? null : [[west, south], [east, north]];
+  return west === Infinity
+    ? null
+    : [
+        [west, south],
+        [east, north],
+      ];
 }

@@ -48,7 +48,7 @@ const paginate = async () => {
     });
   }
   loading.value = true;
-  const { data, error } = await api.arreteCadre.paginate(currentPage.value + 1, query.value, filter);
+  const { data, error: _error } = await api.arreteCadre.paginate(currentPage.value + 1, query.value, filter);
   loading.value = false;
   if (data.value) {
     data.value.meta.dsfrPages = Array.from({ length: data.value.meta.totalPages }, (value, index) => {
@@ -58,7 +58,8 @@ const paginate = async () => {
       };
     });
     arretesCadrePaginated.value = data.value;
-    showZaAlert.value = statusFilter.value === 'publie' && arretesCadrePaginated.value?.data.some((ac) => ac.zonesAlerte.some((za) => za.disabled));
+    showZaAlert.value =
+      statusFilter.value === 'publie' && arretesCadrePaginated.value?.data.some((ac) => ac.zonesAlerte.some((za) => za.disabled));
   }
 };
 
@@ -94,7 +95,9 @@ watch(
       });
       if (!departementFilter.value && departementFilter.value !== 0) {
         departementFilter.value =
-          authStore.user?.role === 'departement' ? refDataStore.departements.filter((d) => authStore.user?.roleDepartements.includes(d.code))[0].id : 0;
+          authStore.user?.role === 'departement'
+            ? refDataStore.departements.filter((d) => authStore.user?.roleDepartements.includes(d.code))[0].id
+            : 0;
       } else {
         paginate();
       }
@@ -129,9 +132,7 @@ watch(
           Dernière modification des zones d'alerte&nbsp;:
           {{ refDataStore.zoneAlerteMaxUpdatedAt?.format('DD/MM/YYYY') }}
         </div>
-        <DsfrSegmentedSet v-model="statusFilter"
-                          :inline="true"
-                          :options="statusOptions" />
+        <DsfrSegmentedSet v-model="statusFilter" :inline="true" :options="statusOptions" />
       </div>
       <div class="fr-col-12 fr-col-md-3 fr-mb-2w">
         <DsfrSearchBar :labelVisible="false" v-model="query" data-cy="ArreteCadreListSearchBar" />
@@ -149,7 +150,7 @@ watch(
   <template v-if="arretesCadrePaginated">
     <div class="fr-grid-row fr-grid-row--gutters fr-mb-1w" data-cy="ArreteCadreList">
       <div class="fr-col-12 text-align-center" v-if="arretesCadrePaginated.data.length < 1">Aucun arrêté cadre n'a été trouvé.</div>
-      <div v-for="arreteCadre in arretesCadrePaginated.data" class="fr-col-md-4 fr-col-12">
+      <div v-for="(arreteCadre, arreteCadreIndex) in arretesCadrePaginated.data" :key="arreteCadreIndex" class="fr-col-md-4 fr-col-12">
         <ArreteCadreCard :arrete-cadre="arreteCadre" :key="arreteCadre.id" @delete="paginate()" @repeal="paginate()" />
       </div>
     </div>

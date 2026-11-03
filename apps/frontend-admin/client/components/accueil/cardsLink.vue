@@ -33,7 +33,7 @@ const cartes = [
 
 <template>
   <div class="fr-grid-row fr-grid-row--gutters">
-    <div class="fr-col-12 fr-col-lg-4" v-for="carte of cartes">
+    <div class="fr-col-12 fr-col-lg-4" v-for="(carte, carteIndex) of cartes" :key="carteIndex">
       <div class="fr-card fr-card--horizontal fr-enlarge-link fr-card--sm">
         <div class="fr-card__body">
           <div class="fr-card__content">

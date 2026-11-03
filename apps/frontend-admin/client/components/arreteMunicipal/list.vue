@@ -21,7 +21,7 @@ const arreteMunicipalToDelete: Ref<any> = ref(null);
 
 const paginate = async () => {
   loading.value = true;
-  const { data, error } = await api.arreteMunicipal.paginate(currentPage.value + 1, undefined, undefined, 10);
+  const { data, error: _error } = await api.arreteMunicipal.paginate(currentPage.value + 1, undefined, undefined, 10);
   loading.value = false;
   if (data.value) {
     data.value.meta.dsfrPages = Array.from({ length: data.value.meta.totalPages }, (value, index) => {
@@ -30,7 +30,7 @@ const paginate = async () => {
         label: `${index + 1}`,
       };
     });
-    arretesMunicipauxPaginated.value = <any>data.value;
+    arretesMunicipauxPaginated.value = data.value as any;
     populateTable();
   }
 };
@@ -38,35 +38,39 @@ const paginate = async () => {
 const populateTable = () => {
   rows.value = [];
   arretesMunicipauxPaginated.value?.data?.forEach((am: ArreteMunicipal) => {
-    rows.value.push(
-      [
-        am.communes.map(c => {
+    rows.value.push([
+      am.communes
+        .map((c) => {
           return `${c.nom} (${c.code})`;
-        }).join(', '),
-        {
-          component: MixinsStatutBadge,
-          statut: am.statut,
-        },
-        `Du ${utils.formatDate(am.dateDebut)} au ${utils.formatDate(am.dateFin)}`,
-        am.fichier ? {
-          component: 'DsfrFileDownload',
-          format: 'PDF',
-          href: am.fichier.url,
-          size: utils.fileSizeString(am.fichier.size),
-          download: am.fichier.url,
-          title: am.fichier.nom,
-        } : '',
-        am.statut !== 'abroge' ?
-        {
-          component: 'DsfrButton',
-          secondary: true,
-          text: 'Modifier',
-          onClick: () => {
-            router.push(`/arrete-municipal/${am.id}/edition`);
-          },
-        } : '',
-        authStore.user && authStore.user.role !== 'commune' ?
-          {
+        })
+        .join(', '),
+      {
+        component: MixinsStatutBadge,
+        statut: am.statut,
+      },
+      `Du ${utils.formatDate(am.dateDebut)} au ${utils.formatDate(am.dateFin)}`,
+      am.fichier
+        ? {
+            component: 'DsfrFileDownload',
+            format: 'PDF',
+            href: am.fichier.url,
+            size: utils.fileSizeString(am.fichier.size),
+            download: am.fichier.url,
+            title: am.fichier.nom,
+          }
+        : '',
+      am.statut !== 'abroge'
+        ? {
+            component: 'DsfrButton',
+            secondary: true,
+            text: 'Modifier',
+            onClick: () => {
+              router.push(`/arrete-municipal/${am.id}/edition`);
+            },
+          }
+        : '',
+      authStore.user && authStore.user.role !== 'commune'
+        ? {
             component: 'DsfrButton',
             secondary: true,
             text: 'Supprimer',
@@ -76,9 +80,9 @@ const populateTable = () => {
 Cette action est irréversible.</p>`;
               deleteModalOpened.value = true;
             },
-          } : '',
-      ],
-    );
+          }
+        : '',
+    ]);
   });
 };
 
@@ -87,7 +91,7 @@ const deleteArrete = async () => {
     return;
   }
   loading.value = true;
-  const { data, error } = await api.arreteMunicipal.delete(arreteMunicipalToDelete.value.id?.toString());
+  const { data: _data, error } = await api.arreteMunicipal.delete(arreteMunicipalToDelete.value.id?.toString());
   if (!error.value) {
     utils.closeModal(deleteModalOpened);
     alertStore.addAlert({
@@ -114,15 +118,10 @@ paginate();
     <NuxtLink to="/arrete-municipal/nouveau/edition">
       <DsfrButton label="Créer un nouvel arrêté municipal" data-cy="ArreteMunicipalListAddBtn" />
     </NuxtLink>
-    <div class="fr-col-12">
-      Vous pouvez gérer ici vos arrêtés municipaux sécheresse.
-    </div>
+    <div class="fr-col-12">Vous pouvez gérer ici vos arrêtés municipaux sécheresse.</div>
   </div>
   <template v-if="arretesMunicipauxPaginated">
-    <DsfrTable title=""
-               :headers="headers"
-               :rows="rows"
-               :pagination="false" />
+    <DsfrTable title="" :headers="headers" :rows="rows" :pagination="false" />
     <div class="fr-grid-row fr-grid-row--center fr-mt-2w">
       <DsfrPagination
         v-model:current-page="currentPage"

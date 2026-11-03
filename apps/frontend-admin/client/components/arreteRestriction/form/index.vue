@@ -110,19 +110,22 @@ void load();
 
 <template>
   <h1>
-    {{ duplicate ? 'Duplication' : isNewArreteRestriction ? 'Création' : 'Edition' }} d'un arrêté de restriction
+    {{ duplicate ? 'Duplication' : isNewArreteRestriction ? 'Création' : 'Edition' }}
+    d'un arrêté de restriction
     <MixinsStatutBadge v-if="arreteRestriction" :statut="arreteRestriction.statut" />
   </h1>
-  <p v-if="loading" role="status" data-cy="ArreteLoadPending">
-    Chargement de l’arrêté en cours.
-  </p>
+  <p v-if="loading" role="status" data-cy="ArreteLoadPending">Chargement de l’arrêté en cours.</p>
   <template v-else-if="loadError">
     <DsfrAlert title="Chargement de l’arrêté impossible" type="error" class="fr-mb-2w" data-cy="ArreteLoadError">
       {{ getApiErrorMessage(loadError) }}
     </DsfrAlert>
     <ul class="fr-btns-group fr-btns-group--inline-md">
-      <li><DsfrButton label="Réessayer" icon="ri-refresh-line" data-cy="ArreteLoadRetry" @click="load" /></li>
-      <li><DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="navigateTo('/arrete-restriction')" /></li>
+      <li>
+        <DsfrButton label="Réessayer" icon="ri-refresh-line" data-cy="ArreteLoadRetry" @click="load" />
+      </li>
+      <li>
+        <DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="navigateTo('/arrete-restriction')" />
+      </li>
     </ul>
   </template>
   <ArreteRestrictionFormWrapper v-if="arreteRestriction" :arrete-restriction="arreteRestriction" />

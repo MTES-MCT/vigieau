@@ -5,7 +5,7 @@ module.exports = antfu(
     typescript: true,
     vue: true,
     stylistic: false,
-    ignores: ['node_modules/**', '.nuxt/**', '.output/**', 'dist/**'],
+    ignores: ['node_modules/**', '.nuxt/**', '.output/**', '.sentry-sourcemaps/**', 'dist/**'],
   },
   {
     languageOptions: {
@@ -25,4 +25,6 @@ module.exports = antfu(
       'vue/no-mutating-props': 'off',
     },
   },
+  // Prettier validates formatting separately; keep one authority for indentation.
+  require('eslint-config-prettier'),
 );

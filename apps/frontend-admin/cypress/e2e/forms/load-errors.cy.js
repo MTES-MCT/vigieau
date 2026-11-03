@@ -1,5 +1,10 @@
 /* global cy, describe, it, expect */
-const department = { id: 47, code: '47', nom: 'Lot-et-Garonne', zonesAlerte: [] };
+const department = {
+  id: 47,
+  code: '47',
+  nom: 'Lot-et-Garonne',
+  zonesAlerte: [],
+};
 const framework = {
   id: 470,
   numero: 'AC-TEST-LOAD',
@@ -28,7 +33,11 @@ const source = {
 
 function mockApplication(failingPath, failure) {
   const state = { fail: true, mutations: [], sourceReads: 0 };
-  const paginated = { data: [], meta: { totalItems: 0, totalPages: 1, currentPage: 1, itemsPerPage: 9 }, links: {} };
+  const paginated = {
+    data: [],
+    meta: { totalItems: 0, totalPages: 1, currentPage: 1, itemsPerPage: 9 },
+    links: {},
+  };
   // All API requests are local fixtures, including retries and unexpected mutations.
   cy.intercept({ pathname: '/api/**' }, (request) => {
     const path = new URL(request.url).pathname;
@@ -43,15 +52,29 @@ function mockApplication(failingPath, failure) {
         if (failure === 'network') {
           request.destroy();
         } else if (failure === 'timeout') {
-          request.reply({ delay: 12000, body: path.includes('arrete-cadre') ? framework : source });
+          request.reply({
+            delay: 12000,
+            body: path.includes('arrete-cadre') ? framework : source,
+          });
         } else {
-          request.reply({ statusCode: failure, body: { statusCode: failure, message: 'Chargement refuse pour ce test.' } });
+          request.reply({
+            statusCode: failure,
+            body: {
+              statusCode: failure,
+              message: 'Chargement refuse pour ce test.',
+            },
+          });
         }
         return;
       }
     }
     if (path === '/api/user/me') {
-      request.reply({ email: 'operator@example.test', role: 'departement', roleDepartements: ['47'], checkRules: '2099-01-01' });
+      request.reply({
+        email: 'operator@example.test',
+        role: 'departement',
+        roleDepartements: ['47'],
+        checkRules: '2099-01-01',
+      });
     } else if (path === '/api/departement') {
       request.reply([department]);
     } else if (path === '/api/arrete-cadre/470') {
@@ -61,7 +84,10 @@ function mockApplication(failingPath, failure) {
     } else if (path === '/api/arrete-cadre') {
       request.reply([framework]);
     } else if (path === '/api/parametres/47') {
-      request.reply({ superpositionCommune: 'no_all', departement: department });
+      request.reply({
+        superpositionCommune: 'no_all',
+        departement: department,
+      });
     } else if (path === '/api/zone-alerte/date') {
       request.reply('2026-09-07T00:00:00.000Z');
     } else if (path.endsWith('/search')) {
@@ -128,7 +154,9 @@ describe('Order form loading errors', () => {
     visitForm('/arrete-restriction/nouveau/edition?arretecadre=470');
     cy.get('[data-cy=ArreteLoadError]').should('be.visible');
     cy.get('[data-cy=ArreteRestrictionFormNumeroInput]').should('not.exist');
-    cy.then(() => { state.fail = false; });
+    cy.then(() => {
+      state.fail = false;
+    });
     cy.get('[data-cy=ArreteLoadRetry]').click();
     cy.get('[data-cy=ArreteRestrictionFormNumeroInput]').should('have.value', '');
     cy.contains('.fr-tag', framework.numero).should('be.visible');
@@ -139,7 +167,9 @@ describe('Order form loading errors', () => {
     const state = mockApplication('/api/arrete-restriction/37731', 404);
     visitForm('/arrete-restriction/nouveau/edition?arreterestriction=37731');
     cy.get('[data-cy=ArreteLoadError]').should('be.visible');
-    cy.then(() => { state.fail = false; });
+    cy.then(() => {
+      state.fail = false;
+    });
     cy.get('[data-cy=ArreteLoadRetry]').click();
     cy.get('[data-cy=ArreteRestrictionFormNumeroInput]').should('have.value', '');
     cy.get('[data-cy=ArreteRestrictionFormAbrogeInput]').should('have.value', source.numero);

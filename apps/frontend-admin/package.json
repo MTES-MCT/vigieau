@@ -17,16 +17,16 @@
     "vue-demi@0.14.10": true
   },
   "scripts": {
-    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
-    "start": "PORT=${PORT:-3003} nuxi preview",
+    "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/prepare-static-preview.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
+    "start": "PORT=${PORT:-3003} node .output/preview.mjs",
     "dev": "nuxi dev",
     "format": "eslint . --fix",
-    "generate": "nuxt generate",
+    "generate": "nuxt generate && node ../../scripts/prepare-static-preview.mjs",
     "lint:js": "eslint .",
     "lint:prettier": "prettier --check .",
     "lint": "npm run lint:js && npm run lint:prettier",
     "lintfix": "prettier --write --list-different . && npm run lint:js -- --fix",
-    "preview": "nuxt preview",
+    "preview": "npm run start --",
     "postinstall": "node -e \"if (process.env.NODE_ENV !== 'production') require('child_process').execSync('nuxt prepare', {stdio: 'inherit'})\"",
     "purgecss": "purgecss --config ./purgecss.config.js",
     "test:unit": "node --test --experimental-strip-types test/*.test.mjs",
@@ -56,6 +56,7 @@
     "ofetch": "^1.5.1",
     "oh-vue-icons": "1.0.0-rc3",
     "pinia": "^2.2.1",
+    "sirv": "3.0.2",
     "vue": "3.5.44",
     "vue-chartjs": "^5.3.1"
   },

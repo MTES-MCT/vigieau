@@ -1,11 +1,12 @@
 <script setup lang="ts">
+const props = defineProps<{
+  error: any;
+}>();
+
 useHead({
   title: `Erreur - ${useRuntimeConfig().public.appName}`,
 });
 
-const props = defineProps<{
-  error: any;
-}>();
 const router = useRouter();
 
 const title = computed<string>(() => {

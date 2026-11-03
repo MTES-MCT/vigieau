@@ -167,7 +167,10 @@ const synchronizeRestrictionUsageSelection = <T extends RestrictionUsageDefiniti
 
   state.active.forEach((previous) => {
     const availableIndices = intended.map((_, index) => index).filter((index) => !consumedIntentionIndices.has(index));
-    const intentionMatch = findMatchingUsageIndex(availableIndices.map((index) => intended[index]), previous);
+    const intentionMatch = findMatchingUsageIndex(
+      availableIndices.map((index) => intended[index]),
+      previous,
+    );
     const intentionIndex = intentionMatch < 0 ? -1 : availableIndices[intentionMatch];
     const incomingIndex = findMatchingUsageIndex(incoming, previous);
     if (intentionIndex >= 0) {
@@ -251,7 +254,10 @@ export const getRestrictionUsagesForSeverity = <T extends RestrictionUsageDefini
   if (!cached || cached.frameworkId !== (restriction.arreteCadre?.id ?? null)) {
     const original = { ...restriction, niveauGravite: oldSeverity };
     const state = getRestrictionUsageSelectionState(original, catalog);
-    restrictionUsageSelections.set(key, { frameworkId: restriction.arreteCadre?.id ?? null, state });
+    restrictionUsageSelections.set(key, {
+      frameworkId: restriction.arreteCadre?.id ?? null,
+      state,
+    });
     restrictionUsageSelections.delete(original);
   }
   return activateRestrictionUsageSelection(getRestrictionUsageSelectionState(restriction, catalog), newSeverity);
@@ -276,7 +282,10 @@ export const resetRestrictionUsagesFromFramework = <T extends RestrictionUsageDe
     active: [],
     frameworkOnly: true,
   };
-  restrictionUsageSelections.set(toRaw(restriction), { frameworkId: restriction.arreteCadre?.id ?? null, state });
+  restrictionUsageSelections.set(toRaw(restriction), {
+    frameworkId: restriction.arreteCadre?.id ?? null,
+    state,
+  });
   return activateRestrictionUsageSelection(state, restriction.niveauGravite);
 };
 
@@ -318,7 +327,11 @@ export const getRestrictionUsageResetPreview = <T extends RestrictionUsageDefini
   const grouped = new Map<string, { name: string; before: T[]; after: T[] }>();
   const addToGroup = (usage: T, side: 'before' | 'after') => {
     const key = JSON.stringify([normalizeUsageTypography(usage.nom), usage.thematique?.id ?? null]);
-    const group = grouped.get(key) ?? { name: usage.nom ?? '', before: [], after: [] };
+    const group = grouped.get(key) ?? {
+      name: usage.nom ?? '',
+      before: [],
+      after: [],
+    };
     group[side].push(usage);
     grouped.set(key, group);
   };
@@ -327,16 +340,21 @@ export const getRestrictionUsageResetPreview = <T extends RestrictionUsageDefini
   const groups: RestrictionUsageResetGroup<T>[] = [];
   grouped.forEach((group) => {
     const remaining = [...group.after];
-    const unchanged = group.before.length === group.after.length && group.before.every((usage) => {
-      const index = remaining.findIndex((candidate) => haveEquivalentRestrictionUsageDefinition(candidate, usage));
-      if (index < 0) {
-        return false;
-      }
-      remaining.splice(index, 1);
-      return true;
-    });
+    const unchanged =
+      group.before.length === group.after.length &&
+      group.before.every((usage) => {
+        const index = remaining.findIndex((candidate) => haveEquivalentRestrictionUsageDefinition(candidate, usage));
+        if (index < 0) {
+          return false;
+        }
+        remaining.splice(index, 1);
+        return true;
+      });
     if (!unchanged) {
-      groups.push({ ...group, change: group.before.length === 0 ? 'added' : group.after.length === 0 ? 'removed' : 'changed' });
+      groups.push({
+        ...group,
+        change: group.before.length === 0 ? 'added' : group.after.length === 0 ? 'removed' : 'changed',
+      });
     }
   });
   return { usages, groups };

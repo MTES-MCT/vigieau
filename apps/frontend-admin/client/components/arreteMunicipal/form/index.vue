@@ -13,9 +13,9 @@ const isNewArreteMunicipal = route.params.id === 'nouveau';
 if (isNewArreteMunicipal) {
   arreteMunicipal.value = new ArreteMunicipal(authStore.user);
 } else {
-  const { data, error } = await api.arreteMunicipal.get(<string>route.params.id);
+  const { data, error: _error } = await api.arreteMunicipal.get(route.params.id as string);
   if (data.value) {
-    arreteMunicipal.value = <ArreteMunicipal>JSON.parse(JSON.stringify(data.value));
+    arreteMunicipal.value = JSON.parse(JSON.stringify(data.value)) as ArreteMunicipal;
   }
 }
 </script>
@@ -25,7 +25,9 @@ if (isNewArreteMunicipal) {
     {{ isNewArreteMunicipal ? 'Création' : 'Edition' }} d'un arrêté municipal
     <MixinsStatutBadge :statut="arreteMunicipal?.statut" />
   </h1>
-  <b>L’arrêté municipal sera publié sur Vigieau.<br />
-    Il doit être au moins aussi restrictif que l’arrêté préfectoral.</b>
+  <b
+    >L’arrêté municipal sera publié sur Vigieau.<br />
+    Il doit être au moins aussi restrictif que l’arrêté préfectoral.</b
+  >
   <ArreteMunicipalFormWrapper v-if="arreteMunicipal" :arreteMunicipal="arreteMunicipal" />
 </template>

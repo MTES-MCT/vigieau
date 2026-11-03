@@ -5,9 +5,14 @@ export class VigiEauApi {
     const runtimeConfig = useRuntimeConfig();
 
     const url = `/zones?commune=${codeCommune}`;
-    return useCustomFetch(url, {
-      method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
-    }, 0, false);
+    return useCustomFetch(
+      url,
+      {
+        method: 'GET',
+        baseURL: runtimeConfig.public.apiSecheresseUrl,
+      },
+      0,
+      false,
+    );
   }
 }

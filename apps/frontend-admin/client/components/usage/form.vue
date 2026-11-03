@@ -63,7 +63,9 @@ const rules = computed(() => {
       required: helpers.withMessage('Le nom est obligatoire.', required),
       maxLength: helpers.withMessage('Le nom ne doit pas dépasser 150 caractères.', maxLength(150)),
     },
-    thematique: { required: helpers.withMessage('La thématique est obligatoire.', required) },
+    thematique: {
+      required: helpers.withMessage('La thématique est obligatoire.', required),
+    },
     concerneParticulier: { required },
     concerneEntreprise: { required },
     concerneCollectivite: { required },
@@ -99,12 +101,13 @@ const submitForm = async () => {
 };
 
 const thematiqueSelected = ($event: number) => {
-  props.usage.thematique = refDataStore.thematiques.findLast((t) => t.id == $event);
+  props.usage.thematique = refDataStore.thematiques.findLast((t) => t.id === Number($event));
 };
 
 const thematiqueDescription = computed(() => {
-  return `Pour éviter les incompréhensions des usagers de VigiEau, vérifiez que la thématique choisie est bien cohérente avec l’usage. Par exemple ${props
-    .usage.thematique?.nom} peut être associé avec&nbsp;: ${ThematiqueExamples[props.usage.thematique?.nom]}.`;
+  return `Pour éviter les incompréhensions des usagers de VigiEau, vérifiez que la thématique choisie est bien cohérente avec l’usage. Par exemple ${
+    props.usage.thematique?.nom
+  } peut être associé avec&nbsp;: ${ThematiqueExamples[props.usage.thematique?.nom]}.`;
 });
 
 defineExpose({
@@ -143,11 +146,15 @@ defineExpose({
 
   <div class="fr-my-2w">Usagers</div>
   <DsfrInputGroup :error-message="utils.showInputError(v$, 'concerne')">
-    <DsfrInputGroup v-for="concerne of concernes" :error-message="utils.showInputError(v$, concerne.attribute)">
+    <DsfrInputGroup
+      v-for="(concerne, concerneIndex) of concernes"
+      :key="concerneIndex"
+      :error-message="utils.showInputError(v$, concerne.attribute)"
+    >
       <DsfrCheckbox
         :label="concerne.name"
         :name="concerne.attribute"
-        :data-cy="'UsageForm' + concerne.attribute + 'Checkbox'"
+        :data-cy="`UsageForm${concerne.attribute}Checkbox`"
         v-model="usage[concerne.attribute]"
       />
     </DsfrInputGroup>
@@ -155,11 +162,15 @@ defineExpose({
 
   <div class="fr-my-2w">À quelle(s) ressource(s) cet usage est-il associé ?</div>
   <DsfrInputGroup :error-message="utils.showInputError(v$, 'ressource')">
-    <DsfrInputGroup v-for="ressource of resssources" :error-message="utils.showInputError(v$, ressource.attribute)">
+    <DsfrInputGroup
+      v-for="(ressource, ressourceIndex) of resssources"
+      :key="ressourceIndex"
+      :error-message="utils.showInputError(v$, ressource.attribute)"
+    >
       <DsfrCheckbox
         :label="ressource.name"
         :name="ressource.attribute"
-        :data-cy="'UsageForm' + ressource.attribute + 'Checkbox'"
+        :data-cy="`UsageForm${ressource.attribute}Checkbox`"
         v-model="usage[ressource.attribute]"
       />
     </DsfrInputGroup>

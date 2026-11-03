@@ -10,8 +10,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   abroger: any;
 }>();
-const utils = useUtils()
-const am = ref({...props.arreteMunicipal});
+const utils = useUtils();
+const am = ref({ ...props.arreteMunicipal });
 
 const rules = computed(() => {
   return {

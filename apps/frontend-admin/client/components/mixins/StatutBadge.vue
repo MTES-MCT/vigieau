@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { Ref } from "vue";
-import { ArreteCadreStatutFr } from "~/dto/arrete_cadre.dto";
+import type { Ref } from 'vue';
+import { ArreteCadreStatutFr } from '~/dto/arrete_cadre.dto';
 
 const props = defineProps<{
   statut: string;

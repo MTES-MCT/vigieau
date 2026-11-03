@@ -14,21 +14,21 @@ const props = defineProps<{
 const computeTypeEauTags = () => {
   const toReturn = [];
   const toReturnLayers = [];
-  if (props.arreteRestriction.restrictions.some(r => r.zoneAlerte?.type === 'SUP')) {
+  if (props.arreteRestriction.restrictions.some((r) => r.zoneAlerte?.type === 'SUP')) {
     toReturn.push({
       label: 'Eau superficielle',
       value: 'SUP',
     });
     toReturnLayers.push('zoneSup');
   }
-  if (props.arreteRestriction.restrictions.some(r => r.zoneAlerte?.type === 'SOU')) {
+  if (props.arreteRestriction.restrictions.some((r) => r.zoneAlerte?.type === 'SOU')) {
     toReturn.push({
       label: 'Eau souterraine',
       value: 'SOU',
     });
     toReturnLayers.push('zoneSou');
   }
-  if (props.arreteRestriction.restrictions.some(r => r.isAep) || props.arreteRestriction.ressourceEapCommunique) {
+  if (props.arreteRestriction.restrictions.some((r) => r.isAep) || props.arreteRestriction.ressourceEapCommunique) {
     toReturn.push({
       label: 'Eau potable',
       value: 'AEP',
@@ -243,8 +243,7 @@ const resetSources = (onlyLayers = false) => {
         map.value?.removeSource(l);
       }
     });
-  } catch {
-  }
+  } catch {}
 };
 
 const computeBounds = () => {
@@ -278,7 +277,15 @@ const showLayer = () => {
         /* other */ '#ccc',
       ],
       'fill-opacity': {
-        stops: [[5, 1], [6, 0.8], [7, 0.7], [8, 0.6], [9, 0.5], [10, 0.4], [11, 0.3]],
+        stops: [
+          [5, 1],
+          [6, 0.8],
+          [7, 0.7],
+          [8, 0.6],
+          [9, 0.5],
+          [10, 0.4],
+          [11, 0.3],
+        ],
       },
       'fill-outline-color': '#000',
     },

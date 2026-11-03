@@ -69,7 +69,7 @@ const computeData = () => {
   uniqueDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
 
   const data: any[] = [];
-  uniqueDates.map((d) => {
+  uniqueDates.forEach((d) => {
     const visits = props.statisticDepartement
       .map((s) => {
         return s.visits?.find((v: any) => v.date === d)?.visits || 0;
@@ -78,7 +78,7 @@ const computeData = () => {
 
     data.push({
       date: d,
-      visits: visits,
+      visits,
     });
   });
 

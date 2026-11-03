@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import useVuelidate from '@vuelidate/core';
-import { requiredIf, helpers, required } from '@vuelidate/validators';
+import { helpers, required, requiredIf } from '@vuelidate/validators';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 
 const props = defineProps<{
@@ -15,13 +15,13 @@ const rules = computed(() => {
     niveauGraviteSpecifiqueEap: {
       requiredIf: helpers.withMessage(
         "La règle de gestion de l'eau potable est obligatoire.",
-        requiredIf(() => props.arreteRestriction.perimetreAr == 'all'),
+        requiredIf(() => props.arreteRestriction.perimetreAr === 'all'),
       ),
     },
     ressourceEapCommunique: {
       requiredIf: helpers.withMessage(
         "La niveau de gravité de l'eau potable est obligatoire.",
-        requiredIf(() => props.arreteRestriction.niveauGraviteSpecifiqueEap == false),
+        requiredIf(() => props.arreteRestriction.niveauGraviteSpecifiqueEap === false),
       ),
     },
   };
@@ -35,7 +35,7 @@ const perimetreArOptions = [
     value: 'zones',
   },
   {
-    label: 'Zones d\'approvisionnement en eau potable (AEP)',
+    label: "Zones d'approvisionnement en eau potable (AEP)",
     value: 'aep',
   },
   {
@@ -78,11 +78,9 @@ watch(
   () => props.arreteRestriction.perimetreAr,
   () => {
     props.arreteRestriction.niveauGraviteSpecifiqueEap = null;
-    if (props.arreteRestriction.perimetreAr == 'all') {
-      return;
-    } else if (props.arreteRestriction.perimetreAr === 'zones') {
+    if (props.arreteRestriction.perimetreAr === 'zones') {
       props.arreteRestriction.restrictions = props.arreteRestriction.restrictions.filter((r) => !r.isAep);
-    } else {
+    } else if (props.arreteRestriction.perimetreAr !== 'all') {
       props.arreteRestriction.restrictions = props.arreteRestriction.restrictions.filter((r) => r.isAep);
     }
   },
@@ -115,7 +113,7 @@ watch(
         </DsfrInputGroup>
 
         <DsfrInputGroup
-          v-if="arreteRestriction.perimetreAr == 'all'"
+          v-if="arreteRestriction.perimetreAr === 'all'"
           :error-message="utils.showInputError(v$, 'niveauGraviteSpecifiqueEap')"
         >
           <DsfrRadioButtonSet
@@ -128,7 +126,7 @@ watch(
         </DsfrInputGroup>
 
         <DsfrInputGroup
-          v-if="arreteRestriction.niveauGraviteSpecifiqueEap == false"
+          v-if="arreteRestriction.niveauGraviteSpecifiqueEap === false"
           :error-message="utils.showInputError(v$, 'ressourceEapCommunique')"
         >
           <DsfrRadioButtonSet

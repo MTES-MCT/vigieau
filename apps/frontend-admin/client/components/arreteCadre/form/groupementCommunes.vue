@@ -27,8 +27,8 @@ const parseCommunes = (communesText: string) => {
   if (!communesText) {
     return;
   }
-  const inseeRegex = new RegExp('(0[1-9]|[1-9][ABab\\d])\\d{3}', 'gim');
-  const inseeRegexWithout0 = new RegExp('(?:\\s|^)([1-9])\\d{3}(?:\\s|$)', 'gim');
+  const inseeRegex = /(0[1-9]|[1-9][AB\d])\d{3}/gim;
+  const inseeRegexWithout0 = /(?:\s|^)([1-9])\d{3}(?:\s|$)/gim;
   let codesExtracted = communesText.match(inseeRegex);
   let codesExtractedWithout0 = communesText.match(inseeRegexWithout0);
   if (!codesExtracted && !codesExtractedWithout0) {
@@ -64,10 +64,7 @@ props.zoneAlerte.communesText = props.zoneAlerte.communes?.map((c) => c.code).jo
   <form @submit.prevent="">
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-6">
-        <DsfrAlert
-          type="info"
-          title="Liste des codes INSEE par département"
-          class="fr-mb-2w">
+        <DsfrAlert type="info" title="Liste des codes INSEE par département" class="fr-mb-2w">
           Pour créer vos groupement de commune, vous allez devoir nous fournir les codes INSEE de chaque commune. Copier / coller à partir
           de la liste des codes correspondant à un groupement.
           <br /><a class="fr-link" href="https://www.insee.fr/fr/information/2560452" target="_blank">Liste des codes INSEE</a>

@@ -30,6 +30,6 @@ describe('Test de la page de Login', () => {
   describe('Login AgentConenect', () => {
     it(`Le bouton AgentConenct doit être visible`, () => {
       cy.get('[data-cy=LoginAgentConnectBtn]').should('exist');
-    });    
+    });
   });
 });

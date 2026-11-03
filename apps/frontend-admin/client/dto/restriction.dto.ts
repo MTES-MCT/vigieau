@@ -7,7 +7,7 @@ export class Restriction {
   nomGroupementAep: string | null;
   niveauGravite: 'vigilance' | 'alerte' | 'alerte_renforcee' | 'crise' | null;
   usages: any[];
-  
+
   communesText: string | undefined;
 
   constructor(isAep = false) {
@@ -20,7 +20,6 @@ export class Restriction {
     this.niveauGravite = null;
     this.usages = [];
   }
-
 }
 
 export enum RestrictionNiveauGraviteFr {

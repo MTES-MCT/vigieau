@@ -37,7 +37,9 @@ const normalize = (value: string | null | undefined): string =>
     .toLocaleLowerCase('fr-FR');
 
 export const findRestrictionUsageConflicts = (
-  restrictions: readonly { usages?: readonly RestrictionUsageConflictSource[] | null }[] = [],
+  restrictions: readonly {
+    usages?: readonly RestrictionUsageConflictSource[] | null;
+  }[] = [],
 ): RestrictionUsageConflict[] => {
   const conflicts: RestrictionUsageConflict[] = [];
 
@@ -66,7 +68,9 @@ export const findRestrictionUsageConflicts = (
           ) {
             return;
           }
-          const differences = descriptionFields.filter((field) => normalize(String(first[field] ?? '')) !== normalize(String(second[field] ?? '')));
+          const differences = descriptionFields.filter(
+            (field) => normalize(String(first[field] ?? '')) !== normalize(String(second[field] ?? '')),
+          );
           if (differences.length === 0) {
             return;
           }

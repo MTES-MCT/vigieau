@@ -4,7 +4,7 @@ import type { PaginatedResult } from '~/dto/paginated_result.dto';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 import { useRefDataStore } from '~/stores/refData';
 import { useAuthStore } from '~/stores/auth';
-import { useContextStore } from "~/stores/context";
+import { useContextStore } from '~/stores/context';
 
 const refDataStore = useRefDataStore();
 const authStore = useAuthStore();
@@ -49,7 +49,7 @@ const paginate = async () => {
     });
   }
   loading.value = true;
-  const { data, error } = await api.arreteRestriction.paginate(currentPage.value + 1, query.value, filter);
+  const { data, error: _error } = await api.arreteRestriction.paginate(currentPage.value + 1, query.value, filter);
   loading.value = false;
   if (data.value) {
     data.value.meta.dsfrPages = Array.from({ length: data.value.meta.totalPages }, (value, index) => {
@@ -59,7 +59,9 @@ const paginate = async () => {
       };
     });
     arretesRestrictionPaginated.value = data.value;
-    showZaAlert.value = statusFilter.value === 'publie' && arretesRestrictionPaginated.value?.data.some((ar) => ar.restrictions.some((r) => r.zoneAlerte?.disabled));
+    showZaAlert.value =
+      statusFilter.value === 'publie' &&
+      arretesRestrictionPaginated.value?.data.some((ar) => ar.restrictions.some((r) => r.zoneAlerte?.disabled));
   }
 };
 
@@ -90,12 +92,14 @@ watch(
         };
       });
       departementsOptions.value?.unshift({
-          value: 0,
-          text: 'Tous les départements',
-        });
-      if(!departementFilter.value && departementFilter.value !== 0) {
+        value: 0,
+        text: 'Tous les départements',
+      });
+      if (!departementFilter.value && departementFilter.value !== 0) {
         departementFilter.value =
-          authStore.user?.role === 'departement' ? refDataStore.departements.find((d) => authStore.user?.roleDepartements.includes(d.code)).id : null;
+          authStore.user?.role === 'departement'
+            ? refDataStore.departements.find((d) => authStore.user?.roleDepartements.includes(d.code)).id
+            : null;
       } else {
         paginate();
       }
@@ -150,7 +154,11 @@ watch(
       <div class="fr-col-12 text-align-center" v-if="arretesRestrictionPaginated.data.length < 1">
         Aucun arrêté de restriction n'a été trouvé.
       </div>
-      <div v-for="arreteRestriction in arretesRestrictionPaginated.data" class="fr-col-md-4 fr-col-12">
+      <div
+        v-for="(arreteRestriction, arreteRestrictionIndex) in arretesRestrictionPaginated.data"
+        :key="arreteRestrictionIndex"
+        class="fr-col-md-4 fr-col-12"
+      >
         <ArreteRestrictionCard
           :arrete-restriction="arreteRestriction"
           :key="arreteRestriction.id"

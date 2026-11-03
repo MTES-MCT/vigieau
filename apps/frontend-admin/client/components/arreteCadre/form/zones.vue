@@ -5,7 +5,7 @@ import { useRefDataStore } from '~/stores/refData';
 import type { Departement } from '~/dto/departement.dto';
 import type { Ref } from 'vue';
 import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
-import { required, helpers } from '@vuelidate/validators';
+import { helpers, required } from '@vuelidate/validators';
 import { useAuthStore } from '~/stores/auth';
 
 const props = defineProps<{
@@ -22,7 +22,7 @@ const expandedDepCode: Ref<string | null> = ref(authStore.user?.roleDepartements
 const rules = computed(() => {
   return {
     zonesAlerte: {
-      required: helpers.withMessage('L\'arrêté doit être lié à au moins une zone d\'alerte', required),
+      required: helpers.withMessage("L'arrêté doit être lié à au moins une zone d'alerte", required),
     },
   };
 });
@@ -69,9 +69,9 @@ const onAccordionClick = (depCode: string) => {
 };
 
 watch(zonesSelected, () => {
-  const zones =  refDataStore.zonesAlerte.filter((z) => zonesSelected.value.includes(z.id));
-  props.arreteCadre.zonesAlerte = zones.map(z => {
-    z.communes = props.arreteCadre.zonesAlerte.find(acz => acz.id === z.id)?.communes;
+  const zones = refDataStore.zonesAlerte.filter((z) => zonesSelected.value.includes(z.id));
+  props.arreteCadre.zonesAlerte = zones.map((z) => {
+    z.communes = props.arreteCadre.zonesAlerte.find((acz) => acz.id === z.id)?.communes;
     return z;
   });
   computeDepSelected();
@@ -103,11 +103,9 @@ defineExpose({
   <form @submit.prevent="">
     <div class="fr-grid-row fr-grid-row--gutters">
       <div class="fr-col-12 fr-col-lg-6">
-        <p>
-          Sélectionner les zones d’alerte concernées par cet arrêté
-        </p>
+        <p>Sélectionner les zones d’alerte concernées par cet arrêté</p>
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'zonesAlerte')">
-          <template v-for="(d, index) in departementsFiletered">
+          <template v-for="(d, index) in departementsFiletered" :key="index">
             <div class="divider fr-mb-2w"></div>
             <div class="fr-grid-row fr-grid-row--space-between zone-line full-width">
               <h6>{{ d.nom }}</h6>
@@ -117,23 +115,23 @@ defineExpose({
                 :checked="d.nbZonesSelected === d.zonesAlerte.length"
               />
               <div class="fr-grid-row full-width fr-mt-1w">
-                <DsfrAccordion :expanded-id="expandedDepCode"
-                               @expand="onAccordionClick(d.code)"
-                               class="full-width"
-                               :id="d.code">
+                <DsfrAccordion :expanded-id="expandedDepCode" @expand="onAccordionClick(d.code)" class="full-width" :id="d.code">
                   <template v-slot:title>
-                    Afficher les {{ d.nbZonesSelected }}/{{ d.zonesAlerte.length }} zones
+                    Afficher les {{ d.nbZonesSelected }}/{{ d.zonesAlerte.length }}
+                    zones
                   </template>
                   <div class="zone-alerte__body" v-if="zonesOptionsCheckBox(d, 'SUP').length > 0">
                     <p><b>Eaux superficielles</b></p>
                     <div class="form-group fr-fieldset fr-mt-2w">
-                      <div class="zone-item" v-for="option in zonesOptionsCheckBox(d, 'SUP', false)">
-                        <DsfrCheckbox :id="option.id"
-                                      :key="option.id || option.name"
-                                      :name="option.name"
-                                      :model-value="zonesSelected.includes(option.name)"
-                                      :small="false"
-                                      @update:model-value="onChange({ name: option.name, checked: $event })">
+                      <div class="zone-item" v-for="(option, optionIndex) in zonesOptionsCheckBox(d, 'SUP', false)" :key="optionIndex">
+                        <DsfrCheckbox
+                          :id="option.id"
+                          :key="option.id || option.name"
+                          :name="option.name"
+                          :model-value="zonesSelected.includes(option.name)"
+                          :small="false"
+                          @update:model-value="onChange({ name: option.name, checked: $event })"
+                        >
                           <template #label>
                             {{ option.label }}
                             <div class="checkbox-label-info" v-if="option.isAcAssociated">
@@ -143,16 +141,16 @@ defineExpose({
                           </template>
                         </DsfrCheckbox>
                       </div>
-                      <div class="zone-item" v-if="zonesOptionsCheckBox(d, 'SUP', true).length > 0">
-                        Ressources influencées
-                      </div>
-                      <div class="zone-item" v-for="option in zonesOptionsCheckBox(d, 'SUP', true)">
-                        <DsfrCheckbox :id="option.id"
-                                      :key="option.id || option.name"
-                                      :name="option.name"
-                                      :model-value="zonesSelected.includes(option.name)"
-                                      :small="false"
-                                      @update:model-value="onChange({ name: option.name, checked: $event })">
+                      <div class="zone-item" v-if="zonesOptionsCheckBox(d, 'SUP', true).length > 0">Ressources influencées</div>
+                      <div class="zone-item" v-for="(option, optionIndex) in zonesOptionsCheckBox(d, 'SUP', true)" :key="optionIndex">
+                        <DsfrCheckbox
+                          :id="option.id"
+                          :key="option.id || option.name"
+                          :name="option.name"
+                          :model-value="zonesSelected.includes(option.name)"
+                          :small="false"
+                          @update:model-value="onChange({ name: option.name, checked: $event })"
+                        >
                           <template #label>
                             {{ option.label }}
                             <div class="checkbox-label-info" v-if="option.isAcAssociated">
@@ -167,7 +165,7 @@ defineExpose({
                   <div class="zone-alerte__body" v-if="zonesOptionsCheckBox(d, 'SOU').length > 0">
                     <p><b>Eaux souterraines</b></p>
                     <div class="form-group fr-fieldset fr-mt-2w">
-                      <div class="zone-item" v-for="option in zonesOptionsCheckBox(d, 'SOU', false)">
+                      <div class="zone-item" v-for="(option, optionIndex) in zonesOptionsCheckBox(d, 'SOU', false)" :key="optionIndex">
                         <DsfrCheckbox
                           :id="option.id"
                           :key="option.id || option.name"
@@ -185,16 +183,16 @@ defineExpose({
                           </template>
                         </DsfrCheckbox>
                       </div>
-                      <div class="zone-item" v-if="zonesOptionsCheckBox(d, 'SOU', true).length > 0">
-                        Ressources influencées
-                      </div>
-                      <div class="zone-item" v-for="option in zonesOptionsCheckBox(d, 'SOU', true)">
-                        <DsfrCheckbox :id="option.id"
-                                      :key="option.id || option.name"
-                                      :name="option.name"
-                                      :model-value="zonesSelected.includes(option.name)"
-                                      :small="false"
-                                      @update:model-value="onChange({ name: option.name, checked: $event })">
+                      <div class="zone-item" v-if="zonesOptionsCheckBox(d, 'SOU', true).length > 0">Ressources influencées</div>
+                      <div class="zone-item" v-for="(option, optionIndex) in zonesOptionsCheckBox(d, 'SOU', true)" :key="optionIndex">
+                        <DsfrCheckbox
+                          :id="option.id"
+                          :key="option.id || option.name"
+                          :name="option.name"
+                          :model-value="zonesSelected.includes(option.name)"
+                          :small="false"
+                          @update:model-value="onChange({ name: option.name, checked: $event })"
+                        >
                           <template #label>
                             {{ option.label }}
                             <div class="checkbox-label-info" v-if="option.isAcAssociated">
@@ -218,10 +216,12 @@ defineExpose({
           Pour mettre à jour vos zones d'alerte, veuillez produire des fichiers conformes à cette doctrine de production et les transmettre
           aux adresses zones.alerte.secheresse@oieau.fr et secheresse@beta.gouv.fr
           <br />
-          <a class="fr-link"
-             target="_blank"
-             rel="noopener external"
-             href="https://docs.google.com/document/d/1MfgyyiC2cQG8zYgACjzqgSEiFGpW8N16xbfe8YTHHV4">
+          <a
+            class="fr-link"
+            target="_blank"
+            rel="noopener external"
+            href="https://docs.google.com/document/d/1MfgyyiC2cQG8zYgACjzqgSEiFGpW8N16xbfe8YTHHV4"
+          >
             Voir la doctrine
           </a>
         </DsfrAlert>

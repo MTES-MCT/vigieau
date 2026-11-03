@@ -21,7 +21,9 @@ const apiErrorHandler = useApiErrorHandler();
 const loading = ref(false);
 const componentKey = ref(0);
 const asc = ref(true);
-const isDepPilote: Ref<boolean | null> = ref(authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(props.arreteCadre.departementPilote?.code));
+const isDepPilote: Ref<boolean | null> = ref(
+  authStore.user?.role === 'mte' || authStore.user?.roleDepartements.includes(props.arreteCadre.departementPilote?.code),
+);
 
 const usageSelected = ref();
 
@@ -30,25 +32,20 @@ const currentStep: Ref<number> = ref(!props.arreteCadre.id || !props.arreteCadre
 const v$ = useVuelidate();
 
 const showRessourcesInfluencees = computed(() => {
-  return props.arreteCadre.zonesAlerte.some(z => z.ressourceInfluencee);
+  return props.arreteCadre.zonesAlerte.some((z) => z.ressourceInfluencee);
 });
 
 const steps = computed(() => {
   if (showRessourcesInfluencees.value) {
     return [
       'Informations générales',
-      'Liste des zones d\'alertes',
+      "Liste des zones d'alertes",
       'Emprise géographique des ressources influencées',
       'Mesures de restriction',
       'Récapitulatif',
     ];
   } else {
-    return [
-      'Informations générales',
-      'Liste des zones d\'alertes',
-      'Mesures de restriction',
-      'Récapitulatif',
-    ];
+    return ['Informations générales', "Liste des zones d'alertes", 'Mesures de restriction', 'Récapitulatif'];
   }
 });
 
@@ -95,15 +92,14 @@ const publicationContext = (action: string) => ({
   arreteId: props.arreteCadre.id,
   numero: props.arreteCadre.numero,
   statut: props.arreteCadre.statut,
-  departement: props.arreteCadre.departementPilote?.code ??
+  departement:
+    props.arreteCadre.departementPilote?.code ??
     (props.arreteCadre.departements.length === 1 ? props.arreteCadre.departements[0]?.code : undefined),
 });
 
 const syncSavedUsageIds = (savedArreteCadre: ArreteCadre) => {
   props.arreteCadre.usages.forEach((usageArreteCadre: Usage) => {
-    const savedUsage = savedArreteCadre.usages?.find(
-      (uac: Usage) => uac.nom === usageArreteCadre.nom,
-    );
+    const savedUsage = savedArreteCadre.usages?.find((uac: Usage) => uac.nom === usageArreteCadre.nom);
 
     if (!savedUsage?.id) {
       throw new Error(`L'usage "${usageArreteCadre.nom}" n'a pas été renvoyé par l'API après enregistrement.`);
@@ -124,7 +120,7 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
     await usagesFormRef.value?.arreteCadreUsageListRef.v$.$validate();
   }
   if (publish ? v$.value.$error : generalFormRef.value?.v$.$error || usagesFormRef.value?.arreteCadreUsageListRef.v$.$error) {
-    showErrors(v$.value.$errors, publish ? 'Impossible de publier l\'arrêté cadre' : 'Impossible d\'enregistrer l\'arrêté cadre');
+    showErrors(v$.value.$errors, publish ? "Impossible de publier l'arrêté cadre" : "Impossible d'enregistrer l'arrêté cadre");
     return false;
   }
 
@@ -154,7 +150,7 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
   } catch (error) {
     apiErrorHandler.showError(
       error,
-      publish ? 'Impossible de préparer la publication de l\'arrêté cadre' : 'Impossible d\'enregistrer l\'arrêté cadre',
+      publish ? "Impossible de préparer la publication de l'arrêté cadre" : "Impossible d'enregistrer l'arrêté cadre",
       'Une erreur technique empêche l’enregistrement de l’arrêté cadre.',
       publicationContext(publish ? 'save_before_publish_exception' : 'save_exception'),
     );
@@ -180,12 +176,18 @@ const saveArrete = async (publish: boolean = false): Promise<boolean> => {
 const showErrors = (errors: any, title: string | null) => {
   alertStore.addAlert({
     title,
-    description: errors.filter((e: any) => e.$message).map((e: any) => {
-      if (Array.isArray(e.$message)) {
-        return e.$message.flat().filter((m: any) => m).join(', ');
-      }
-      return e.$message;
-    }).join(', '),
+    description: errors
+      .filter((e: any) => e.$message)
+      .map((e: any) => {
+        if (Array.isArray(e.$message)) {
+          return e.$message
+            .flat()
+            .filter((m: any) => m)
+            .join(', ');
+        }
+        return e.$message;
+      })
+      .join(', '),
     type: 'error',
   });
 };
@@ -225,7 +227,7 @@ const publishArrete = async (ac: ArreteCadre): Promise<boolean> => {
   } catch (error) {
     apiErrorHandler.showError(
       error,
-      'Impossible de publier l\'arrêté cadre',
+      "Impossible de publier l'arrêté cadre",
       'Une erreur technique empêche la publication de l’arrêté cadre.',
       publicationContext('publish_exception'),
     );
@@ -249,24 +251,15 @@ const ressourcesInfluenceesFormRef = ref(null);
 
 <template>
   <DsfrStepper :steps="steps" :currentStep="currentStep" />
-  <DsfrTabs class="tabs-light"
-            v-if="refDataStore.departements.length > 0"
-            @select-tab="utils.scrollToTop()">
+  <DsfrTabs class="tabs-light" v-if="refDataStore.departements.length > 0" @select-tab="utils.scrollToTop()">
     <DsfrTabContent :selected="currentStep === 1" :asc="asc">
-      <ArreteCadreFormGeneral
-        ref="generalFormRef"
-        :arrete-cadre="arreteCadre" />
+      <ArreteCadreFormGeneral ref="generalFormRef" :arrete-cadre="arreteCadre" />
     </DsfrTabContent>
     <DsfrTabContent :selected="currentStep === 2" :asc="asc">
-      <ArreteCadreFormZones
-        ref="zonesFormRef"
-        :arrete-cadre="arreteCadre" />
+      <ArreteCadreFormZones ref="zonesFormRef" :arrete-cadre="arreteCadre" />
     </DsfrTabContent>
     <DsfrTabContent v-if="showRessourcesInfluencees" :selected="currentStep === 3" :asc="asc">
-      <ArreteCadreFormRessourceInfluencee
-        ref="ressourcesInfluenceesFormRef"
-        :arrete-cadre="arreteCadre"
-      />
+      <ArreteCadreFormRessourceInfluencee ref="ressourcesInfluenceesFormRef" :arrete-cadre="arreteCadre" />
     </DsfrTabContent>
     <DsfrTabContent :selected="showRessourcesInfluencees ? currentStep === 4 : currentStep === 3" :asc="asc">
       <ArreteCadreFormUsages
@@ -290,14 +283,17 @@ const ressourcesInfluenceesFormRef = ref(null);
     </DsfrTabContent>
   </DsfrTabs>
   <ul
-    class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w">
+    class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w"
+  >
     <li>
-      <DsfrButton label="Précedent"
-                  :secondary="true"
-                  icon="ri-arrow-left-line"
-                  data-cy="ArreteCadreFormPreviousStepBtn"
-                  :disabled="currentStep === 1"
-                  @click="previousStep()" />
+      <DsfrButton
+        label="Précedent"
+        :secondary="true"
+        icon="ri-arrow-left-line"
+        data-cy="ArreteCadreFormPreviousStepBtn"
+        :disabled="currentStep === 1"
+        @click="previousStep()"
+      />
     </li>
     <li>
       <DsfrButton
@@ -310,11 +306,7 @@ const ressourcesInfluenceesFormRef = ref(null);
       />
     </li>
     <li v-if="showRessourcesInfluencees ? currentStep !== 5 : currentStep !== 4">
-      <DsfrButton label="Suivant"
-                  :secondary="true"
-                  icon="ri-arrow-right-line"
-                  data-cy="ArreteCadreFormNextStepBtn"
-                  @click="nextStep()" />
+      <DsfrButton label="Suivant" :secondary="true" icon="ri-arrow-right-line" data-cy="ArreteCadreFormNextStepBtn" @click="nextStep()" />
     </li>
     <li v-if="(showRessourcesInfluencees ? currentStep === 5 : currentStep === 4) && arreteCadre.statut === 'a_valider'">
       <DsfrButton
@@ -326,19 +318,16 @@ const ressourcesInfluenceesFormRef = ref(null);
         @click="askPublishArrete()"
       />
     </li>
-    <li style="margin-left: auto;">
-      <DsfrButton
-        label="Retour à la liste"
-        icon="ri-arrow-left-line"
-        secondary
-        @click="router.push('/arrete-cadre')"
-      />
+    <li style="margin-left: auto">
+      <DsfrButton label="Retour à la liste" icon="ri-arrow-left-line" secondary @click="router.push('/arrete-cadre')" />
     </li>
   </ul>
-  <DsfrModal :opened="modalPublishOpened"
-             icon="ri-arrow-right-line"
-             :title="modalTitle"
-             @close="modalPublishOpened = utils.closeModal(modalPublishOpened);">
+  <DsfrModal
+    :opened="modalPublishOpened"
+    icon="ri-arrow-right-line"
+    :title="modalTitle"
+    @close="modalPublishOpened = utils.closeModal(modalPublishOpened)"
+  >
     <div>
       Cet arrêté cadre contient&nbsp;:
       <ul>
@@ -352,10 +341,12 @@ const ressourcesInfluenceesFormRef = ref(null);
     <template #footer>
       <ul class="fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w">
         <li v-if="currentStep !== 1">
-          <DsfrButton label="Annuler"
-                      :disabled="loading"
-                      :secondary="true"
-                      @click="modalPublishOpened = utils.closeModal(modalPublishOpened);" />
+          <DsfrButton
+            label="Annuler"
+            :disabled="loading"
+            :secondary="true"
+            @click="modalPublishOpened = utils.closeModal(modalPublishOpened)"
+          />
         </li>
         <li>
           <DsfrButton

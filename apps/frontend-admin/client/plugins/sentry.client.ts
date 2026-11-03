@@ -23,8 +23,7 @@ const toNumber = (value: unknown, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const toBoolean = (value: unknown): boolean =>
-  toTrimmedString(value).toLowerCase() === 'true';
+const toBoolean = (value: unknown): boolean => toTrimmedString(value).toLowerCase() === 'true';
 
 export default defineNuxtPlugin((nuxtApp) => {
   const runtimeConfig = useRuntimeConfig();
@@ -35,14 +34,8 @@ export default defineNuxtPlugin((nuxtApp) => {
   }
 
   const router = useRouter();
-  const tracesSampleRate = toNumber(
-    runtimeConfig.public.sentryTracesSampleRate,
-    0.1,
-  );
-  const profilesSampleRate = toNumber(
-    runtimeConfig.public.sentryProfilesSampleRate,
-    0,
-  );
+  const tracesSampleRate = toNumber(runtimeConfig.public.sentryTracesSampleRate, 0.1);
+  const profilesSampleRate = toNumber(runtimeConfig.public.sentryProfilesSampleRate, 0);
   const integrations: any[] = [];
 
   const browserTracingIntegration = (Sentry as any).browserTracingIntegration;
@@ -50,12 +43,8 @@ export default defineNuxtPlugin((nuxtApp) => {
     integrations.push(browserTracingIntegration({ router }));
   }
 
-  const browserProfilingIntegration = (Sentry as any)
-    .browserProfilingIntegration;
-  if (
-    profilesSampleRate > 0 &&
-    typeof browserProfilingIntegration === 'function'
-  ) {
+  const browserProfilingIntegration = (Sentry as any).browserProfilingIntegration;
+  if (profilesSampleRate > 0 && typeof browserProfilingIntegration === 'function') {
     integrations.push(browserProfilingIntegration());
   }
 
@@ -63,10 +52,7 @@ export default defineNuxtPlugin((nuxtApp) => {
     app: nuxtApp.vueApp,
     dsn: sentryDsn,
     release: toTrimmedString(runtimeConfig.public.sentryRelease) || undefined,
-    environment:
-      toTrimmedString(runtimeConfig.public.sentryEnv) ||
-      toTrimmedString(runtimeConfig.public.appEnv) ||
-      'local',
+    environment: toTrimmedString(runtimeConfig.public.sentryEnv) || toTrimmedString(runtimeConfig.public.appEnv) || 'local',
     integrations,
     enableLogs: true,
     tracesSampleRate,

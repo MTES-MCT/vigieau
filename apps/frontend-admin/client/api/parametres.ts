@@ -1,5 +1,5 @@
 import { BaseApi } from '~/api/base-api';
-import { useCustomFetch } from "~/composables/useCustomFetch";
+import { useCustomFetch } from '~/composables/useCustomFetch';
 
 export class ParametresApi extends BaseApi {
   save(payload: any, depCode: string) {
@@ -9,5 +9,5 @@ export class ParametresApi extends BaseApi {
       baseURL: '/api',
       body: payload,
     });
-  };
+  }
 }

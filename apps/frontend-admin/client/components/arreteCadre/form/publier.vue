@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import useVuelidate from '@vuelidate/core';
 import { ArreteCadre } from '~/dto/arrete_cadre.dto';
-import { requiredIf, helpers, required } from "@vuelidate/validators";
+import { helpers, required, requiredIf } from '@vuelidate/validators';
 
 const props = defineProps<{
   arreteCadre: ArreteCadre;
@@ -11,7 +11,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   publier: any;
 }>();
-const utils = useUtils()
+const utils = useUtils();
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 const rules = computed(() => {
@@ -28,13 +28,19 @@ const rules = computed(() => {
       }),
     },
     file: {
-      required: helpers.withMessage("Le PDF de l'arrêté doit être ajouté", requiredIf(() => !props.arreteCadre.fichier)),
-      maxSize: helpers.withMessage("La taille du PDF ne doit pas dépasser 10Mo", (value: any) => {
-        return !value || value?.size < MAX_FILE_SIZE
+      required: helpers.withMessage(
+        "Le PDF de l'arrêté doit être ajouté",
+        requiredIf(() => !props.arreteCadre.fichier),
+      ),
+      maxSize: helpers.withMessage('La taille du PDF ne doit pas dépasser 10Mo', (value: any) => {
+        return !value || value?.size < MAX_FILE_SIZE;
       }),
-      maxLength: helpers.withMessage("Le nom du fichier ne doit pas dépasser 100 caractères. Évitez les espaces et caractères spéciaux.", (value: any) => {
-        return !value || encodeURIComponent(value?.name).length <= 100
-      }),
+      maxLength: helpers.withMessage(
+        'Le nom du fichier ne doit pas dépasser 100 caractères. Évitez les espaces et caractères spéciaux.',
+        (value: any) => {
+          return !value || encodeURIComponent(value?.name).length <= 100;
+        },
+      ),
     },
   };
 });
@@ -73,17 +79,19 @@ defineExpose({
       </div>
       <div v-if="showDateFin" class="fr-col-12 fr-col-lg-6">
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'dateFin')">
-          <DsfrInput id="dateFin"
-                     v-model="arreteCadre.dateFin"
-                     label="Date de fin"
-                     label-visible
-                     type="date"
-                     name="dateFin"
-                     data-cy="PublishFormDateFinInput" />
+          <DsfrInput
+            id="dateFin"
+            v-model="arreteCadre.dateFin"
+            label="Date de fin"
+            label-visible
+            type="date"
+            name="dateFin"
+            data-cy="PublishFormDateFinInput"
+          />
         </DsfrInputGroup>
       </div>
     </div>
-    
+
     <div class="fr-mt-4w" v-if="arreteCadre.fichier">
       <DsfrFileDownload
         format="PDF"
@@ -96,12 +104,14 @@ defineExpose({
 
     <div class="fr-mt-4w">
       <DsfrInputGroup :error-message="utils.showInputError(v$, 'file')">
-        <DsfrFileUpload :required="!arreteCadre.fichier"
-                        :label="arreteCadre.fichier ? 'Modifier le PDF de l\'arrêté' : 'Importer le PDF de l\'arrêté'"
-                        hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
-                        :arreteCadrecept="['application/pdf']"
-                        data-cy="PublishFormFileInput"
-                        @change="arreteCadre.file = $event[0]" />
+        <DsfrFileUpload
+          :required="!arreteCadre.fichier"
+          :label="arreteCadre.fichier ? 'Modifier le PDF de l\'arrêté' : 'Importer le PDF de l\'arrêté'"
+          hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
+          :arreteCadrecept="['application/pdf']"
+          data-cy="PublishFormFileInput"
+          @change="arreteCadre.file = $event[0]"
+        />
       </DsfrInputGroup>
     </div>
   </form>

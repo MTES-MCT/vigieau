@@ -1,10 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import useClickOutside from "~/composables/useClickOutside";
-
-const container = ref(undefined);
-const optionsList = ref(undefined);
-const optionSelected = ref(undefined);
+import useClickOutside from '~/composables/useClickOutside';
 
 const props = defineProps({
   modelValue: {
@@ -44,14 +40,16 @@ const props = defineProps({
     default: 'ri-search-line',
   },
 });
-
 const emit = defineEmits(['update:modelValue', 'search']);
+const container = ref(undefined);
+const optionsList = ref(undefined);
+const optionSelected = ref(undefined);
 
 const hasFocus = ref(false);
 const displayOptions = computed(() => !!props.options.length);
 
 function convertRemToPixels(rem) {
-  return rem * parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return rem * Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
 }
 
 function selectOption(option) {
@@ -140,21 +138,12 @@ function displayOption(option: any) {
   return toDisplay;
 }
 
-useClickOutside(
-  container,
-  () => looseFocus(),
-  null
-)
+useClickOutside(container, () => looseFocus(), null);
 </script>
 
 <template>
-  <div ref="container"
-       class="relative search-autocomplete">
-    <div
-      class="fr-search-bar"
-      :class="{ 'fr-search-bar--lg': !light }"
-      role="search"
-    >
+  <div ref="container" class="relative search-autocomplete">
+    <div class="fr-search-bar" :class="{ 'fr-search-bar--lg': !light }" role="search">
       <DsfrInput
         :model-value="modelValue"
         :placeholder="placeholder"
@@ -162,17 +151,11 @@ useClickOutside(
         v-bind="$attrs"
         :disabled="disabled"
         @update:model-value="$emit('update:modelValue', $event)"
-        ref="input"
         @focus="hasFocus = true"
         @keydown="checkKeyboardNav($event)"
         @search="checkKeyboardNav({ key: 'search' })"
       />
-      <DsfrButton
-        :title="buttonText"
-        :disabled="disabled"
-        type="button"
-        @click="checkKeyboardNav({ key: 'search' })"
-      >
+      <DsfrButton :title="buttonText" :disabled="disabled" type="button" @click="checkKeyboardNav({ key: 'search' })">
         <VIcon :name="icon" class="fr-mr-1w" />
         {{ buttonText }}
       </DsfrButton>

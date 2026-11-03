@@ -1,5 +1,5 @@
-import type { ArreteRestriction } from "~/dto/arrete_restriction.dto";
-import type { ZoneAlerte } from "~/dto/zone_alerte.dto";
+import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
+import type { ZoneAlerte } from '~/dto/zone_alerte.dto';
 
 export class ArreteCadre {
   id: number | null;
@@ -14,7 +14,7 @@ export class ArreteCadre {
   statut: 'a_valider' | 'a_venir' | 'publie' | 'abroge';
   arretesRestriction: ArreteRestriction[];
   arreteCadreAbroge: ArreteCadre | null;
-  
+
   // To upload file
   file: any;
 
