@@ -5,7 +5,8 @@ import { HttpService } from '@nestjs/axios';
 import { pick } from 'lodash';
 import { ZonesService } from '../zones/zones.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { FindOptionsWhere, IsNull, Repository } from 'typeorm';
+import { createHash } from 'node:crypto';
 import { AbonnementMail } from '@shared/entities/abonnement_mail.entity';
 import { firstValueFrom } from 'rxjs';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -17,10 +18,21 @@ import { CronService } from '../cron/cron.service';
 const ADDRESS_TIMEOUT_MS = 3_000;
 const ADDRESS_UNAVAILABLE_MESSAGE =
   'La vérification de l’adresse est momentanément indisponible. Réessayez dans quelques instants ou sélectionnez un point sur la carte.';
+const MANAGEMENT_LINK_COOLDOWN_MS = 60_000;
+const MAX_MANAGEMENT_LINK_REQUESTS = 10_000;
+const MANAGEMENT_LINK_RESPONSE = {
+  message:
+    'Si des abonnements sont associés à cette adresse, un lien de gestion vous sera envoyé.',
+};
 
 @Injectable()
 export class SubscriptionsService {
   private readonly logger = new VigieauLogger('SubscriptionsService');
+  private readonly managementLinkRequests = new Map<string, number>();
+  private readonly managementLinksInFlight = new Map<
+    string,
+    Promise<typeof MANAGEMENT_LINK_RESPONSE>
+  >();
 
   constructor(
     @InjectRepository(AbonnementMail)
@@ -55,6 +67,19 @@ export class SubscriptionsService {
   ): Promise<AbonnementMail> {
     const subscription: any = { ...createSubscriptionDto, ip };
     let communeNom: string | undefined;
+    const hasCoordinates = this.hasValidCoordinates(subscription);
+
+    if (
+      ((subscription.lon != null || subscription.lat != null) &&
+        !hasCoordinates) ||
+      (subscription.idAdresse && !hasCoordinates) ||
+      (!subscription.commune && !subscription.idAdresse && !hasCoordinates)
+    ) {
+      throw new HttpException(
+        'Renseignez une commune, une adresse avec ses coordonnées ou un point sur la carte valide.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
 
     if (subscription.commune) {
       const commune = this.communesService.getCommune(subscription.commune);
@@ -90,6 +115,8 @@ export class SubscriptionsService {
         this.getCommuneNom(subscription.commune) ||
         adresseCommuneNom ||
         communeNom;
+    } else if (hasCoordinates) {
+      subscription.libelleLocalisation = `${communeNom ? `${communeNom} — ` : ''}Point sur la carte (${subscription.lat}, ${subscription.lon})`;
     }
 
     subscription.typesEau = [...new Set(subscription.typesEau)].sort();
@@ -100,27 +127,40 @@ export class SubscriptionsService {
       subscription.situation = {};
     }
 
-    const whereClause = subscription.commune
+    const whereClause: FindOptionsWhere<AbonnementMail> = subscription.idAdresse
       ? {
           email: subscription.email,
-          commune: subscription.commune,
           idAdresse: subscription.idAdresse,
         }
-      : {
-          lon: subscription.lon,
-          lat: subscription.lat,
-        };
+      : hasCoordinates
+        ? {
+            email: subscription.email,
+            idAdresse: IsNull(),
+            lon: subscription.lon,
+            lat: subscription.lat,
+          }
+        : {
+            email: subscription.email,
+            commune: subscription.commune,
+            idAdresse: IsNull(),
+            lon: IsNull(),
+            lat: IsNull(),
+          };
     const subscriptionExists = await this.abonnementMailRepository.exists({
       where: whereClause,
     });
     if (subscriptionExists) {
       await this.abonnementMailRepository.update(
         whereClause,
-        pick(subscription, 'profil', 'typesEau'),
+        pick(subscription, 'profil', 'typesEau', 'libelleLocalisation'),
       );
     } else {
       await this.abonnementMailRepository.save(subscription);
+    }
 
+    // An earlier attempt may have persisted the subscription before the mail
+    // provider failed. Repeating the request must also retry confirmation.
+    try {
       await this.brevoService.sendMail(29, subscription.email, {
         city:
           communeNom ||
@@ -132,9 +172,75 @@ export class SubscriptionsService {
           subscription.email,
         ),
       });
+    } catch {
+      this.logger.warn('subscription_confirmation_unavailable');
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+          code: 'SUBSCRIPTION_CONFIRMATION_UNAVAILABLE',
+          message:
+            'Votre abonnement est enregistré, mais le mail de confirmation n’a pas pu être envoyé. Réessayez pour le recevoir.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
 
     return subscription;
+  }
+
+  async requestManagementLink(email: string) {
+    const now = Date.now();
+    for (const [key, expiresAt] of this.managementLinkRequests) {
+      if (expiresAt <= now) this.managementLinkRequests.delete(key);
+    }
+    // Match the exact email semantics used by existing subscriptions and JWTs.
+    const key = createHash('sha256').update(email).digest('hex');
+    const inFlight = this.managementLinksInFlight.get(key);
+    if (inFlight) return inFlight;
+    if (this.managementLinkRequests.has(key)) return MANAGEMENT_LINK_RESPONSE;
+    if (
+      this.managementLinkRequests.size + this.managementLinksInFlight.size >=
+      MAX_MANAGEMENT_LINK_REQUESTS
+    ) {
+      throw new HttpException(
+        'Le service est temporairement indisponible. Veuillez réessayer.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    // Concurrent callers observe the same result, including provider failures.
+    const delivery = this.deliverManagementLink(email);
+    this.managementLinksInFlight.set(key, delivery);
+    try {
+      const result = await delivery;
+      this.managementLinkRequests.set(
+        key,
+        Date.now() + MANAGEMENT_LINK_COOLDOWN_MS,
+      );
+      return result;
+    } finally {
+      this.managementLinksInFlight.delete(key);
+    }
+  }
+
+  private async deliverManagementLink(email: string) {
+    try {
+      const exists = await this.abonnementMailRepository.exists({
+        where: { email },
+      });
+      if (exists) await this.brevoService.sendManagementLink(email);
+    } catch {
+      this.logger.warn('subscription_management_link_unavailable');
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+          code: 'SUBSCRIPTION_MANAGEMENT_LINK_UNAVAILABLE',
+          message:
+            'L’envoi du lien est temporairement indisponible. Veuillez réessayer dans quelques instants.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    return MANAGEMENT_LINK_RESPONSE;
   }
 
   /**
@@ -413,8 +519,11 @@ export class SubscriptionsService {
    * @param email - L'email de l'utilisateur.
    * @returns Le résultat de la suppression.
    */
-  deleteSubscriptionById(id: string, email: string) {
-    return this.abonnementMailRepository.delete({ id: +id, email: email });
+  deleteSubscriptionById(id: number, email: string) {
+    if (!Number.isInteger(id) || id < 1 || id > 2_147_483_647) {
+      throw new HttpException('Identifiant invalide.', HttpStatus.BAD_REQUEST);
+    }
+    return this.abonnementMailRepository.delete({ id, email });
   }
 
   /**
@@ -527,6 +636,9 @@ export class SubscriptionsService {
             subscription.commune,
             subscription.libelleLocalisation,
             subscription.profil,
+            subscription.lon != null && subscription.lat != null
+              ? { lon: subscription.lon, lat: subscription.lat }
+              : undefined,
           );
 
           stats.mail_envoye++;
@@ -584,6 +696,7 @@ export class SubscriptionsService {
    * @param commune - Code de la commune pour déduire le département.
    */
   addStatDepartement(departements: string[], commune: string) {
+    if (!commune) return;
     const depCode = commune >= '97' ? commune.slice(0, 3) : commune.slice(0, 2);
     if (!departements.includes(depCode)) {
       departements.push(depCode);

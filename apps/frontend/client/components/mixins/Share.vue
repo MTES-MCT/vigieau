@@ -4,23 +4,26 @@ defineProps<{
   address: string
 }>();
 
-const urlToShare = encodeURIComponent(window.location.href);
+const route = useRoute();
+const urlToShare = computed(() => encodeURIComponent(new URL(route.fullPath, window.location.origin).href));
 
-const networks = [
+const networks = computed(() => [
   {
     name: "facebook",
     label: "Partager sur Facebook",
-    url: `https://www.facebook.com/sharer.php?u=${urlToShare}`
+    url: `https://www.facebook.com/sharer.php?u=${urlToShare.value}`
   },
   {
     name: "linkedin",
     label: "Partager sur LinkedIn",
-    url: `https://www.linkedin.com/sharing/share-offsite/?url=${urlToShare}`
+    url: `https://www.linkedin.com/sharing/share-offsite/?url=${urlToShare.value}`
   }
-];
+]);
 </script>
 
 <template>
-  <DsfrShare title="Partagez votre situation - Attention l'adresse utilisée sera visible"
-             :networks="networks"/>
+  <DsfrShare
+    title="Partagez votre situation - Attention l'adresse utilisée sera visible"
+    :networks="networks"
+  />
 </template>

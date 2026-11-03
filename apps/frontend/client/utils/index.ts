@@ -16,6 +16,7 @@ import {
 import type { RestrictionPopupEmptyState } from './map-popup-content';
 import { openAccessibleTallyPopup } from './tally-popup';
 import { getHttpErrorStatus, isZoneRestrictionsConflict } from './zone-publication';
+import { buildSituationQuery } from './situation-link';
 
 const alphanumBase = 'abcdefghijklmnopqrstuvwyz0123456789';
 // We need to duplicate the base string to have a longer string
@@ -215,12 +216,7 @@ const index = {
     addressStore.setProfile(profile);
     addressStore.setTypeEau(typeEau);
     setZones(data?.value ? data.value : []);
-    const query: any = {};
-    query.profil = profile;
-    query.typeEau = typeEau;
-    query.adresse = address
-      ? address?.properties.label
-      : `${geo?.nom}, ${geo?.codeDepartement}`;
+    const query = buildSituationQuery(address, geo, profile, typeEau);
     router.push({ path: '/situation', query });
   },
 

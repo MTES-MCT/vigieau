@@ -3,11 +3,9 @@ import { BrevoClient } from '@getbrevo/brevo';
 import { JwtService } from '@nestjs/jwt';
 import { CommunesService } from '../communes/communes.service';
 import { ConfigService } from '@nestjs/config';
-import { VigieauLogger } from '../logger/vigieau.logger';
 
 @Injectable()
 export class BrevoService {
-  private readonly logger = new VigieauLogger('BrevoService');
   private readonly brevoClient?: BrevoClient;
 
   constructor(
@@ -51,6 +49,7 @@ export class BrevoService {
     codeCommune: string,
     libelleLocalisation: string,
     profil: string,
+    coordinates?: { lon: number | string; lat: number | string },
   ) {
     const isEmailEnabled =
       this.configService.get<string>('EMAIL_NOTIFICATIONS_ENABLED') === '1';
@@ -61,6 +60,30 @@ export class BrevoService {
     const recipient =
       this.configService.get<string>('EMAIL_NOTIFICATIONS_DEV_RECIPIENT') ||
       email;
+
+    const restrictionUrl = new URL(
+      '/situation',
+      this.configService.get<string>('WEBSITE_URL'),
+    );
+    restrictionUrl.searchParams.set('profil', profil);
+    restrictionUrl.searchParams.set('adresse', libelleLocalisation);
+    if (coordinates?.lon != null && coordinates?.lat != null) {
+      const lon = Number(coordinates.lon);
+      const lat = Number(coordinates.lat);
+      if (
+        !Number.isFinite(lon) ||
+        !Number.isFinite(lat) ||
+        lon < -180 ||
+        lon > 180 ||
+        lat < -90 ||
+        lat > 90
+      ) {
+        throw new Error('Invalid subscription coordinates');
+      }
+      restrictionUrl.searchParams.set('lon', String(lon));
+      restrictionUrl.searchParams.set('lat', String(lat));
+      if (codeCommune) restrictionUrl.searchParams.set('commune', codeCommune);
+    }
 
     const params = {
       address: libelleLocalisation,
@@ -74,9 +97,7 @@ export class BrevoService {
       changementSup,
       niveauGraviteSou: this.getniveauGraviteFr(niveauGraviteSou),
       changementSou,
-      restrictionUrl: `${this.configService.get<string>(
-        'WEBSITE_URL',
-      )}/situation?profil=${profil}&adresse=${libelleLocalisation}`,
+      restrictionUrl: restrictionUrl.toString(),
     };
 
     return this.sendMail(
@@ -141,6 +162,53 @@ export class BrevoService {
     return `${this.configService.get<string>('WEBSITE_URL')}/abonnements?token=${token}`;
   }
 
+  /** Sends a fresh management link without creating or changing subscriptions. */
+  async sendManagementLink(email: string) {
+    if (!this.brevoClient) {
+      if (this.configService.get<string>('NODE_ENV') === 'production') {
+        throw new Error('BREVO_API_KEY is required');
+      }
+      return;
+    }
+
+    // Reuse the verified sender of the subscription confirmation template.
+    const template = await this.brevoClient.transactionalEmails.getSmtpTemplate(
+      {
+        templateId: 29,
+      },
+    );
+    if (!template.sender?.email) {
+      throw new Error('Subscription email sender is unavailable');
+    }
+    const url = this.computeUnsubscribeUrl(email);
+    const escapedUrl = url.replace(
+      /[&<>"']/g,
+      (character) =>
+        ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        })[character],
+    );
+
+    return this.brevoClient.transactionalEmails.sendTransacEmail({
+      sender: { email: template.sender.email, name: template.sender.name },
+      ...(template.replyTo ? { replyTo: { email: template.replyTo } } : {}),
+      to: [{ email }],
+      subject: 'Gérer vos abonnements aux alertes VigiEau',
+      htmlContent: `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Vos abonnements VigiEau</title></head><body>
+<h1>Gérer vos abonnements aux alertes VigiEau</h1>
+<p>Vous avez demandé un nouveau lien pour consulter vos abonnements ou vous désabonner.</p>
+<p><a href="${escapedUrl}">Gérer mes abonnements</a></p>
+<p>Ce lien personnel est valable 7 jours. Ne le partagez pas.</p>
+<p>Si vous n’êtes pas à l’origine de cette demande, vous pouvez ignorer ce message. Vos abonnements restent inchangés.</p>
+</body></html>`,
+      textContent: `Vous avez demandé un nouveau lien pour gérer vos abonnements aux alertes VigiEau.\n\nGérer mes abonnements : ${url}\n\nCe lien personnel est valable 7 jours. Ne le partagez pas.\n\nSi vous n’êtes pas à l’origine de cette demande, vous pouvez ignorer ce message. Vos abonnements restent inchangés.`,
+    });
+  }
+
   /**
    * Envoie un email transactionnel via Brevo.
    *
@@ -157,14 +225,10 @@ export class BrevoService {
       }
     }
 
-    try {
-      return this.brevoClient.transactionalEmails.sendTransacEmail({
-        templateId,
-        to: [{ email: to }],
-        params,
-      });
-    } catch (error) {
-      this.logger.error(`Error sending email`, error.message);
-    }
+    return this.brevoClient.transactionalEmails.sendTransacEmail({
+      templateId,
+      to: [{ email: to }],
+      params,
+    });
   }
 }

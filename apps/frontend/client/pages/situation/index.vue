@@ -9,17 +9,17 @@ definePageMeta({
 const addressStore = useAddressStore();
 const {adressString, isParticulier} = addressStore;
 
-useHead({
+useHead(() => ({
   title: `Situation ${adressString()} - ${useRuntimeConfig().public.appName}`
-})
+}))
 </script>
 
 <template>
   <div>
-    <SituationStatus/>
+    <SituationStatus />
     <MixinsEmail />
-    <AccueilGestes v-if="isParticulier()"/>
-    <AccueilLiens/>
-    <AccueilFaq/>
+    <AccueilGestes v-if="isParticulier()" />
+    <AccueilLiens />
+    <AccueilFaq />
   </div>
 </template>

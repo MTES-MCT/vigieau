@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { SubscriptionsService } from './subscriptions.service';
-import { Repository } from 'typeorm';
+import { FindOperator, Repository } from 'typeorm';
 import { CommunesService } from '../communes/communes.service';
 import { HttpService } from '@nestjs/axios';
 import { ZonesService } from '../zones/zones.service';
@@ -55,6 +55,7 @@ describe('SubscriptionsService', () => {
             sendMail: jest.fn(),
             computeUnsubscribeUrl: jest.fn(),
             sendSituationUpdate: jest.fn(),
+            sendManagementLink: jest.fn(),
           },
         },
         {
@@ -257,7 +258,8 @@ describe('SubscriptionsService', () => {
         29,
         'test@test.com',
         expect.objectContaining({
-          city: '',
+          city: 'Point sur la carte (48.8566, 2.3522)',
+          address: 'Point sur la carte (48.8566, 2.3522)',
         }),
       );
     });
@@ -337,6 +339,314 @@ describe('SubscriptionsService', () => {
       expect(save).not.toHaveBeenCalled();
       expect(update).not.toHaveBeenCalled();
       expect(brevoService.sendMail).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('subscription identity and confirmation retries', () => {
+    let subscriptions: any[];
+    const input = {
+      email: 'alice@example.com',
+      profil: 'particulier',
+      typesEau: ['AEP'],
+    };
+
+    beforeEach(() => {
+      subscriptions = [];
+      jest
+        .spyOn(communesService, 'getCommune')
+        .mockReturnValue({ nom: 'Paris' } as any);
+      jest.spyOn(zonesService, 'searchZonesByLonLat').mockReturnValue([]);
+      jest.spyOn(zonesService, 'searchZonesByCommune').mockReturnValue([]);
+      const matches = (row: any, where: any) =>
+        Object.entries(where).every(([key, value]) => {
+          // TypeORM ignores undefined/null predicates unless IsNull is explicit.
+          if (value == null) return true;
+          if (value instanceof FindOperator)
+            return value.type === 'isNull' && row[key] == null;
+          return row[key] === value;
+        });
+      jest
+        .spyOn(abonnementMailRepository, 'exists')
+        .mockImplementation(async ({ where }: any) =>
+          subscriptions.some((row) => matches(row, where)),
+        );
+      jest
+        .spyOn(abonnementMailRepository, 'save')
+        .mockImplementation(async (row: any) => {
+          const saved = { ...row, id: subscriptions.length + 1 };
+          subscriptions.push(saved);
+          return saved;
+        });
+      jest
+        .spyOn(abonnementMailRepository, 'update')
+        .mockImplementation(async (where: any, patch: any) => {
+          for (const row of subscriptions)
+            if (matches(row, where)) Object.assign(row, patch);
+          return { affected: 1, raw: [], generatedMaps: [] };
+        });
+    });
+
+    it('keeps a commune subscription separate from an address in that commune', async () => {
+      subscriptions.push({
+        ...input,
+        commune: '75056',
+        idAdresse: '75056_0001_00010',
+        lon: 2,
+        lat: 48,
+        typesEau: ['SOU'],
+      });
+      await service.create({ ...input, commune: '75056' } as any, '127.0.0.1');
+      expect(subscriptions).toHaveLength(2);
+      expect(subscriptions[0].typesEau).toEqual(['SOU']);
+      expect(subscriptions[1]).toMatchObject({
+        commune: '75056',
+        typesEau: ['AEP'],
+      });
+    });
+
+    it('keeps coordinate subscriptions separate between recipients', async () => {
+      subscriptions.push({
+        ...input,
+        email: 'bob@example.com',
+        lon: 0,
+        lat: 48,
+        typesEau: ['SOU'],
+      });
+      await service.create({ ...input, lon: 0, lat: 48 } as any, '127.0.0.1');
+      expect(subscriptions).toHaveLength(2);
+      expect(subscriptions[0]).toMatchObject({
+        email: 'bob@example.com',
+        typesEau: ['SOU'],
+      });
+      expect(subscriptions[1]).toMatchObject({
+        email: input.email,
+        lon: 0,
+        lat: 48,
+        libelleLocalisation: 'Point sur la carte (48, 0)',
+      });
+    });
+
+    it('keeps two map points in one commune and a commune-only subscription distinct', async () => {
+      subscriptions.push(
+        { ...input, commune: '75056', typesEau: ['SOU'] },
+        { ...input, commune: '75056', lon: 2, lat: 48, typesEau: ['SOU'] },
+      );
+      await service.create(
+        { ...input, commune: '75056', lon: 2.1, lat: 48 } as any,
+        '127.0.0.1',
+      );
+      expect(subscriptions).toHaveLength(3);
+      expect(subscriptions.slice(0, 2).map((row) => row.typesEau)).toEqual([
+        ['SOU'],
+        ['SOU'],
+      ]);
+      expect(subscriptions[2].libelleLocalisation).toBe(
+        'Paris — Point sur la carte (48, 2.1)',
+      );
+    });
+
+    it('keeps a map point distinct from an address at the same coordinates', async () => {
+      subscriptions.push({
+        ...input,
+        idAdresse: '75056_0001_00010',
+        lon: 2,
+        lat: 48,
+        typesEau: ['SOU'],
+      });
+      await service.create({ ...input, lon: 2, lat: 48 } as any, '127.0.0.1');
+      expect(subscriptions).toHaveLength(2);
+      expect(subscriptions[0].typesEau).toEqual(['SOU']);
+    });
+
+    it('retries confirmation after provider failure without duplicating the saved subscription', async () => {
+      jest
+        .spyOn(brevoService, 'sendMail')
+        .mockRejectedValueOnce(new Error('Private provider response'))
+        .mockResolvedValueOnce(undefined);
+      await expect(
+        service.create({ ...input, commune: '75056' } as any, '127.0.0.1'),
+      ).rejects.toMatchObject({
+        status: 503,
+        response: { code: 'SUBSCRIPTION_CONFIRMATION_UNAVAILABLE' },
+      });
+      expect(subscriptions).toHaveLength(1);
+      await expect(
+        service.create({ ...input, commune: '75056' } as any, '127.0.0.1'),
+      ).resolves.toMatchObject(input);
+      expect(subscriptions).toHaveLength(1);
+      expect(brevoService.sendMail).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.stringify((service as any).logger.warn.mock.calls),
+      ).not.toContain('Private provider response');
+    });
+
+    it.each([
+      {},
+      { lon: 0 },
+      { lat: 48 },
+      { commune: '75056', lon: 2 },
+      { lon: Infinity, lat: 48 },
+      { lon: 2, lat: 91 },
+    ])(
+      'rejects a missing or incomplete location before persistence: %p',
+      async (location) => {
+        await expect(
+          service.create({ ...input, ...location } as any, '127.0.0.1'),
+        ).rejects.toMatchObject({ status: 400 });
+        expect(abonnementMailRepository.exists).not.toHaveBeenCalled();
+        expect(abonnementMailRepository.save).not.toHaveBeenCalled();
+        expect(brevoService.sendMail).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('requestManagementLink', () => {
+    const email = 'alice@example.com';
+    const response = {
+      message:
+        'Si des abonnements sont associés à cette adresse, un lien de gestion vous sera envoyé.',
+    };
+
+    it.each([true, false])(
+      'returns the same response whether subscriptions exist: %s',
+      async (exists) => {
+        jest
+          .spyOn(abonnementMailRepository, 'exists')
+          .mockResolvedValue(exists);
+        await expect(service.requestManagementLink(email)).resolves.toEqual(
+          response,
+        );
+        expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(
+          exists ? 1 : 0,
+        );
+        if (exists)
+          expect(brevoService.sendManagementLink).toHaveBeenCalledWith(email);
+        expect(abonnementMailRepository.exists).toHaveBeenCalledWith({
+          where: { email },
+        });
+      },
+    );
+
+    it('suppresses concurrent/repeated requests for one recipient', async () => {
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
+      await Promise.all([
+        service.requestManagementLink(email),
+        service.requestManagementLink(email),
+      ]);
+      await service.requestManagementLink(email);
+      expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not suppress a corrected email casing after a non-matching request', async () => {
+      jest
+        .spyOn(abonnementMailRepository, 'exists')
+        .mockImplementation(
+          async ({ where }: any) => where.email === 'Alice@example.com',
+        );
+      await service.requestManagementLink('alice@example.com');
+      await service.requestManagementLink('Alice@example.com');
+      expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(1);
+      expect(brevoService.sendManagementLink).toHaveBeenCalledWith(
+        'Alice@example.com',
+      );
+    });
+
+    it('propagates a failed delivery to all concurrent callers and allows retry', async () => {
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
+      let failDelivery: (reason: Error) => void;
+      const delivery = new Promise<never>((_, reject) => {
+        failDelivery = reject;
+      });
+      jest
+        .spyOn(brevoService, 'sendManagementLink')
+        .mockReturnValueOnce(delivery)
+        .mockResolvedValueOnce(undefined);
+      const results = Promise.allSettled([
+        service.requestManagementLink(email),
+        service.requestManagementLink(email),
+      ]);
+      failDelivery(new Error('provider unavailable'));
+      expect(await results).toEqual([
+        {
+          status: 'rejected',
+          reason: expect.objectContaining({
+            status: 503,
+            response: expect.objectContaining({
+              code: 'SUBSCRIPTION_MANAGEMENT_LINK_UNAVAILABLE',
+            }),
+          }),
+        },
+        {
+          status: 'rejected',
+          reason: expect.objectContaining({
+            status: 503,
+            response: expect.objectContaining({
+              code: 'SUBSCRIPTION_MANAGEMENT_LINK_UNAVAILABLE',
+            }),
+          }),
+        },
+      ]);
+      expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(1);
+      await expect(service.requestManagementLink(email)).resolves.toEqual(
+        response,
+      );
+      expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(2);
+    });
+
+    it('allows a new request after the cooldown expires', async () => {
+      const now = jest.spyOn(Date, 'now').mockReturnValue(1_000);
+      try {
+        jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
+        await service.requestManagementLink(email);
+        now.mockReturnValue(61_000);
+        await service.requestManagementLink(email);
+        expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(2);
+      } finally {
+        now.mockRestore();
+      }
+    });
+
+    it('allows retry after send failure and does not expose provider details', async () => {
+      jest.spyOn(abonnementMailRepository, 'exists').mockResolvedValue(true);
+      jest
+        .spyOn(brevoService, 'sendManagementLink')
+        .mockRejectedValueOnce(new Error('private-token'))
+        .mockResolvedValueOnce(undefined);
+      await expect(service.requestManagementLink(email)).rejects.toMatchObject({
+        status: 503,
+        response: { code: 'SUBSCRIPTION_MANAGEMENT_LINK_UNAVAILABLE' },
+      });
+      await expect(service.requestManagementLink(email)).resolves.toEqual(
+        response,
+      );
+      expect(brevoService.sendManagementLink).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.stringify((service as any).logger.warn.mock.calls),
+      ).not.toMatch(/private-token|alice@example/);
+    });
+  });
+
+  describe('deleteSubscriptionById', () => {
+    it.each([0, -1, 1.5, NaN, Infinity, 2_147_483_648])(
+      'rejects invalid IDs before querying the database: %p',
+      (id) => {
+        const remove = jest.spyOn(abonnementMailRepository, 'delete');
+        expect(() =>
+          service.deleteSubscriptionById(id, 'alice@example.com'),
+        ).toThrow(HttpException);
+        expect(remove).not.toHaveBeenCalled();
+      },
+    );
+
+    it('scopes a deletion to both the subscription ID and the authenticated email', async () => {
+      jest
+        .spyOn(abonnementMailRepository, 'delete')
+        .mockResolvedValue({ affected: 1, raw: [] });
+      await service.deleteSubscriptionById(42, 'alice@example.com');
+      expect(abonnementMailRepository.delete).toHaveBeenCalledWith({
+        id: 42,
+        email: 'alice@example.com',
+      });
     });
   });
 
@@ -664,6 +974,98 @@ describe('SubscriptionsService', () => {
   });
 
   describe('updateSituations', () => {
+    it.each([
+      { lon: '0', lat: '48' },
+      { lon: 0, lat: 48 },
+    ])(
+      'can notify a coordinate subscription without a commune: %p',
+      async (coordinates) => {
+        jest.spyOn(abonnementMailRepository, 'find').mockResolvedValue([
+          {
+            id: 1,
+            email: 'test@example.com',
+            ...coordinates,
+            typesEau: ['AEP'],
+            situation: { AEP: 'pas_restriction' },
+            libelleLocalisation: 'Point sur la carte (48, 0)',
+          },
+        ] as any);
+        jest
+          .spyOn(zonesService, 'searchZonesByLonLat')
+          .mockReturnValue([
+            { type: 'AEP', niveauGravite: 'alerte', idZone: 1 },
+          ]);
+        jest
+          .spyOn(abonnementMailRepository, 'update')
+          .mockResolvedValue(undefined);
+        jest
+          .spyOn(service, 'sendMattermostNotification')
+          .mockResolvedValue(undefined);
+        jest.spyOn((service as any).logger, 'log').mockImplementation();
+        await service.updateSituations();
+        expect(brevoService.sendSituationUpdate).toHaveBeenCalledTimes(1);
+        expect(
+          jest.mocked(brevoService.sendSituationUpdate).mock.calls[0][10],
+        ).toEqual(coordinates);
+        expect(abonnementMailRepository.update).toHaveBeenCalledWith(
+          { id: 1 },
+          {
+            situation: {
+              AEP: 'alerte',
+              SUP: 'pas_restriction',
+              SOU: 'pas_restriction',
+            },
+          },
+        );
+        expect(service.sendMattermostNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            erreur: 0,
+            mail_envoye: 1,
+            departements: [],
+          }),
+        );
+      },
+    );
+
+    it('does not invent coordinates for a commune-only subscription notification', async () => {
+      jest.spyOn(abonnementMailRepository, 'find').mockResolvedValue([
+        {
+          id: 1,
+          email: 'test@example.com',
+          commune: '75056',
+          lon: null,
+          lat: null,
+          typesEau: ['AEP'],
+          situation: { AEP: 'pas_restriction' },
+          libelleLocalisation: 'Paris',
+        },
+      ] as any);
+      jest
+        .spyOn(zonesService, 'searchZonesByCommune')
+        .mockReturnValue([{ type: 'AEP', niveauGravite: 'alerte', idZone: 1 }]);
+      jest
+        .spyOn(abonnementMailRepository, 'update')
+        .mockResolvedValue(undefined);
+      jest
+        .spyOn(service, 'sendMattermostNotification')
+        .mockResolvedValue(undefined);
+      jest.spyOn((service as any).logger, 'log').mockImplementation();
+      await service.updateSituations();
+      expect(brevoService.sendSituationUpdate).toHaveBeenCalledWith(
+        'test@example.com',
+        'alerte',
+        true,
+        'pas_restriction',
+        false,
+        'pas_restriction',
+        false,
+        '75056',
+        'Paris',
+        undefined,
+        undefined,
+      );
+    });
+
     it('should not update restrictions or email subscribers when commune data is unavailable', async () => {
       jest.spyOn(abonnementMailRepository, 'find').mockResolvedValue([
         {

@@ -23,7 +23,7 @@ const zoneModalError = ref('');
 const modalOpened: Ref<boolean> = ref(false);
 const router = useRouter();
 
-const addressToUse: Ref<any> = ref(adressString());
+const addressToUse = computed(() => adressString());
 
 const typesEauOptions = [
   {
@@ -80,7 +80,7 @@ const zoneSelectValue = (id: string | number | null | undefined) =>
   id === null || id === undefined ? undefined : String(id);
 
 const zonesOptions = computed(() => {
-  return zones.value
+  return (zones.value ?? [])
     .filter((z) => z.type === typeEau.value)
     .map((z) => {
       return {
@@ -147,7 +147,7 @@ const selectZone = async () => {
     return;
   }
 
-  const selectedZone = zones.value.find(
+  const selectedZone = zones.value?.find(
     (z) => zoneSelectValue(z.id) === zoneSelectValue(zoneModal.value),
   );
   if (!selectedZone) {
@@ -173,7 +173,7 @@ const closeZoneModal = () => {
 };
 
 const updateZone = ($event) => {
-  zone.value = zones.value.find(
+  zone.value = zones.value?.find(
     (z) => zoneSelectValue(z.id) === zoneSelectValue($event),
   );
 };
@@ -192,14 +192,15 @@ onMounted(() => {
 });
 
 watch(
-  () => typeEau.value,
+  [typeEau, zones],
   () => {
+    zoneModalError.value = '';
+    zoneModal.value = null;
     if (zonesOptions.value.length <= 1) {
-      zone.value = zones.value.find((z) => z.type === typeEau.value);
+      zone.value = zones.value?.find((z) => z.type === typeEau.value);
+      modalOpened.value = false;
     } else {
       zone.value = undefined;
-      zoneModal.value = null;
-      zoneModalError.value = '';
       modalOpened.value = true;
     }
   },

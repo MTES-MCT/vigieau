@@ -69,6 +69,10 @@ function visitSituationWithTwoZones(viewportWidth) {
     statusCode: 200,
     body: zones,
   }).as('zoneSearch');
+  cy.intercept('GET', '**/zones/v2?*', {
+    statusCode: 200,
+    body: { zones, availability: { SUP: { status: 'available' } } },
+  }).as('zoneSearchV2');
 
   cy.visit(
     '/situation?adresse=20+Avenue+de+Segur+75007+Paris&profil=particulier&typeEau=SUP',
