@@ -249,7 +249,7 @@ describe('Documents et pages institutionnelles accessibles', () => {
       statusCode: 200,
       body: validZonePublication,
     });
-    cy.intercept('GET', '**/zones?*', {
+    cy.intercept('GET', '**/zones/v2?*', {
       statusCode: 200,
       body: [restrictionZone],
     }).as('zoneSearch');

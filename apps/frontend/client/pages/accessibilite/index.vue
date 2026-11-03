@@ -102,8 +102,8 @@ const links: Ref<any[]> = ref([{'to': '/', 'text': 'Accueil'}, {'text': 'Accessi
       <h3>Contenus non soumis à l’obligation d’accessibilité</h3>
       <ul>
         <li>
-          Les fichiers bureautiques publiés avant le 23 septembre 2018, sauf ceux nécessaires à l’accomplissement
-          d’une démarche administrative en cours.
+          Les fichiers bureautiques publiés avant le 23 septembre 2018, sauf ceux nécessaires à une démarche
+          administrative relevant de l’organisme responsable.
         </li>
         <li>
           Les contenus tiers de la carte de géolocalisation qui ne sont ni financés ni développés par l’organisme
