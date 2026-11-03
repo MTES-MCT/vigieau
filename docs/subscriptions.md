@@ -64,12 +64,21 @@ vers `https://vigieau.gouv.fr/abonnements/nouveau` : modèle 29 déjà correct,
 modèle 32 avec un bouton standard et un bouton Outlook, modèle 65 avec un bouton.
 Ces contenus distants ne sont pas modifiés par le déploiement de ce code.
 
-Pour conserver l'éditeur visuel, corriger ces boutons dans l'interface Brevo,
-puis relire les modèles actifs par l'API. Une mise à jour de `htmlContent` par
-l'API fait perdre l'accès à l'éditeur Drag & Drop selon la
+Le 3 novembre 2026, les trois liens des modèles actifs 32 et 65 ont été corrigés
+par l'API, après sauvegarde et contrôle du contenu précédent. La relecture
+confirme les URL attendues, les métadonnées inchangées et l'absence d'autre
+modification du HTML, hormis un saut de ligne final supprimé par Brevo. Le
+modèle 29 et les liens `{{params.unsubscribeUrl}}` sont restés inchangés.
+
+| Modèle | SHA-256 du HTML relu après correction |
+| --- | --- |
+| 32 | `f207178c3f5e53417b407f19f4e92bbd88740158e88b4f32b78fafd5f643d1ae` |
+| 65 | `3a95430846bb08c07ccb3fac6e90565a3b6a39347160af12970a33f64b69ebfa` |
+
+Une mise à jour de `htmlContent` par l'API fait perdre l'accès à l'éditeur Drag & Drop selon la
 [documentation Brevo](https://developers.brevo.com/reference/update-smtp-template).
-Sauvegarder le contenu avant toute modification et préserver les liens
-`{{params.unsubscribeUrl}}`.
+Les modèles 32 et 65 sont donc maintenus en HTML. Sauvegarder le contenu avant
+toute nouvelle modification et préserver les liens de gestion personnels.
 
 ## Vérification
 

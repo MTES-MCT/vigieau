@@ -122,7 +122,9 @@
     "ts-loader": "^9.4.3",
     "ts-node": "^10.9.1",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "minimatch-legacy": "file:vendor/vigieau-minimatch-legacy-10.2.6-vigieau.1.tgz",
+    "minimatch-modern": "file:vendor/vigieau-minimatch-10.2.6-vigieau.1.tgz"
   },
   "jest": {
     "moduleFileExtensions": [
@@ -173,7 +175,11 @@
       },
       "nodemailer": "$nodemailer",
       "uuid": "11.1.1"
-    }
+    },
+    "follow-redirects": "1.16.2",
+    "glob@>=9 <14.0.2": "14.0.3",
+    "minimatch@<6": "$minimatch-legacy",
+    "minimatch@>=9 <11": "$minimatch-modern"
   },
   "engines": {
     "node": "24.22.1",
