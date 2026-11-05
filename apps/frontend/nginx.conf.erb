@@ -1,0 +1,79 @@
+<%
+preprod_auth_flag = ENV['VIGIEAU_PREPROD_AUTH_ENABLED']
+unless [nil, '', 'false', 'true'].include?(preprod_auth_flag)
+  raise 'VIGIEAU_PREPROD_AUTH_ENABLED must be true, false or unset.'
+end
+preprod_auth_enabled = preprod_auth_flag == 'true'
+if preprod_auth_enabled && ENV['APP'] != 'preservonsleau-front-preprod'
+  raise 'Preproduction authentication requires APP=preservonsleau-front-preprod.'
+end
+%>
+root /app/.output/public;
+
+<% if preprod_auth_enabled %>
+# Browser requests stay on the authenticated frontend origin. The API proxy
+# independently checks the shared session; the business JWT remains untouched.
+location ^~ /api/ {
+    proxy_pass https://api.vigieau.incubateur.net/api/;
+    proxy_ssl_server_name on;
+    proxy_ssl_name api.vigieau.incubateur.net;
+    proxy_ssl_verify on;
+    proxy_ssl_verify_depth 3;
+    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+    proxy_set_header Host api.vigieau.incubateur.net;
+    proxy_set_header Cookie $http_cookie;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_hide_header Access-Control-Allow-Origin;
+    proxy_hide_header Access-Control-Allow-Credentials;
+    add_header Cache-Control "no-store" always;
+}
+<% end %>
+
+location ~* \.map(?:\.(?:gz|br))?$ {
+    return 404;
+}
+
+location = /sw.js {
+    add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    try_files $uri =404;
+}
+
+location = /manifest.webmanifest {
+    add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    default_type application/manifest+json;
+    try_files $uri =404;
+}
+
+location = /inject-sw.js {
+    add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    try_files $uri =404;
+}
+
+location ^~ /_nuxt/ {
+    add_header Cache-Control "<%= preprod_auth_enabled ? 'no-store' : 'public, max-age=31536000, s-maxage=31536000, immutable' %>";
+    try_files $uri =404;
+}
+
+location ^~ /workbox- {
+    add_header Cache-Control "<%= preprod_auth_enabled ? 'no-store' : 'public, max-age=31536000, s-maxage=31536000, immutable' %>";
+    try_files $uri =404;
+}
+
+location ~* \.js$ {
+    add_header Cache-Control "<%= preprod_auth_enabled ? 'no-store' : 'public, max-age=0, s-maxage=0, must-revalidate' %>" always;
+    try_files $uri =404;
+}
+
+location / {
+  autoindex off;
+  absolute_redirect off;
+  port_in_redirect off;
+  expires off;
+  add_header Cache-Control "<%= preprod_auth_enabled ? 'no-store' : 'public, max-age=0, s-maxage=0, must-revalidate' %>" always;
+  include mime.types;
+  types {
+    application/manifest+json  webmanifest;
+  }
+  try_files $uri $uri/ /index.html =404;
+}

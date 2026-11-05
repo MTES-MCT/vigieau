@@ -6,6 +6,7 @@ import type { DepartementSituation } from '../dto/departement.dto';
 import type { ZoneSearchResponse } from '../dto/zone-availability.dto';
 import { useZonePublicationStore } from '../store/zonePublication';
 import { fetchAsRefResponse } from '../utils/fetch-response';
+import { publicApiRequestOptions } from '../utils/preprod-auth';
 import {
   buildPublishedZonePath,
   getDepartmentsApiDate,
@@ -92,7 +93,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'POST',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
       body,
       retry: false,
     }));
@@ -102,7 +103,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/data`, {
       method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
     }));
   },
 
@@ -122,7 +123,7 @@ const index = {
       `/departements?${params.toString()}`,
       {
         method: 'GET',
-        baseURL: runtimeConfig.public.apiSecheresseUrl,
+        ...publicApiRequestOptions(runtimeConfig.public),
       },
     ));
   },
@@ -139,7 +140,7 @@ const index = {
       `/data/area?${params.toString()}`,
       {
         method: 'GET',
-        baseURL: runtimeConfig.public.apiSecheresseUrl,
+        ...publicApiRequestOptions(runtimeConfig.public),
       },
     ));
   },
@@ -161,7 +162,7 @@ const index = {
       `/data/departement?${params.toString()}`,
       {
         method: 'GET',
-        baseURL: runtimeConfig.public.apiSecheresseUrl,
+        ...publicApiRequestOptions(runtimeConfig.public),
       },
     ));
   },
@@ -170,7 +171,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/data/duree`, {
       method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
     }));
   },
 
@@ -178,7 +179,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/data/status`, {
       method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
     }));
   },
 
@@ -197,7 +198,7 @@ const index = {
       `/data/commune/${codeInsee}?${params.toString()}`,
       {
         method: 'GET',
-        baseURL: runtimeConfig.public.apiSecheresseUrl,
+        ...publicApiRequestOptions(runtimeConfig.public),
       },
     ));
   },
@@ -206,7 +207,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/arretes_restrictions?date=${date}&${area ? area : ''}`, {
       method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
     }));
   },
 
@@ -214,7 +215,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
       retry: false,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -226,7 +227,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch('/subscriptions/management-link', {
       method: 'POST',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
       body: { email },
       retry: false,
     }));
@@ -236,7 +237,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/subscriptions/${id}`, {
       method: 'DELETE',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
       retry: false,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -248,7 +249,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/subscriptions`, {
       method: 'DELETE',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
       retry: false,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -260,7 +261,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return useFetch(`/statistics`, {
       method: 'GET',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
     });
   },
 
@@ -268,7 +269,7 @@ const index = {
     const runtimeConfig = useRuntimeConfig();
     return fetchAsRefResponse(() => $fetch(`/usage/feedback/${usageId}`, {
       method: 'POST',
-      baseURL: runtimeConfig.public.apiSecheresseUrl,
+      ...publicApiRequestOptions(runtimeConfig.public),
       retry: false,
       body: {
         feedback: feedbackComment,
@@ -286,7 +287,7 @@ const _searchZones = async (
   searchParams = new URLSearchParams(),
   publicationPin?: ZonePublicationPin,
 ): Promise<any> => {
-  const apiSecheresseUrl = useRuntimeConfig().public.apiSecheresseUrl;
+  const apiOptions = publicApiRequestOptions(useRuntimeConfig().public);
   const publicationStore = publicationPin ? null : useZonePublicationStore();
   let publicationId = publicationPin?.publicationId;
   if (publicationStore) {
@@ -299,7 +300,7 @@ const _searchZones = async (
   let response = await _fetchZones(
     path,
     searchParams,
-    apiSecheresseUrl,
+    apiOptions,
     publicationId,
   );
 
@@ -318,7 +319,7 @@ const _searchZones = async (
     response = await _fetchZones(
       path,
       searchParams,
-      apiSecheresseUrl,
+      apiOptions,
       publicationId,
     );
   }
@@ -329,7 +330,7 @@ const _searchZones = async (
 const _fetchZones = (
   path: string,
   searchParams: URLSearchParams,
-  baseURL: string,
+  apiOptions: ReturnType<typeof publicApiRequestOptions>,
   publicationId?: string | null,
 ): Promise<any> => {
   const departmentCode = _getRequestedDepartmentCode(path, searchParams);
@@ -341,7 +342,7 @@ const _fetchZones = (
           searchParams,
           publicationId,
         ),
-        { method: 'GET', baseURL },
+        { method: 'GET', ...apiOptions },
       );
       return normalizeZoneSearchResponse(response, departmentCode);
     } catch (error) {
@@ -350,7 +351,7 @@ const _fetchZones = (
       }
       const legacyResponse = await $fetch(
         buildPublishedZonePath(path, searchParams, publicationId),
-        { method: 'GET', baseURL },
+        { method: 'GET', ...apiOptions },
       );
       return normalizeZoneSearchResponse(legacyResponse, departmentCode);
     }

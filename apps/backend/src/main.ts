@@ -9,8 +9,10 @@ import { json, urlencoded } from 'express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { createHttpFailureLoggingMiddleware } from './core/middleware/http-failure-logging.middleware';
+import { isPreproductionAuthEnabled } from './core/preproduction-auth';
 
 async function bootstrap() {
+  const preproductionAuthEnabled = isPreproductionAuthEnabled();
   const app = await NestFactory.create(AppModule);
 
   // Logger personnalisé
@@ -47,7 +49,13 @@ async function bootstrap() {
 
   // Gestion du port
   const configService = app.get(ConfigService);
-  await app.listen(configService.get('PORT'));
+  const port = configService.get('PORT');
+  if (preproductionAuthEnabled) {
+    // Only the authentication gateway in this container may reach the API.
+    await app.listen(port, '127.0.0.1');
+  } else {
+    await app.listen(port);
+  }
 }
 
 bootstrap();

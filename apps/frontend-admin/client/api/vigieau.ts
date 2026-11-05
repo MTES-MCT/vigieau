@@ -10,8 +10,9 @@ export class VigiEauApi {
       {
         method: 'GET',
         baseURL: runtimeConfig.public.apiSecheresseUrl,
+        ...(runtimeConfig.public.preprodPublicApiBridge ? { credentials: 'same-origin', retry: false } : {}),
       },
-      0,
+      runtimeConfig.public.preprodPublicApiBridge ? 10000 : 0,
       false,
     );
   }

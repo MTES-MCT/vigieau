@@ -2,6 +2,7 @@ import { $fetch } from 'ofetch';
 import { defineStore } from 'pinia';
 import { computed, Ref, ref } from 'vue';
 import type { ZonePublication } from '../dto/zone-publication.dto';
+import { publicApiRequestOptions } from '../utils/preprod-auth';
 import {
   classifyManifestFailure,
   fetchLegacyPmtilesEtag,
@@ -73,7 +74,7 @@ export const useZonePublicationStore = defineStore(
 
       const runtimeConfig = useRuntimeConfig();
       loadingPromise = $fetch<ZonePublication>('/zones/publication', {
-        baseURL: runtimeConfig.public.apiSecheresseUrl,
+        ...publicApiRequestOptions(runtimeConfig.public),
         cache: 'no-store',
         retry: 0,
         timeout: ZONE_PUBLICATION_TIMEOUT_MS,

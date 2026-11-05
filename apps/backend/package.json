@@ -27,7 +27,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "scalingo-postbuild": "npm run build"
+    "scalingo-postbuild": "npm run build && node ../../scripts/preprod-auth/install.mjs backend"
   },
   "dependencies": {
     "@getbrevo/brevo": "^6.0.2",

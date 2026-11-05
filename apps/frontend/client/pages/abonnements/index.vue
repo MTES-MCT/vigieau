@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import api from '../../api';
 import type { Subscription } from '../../dto/subscription.dto';
 import { getHttpErrorStatus } from '../../utils/zone-publication';
+import { isPreprodAuthenticationError } from '../../utils/preprod-auth';
 
 definePageMeta({
   layout: 'basic',
@@ -51,7 +52,8 @@ const loadSubscriptions = async () => {
     accessState.value = 'ready';
   } catch (error) {
     if (version !== loadVersion) return;
-    accessState.value = [401, 403].includes(getHttpErrorStatus(error) ?? 0)
+    accessState.value = !isPreprodAuthenticationError(error)
+      && [401, 403].includes(getHttpErrorStatus(error) ?? 0)
       ? 'link-required'
       : 'unavailable';
   }
@@ -107,7 +109,8 @@ const unsubscribe = async () => {
       : await api.unsubscribe(ids[0], token.value);
     if (response.error?.value) throw response.error.value;
   } catch (error) {
-    if ([401, 403].includes(getHttpErrorStatus(error) ?? 0)) {
+    if (!isPreprodAuthenticationError(error)
+      && [401, 403].includes(getHttpErrorStatus(error) ?? 0)) {
       accessState.value = 'link-required';
       userSubscriptions.value = [];
       modalOpened.value = false;

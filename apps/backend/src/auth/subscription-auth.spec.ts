@@ -60,6 +60,43 @@ describe('Subscription management authentication', () => {
     );
   });
 
+  it('keeps the subscription JWT identity separate from the preproduction rate key', async () => {
+    const token = jwt.sign(
+      { email: 'subscriber@example.com' },
+      { expiresIn: '7d' },
+    );
+    await request(app.getHttpServer())
+      .get('/api/subscriptions')
+      .set('X-Vigieau-Preprod-Rate-Key', 'A'.repeat(43))
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200, []);
+    expect(service.getSubscriptionsByEmail).toHaveBeenCalledWith(
+      'subscriber@example.com',
+    );
+
+    await request(app.getHttpServer())
+      .delete('/api/subscriptions/42')
+      .set('X-Vigieau-Preprod-Rate-Key', 'A'.repeat(43))
+      .set('Authorization', `Bearer ${token}`)
+      .expect(204);
+    expect(service.deleteSubscriptionById).toHaveBeenCalledWith(
+      42,
+      'subscriber@example.com',
+    );
+  });
+
+  it('requires a valid subscription JWT even with a preproduction rate key', async () => {
+    for (const method of ['get', 'delete'] as const) {
+      await request(app.getHttpServer())
+        [method]('/api/subscriptions')
+        .set('X-Vigieau-Preprod-Rate-Key', 'A'.repeat(43))
+        .set('Authorization', 'Bearer invalid-subscription-token')
+        .expect(401);
+    }
+    expect(service.getSubscriptionsByEmail).not.toHaveBeenCalled();
+    expect(service.deleteSubscriptionByEmail).not.toHaveBeenCalled();
+  });
+
   it.each(['', 'tampered', 'expired', 'missing-email', 'invalid-email'])(
     'refuses %s credentials before reading or deleting subscriptions',
     async (kind) => {

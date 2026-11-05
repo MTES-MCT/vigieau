@@ -1,7 +1,9 @@
 import { defineNuxtConfig } from 'nuxt/config';
 import istanbulPlugin from 'vite-plugin-istanbul';
+import { isPreprodPublicApiBridgeEnabled } from './config/preprod-public-api';
 
 const appName = 'VigiEau Admin';
+const preprodPublicApiBridge = isPreprodPublicApiBridgeEnabled(process.env);
 
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
@@ -75,7 +77,8 @@ export default defineNuxtConfig({
       domainName: process.env.DOMAIN_NAME,
       apiUrl: process.env.API_URL,
       email: 'contact.vigieau@beta.gouv.fr',
-      apiSecheresseUrl: process.env.API_SECHERESSE_URL,
+      apiSecheresseUrl: preprodPublicApiBridge ? '/api-vigieau' : process.env.API_SECHERESSE_URL,
+      preprodPublicApiBridge,
       sentryDsn: process.env.SENTRY_DSN,
       sentryRelease: process.env.SENTRY_RELEASE || process.env.SOURCE_VERSION || process.env.CONTAINER_VERSION || '',
       sentryEnv: process.env.SENTRY_ENV || (process.env.IS_PROD === '1' ? 'prod' : 'local'),

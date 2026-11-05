@@ -6,8 +6,11 @@ import {
 import { focusRouteContent } from './utils/focus-management';
 import { observeNewWindowLinks } from './utils/new-window-links';
 import { createRetryScheduler } from './utils/retryable-task';
+import { preprodAuthenticationRequired, preprodLoginUrl } from './utils/preprod-auth';
 
 const route = useRoute();
+const preprodAuthEnabled = useRuntimeConfig().public.preprodAuthEnabled === true;
+const preprodLoginHref = computed(() => preprodLoginUrl(route.fullPath));
 const routeAnnouncement = ref('');
 const zonePublicationStore = useZonePublicationStore();
 const ZONE_PUBLICATION_REFRESH_MS = 60_000;
@@ -19,6 +22,10 @@ let routeChangeSequence = 0;
 let stopNewWindowLinkObserver: (() => void) | null = null;
 
 function refreshPublication(force = false): void {
+  if (preprodAuthEnabled && preprodAuthenticationRequired.value) {
+    publicationRetry.clear();
+    return;
+  }
   void zonePublicationStore
     .loadPublication(force)
     .then(() => publicationRetry.clear())
@@ -99,7 +106,7 @@ onUnmounted(() => {
 
 <template>
   <div>
-    <VitePwaManifest />
+    <VitePwaManifest v-if="!preprodAuthEnabled" />
     <NuxtLoadingIndicator />
     <div
       role="status"
@@ -110,7 +117,22 @@ onUnmounted(() => {
       {{ routeAnnouncement }}
     </div>
     <NuxtLayout>
-      <NuxtPage />
+      <div
+        v-if="preprodAuthEnabled && preprodAuthenticationRequired"
+        class="fr-container fr-my-6w"
+        role="alert"
+      >
+        <div class="fr-alert fr-alert--info">
+          <h1 class="fr-alert__title">
+            Connexion à la préproduction nécessaire
+          </h1>
+          <p>Votre session a expiré. Connectez-vous à la préproduction pour poursuivre.</p>
+          <p class="fr-mt-2w">
+            <a :href="preprodLoginHref" class="fr-btn">Se connecter à la préproduction</a>
+          </p>
+        </div>
+      </div>
+      <NuxtPage v-else />
     </NuxtLayout>
   </div>
 </template>
