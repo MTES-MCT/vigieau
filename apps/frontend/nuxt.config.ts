@@ -3,11 +3,16 @@ import istanbul from 'vite-plugin-istanbul';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import {
+  isProtectedPreproduction,
+  preprodTransitionServiceWorker,
+} from './config/preprod-auth.mjs';
+import {
   pwaNavigationFallbackDenylist,
   pwaNetworkOnlyPattern,
 } from './client/utils/pwa-cache-policy';
 
 const appName = `VigiEau`;
+const preprodAuthEnabled = isProtectedPreproduction();
 let nitroPublicDir = resolve('.output/public');
 
 const writeWebManifest = async () => {
@@ -114,7 +119,8 @@ export default defineNuxtConfig({
     public: {
       apiAdresseUrl: process.env.API_ADRESSE_URL,
       apiGeoUrl: process.env.API_GEO_URL,
-      apiSecheresseUrl: process.env.API_SECHERESSE_URL,
+      apiSecheresseUrl: preprodAuthEnabled ? '/api' : process.env.API_SECHERESSE_URL,
+      preprodAuthEnabled,
       domainName: process.env.DOMAIN_NAME,
       domainProdNotActivated: process.env.DOMAIN_PROD_NOT_ACTIVATED,
       historicMapManifestUrl: process.env.HISTORIC_MAP_MANIFEST_URL,
@@ -169,7 +175,16 @@ export default defineNuxtConfig({
         },
       };
     },
-    'nitro:build:public-assets': writeWebManifest,
+    'nitro:build:public-assets': async () => {
+      await writeWebManifest();
+      if (preprodAuthEnabled) {
+        await writeFile(
+          resolve(nitroPublicDir, 'sw.js'),
+          preprodTransitionServiceWorker,
+          'utf8',
+        );
+      }
+    },
     'build:manifest': (manifest) => {
       // Suppression du prefetch pour les icônes
       for (const key in manifest) {
@@ -190,6 +205,7 @@ export default defineNuxtConfig({
 
   // @ts-expect-error The PWA module augments Nuxt config at runtime.
   pwa: {
+    disable: preprodAuthEnabled,
     registerType: 'autoUpdate',
     manifest: false,
     workbox: {
