@@ -102,7 +102,9 @@ function noStore(response) {
   response.setHeader("cache-control", "no-store");
   response.setHeader("pragma", "no-cache");
   response.setHeader("x-content-type-options", "nosniff");
-  response.setHeader("referrer-policy", "no-referrer");
+  // no-referrer makes browsers send Origin:null on a native form POST,
+  // which our strict login Origin check correctly refuses.
+  response.setHeader("referrer-policy", "same-origin");
 }
 
 function json(response, status, body) {

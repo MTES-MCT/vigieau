@@ -171,6 +171,8 @@ async function loginForm(
     { jar, ip },
   );
   assert.equal(response.status, 200);
+  assert.equal(response.headers["referrer-policy"], "same-origin",
+    "Native browser form POST must retain its same-origin Origin header");
   const csrf = response.body.match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf, "Login form must contain a CSRF token");
   assert.equal(jar.values.get(CSRF_COOKIE), csrf);
