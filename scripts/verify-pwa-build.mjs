@@ -10,7 +10,7 @@ export async function verifyPwaBuild(appDirectory) {
     await Promise.all([
       readFile(new URL("sw.js", outputRoot), "utf8"),
       readFile(new URL("manifest.webmanifest", outputRoot), "utf8"),
-      readFile(join(appDirectory, "nginx.conf"), "utf8"),
+      readFile(join(appDirectory, "nginx.conf.erb"), "utf8"),
       readdir(clientBundleRoot),
     ]);
 
