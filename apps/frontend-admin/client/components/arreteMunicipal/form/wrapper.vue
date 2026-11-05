@@ -3,7 +3,6 @@ import type { ArreteMunicipal } from '~/dto/arrete_municipal.dto';
 import useVuelidate from '@vuelidate/core';
 import { useAlertStore } from '~/stores/alert';
 import { parsePhoneNumberWithError } from 'libphonenumber-js';
-import { getPublicApiVisibility, type PublicApiVisibility } from '~/utils/public-api-visibility';
 
 const props = defineProps<{
   arreteMunicipal: ArreteMunicipal;
@@ -16,9 +15,6 @@ const api = useApi();
 const v$ = useVuelidate();
 const modalOpened = ref(false);
 const utils = useUtils();
-const preprodPublicApiBridge = useRuntimeConfig().public.preprodPublicApiBridge;
-const visibilityConfirmed = ref(false);
-const visibilityError = ref<PublicApiVisibility | null>(null);
 
 const askEditPublishArrete = async () => {
   await checkSaveArrete();
@@ -35,15 +31,14 @@ const checkSaveArrete = async () => {
   }
   loading.value = true;
 
-  try {
-    // Check si l'arrêté municipal sera visible sur VigiEau
-    const toSave = await checkVisibilityOnVigiEau();
-    if (toSave) {
-      await saveArrete();
-    }
-  } finally {
-    loading.value = false;
+  // Check si l'arrêté municipal sera visible sur VigiEau
+  const toSave = await checkVisibilityOnVigiEau();
+
+  if (toSave) {
+    await saveArrete();
   }
+
+  loading.value = false;
 };
 
 const showErrors = (errors: any, title: string | null) => {
@@ -66,20 +61,7 @@ const showErrors = (errors: any, title: string | null) => {
 };
 
 const checkVisibilityOnVigiEau = async () => {
-  visibilityError.value = null;
-  visibilityConfirmed.value = false;
-  modalOpened.value = false;
   const { data, error } = await api.vigiEau.getZonesByCommune(props.arreteMunicipal.communes[0]?.code);
-  if (preprodPublicApiBridge) {
-    const visibility = getPublicApiVisibility(data.value, error?.value);
-    visibilityConfirmed.value = visibility === 'visible' || visibility === 'empty';
-    if (!visibilityConfirmed.value) {
-      visibilityError.value = visibility;
-      return false;
-    }
-    modalOpened.value = visibility === 'empty';
-    return visibility === 'visible';
-  }
   if ((data.value && data.value.length > 0) || (error?.value && error.value.statusCode === 409)) {
     return true;
   }
@@ -88,9 +70,6 @@ const checkVisibilityOnVigiEau = async () => {
 };
 
 const saveArrete = async () => {
-  if (preprodPublicApiBridge && !visibilityConfirmed.value) {
-    return;
-  }
   const phoneNumber = parsePhoneNumberWithError(props.arreteMunicipal.userPhone, 'FR');
   props.arreteMunicipal.userPhone = phoneNumber.formatInternational();
 
@@ -109,40 +88,6 @@ const saveArrete = async () => {
 
 <template>
   <ArreteMunicipalFormGeneral :arreteMunicipal="arreteMunicipal" />
-
-  <DsfrAlert
-    v-if="visibilityError"
-    type="error"
-    title="Vérification VigiEau impossible"
-    class="fr-mt-3w"
-    data-cy="ArreteMunicipalPublicApiError"
-  >
-    <p v-if="visibilityError === 'authentication-required'">
-      Votre connexion à la préproduction publique de VigiEau est nécessaire pour vérifier la visibilité de cet arrêté.
-      <a
-        class="fr-link"
-        href="https://vigieau.incubateur.net/_preprod/login?rd=%2F"
-        target="_blank"
-        rel="noopener noreferrer"
-        data-cy="ArreteMunicipalPublicApiLogin"
-      >
-        Se connecter à la préproduction (nouvel onglet)
-      </a>
-      Une fois connecté, revenez dans cet onglet et réessayez.
-    </p>
-    <p v-else-if="visibilityError === 'forbidden'">
-      L’accès à la préproduction publique de VigiEau est refusé. Contactez l’équipe VigiEau pour obtenir cet accès.
-    </p>
-    <p v-else>La vérification est momentanément indisponible. Vérifiez votre connexion et réessayez.</p>
-    <p>L’arrêté n’a pas été enregistré. Le formulaire est conservé.</p>
-    <DsfrButton
-      label="Réessayer la vérification"
-      :disabled="loading"
-      secondary
-      data-cy="ArreteMunicipalPublicApiRetry"
-      @click="askEditPublishArrete()"
-    />
-  </DsfrAlert>
 
   <ul
     class="fr-btns-group--sticky fr-btns-group fr-btns-group--md fr-btns-group--inline-sm fr-btns-group--inline-md fr-btns-group--inline-lg fr-mt-4w"

@@ -2,13 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { isProtectedPreproduction, preprodTransitionServiceWorker } from '../config/preprod-auth.mjs';
-import {
-  isPreprodAuthenticationError,
-  preprodAuthenticationRequired,
-  preprodLoginUrl,
-  publicApiRequestOptions,
-} from '../client/utils/preprod-auth.ts';
-
 test('protects only the explicitly enabled public preproduction frontend', () => {
   assert.equal(isProtectedPreproduction({
     APP: 'preservonsleau-front-preprod', VIGIEAU_PREPROD_AUTH_ENABLED: 'true',
@@ -26,59 +19,6 @@ test('protects only the explicitly enabled public preproduction frontend', () =>
     assert.throws(() => isProtectedPreproduction({
       APP: 'preservonsleau-front-preprod', VIGIEAU_PREPROD_AUTH_ENABLED,
     }), /must be true, false or unset/);
-  }
-});
-
-test('recognizes only the preproduction gateway JSON 401, preserving business JWT failures', () => {
-  assert.equal(isPreprodAuthenticationError({
-    statusCode: 401, data: { error: 'preprod_auth_required' },
-  }), true);
-  assert.equal(isPreprodAuthenticationError({
-    response: { status: 401, _data: { error: 'preprod_auth_required' } },
-  }), true);
-  for (const failure of [
-    null, new Error('network failure'),
-    { statusCode: 401, data: { message: 'Unauthorized', statusCode: 401 } },
-    { statusCode: 401, data: { error: 'Unauthorized', message: 'Expired subscription JWT', statusCode: 401 } },
-    { statusCode: 401, data: {} },
-    { statusCode: 401, data: { error: 'Unauthorized' } },
-    { statusCode: 401, data: { error: 'preprod_auth_required', message: 'Invalid token' } },
-    { statusCode: 403, data: { error: 'Forbidden' } },
-    { statusCode: 401, data: [] },
-    { statusCode: 401, data: null },
-    { statusCode: 401 },
-    { statusCode: 401, data: '<html>unauthorized</html>' },
-    { statusCode: 500, data: { error: 'preprod_auth_required' } },
-  ]) assert.equal(isPreprodAuthenticationError(failure), false);
-});
-
-test('keeps request behavior unchanged unless protected preproduction is enabled', () => {
-  assert.deepEqual(publicApiRequestOptions({ apiSecheresseUrl: 'https://api.example.test/api' }), {
-    baseURL: 'https://api.example.test/api',
-  });
-  const options = publicApiRequestOptions({ apiSecheresseUrl: '/api', preprodAuthEnabled: true });
-  preprodAuthenticationRequired.value = false;
-  options.onResponseError({ response: {
-    status: 401, _data: { message: 'Unauthorized', statusCode: 401 },
-  } });
-  assert.equal(preprodAuthenticationRequired.value, false);
-  options.onResponseError({ response: { status: 401, _data: { error: 'preprod_auth_required' } } });
-  assert.equal(preprodAuthenticationRequired.value, true);
-  preprodAuthenticationRequired.value = false;
-});
-
-test('login preserves a local route, query and fragment without accepting an external redirect', () => {
-  const path = '/abonnements?token=subscription-token&source=test#result';
-  const login = new URL(preprodLoginUrl(path), 'https://vigieau.incubateur.net');
-  assert.equal(login.pathname, '/_preprod/login');
-  assert.equal(login.searchParams.get('rd'), path);
-  for (const unsafe of [
-    '', '//evil.example/path', 'https://evil.example/', 'javascript:alert(1)',
-    '/\\evil.example/', '/%2f%2fevil.example/', '/%5cevil.example/',
-    '/_preprod/login?rd=//evil.example', '/_preprod/logout', '/%invalid', '/\n/evil.example',
-    '/%0d%0a/evil.example',
-  ]) {
-    assert.equal(new URL(preprodLoginUrl(unsafe), login.origin).searchParams.get('rd'), '/', unsafe);
   }
 });
 

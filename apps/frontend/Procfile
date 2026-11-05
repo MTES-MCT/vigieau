@@ -1,1 +1,0 @@
-web: node .preprod-auth/launch.mjs

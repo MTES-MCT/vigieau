@@ -7,21 +7,19 @@ import ts from 'typescript';
 import { ref } from 'vue';
 import { fetchAsRefResponse } from '../client/utils/fetch-response.ts';
 import * as zonePublication from '../client/utils/zone-publication.ts';
-import * as preprodAuth from '../client/utils/preprod-auth.ts';
 
 const source = readFileSync(new URL('../client/api/index.ts', import.meta.url), 'utf8');
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 });
 
-function createApi(request, config = {}) {
+function createApi(request) {
   const exports = {};
   const imports = {
     ofetch: { $fetch: request },
     vue: { ref },
     '../store/zonePublication': {},
     '../utils/fetch-response': { fetchAsRefResponse },
-    '../utils/preprod-auth': preprodAuth,
     '../utils/zone-publication': zonePublication,
     '../utils/zone-availability': {},
   };
@@ -36,7 +34,6 @@ function createApi(request, config = {}) {
       apiSecheresseUrl: 'http://localhost/api',
       apiAdresseUrl: 'http://localhost/api',
       apiGeoUrl: 'http://localhost/api',
-      ...config,
     } }),
     useFetch() {
       throw new Error('Explicit requests must not reuse Nuxt async-data cache');
@@ -44,41 +41,6 @@ function createApi(request, config = {}) {
   });
   return exports.default;
 }
-
-test('protected API reports an expired proxy session and preserves subscription Authorization', async () => {
-  for (const [body, requiresLogin] of [
-    [{ error: 'preprod_auth_required' }, true],
-    [{}, false],
-    [{ error: 'Unauthorized' }, false],
-    [{ message: 'Unauthorized', statusCode: 401 }, false],
-  ]) {
-    preprodAuth.preprodAuthenticationRequired.value = false;
-    const api = createApi(createFetch({
-      fetch: async (url, options) => {
-        assert.equal(url, '/api/subscriptions');
-        assert.equal(options.headers.get('Authorization'), 'Bearer business-jwt');
-        return new Response(JSON.stringify(body), {
-          status: 401, headers: { 'Content-Type': 'application/json' },
-        });
-      },
-    }), { apiSecheresseUrl: '/api', preprodAuthEnabled: true });
-    const result = await api.getUserSubscriptions('business-jwt');
-    assert.equal(result.error.value.statusCode, 401);
-    assert.equal(preprodAuth.preprodAuthenticationRequired.value, requiresLogin);
-  }
-  preprodAuth.preprodAuthenticationRequired.value = false;
-});
-
-test('external address lookup does not trigger preproduction login handling', async () => {
-  preprodAuth.preprodAuthenticationRequired.value = false;
-  const api = createApi(createFetch({
-    fetch: async () => new Response(JSON.stringify({ error: 'preprod_auth_required' }), {
-      status: 401, headers: { 'Content-Type': 'application/json' },
-    }),
-  }), { apiSecheresseUrl: '/api', preprodAuthEnabled: true });
-  await api.searchAddressByLatlon('2.3', '48.8');
-  assert.equal(preprodAuth.preprodAuthenticationRequired.value, false);
-});
 
 for (const [method, args, path] of [
   ['getDataArea', ['2026-08-01', '2026-08-31', 'departement=01', true], '/data/area?departement=01&dateDebut=2026-08-01&dateFin=2026-08-31&includeProvisional=true'],

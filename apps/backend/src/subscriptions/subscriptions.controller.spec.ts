@@ -17,11 +17,6 @@ import JwtGuard from '../auth/jwt.guard';
 describe('SubscriptionsController', () => {
   let controller: SubscriptionsController;
   let app: INestApplication;
-  const originalEnvironment = {
-    VIGIEAU_PREPROD_AUTH_ENABLED: process.env.VIGIEAU_PREPROD_AUTH_ENABLED,
-    APP: process.env.APP,
-    SCALINGO_APPLICATION_ID: process.env.SCALINGO_APPLICATION_ID,
-  };
 
   // Mock pour le service des abonnements
   const mockSubscriptionsService = {
@@ -33,7 +28,6 @@ describe('SubscriptionsController', () => {
   };
 
   beforeEach(async () => {
-    delete process.env.VIGIEAU_PREPROD_AUTH_ENABLED;
     jest.resetAllMocks();
     const module: TestingModule = await Test.createTestingModule({
       imports: [ThrottlerModule.forRoot([{ ttl: 900_000, limit: 300 }])],
@@ -69,10 +63,6 @@ describe('SubscriptionsController', () => {
 
   afterEach(async () => {
     await app.close();
-    for (const [key, value] of Object.entries(originalEnvironment)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
   });
 
   it('should be defined', () => {
@@ -379,88 +369,6 @@ describe('SubscriptionsController', () => {
         .send(input)
         .expect(429);
       expect(mockSubscriptionsService.create).toHaveBeenCalledTimes(10);
-    });
-  });
-
-  describe('protected preproduction quotas', () => {
-    const firstRateKey = 'A'.repeat(43);
-    const secondRateKey = 'B'.repeat(43);
-    beforeEach(() => {
-      process.env.VIGIEAU_PREPROD_AUTH_ENABLED = 'true';
-      process.env.APP = 'vigieau-api-preprod';
-      process.env.SCALINGO_APPLICATION_ID = 'test-app';
-    });
-
-    it.each([
-      { path: '/api/subscriptions/management-link', limit: 3, status: 202 },
-      { path: '/api/subscriptions', limit: 10, status: 201 },
-    ])(
-      'applies the $limit request quota to each authenticated IP key on $path',
-      async ({ path, limit, status }) => {
-        const send = (rateKey: string, subscription: number) =>
-          request(app.getHttpServer())
-            .post(path)
-            .set('X-Real-IP', '192.0.2.4')
-            .set('X-Vigieau-Preprod-Rate-Key', rateKey)
-            .send({
-              email: `subscriber${subscription}@example.com`,
-              profil: 'particulier',
-              typesEau: ['AEP'],
-              commune: '75056',
-            });
-        for (let index = 0; index < limit; index++) {
-          await send(firstRateKey, index).expect(status);
-        }
-        await send(firstRateKey, limit).expect(429);
-        await send(secondRateKey, limit).expect(status);
-        const service =
-          status === 201
-            ? mockSubscriptionsService.create
-            : mockSubscriptionsService.requestManagementLink;
-        expect(service).toHaveBeenCalledTimes(limit + 1);
-      },
-    );
-
-    it.each([undefined, 'invalid', 'A'.repeat(44), `${firstRateKey}=`])(
-      'rejects missing or malformed gateway rate keys before sending mail: %p',
-      async (rateKey) => {
-        for (const path of [
-          '/api/subscriptions',
-          '/api/subscriptions/management-link',
-        ]) {
-          const operation = request(app.getHttpServer()).post(path);
-          if (rateKey !== undefined) {
-            operation.set('X-Vigieau-Preprod-Rate-Key', rateKey);
-          }
-          await operation
-            .send({
-              email: 'subscriber@example.com',
-              profil: 'particulier',
-              typesEau: ['AEP'],
-              commune: '75056',
-            })
-            .expect(401);
-        }
-        expect(mockSubscriptionsService.create).not.toHaveBeenCalled();
-        expect(
-          mockSubscriptionsService.requestManagementLink,
-        ).not.toHaveBeenCalled();
-      },
-    );
-
-    it('does not let a client-provided rate key bypass the IP quota when disabled', async () => {
-      process.env.VIGIEAU_PREPROD_AUTH_ENABLED = 'false';
-      for (let index = 0; index < 4; index++) {
-        await request(app.getHttpServer())
-          .post('/api/subscriptions/management-link')
-          .set('X-Real-IP', '192.0.2.4')
-          .set('X-Vigieau-Preprod-Rate-Key', `${index}${'A'.repeat(42)}`)
-          .send({ email: 'subscriber@example.com' })
-          .expect(index === 3 ? 429 : 202);
-      }
-      expect(
-        mockSubscriptionsService.requestManagementLink,
-      ).toHaveBeenCalledTimes(3);
     });
   });
 });

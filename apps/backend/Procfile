@@ -1,2 +1,2 @@
-web: node .preprod-auth/launch.mjs
+web: npm run start:prod
 statcache: npm run start:statcache

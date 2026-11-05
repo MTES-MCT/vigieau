@@ -16,7 +16,6 @@
     "vue-demi@0.14.10": true
   },
   "scripts": {
-    "scalingo-postbuild": "npm run build && node ../../scripts/preprod-auth/install.mjs frontend",
     "build": "nuxi generate && purgecss --config ./purgecss.config.js && node ../../scripts/sentry-private-sourcemaps.mjs && node ../../scripts/prepare-static-preview.mjs && node ../../scripts/verify-maplibre-worker-build.mjs",
     "start": "PORT=${PORT:-3000} node .output/preview.mjs",
     "dev": "nuxi dev",

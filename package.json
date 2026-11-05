@@ -29,7 +29,6 @@
     "smoke:public": "node scripts/smoke-public.mjs",
     "smoke:statistics": "node scripts/smoke-statistics.mjs",
     "test:smoke-statistics": "node --test scripts/smoke-statistics.test.mjs",
-    "test:preprod-auth": "node --test scripts/preprod-auth/*.test.mjs",
     "smoke:admin": "node scripts/smoke-admin.mjs",
     "smoke:datagouv": "node scripts/smoke-datagouv.mjs"
   },
