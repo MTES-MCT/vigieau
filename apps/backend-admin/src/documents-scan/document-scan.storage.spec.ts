@@ -24,6 +24,153 @@ describe('document S3 inventory and reversible quarantine', () => {
   const metadata = { VersionId: 'v1', ETag: 'e1', ContentLength: 4 };
   afterEach(() => jest.restoreAllMocks());
 
+  it('does not enumerate S3 once per missing DB reference or recursively list a directory reference', async () => {
+    const send = jest.fn(async () => ({}));
+    const storage = new S3DocumentStorage({ send } as unknown as S3Client, {
+      ...config,
+      prefix: 'test/',
+    });
+    const references = Array.from({ length: 1707 }, (_, id) => ({
+      id: id + 1,
+      url: `https://documents.example.test/test/legacy-${id}.pdf`,
+      size: 4,
+    }));
+    references.push({
+      id: 9999,
+      url: 'https://documents.example.test/test/',
+      size: 0,
+    });
+    const progress = jest.fn();
+    const inventory = await storage.inventory(references, undefined, progress);
+    expect(send).toHaveBeenCalledTimes(16);
+    expect(inventory.objects).toHaveLength(1707);
+    expect(inventory.invalidReferences).toBe(1);
+    expect(progress.mock.calls[0][0]).toMatchObject({
+      event: 'inventory_progress',
+      phase: 'current_objects',
+      pages: 1,
+    });
+    expect(
+      send.mock.calls.some(
+        ([command]: any[]) =>
+          command.input.Prefix === 'test/' && !command.input.Delimiter,
+      ),
+    ).toBe(false);
+  });
+
+  it('discovers old versions in folders absent from the current object list', async () => {
+    const send = jest.fn(async (command: any) => {
+      if (command.constructor.name !== 'ListObjectVersionsCommand') return {};
+      if (command.input.Prefix === 'test/')
+        return { CommonPrefixes: [{ Prefix: 'test/archive/' }] };
+      if (command.input.Prefix === 'test/archive/')
+        return {
+          Versions: [
+            {
+              Key: 'test/archive/deleted.pdf',
+              VersionId: 'old',
+              IsLatest: false,
+              ETag: 'old-etag',
+              Size: 4,
+            },
+          ],
+        };
+      return {};
+    });
+    const storage = new S3DocumentStorage({ send } as unknown as S3Client, {
+      ...config,
+      prefix: 'test/',
+    });
+    const inventory = await storage.inventory([
+      {
+        id: 1,
+        url: 'https://documents.example.test/test/archive/deleted.pdf',
+        size: 4,
+      },
+    ]);
+    expect(inventory.objects).toEqual([
+      expect.objectContaining({
+        key: 'test/archive/deleted.pdf',
+        versionId: 'old',
+        latest: false,
+      }),
+      expect.objectContaining({
+        key: 'test/archive/deleted.pdf',
+        latest: true,
+      }),
+    ]);
+    expect(inventory.objects[1].versionId).toBeUndefined();
+    expect(
+      send.mock.calls.some(
+        ([command]: any[]) =>
+          command.input.Prefix === 'test/archive/deleted.pdf',
+      ),
+    ).toBe(false);
+  });
+
+  it('discovers nested documents and prioritizes known S3 objects over missing DB placeholders', async () => {
+    const send = jest.fn(async (command: any) => {
+      if (command.constructor.name !== 'ListObjectsV2Command') return {};
+      if (command.input.Prefix === 'test/')
+        return {
+          CommonPrefixes: [
+            { Prefix: 'test/z-archive/' },
+            { Prefix: 'test//pmtiles/' },
+          ],
+        };
+      if (command.input.Prefix === 'test/z-archive/')
+        return {
+          Contents: [
+            { Key: 'test/z-archive/existing.docx', ETag: 'e', Size: 4 },
+          ],
+        };
+      return {};
+    });
+    const storage = new S3DocumentStorage({ send } as unknown as S3Client, {
+      ...config,
+      prefix: 'test/',
+    });
+    const inventory = await storage.inventory([
+      {
+        id: 1,
+        url: 'https://documents.example.test/test/a-missing.pdf',
+        size: 4,
+      },
+    ]);
+    expect(inventory.objects.map((object) => object.key)).toEqual([
+      'test/z-archive/existing.docx',
+      'test/a-missing.pdf',
+    ]);
+    expect(
+      send.mock.calls.some(
+        ([command]: any[]) => command.input.Prefix === 'test//pmtiles/',
+      ),
+    ).toBe(false);
+  });
+
+  it.each(['ListObjectsV2Command', 'ListObjectVersionsCommand'])(
+    'rejects repeated pagination markers from %s',
+    async (stalledCommand) => {
+      const send = jest.fn(async (command: any) =>
+        command.constructor.name === stalledCommand
+          ? {
+              IsTruncated: true,
+              NextContinuationToken: 'same',
+              NextKeyMarker: 'same',
+              NextVersionIdMarker: 'same',
+            }
+          : {},
+      );
+      const storage = new S3DocumentStorage(
+        { send } as unknown as S3Client,
+        config,
+      );
+      await expect(storage.inventory([])).rejects.toMatchObject({
+        name: 'InventoryPaginationStalled',
+      });
+    },
+  );
+
   it('discovers orphan folders without recursively enumerating cartographic artifacts and reports inaccessible versions', async () => {
     const inputs: any[] = [];
     const send = jest.fn(async (command: any) => {

@@ -106,6 +106,23 @@ function harness(count = 1) {
 }
 
 describe('historical document scan checkpoints and containment', () => {
+  it('bounds missing objects by the canary limit without claiming any bytes were scanned', async () => {
+    const h = harness(3);
+    h.storage.head.mockRejectedValue(
+      Object.assign(new Error(), { name: 'NotFound' }),
+    );
+    expect(
+      await h.run({ execute: true, scopeHash: 'scope', limit: 1 }),
+    ).toMatchObject({
+      status: 'limited',
+      processed: 1,
+      remaining: 2,
+      bytes: 0,
+      counts: { missing: 1 },
+    });
+    expect(h.storage.head).toHaveBeenCalledTimes(1);
+    expect(h.scan).not.toHaveBeenCalled();
+  });
   it('does not mutate storage or journal in inventory mode', async () => {
     const h = harness();
     expect(await h.run({ execute: false, scopeHash: 'scope' })).toMatchObject({

@@ -50,7 +50,10 @@ export function scopedRelativeKey(key: string, prefix: string): string | null {
   }
   const relative = key.startsWith('/') ? key.slice(1) : key;
   // Production uses the bucket root; sibling test/dev prefixes belong to other environments.
-  if (/^(?:test|dev|preprod|preproduction)\//i.test(relative)) return null;
+  if (
+    /^(?:test|dev|preprod|preproduction)\//i.test(relative.replace(/^\/+/, ''))
+  )
+    return null;
   return relative;
 }
 
@@ -59,7 +62,7 @@ export function isDocumentKey(
   prefix: string,
   referenced = false,
 ): boolean {
-  const relative = scopedRelativeKey(key, prefix);
+  const relative = scopedRelativeKey(key, prefix)?.replace(/^\/+/, '');
   if (relative === null || !relative || relative.endsWith('/')) return false;
   if (relative.startsWith('_antivirus-quarantine/')) return false;
   if (referenced || DOCUMENT_FOLDER.test(relative)) return true;
@@ -71,8 +74,8 @@ export function isDocumentKey(
 }
 
 export function isDocumentPrefix(key: string, prefix: string): boolean {
-  const relative = scopedRelativeKey(key, prefix);
-  return relative !== null && !GENERATED_FOLDER.test(relative);
+  const relative = scopedRelativeKey(key, prefix)?.replace(/^\/+/, '');
+  return relative !== undefined && !GENERATED_FOLDER.test(relative);
 }
 
 export type ParsedDocumentUrl =

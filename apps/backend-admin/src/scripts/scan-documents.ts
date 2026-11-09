@@ -183,7 +183,27 @@ export async function scanDocumentsMain(
       references.push(...page.rows);
       afterId = page.rows[page.rows.length - 1].id;
     }
-    const inventory = await storage.inventory(references, controller.signal);
+    console.log(
+      JSON.stringify({
+        event: 'inventory_start',
+        databaseReferences: references.length,
+      }),
+    );
+    const inventoryStarted = Date.now();
+    const inventory = await storage.inventory(
+      references,
+      controller.signal,
+      (event) => console.log(JSON.stringify(event)),
+    );
+    const { objects, ...inventorySummary } = inventory;
+    console.log(
+      JSON.stringify({
+        event: 'inventory_complete',
+        ...inventorySummary,
+        candidates: objects.length,
+        elapsedMs: Date.now() - inventoryStarted,
+      }),
+    );
     const timeout = Number(process.env.ANTIVIRUS_TIMEOUT_MS ?? 60_000);
     const ageHours = Number(process.env.ANTIVIRUS_MAX_DATABASE_AGE_HOURS ?? 72);
     if (
