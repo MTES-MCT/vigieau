@@ -443,6 +443,7 @@ export class S3DocumentStorage implements DocumentScanStorage {
     if (!sameObject(object, before))
       throw new Error('Object changed before quarantine');
     const versionId = before.versionId;
+    const immutableVersion = Boolean(versionId && versionId !== 'null');
 
     // Revoke access before copying. Never delete or overwrite the source bytes.
     await this.client.send(
@@ -472,13 +473,19 @@ export class S3DocumentStorage implements DocumentScanStorage {
     const source =
       `${encodeURIComponent(object.bucket)}/${object.key.split('/').map(encodeURIComponent).join('/')}` +
       (versionId ? `?versionId=${encodeURIComponent(versionId)}` : '');
+    if (!immutableVersion && !object.etag) {
+      throw new Error('Unversioned quarantine requires an ETag precondition');
+    }
     const copied = await this.client.send(
       new CopyObjectCommand({
         Bucket: object.bucket,
         Key: key,
         CopySource: source,
         ACL: 'private',
-        ...(object.etag ? { CopySourceIfMatch: object.etag } : {}),
+        // OVH performance storage rejects this header even for a pinned version.
+        // A real version ID fixes the source bytes; null/unversioned sources still
+        // require the conditional copy and must fail if the provider rejects it.
+        ...(!immutableVersion ? { CopySourceIfMatch: object.etag } : {}),
         MetadataDirective: 'COPY',
       }),
       { abortSignal: timeoutSignal(signal) },
