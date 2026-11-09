@@ -10,6 +10,8 @@ import { configureClamd } from './configure-clamav.mjs';
 
 const execute = promisify(execFile);
 const defaultAppRoot = fileURLToPath(new URL('..', import.meta.url));
+// 120 seconds for confinement, plus bounded database checkpoints and cleanup.
+export const DOCUMENT_SCAN_CANCEL_GRACE_MS = 210000;
 
 function ping(socketPath) {
   return new Promise((resolvePing) => {
@@ -52,6 +54,37 @@ function waitForExit(child) {
   });
 }
 
+function waitForScannerExit(child, signal, graceMs) {
+  return new Promise((resolveExit, rejectExit) => {
+    let force;
+    let stopping = false;
+    const cleanup = () => {
+      clearTimeout(force);
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      if (stopping || child.exitCode !== null || child.signalCode !== null)
+        return;
+      stopping = true;
+      // spawn's AbortSignal rejects immediately after SIGTERM: using it would
+      // enter finally and kill the CLI before its positive quarantine finishes.
+      child.kill('SIGTERM');
+      force = setTimeout(() => child.kill('SIGKILL'), graceMs);
+      force.unref();
+    };
+    child.once('error', (error) => {
+      cleanup();
+      rejectExit(error);
+    });
+    child.once('close', (code) => {
+      cleanup();
+      resolveExit(stopping ? 1 : (code ?? 1));
+    });
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
 function assertOneOff(env) {
   if (env.CONTAINER && !env.CONTAINER.startsWith('one-off-')) {
     throw new Error(
@@ -70,6 +103,7 @@ export async function runDocumentScan({
   args = [],
   env = process.env,
   signal,
+  cancellationGraceMs = DOCUMENT_SCAN_CANCEL_GRACE_MS,
 } = {}) {
   assertOneOff(env);
   const entrypoint = join(
@@ -98,10 +132,9 @@ export async function runDocumentScan({
         cwd: appRoot,
         env: childEnv,
         stdio: 'inherit',
-        signal,
       });
       try {
-        return await waitForExit(scanner);
+        return await waitForScannerExit(scanner, signal, cancellationGraceMs);
       } finally {
         await stop(scanner);
       }

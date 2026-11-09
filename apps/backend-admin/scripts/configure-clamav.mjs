@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** The buildpack creates this file before the Node postbuild hook runs. */
@@ -42,15 +42,48 @@ export async function configureClamavFile(configPath) {
   await writeFile(configPath, configureClamd(source));
 }
 
+export const CLAMAV_BUILDPACK =
+  'https://github.com/Scalingo/clamav-buildpack.git#661a265ae1898e44f140c5765788cae26533bc74';
+
+export function configureClamavProfile(source) {
+  // scalingo-26 does not provide rev. Keep the official process selection,
+  // replacing only its dependency on rev/cut with a Bash builtin expansion.
+  const original = `current_process_type="$( echo "\${CONTAINER}" | rev | cut -d'-' -f2- | rev )"`;
+  const replacement = 'current_process_type="${CONTAINER%-*}"';
+  if (source.split(original).length === 2)
+    return source.replace(original, replacement);
+  if (source.split(replacement).length === 2 && !source.includes(original))
+    return source;
+  throw new Error(
+    'Unexpected ClamAV buildpack process profile: review the pinned buildpack before deploying',
+  );
+}
+
+export async function configureClamavBuild(appRoot) {
+  const buildpacks = await readFile(join(appRoot, '.buildpacks'), 'utf8');
+  const clamavBuildpacks = buildpacks
+    .split(/\r?\n/)
+    .filter((line) => line.includes('/clamav-buildpack'));
+  if (
+    clamavBuildpacks.length !== 1 ||
+    clamavBuildpacks[0] !== CLAMAV_BUILDPACK
+  ) {
+    throw new Error('Unexpected ClamAV buildpack pin');
+  }
+  const configPath = join(appRoot, 'clamav/conf/clamd.conf');
+  const profilePath = join(appRoot, '.profile.d/010-clamav.sh');
+  const config = configureClamd(await readFile(configPath, 'utf8'));
+  const profile = configureClamavProfile(await readFile(profilePath, 'utf8'));
+  await writeFile(configPath, config);
+  await writeFile(profilePath, profile);
+}
+
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   // Resolve against this script, not /app: the build directory has a temporary name.
-  const configPath = fileURLToPath(
-    new URL('../clamav/conf/clamd.conf', import.meta.url),
-  );
-  await configureClamavFile(configPath);
+  await configureClamavBuild(fileURLToPath(new URL('..', import.meta.url)));
   console.log(
     'ClamAV: local socket, bounded scans and encrypted/partial-file alerts configured.',
   );
