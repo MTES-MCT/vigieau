@@ -59,10 +59,12 @@ Puis un lot limité avant l'analyse complète :
 
 ```sh
 scalingo --region osc-fr1 --app regleau-back-preprod run --size 2XL 'npm run documents:scan -- --execute --limit 10'
-scalingo --region osc-fr1 --app regleau-back-preprod run --size 2XL 'npm run documents:scan -- --execute'
+scalingo --region osc-fr1 --app regleau-back-preprod run --detached --size 2XL 'npm run documents:scan -- --execute'
 ```
 
-Après validation du bilan et de la quarantaine en préproduction, appliquer la même séquence à `regleau-back-prod`. Pour une commande longue, utiliser le mode détaché de `scalingo run` et conserver l'identifiant du conteneur pour suivre les logs. Ne jamais lancer le batch dans le processus `web` ou un worker métier.
+Après validation du bilan et de la quarantaine en préproduction, appliquer la même séquence à `regleau-back-prod`. Le mode détaché est nécessaire pour les scans complets : une session interactive peut expirer et interrompre le one-off. Conserver l'identifiant de conteneur affiché au lancement et suivre ses logs avec `scalingo --app regleau-back-prod logs --follow --filter one-off-<identifiant>`. Fermer ce suivi n'arrête pas le batch détaché. Ne jamais lancer le batch dans le processus `web` ou un worker métier.
+
+En mode détaché, le retour réussi de la CLI confirme seulement la demande de démarrage. Vérifier le bilan JSON final et le journal `document_scan_run` : `status: completed`, `remaining: 0`, puis examiner les comptes par verdict et la couverture de l'inventaire. Un conteneur disparu ou un ancien état `running` ne prouve pas que l'analyse est terminée. Après une interruption, relancer la même commande reprend les résultats déjà enregistrés.
 
 `documents:scan` lance `scripts/run-document-scan.mjs`. En mode inventaire, ce lanceur exécute directement la commande métier, sans démarrer ClamAV. Avec `--execute`, il :
 
