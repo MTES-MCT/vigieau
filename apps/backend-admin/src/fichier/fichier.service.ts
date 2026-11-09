@@ -6,6 +6,7 @@ import { S3Service } from '../shared/services/s3.service';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
+import { AntivirusService } from '../antivirus/antivirus.service';
 
 @Injectable()
 export class FichierService {
@@ -15,6 +16,7 @@ export class FichierService {
     private readonly s3Service: S3Service,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    private readonly antivirus: AntivirusService,
   ) {
     // this.migrateFiles();
   }
@@ -28,6 +30,7 @@ export class FichierService {
   }
 
   async create(fichier: Express.Multer.File, prefix: string): Promise<Fichier> {
+    await this.scanOrThrow(fichier);
     const s3Response = await this.s3Service.uploadFile(fichier, prefix);
     const toSave = {
       nom: fichier.originalname,
@@ -35,6 +38,10 @@ export class FichierService {
       url: s3Response.Location,
     };
     return this.fichierRepository.save(toSave);
+  }
+
+  scanOrThrow(fichier: Express.Multer.File): Promise<void> {
+    return this.antivirus.scanOrThrow(fichier);
   }
 
   async createImmutable(
@@ -70,11 +77,15 @@ export class FichierService {
           ),
           method: 'GET',
           responseType: 'arraybuffer',
+          maxContentLength: 10_000_000,
+          timeout: 30_000,
         });
         const fileToTransfer = {
           originalname: file.nom,
           buffer: Buffer.from(response.data, 'binary'),
+          size: Buffer.byteLength(response.data),
         };
+        await this.scanOrThrow(fileToTransfer as Express.Multer.File);
         const s3Response = await this.s3Service.uploadFile(
           // @ts-expect-error legacy transfer payload only exposes used fields
           fileToTransfer,

@@ -14,6 +14,7 @@ const endpoints = {
   dataStatus: `${publicApiBase}/api/data/status`,
   adminLive: `${adminApiBase}/api/health/live`,
   adminReady: `${adminApiBase}/api/health/ready`,
+  documentAntivirus: `${adminApiBase}/api/health/antivirus`,
   zonePublication: `${adminApiBase}/api/health/zone-publication`,
   sandreReferences: `${adminApiBase}/api/health/sandre-references`,
   sandreSynchronization: `${adminApiBase}/api/health/sandre-synchronization`,
