@@ -92,6 +92,7 @@ export class S3DocumentStorage implements DocumentScanStorage {
   async inventory(
     references: FileReference[],
     signal?: AbortSignal,
+    onProgress?: (event: Record<string, unknown>) => void,
   ): Promise<DocumentInventory> {
     const referenceMap = new Map<string, FileReference[]>();
     const report: DocumentInventory = {
@@ -117,8 +118,13 @@ export class S3DocumentStorage implements DocumentScanStorage {
         report.invalidReferences++;
         continue;
       }
-      if (scopedRelativeKey(parsed.key, this.config.prefix) === null) {
+      const relative = scopedRelativeKey(parsed.key, this.config.prefix);
+      if (relative === null) {
         report.outOfScopeReferences++;
+        continue;
+      }
+      if (!relative || parsed.key.endsWith('/')) {
+        report.invalidReferences++;
         continue;
       }
       const rows = referenceMap.get(parsed.key) ?? [];
@@ -146,14 +152,35 @@ export class S3DocumentStorage implements DocumentScanStorage {
       ),
     ]);
     for (const key of referenceMap.keys()) {
-      if (
-        !listings.some(
-          (listing) => !listing.Delimiter && key.startsWith(listing.Prefix),
-        )
-      ) {
-        listings.push({ Prefix: key, exactKey: key });
+      // Root + recursive CommonPrefixes discovery already covers current files
+      // and old versions in every non-generated directory. Missing DB objects
+      // are added below and HEADed by the runner: never list once per DB row.
+      // Only explicitly referenced objects inside excluded artifact directories
+      // need an individual lookup, without recursively traversing those folders.
+      if (!isDocumentPrefix(key, this.config.prefix)) {
+        listings.push({ Prefix: key, Delimiter: '/', exactKey: key });
       }
     }
+    let pages = 0;
+    let lastProgressAt = Date.now();
+    const progress = (phase: string) => {
+      pages++;
+      if (
+        pages === 1 ||
+        pages % 100 === 0 ||
+        Date.now() - lastProgressAt >= 10_000
+      ) {
+        onProgress?.({
+          event: 'inventory_progress',
+          phase,
+          pages,
+          listedObjects: report.listedObjects,
+          currentCandidates: current.size,
+          historicalVersions: older.size,
+        });
+        lastProgressAt = Date.now();
+      }
+    };
     const discovered = new Set(listings.map((listing) => listing.Prefix));
     const discoverPrefixes = (prefixes: Array<{ Prefix?: string }> = []) => {
       for (const { Prefix: prefix } of prefixes) {
@@ -169,6 +196,7 @@ export class S3DocumentStorage implements DocumentScanStorage {
     };
     for (const listing of listings) {
       let token: string | undefined;
+      const seenTokens = new Set<string>();
       do {
         const page = await this.client.send(
           new ListObjectsV2Command({
@@ -210,6 +238,12 @@ export class S3DocumentStorage implements DocumentScanStorage {
         token = page.IsTruncated ? page.NextContinuationToken : undefined;
         if (page.IsTruncated && !token)
           throw new Error('Invalid S3 inventory continuation');
+        if (token && seenTokens.has(token))
+          throw Object.assign(new Error('S3 inventory pagination stalled'), {
+            name: 'InventoryPaginationStalled',
+          });
+        if (token) seenTokens.add(token);
+        progress('current_objects');
       } while (token);
     }
 
@@ -219,6 +253,7 @@ export class S3DocumentStorage implements DocumentScanStorage {
       for (const listing of listings) {
         let keyMarker: string | undefined;
         let versionMarker: string | undefined;
+        const seenMarkers = new Set<string>();
         do {
           const page = await this.client.send(
             new ListObjectVersionsCommand({
@@ -266,6 +301,15 @@ export class S3DocumentStorage implements DocumentScanStorage {
             : undefined;
           if (page.IsTruncated && !keyMarker)
             throw new Error('Invalid S3 version continuation');
+          if (keyMarker) {
+            const marker = JSON.stringify([keyMarker, versionMarker]);
+            if (seenMarkers.has(marker))
+              throw Object.assign(new Error('S3 version pagination stalled'), {
+                name: 'InventoryPaginationStalled',
+              });
+            seenMarkers.add(marker);
+          }
+          progress('object_versions');
         } while (keyMarker);
       }
     } catch (error) {
@@ -294,6 +338,7 @@ export class S3DocumentStorage implements DocumentScanStorage {
     }
     report.objects = [...current.values(), ...older.values()].sort(
       (a, b) =>
+        Number(!a.etag) - Number(!b.etag) ||
         a.key.localeCompare(b.key) ||
         String(a.versionId ?? '').localeCompare(String(b.versionId ?? '')),
     );

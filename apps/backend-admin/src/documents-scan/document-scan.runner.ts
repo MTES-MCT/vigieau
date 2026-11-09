@@ -117,6 +117,14 @@ export async function runDocumentScan(
         report.status = 'interrupted';
         break;
       }
+      if (
+        options.limit !== undefined &&
+        report.processed >= options.limit &&
+        !pendingMap.has(objectIdentity(candidate))
+      ) {
+        report.status = 'limited';
+        break;
+      }
       let record: DocumentScanRecord = pendingMap.get(
         objectIdentity(candidate),
       ) ?? {
