@@ -80,12 +80,17 @@ describe('document S3 inventory and reversible quarantine', () => {
       changed?: boolean;
       public?: boolean;
       corruptCopy?: boolean;
+      sourceVersionId?: string | null;
     } = {},
   ) {
     const send = jest.fn(async (command: any) => {
       if (command.constructor.name === 'HeadObjectCommand')
         return {
           ...metadata,
+          VersionId:
+            options.sourceVersionId === null
+              ? undefined
+              : (options.sourceVersionId ?? 'v1'),
           ...(command.input.Key.startsWith('_antivirus-quarantine/')
             ? { VersionId: 'q1' }
             : {}),
@@ -129,8 +134,10 @@ describe('document S3 inventory and reversible quarantine', () => {
     ).toMatchObject({
       CopySource: 'documents//arrete-cadre/file.pdf?versionId=v1',
       ACL: 'private',
-      CopySourceIfMatch: 'e1',
     });
+    expect(
+      commands.find((command) => command.type === 'CopyObjectCommand'),
+    ).not.toHaveProperty('CopySourceIfMatch');
     expect(commands.some((command) => command.type.includes('Delete'))).toBe(
       false,
     );
@@ -144,6 +151,20 @@ describe('document S3 inventory and reversible quarantine', () => {
       fetchMock.mock.calls.every(([, init]) => init.redirect === 'manual'),
     ).toBe(true);
   });
+  it.each([null, 'null'])(
+    'retains the ETag condition for mutable source version %s',
+    async (sourceVersionId) => {
+      const { storage, send } = quarantineFixture({ sourceVersionId });
+      await storage.quarantine(
+        { ...original, versionId: sourceVersionId ?? undefined },
+        hash,
+      );
+      const copy = send.mock.calls.find(
+        ([command]: any[]) => command.constructor.name === 'CopyObjectCommand',
+      )[0] as any;
+      expect(copy.input.CopySourceIfMatch).toBe('e1');
+    },
+  );
   it('stops without changing ACL when the source identity has changed', async () => {
     const { storage, send } = quarantineFixture({ changed: true });
     await expect(storage.quarantine(original, hash)).rejects.toThrow('changed');
