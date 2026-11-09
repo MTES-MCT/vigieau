@@ -158,6 +158,13 @@ jobs:
         run: node scripts/verify-admin-migrations.mjs
         env:
           MIGRATION_VERIFY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify durable antivirus quarantine evidence
+        run: |
+          psql -h localhost -U postgres -d postgres --set ON_ERROR_STOP=1 --command 'CREATE DATABASE vigieau_antivirus_test'
+          npm --prefix apps/backend-admin test -- --runInBand src/documents-scan/document-scan.journal.postgres.spec.ts
+        env:
+          PGPASSWORD: postgres
+          DOCUMENT_SCAN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_antivirus_test
       - name: Verify statistic artifact lifecycle against PostgreSQL
         run: >-
           npm --prefix apps/backend test -- --runInBand
