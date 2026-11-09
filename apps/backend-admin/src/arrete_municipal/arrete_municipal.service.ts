@@ -174,26 +174,28 @@ export class ArreteMunicipalService {
         HttpStatus.BAD_REQUEST,
       );
     }
-    let am: any = await this.arreteMunicipalRepository.save(
-      <any>createArreteMunicipalDto,
+    // The PDF must be accepted before creating a row or sending any email.
+    let am: ArreteMunicipal;
+    const newFile = await this.fichierService.createImmutable(
+      arreteMunicipalPdf,
+      'arrete-municipal/',
     );
-    let newFile = null;
-    // Upload du PDF de l'arrêté municipal
-    if (arreteMunicipalPdf) {
-      newFile = await this.fichierService.create(
-        arreteMunicipalPdf,
-        `arrete-municipal/${am.id}/`,
+    try {
+      am = await this.arreteMunicipalRepository.manager.transaction(
+        'SERIALIZABLE',
+        async (manager) => {
+          const repository = manager.getRepository(ArreteMunicipal);
+          return repository.save(<any>{
+            ...createArreteMunicipalDto,
+            fichier: { id: newFile.id },
+            statut: this.getStatut(createArreteMunicipalDto),
+          });
+        },
       );
-      am.fichier = { id: newFile.id };
+    } catch (error) {
+      await this.discardUnpublishedFile(newFile.id);
+      throw error;
     }
-    am =
-      new Date(createArreteMunicipalDto.dateDebut) <= new Date()
-        ? createArreteMunicipalDto.dateFin &&
-          new Date(createArreteMunicipalDto.dateFin) <= new Date()
-          ? { ...am, ...{ statut: <StatutArreteMunicipal>'abroge' } }
-          : { ...am, ...{ statut: <StatutArreteMunicipal>'publie' } }
-        : { ...am, ...{ statut: <StatutArreteMunicipal>'a_venir' } };
-    am = await this.arreteMunicipalRepository.save(am);
 
     const depCode = am.communes[0]
       ? am.communes[0].code >= '97'
@@ -237,41 +239,76 @@ export class ArreteMunicipalService {
       );
     }
 
-    if (!arreteMunicipalPdf && !am.fichier.id) {
+    if (!arreteMunicipalPdf && !am.fichier?.id) {
       throw new HttpException(
         `Le PDF de l'arrêté municipal est obligatoire.`,
         HttpStatus.BAD_REQUEST,
       );
     }
 
-    let newAm: any = await this.arreteMunicipalRepository.save(<any>{
-      id: id,
-      ...editArreteMunicipalDto,
-    });
     let newFile = null;
-    // Upload du PDF de l'arrêté municipal
+    // An immutable replacement is scanned and uploaded before changing the row.
+    // Keep the previous object: a published URL may still be in emails or caches.
     if (arreteMunicipalPdf) {
-      if (am.fichier.id) {
-        await this.arreteMunicipalRepository.update(
-          { id: id },
-          { fichier: null },
-        );
-        await this.fichierService.deleteById(am.fichier.id);
-      }
-      newFile = await this.fichierService.create(
+      newFile = await this.fichierService.createImmutable(
         arreteMunicipalPdf,
         `arrete-municipal/${am.id}/`,
       );
-      newAm.fichier = { id: newFile.id };
     }
-    newAm =
-      new Date(editArreteMunicipalDto.dateDebut) <= new Date()
-        ? editArreteMunicipalDto.dateFin &&
-          new Date(editArreteMunicipalDto.dateFin) <= new Date()
-          ? { ...newAm, ...{ statut: <StatutArreteMunicipal>'abroge' } }
-          : { ...newAm, ...{ statut: <StatutArreteMunicipal>'publie' } }
-        : { ...newAm, ...{ statut: <StatutArreteMunicipal>'a_venir' } };
-    return <Promise<ArreteMunicipal>>this.arreteMunicipalRepository.save(newAm);
+    try {
+      return await this.arreteMunicipalRepository.manager.transaction(
+        'SERIALIZABLE',
+        async (manager) => {
+          const repository = manager.getRepository(ArreteMunicipal);
+          const current = await repository.findOne({
+            where: { id },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (
+            !current ||
+            !(await this.canEditArreteMunicipal(
+              current,
+              editArreteMunicipalDto,
+            ))
+          ) {
+            throw new HttpException(
+              'Modification impossible.',
+              HttpStatus.UNAUTHORIZED,
+            );
+          }
+          return repository.save(<any>{
+            id,
+            ...editArreteMunicipalDto,
+            statut: this.getStatut(editArreteMunicipalDto),
+            ...(newFile ? { fichier: { id: newFile.id } } : {}),
+          });
+        },
+      );
+    } catch (error) {
+      if (newFile) await this.discardUnpublishedFile(newFile.id);
+      throw error;
+    }
+  }
+
+  private getStatut(
+    dto: CreateUpdateArreteMunicipalDto,
+  ): StatutArreteMunicipal {
+    return new Date(dto.dateDebut) <= new Date()
+      ? dto.dateFin && new Date(dto.dateFin) <= new Date()
+        ? 'abroge'
+        : 'publie'
+      : 'a_venir';
+  }
+
+  private async discardUnpublishedFile(id: number): Promise<void> {
+    try {
+      await this.fichierService.deleteById(id);
+    } catch {
+      this.logger.error(
+        `Impossible de supprimer le fichier non publié ${id}.`,
+        undefined,
+      );
+    }
   }
 
   // async repeal(

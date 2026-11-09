@@ -619,6 +619,24 @@ describe('ArreteRestrictionService.publish', () => {
     expect(harness.fichierService.deleteById).not.toHaveBeenCalledWith(10);
   });
 
+  it('does not mutate the publication when the PDF antivirus gate rejects it', async () => {
+    const harness = createHarness();
+    harness.fichierService.createImmutable.mockRejectedValue(
+      new Error('antivirus rejected'),
+    );
+    await expect(
+      harness.service.publish(
+        37577,
+        { originalname: 'arrete.pdf' } as any,
+        { dateDebut: '2026-08-05', dateFin: null, dateSignature: null },
+        currentUser,
+      ),
+    ).rejects.toThrow('antivirus rejected');
+    expect(harness.repository.manager.transaction).not.toHaveBeenCalled();
+    expect(harness.fichierService.deleteById).not.toHaveBeenCalled();
+    expect(harness.recordPublicMutation).not.toHaveBeenCalled();
+  });
+
   it('rolls back when the business graph changes before the transactional recheck', async () => {
     const harness = createHarness();
     harness.checkBeforePublish
