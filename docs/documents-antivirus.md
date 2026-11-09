@@ -8,6 +8,8 @@ Les fichiers soumis sont analysés avant leur stockage public. Un fichier malvei
 
 Ordre de `.buildpacks` : APT, ClamAV, puis Node. Le buildpack ClamAV installe le moteur et les signatures. `scalingo-postbuild` appelle `build:antivirus` avant la compilation métier pour compléter `clamav/conf/clamd.conf` dans le répertoire du build. La configuration n'est pas réécrite au démarrage du conteneur.
 
+Sur `scalingo-26`, l'outil `rev` utilisé par le profil de ce commit n'est pas disponible. Le postbuild remplace sa seule ligne de détection du type de processus par l'expansion Bash `${CONTAINER%-*}`, sans outil externe ni fork du buildpack. Le pin et la ligne attendue sont contrôlés ; une évolution inattendue fait échouer le build pour éviter de démarrer ClamAV sur les workers ou les one-offs par erreur.
+
 Variables à définir **avant la construction**, sur les deux applications admin :
 
 ```dotenv
@@ -45,7 +47,7 @@ Le bilan comporte `includesApplicationWebProcess: false` : ce pic comprend l'ant
 
 ## Analyse des documents déjà stockés
 
-Le batch est distinct des requêtes HTTP et utilise un conteneur temporaire 2XL. La migration de journal d'analyse doit être appliquée avant son lancement. La commande reprend les résultats déjà journalisés ; utiliser `--rescan` uniquement pour demander leur réanalyse. `--dry-run`, également le mode par défaut, fait seulement l'inventaire : aucun scan, aucune quarantaine et aucune écriture en base.
+Le batch est distinct des requêtes HTTP et utilise un conteneur temporaire 2XL. La migration de journal d'analyse doit être appliquée avant son lancement. La commande reprend les résultats déjà journalisés ; `--rescan` recommence les résultats sains ou non analysables. Un résultat malveillant antérieur reste confiné : la commande vérifie ou réapplique sa quarantaine, sans le republier automatiquement ni remplacer sa détection par un verdict sain. `--dry-run`, également le mode par défaut, fait seulement l'inventaire : aucun scan, aucune quarantaine et aucune écriture en base.
 
 Depuis la CLI Scalingo authentifiée, commencer par l'inventaire en préproduction :
 
@@ -71,9 +73,13 @@ Après validation du bilan et de la quarantaine en préproduction, appliquer la 
 5. Applique `MaxScanTime 60000` au moteur et un délai client de 75 secondes, avec une seule analyse à la fois.
 6. Arrête le moteur et supprime sa configuration temporaire à la fin ou à l'interruption de la commande.
 
+Lors d'une interruption demandée au lanceur, il transmet un seul `SIGTERM` au batch et attend jusqu'à 210 secondes sa sortie : cela couvre les 120 secondes de confinement d'une détection déjà confirmée, les checkpoints en base bornés à 30 secondes et le nettoyage. Le moteur est arrêté ensuite. Au-delà de cette grâce, le batch est tué ; un arrêt brutal imposé par la plateforme reste hors de cette garantie et exige une reprise du journal.
+
 Les limites de taille et les alertes restent les mêmes que sur le web. Le journal distingue fichiers sains, malveillants, non analysables, erreurs et objets manquants. `document_scan_run` conserve le bilan et les points de reprise, `document_scan_result` les résultats associés aux versions d'objets. Le batch produit un bilan JSON ; en exécution il émet aussi une ligne JSON de progression par objet. Les logs exposent des identifiants et empreintes de clés, pas les secrets ni les noms de fichiers. Les détails d'identité restent dans le journal en base, accessible aux opérateurs autorisés.
 
 Une exécution interrompue ou comportant des erreurs ne constitue pas une analyse complète du stock. Les fichiers identifiés comme dangereux sont mis en quarantaine privée, et leur ancienne URL doit devenir inaccessible ; aucune suppression définitive de leur contenu n'est nécessaire pour la quarantaine.
+
+Codes de sortie : `0` pour inventaire/succès/lot limité ; `1` pour échec ou interruption ; `2` pour résultats nécessitant examen ou couverture incomplète. Ce dernier cas inclut les références externes ou invalides et des versions S3 inaccessibles, même si tous les objets effectivement analysés sont sains. En l'absence de versionnement, l'API S3 ne permet pas de rendre une modification d'ACL conditionnelle à l'ETag : le batch vérifie l'identité avant/après, conserve toute ACL restrictive déjà posée et s'arrête sur changement, sans prétendre à une atomicité indisponible.
 
 ## Exploitation
 

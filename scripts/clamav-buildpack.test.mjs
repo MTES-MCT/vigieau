@@ -3,11 +3,19 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
 import {
   configureClamd,
   configureClamavFile,
+  configureClamavProfile,
+  configureClamavBuild,
+  CLAMAV_BUILDPACK,
 } from "../apps/backend-admin/scripts/configure-clamav.mjs";
-import { runDocumentScan } from "../apps/backend-admin/scripts/run-document-scan.mjs";
+import {
+  DOCUMENT_SCAN_CANCEL_GRACE_MS,
+  runDocumentScan,
+} from "../apps/backend-admin/scripts/run-document-scan.mjs";
+import { setTimeout as delay } from "node:timers/promises";
 
 const buildpackConfig =
   "DatabaseDirectory /app/clamav/data\nLocalSocket /app/clamav/run/clamd.sock\nForeground no\n";
@@ -18,6 +26,71 @@ const directives = (config) =>
       .split("\n")
       .map((line) => line.trim().split(/\s+/)),
   );
+
+const officialProfile = `CLAMAV_START=0
+current_process_type="$( echo "\${CONTAINER}" | rev | cut -d'-' -f2- | rev )"
+IFS=', ' read -r -a disabled <<< "\${CLAMAV_DISABLE_PROCESS_TYPES:-"postdeploy,one-off"}"
+for p in "\${disabled[@]}"; do
+  if [ "\${p}" == "\${current_process_type}" ]; then
+    CLAMAV_START=1
+    break
+  fi
+done
+export CLAMAV_START
+`;
+
+test("the pinned profile selects web and excludes workers and one-offs without rev or cut", () => {
+  const profile = configureClamavProfile(officialProfile);
+  assert.equal(configureClamavProfile(profile), profile);
+  assert.throws(
+    () => configureClamavProfile("unexpected upstream profile"),
+    /Unexpected/,
+  );
+  for (const [container, expected] of [
+    ["web-1", "0"],
+    ["clock-1", "1"],
+    ["currentzoneworker-1", "1"],
+    ["one-off-123", "1"],
+  ]) {
+    const output = execFileSync(
+      "/bin/bash",
+      ["-c", `${profile}\nprintf '%s' "$CLAMAV_START"`],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: "/nonexistent",
+          CONTAINER: container,
+          CLAMAV_DISABLE_PROCESS_TYPES:
+            "clock,currentzoneworker,postdeploy,one-off",
+        },
+      },
+    );
+    assert.equal(output, expected, container);
+  }
+});
+
+test("postbuild checks the pin and patches the buildpack profile before runtime", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "vigieau-clamav-profile-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "clamav/conf"), { recursive: true });
+  await mkdir(join(root, ".profile.d"));
+  await writeFile(join(root, ".buildpacks"), `${CLAMAV_BUILDPACK}\n`);
+  await writeFile(join(root, "clamav/conf/clamd.conf"), buildpackConfig);
+  await writeFile(join(root, ".profile.d/010-clamav.sh"), officialProfile);
+  await configureClamavBuild(root);
+  assert.equal(
+    await readFile(join(root, ".profile.d/010-clamav.sh"), "utf8"),
+    configureClamavProfile(officialProfile),
+  );
+  await writeFile(
+    join(root, ".buildpacks"),
+    "https://github.com/Scalingo/clamav-buildpack.git#unknown\n",
+  );
+  await assert.rejects(
+    configureClamavBuild(root),
+    /Unexpected ClamAV buildpack pin/,
+  );
+});
 
 test("the built configuration rejects unscannable documents and bounds resource usage without adding TCP", () => {
   const result = configureClamd(
@@ -68,7 +141,14 @@ test("the postbuild works outside /app and the batch changes only its private co
   assert.equal(await readFile(configPath, "utf8"), webConfig);
 });
 
-async function prepareBatch(t, { updateFails = false } = {}) {
+async function prepareBatch(
+  t,
+  {
+    updateFails = false,
+    waitForCancellation = false,
+    ignoreCancellation = false,
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "vigieau-clamav-batch-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const path of [
@@ -125,6 +205,17 @@ ${recordCode}
 record({ stage: 'scan', args: process.argv.slice(2), config: process.env.CLAMD_CONFIG_FILE,
   enabled: process.env.ANTIVIRUS_ENABLED, timeout: process.env.ANTIVIRUS_TIMEOUT_MS,
   clamdscan: process.env.CLAMDSCAN_PATH, contents: fs.readFileSync(process.env.CLAMD_CONFIG_FILE, 'utf8') });
+if (${waitForCancellation}) {
+  const hold = setInterval(() => {}, 1000);
+  process.on('SIGTERM', () => {
+    record({ stage: 'sigterm' });
+    if (!${ignoreCancellation}) setTimeout(() => {
+      record({ stage: 'quarantine_finished' });
+      clearInterval(hold);
+      process.exit(0);
+    }, 40);
+  });
+}
 `,
   );
   return {
@@ -164,6 +255,71 @@ test("the batch refreshes first, starts a private daemon, passes arguments and c
     original,
   );
   await assert.rejects(readFile(scan.config), { code: "ENOENT" });
+});
+
+async function waitForScanner(record) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      if ((await readFile(record, "utf8")).includes('"stage":"scan"')) return;
+    } catch {
+      /* The signature updater may not have started yet. */
+    }
+    await delay(5);
+  }
+  throw new Error("Fixture scanner did not start");
+}
+
+test("cancellation sends one SIGTERM and waits for confirmed quarantine before daemon cleanup", async (t) => {
+  assert.equal(DOCUMENT_SCAN_CANCEL_GRACE_MS, 210000);
+  const { root, record, env } = await prepareBatch(t, {
+    waitForCancellation: true,
+  });
+  const controller = new AbortController();
+  const running = runDocumentScan({
+    appRoot: root,
+    args: ["--execute"],
+    env,
+    signal: controller.signal,
+    cancellationGraceMs: 500,
+  });
+  await waitForScanner(record);
+  controller.abort();
+  assert.equal(await running, 1);
+  const events = (await readFile(record, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.deepEqual(
+    events.map((event) => event.stage),
+    ["freshclam", "clamd", "scan", "sigterm", "quarantine_finished", "stopped"],
+  );
+});
+
+test("a scanner ignoring cancellation is forcibly stopped when the bounded grace expires", async (t) => {
+  const { root, record, env } = await prepareBatch(t, {
+    waitForCancellation: true,
+    ignoreCancellation: true,
+  });
+  const controller = new AbortController();
+  const running = runDocumentScan({
+    appRoot: root,
+    args: ["--execute"],
+    env,
+    signal: controller.signal,
+    cancellationGraceMs: 40,
+  });
+  await waitForScanner(record);
+  controller.abort();
+  assert.equal(await running, 1);
+  const events = (await readFile(record, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.deepEqual(
+    events.map((event) => event.stage),
+    ["freshclam", "clamd", "scan", "sigterm", "stopped"],
+  );
 });
 
 test("a failed signature update aborts before starting the scan", async (t) => {
