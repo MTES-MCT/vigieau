@@ -10,11 +10,15 @@ export class ArreteCadreApi extends BaseApiPagination {
       formData.append('dateFin', payload.dateFin);
     }
 
-    return useCustomFetch(`/${this.resource}/${id}/publier`, {
-      method: 'POST',
-      baseURL: '/api',
-      body: formData,
-    });
+    return useCustomFetch(
+      `/${this.resource}/${id}/publier`,
+      {
+        method: 'POST',
+        baseURL: '/api',
+        body: formData,
+      },
+      25000,
+    );
   };
 
   repeal = (id: string, payload: any) => {

@@ -13,11 +13,15 @@ export class ArreteMunicipalApi extends BaseApiPagination {
     formData.append('userFirstName', payload.userFirstName);
     formData.append('userLastName', payload.userLastName);
 
-    return useCustomFetch(`/${this.resource}`, {
-      method: 'POST',
-      baseURL: '/api',
-      body: formData,
-    });
+    return useCustomFetch(
+      `/${this.resource}`,
+      {
+        method: 'POST',
+        baseURL: '/api',
+        body: formData,
+      },
+      25000,
+    );
   }
 
   update(id: string, payload: any) {
@@ -31,11 +35,15 @@ export class ArreteMunicipalApi extends BaseApiPagination {
     formData.append('userFirstName', payload.userFirstName);
     formData.append('userLastName', payload.userLastName);
 
-    return useCustomFetch(`/${this.resource}/${id}`, {
-      method: 'PATCH',
-      baseURL: '/api',
-      body: formData,
-    });
+    return useCustomFetch(
+      `/${this.resource}/${id}`,
+      {
+        method: 'PATCH',
+        baseURL: '/api',
+        body: formData,
+      },
+      25000,
+    );
   }
 
   publish = (id: string, payload: any) => {
