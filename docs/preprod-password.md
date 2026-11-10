@@ -9,9 +9,20 @@ Le front et l’API utilisent une authentification **HTTP Basic standard**, avec
 
 La production est exclue par les gardes sur le nom d’application Scalingo. HTTPS est forcé sur les deux applications publiques.
 
-Les anciens domaines `incubateur.net` restent disponibles pendant la transition. ProConnect ne reconnaît pas encore le nouveau callback admin : la connexion utilise donc toujours `https://api.admin.vigieau.incubateur.net/api/auth/callback` et revient sur `https://admin.vigieau.incubateur.net/`. Les variables de session (`DOMAIN`), de retour (`WEBSITE_URL`) et de callback du backend admin, ainsi que `API_URL` du front admin, restent sur ces anciens domaines jusqu’à l’enregistrement des nouvelles URL dans l’Espace Partenaires ProConnect.
+Les anciens domaines de préproduction en `incubateur.net` ont été retirés des applications Scalingo le **10 novembre 2026**. Ils ne doivent plus servir les applications ni être utilisés comme destinations de redirection.
 
-Pour terminer cette bascule, ajouter le callback `https://api.admin.vigieau.beta.ecologie.gouv.fr/api/auth/callback` et le retour de déconnexion `https://admin.vigieau.beta.ecologie.gouv.fr/` au client ProConnect existant, puis adapter ensemble ces quatre variables et reconstruire le front admin. `DOMAIN_NAME` du front admin désigne la carte publique et vaut `vigieau.beta.ecologie.gouv.fr` ; celui du backend admin désigne le site admin.
+La connexion ProConnect de l’administration reste temporairement indisponible : ProConnect refuse encore le nouveau callback avec `invalid_redirect_uri`. Cette indisponibilité a été acceptée pour retirer les anciens domaines sans attendre l’enregistrement des nouvelles URL. Elle ne justifie pas de réactiver les anciennes adresses ou de contourner l’authentification.
+
+La configuration de l’administration utilise désormais :
+
+- Backend : `DOMAIN=vigieau.beta.ecologie.gouv.fr` pour le cookie de session.
+- Backend : `WEBSITE_URL=https://admin.vigieau.beta.ecologie.gouv.fr/` pour les retours après connexion et déconnexion.
+- Backend : `OAUTH2_CLIENT_REGISTRATION_LOGIN_REDIRECT_URI=https://api.admin.vigieau.beta.ecologie.gouv.fr/api/auth/callback`.
+- Front : `API_URL=https://api.admin.vigieau.beta.ecologie.gouv.fr/api` pour l’API et le démarrage de la connexion. Toute modification de cette valeur exige une reconstruction du front admin.
+
+Pour rétablir la connexion, enregistrer le callback `https://api.admin.vigieau.beta.ecologie.gouv.fr/api/auth/callback` et le retour de déconnexion `https://admin.vigieau.beta.ecologie.gouv.fr/` dans le client d’intégration existant, depuis l’[Espace Partenaires ProConnect](https://partenaires.proconnect.gouv.fr/apps), puis vérifier les parcours de connexion et de déconnexion. `DOMAIN_NAME` du front admin désigne la carte publique et vaut `vigieau.beta.ecologie.gouv.fr` ; celui du backend admin désigne le site admin.
+
+Le retrait des domaines conserve les protections HTTP Basic décrites ci-dessus et l’analyse ClamAV des pièces jointes déjà active dans l’administration. Aucun mécanisme d’authentification ni contrôle antivirus n’est désactivé.
 
 ## Variables Scalingo
 
