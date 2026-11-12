@@ -3,6 +3,8 @@ import { DataSource } from 'typeorm';
 import { USER_ACTIVITY_AUDIT_SOURCES } from '../migrations/1794477600000-UserActivityAudit';
 
 describe('audit database capture policy against TypeORM metadata', () => {
+  // Loading every entity compiles the shared model on a cold CI worker.
+  jest.setTimeout(30000);
   it('uses actual column and junction names, including every resource identity', async () => {
     const dataSource = new DataSource({
       type: 'postgres',
