@@ -11,7 +11,7 @@ l'information concernant les restrictions en vigueur lors d'épisodes d'alertes 
 
 ### Pré-requis
 
-Vous aurez besoin de [NodeJS](https://nodejs.org/) 24.22.1 et npm 12.2.1 pour lancer ce projet.
+Vous aurez besoin de [NodeJS](https://nodejs.org/) 24.22.3 et npm 12.2.1 pour lancer ce projet.
 
 Nous vous recommandons de regarder la [documentation de Nuxt 3](https://v3.nuxtjs.org)
 et la [documentation de VueDsfr](https://vue-dsfr.netlify.app).

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const projects = ['.', 'apps/backend', 'apps/backend-admin', 'apps/frontend', 'apps/frontend-admin'];
-const engines = { node: '24.22.1', npm: '12.2.1' };
+const engines = { node: '24.22.3', npm: '12.2.1' };
 const packageName = '(?:@[a-z0-9._-]+/)?[a-z0-9._-]+';
 const exactApproval = new RegExp(`^(${packageName})@(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$`);
 const registryName = new RegExp(`^${packageName}$`);
