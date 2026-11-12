@@ -317,8 +317,13 @@ export class AuditService {
       'from',
       new Date(now.getTime() - 30 * 86400000),
     );
-    const to = dateFilter(query.to, 'to', now);
-    if (from > to)
+    // PostgreSQL timestamps retain microseconds. A JavaScript "now" cutoff can
+    // hide a committed event from the current millisecond before pagination.
+    const to =
+      query.to === undefined || query.to === ''
+        ? null
+        : dateFilter(query.to, 'to', now);
+    if (to && from > to)
       throw new BadRequestException(
         'La date de début doit précéder la date de fin',
       );
@@ -330,7 +335,7 @@ export class AuditService {
     const args: unknown[] = [from, to];
     const conditions = [
       'o.occurred_at >= $1::timestamptz',
-      'o.occurred_at <= $2::timestamptz',
+      'o.occurred_at <= coalesce($2::timestamptz, statement_timestamp())',
     ];
     const add = (value: unknown, sql: (placeholder: string) => string) => {
       args.push(value);
@@ -411,7 +416,7 @@ export class AuditService {
     const rows = await runWithoutAuditContext(() =>
       this.dataSource.query(
         `
-      WITH operations AS (${operationSql('WHERE operation_id IN (SELECT operation_id FROM audit_event WHERE occurred_at >= $1::timestamptz AND occurred_at <= $2::timestamptz)')})
+      WITH operations AS (${operationSql('WHERE operation_id IN (SELECT operation_id FROM audit_event WHERE occurred_at >= $1::timestamptz AND occurred_at <= coalesce($2::timestamptz, statement_timestamp()))')})
       SELECT o.*, to_char(o.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_at,
         r.resource_type, r.resource_id, r.resource_label, r.territories
       FROM operations o
