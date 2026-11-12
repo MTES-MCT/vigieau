@@ -4,7 +4,7 @@ Monorepo contenant les applications VigiEau (`frontend`, `backend`) et VigiEau A
 
 ## Pré-requis
 
-- Node.js 24.22.1
+- Node.js 24.22.3
 - npm 12.2.1
 - Docker avec Docker Compose
 
