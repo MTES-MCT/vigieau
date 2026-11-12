@@ -1,4 +1,10 @@
-import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Optional,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
 import { ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { SkipThrottle } from '@nestjs/throttler';
@@ -63,6 +69,7 @@ export class HealthController {
     private readonly configService: ConfigService,
     private readonly zonePublicationHealth: ZonePublicationHealthService,
     private readonly historicExportReadiness: HistoricExportReadinessService,
+    @Optional() private readonly auditService?: AuditService,
   ) {}
 
   @Get()
@@ -75,6 +82,22 @@ export class HealthController {
   @SkipThrottle()
   live(): { status: 'ok' } {
     return { status: 'ok' };
+  }
+
+  @Get('audit')
+  @SkipThrottle()
+  async auditHealth() {
+    try {
+      const health = (await this.auditService?.health()) ?? {
+        status: 'disabled',
+      };
+      if (health.status !== 'ready')
+        throw new ServiceUnavailableException(health);
+      return health;
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw error;
+      throw new ServiceUnavailableException({ status: 'unavailable' });
+    }
   }
 
   @Get('ready')

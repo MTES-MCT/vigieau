@@ -41,6 +41,8 @@ import { areScheduledJobsDisabled } from './core/scheduling/business-cron';
 import { parseDatabasePoolMax } from './core/database-pool';
 import { HistoricBackfillModule } from './historic_backfill/historic-backfill.module';
 import { HistoryRecoveryModule } from './history_recovery/history-recovery.module';
+import { AuditModule } from './audit/audit.module';
+import { installDataSourceAudit } from './audit/audit-datasource';
 
 const isSentryEnabled = () => Boolean(process.env.SENTRY_DSN?.trim());
 const scheduledJobsEnabled = !areScheduledJobsDisabled();
@@ -80,6 +82,7 @@ const scheduledJobsEnabled = !areScheduledJobsDisabled();
           ssl: configService.get('NODE_ENV') !== 'local',
           extra: {
             max: poolMax,
+            connectionTimeoutMillis: 5000,
             ...(configService.get('NODE_ENV') !== 'local'
               ? {
                   ssl: {
@@ -95,6 +98,7 @@ const scheduledJobsEnabled = !areScheduledJobsDisabled();
         if (process.env.SKIP_SCHEMA_BOOTSTRAP?.trim() !== 'true') {
           await bootstrapSchema(dataSource);
         }
+        installDataSourceAudit(dataSource);
         return dataSource;
       },
     }),
@@ -134,6 +138,7 @@ const scheduledJobsEnabled = !areScheduledJobsDisabled();
     AbonnementMailModule,
     HistoricBackfillModule,
     HistoryRecoveryModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [

@@ -8,6 +8,10 @@ import {
   Delete,
   UseGuards,
   Req,
+  Res,
+  Query,
+  UnauthorizedException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -24,6 +28,16 @@ import { Roles } from '../core/decorators/roles.decorator';
 import { Public } from '../core/decorators/public.decorator';
 import { DeleteResult } from 'typeorm';
 import { DevGuard } from '../core/guards/dev.guard';
+import { Response } from 'express';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { exportUsersCsv, filterExportUsers } from './user-export';
+
+class ExportUsersQueryDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  search?: string;
+}
 
 @UseGuards(AuthenticatedGuard)
 @Controller('user')
@@ -53,6 +67,34 @@ export class UserController {
   async findAll(@Req() req): Promise<UserDto[]> {
     const users: User[] = await this.userService.findAll(req.session.user);
     return plainToInstance(UserDto, camelcaseKeys(users, { deep: true }));
+  }
+
+  @Get('/export')
+  @UseGuards(RolesGuard)
+  @Roles(['mte', 'departement'])
+  @ApiOperation({
+    summary: 'Exporter les utilisateurs autorisés, avec journalisation',
+  })
+  async export(
+    @Req() req,
+    @Query() query: ExportUsersQueryDto,
+    @Res() res: Response,
+  ) {
+    const actor = await this.userService.findOne(req.session?.user?.email);
+    if (!actor) throw new UnauthorizedException();
+    if (!['mte', 'departement'].includes(actor.role))
+      throw new ForbiddenException();
+    const users = filterExportUsers(
+      await this.userService.findAll(actor),
+      query.search,
+    );
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="utilisateurs_${new Date().toISOString().slice(0, 10)}.csv"`,
+    );
+    return res.send(exportUsersCsv(users));
   }
 
   @Get('/me')

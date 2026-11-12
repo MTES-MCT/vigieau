@@ -7,7 +7,8 @@ import {
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { RegleauLogger } from '../../logger/regleau.logger';
-const crypto = require('crypto');
+import { randomUUID } from 'node:crypto';
+import { getAuditContext } from '../../audit/audit-context';
 
 @Injectable()
 export class LoggerInterceptor implements NestInterceptor {
@@ -19,13 +20,10 @@ export class LoggerInterceptor implements NestInterceptor {
    * @param next
    */
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    const id = crypto.randomBytes(8).toString('hex');
+    const id = getAuditContext()?.requestId ?? randomUUID();
     const req = context.getArgByIndex(0);
-    const body = { ...req.body };
     this._logger.log(
-      `REQUEST - ${id} - ${req.ip} - ${req.session?.user?.email} - ${
-        req.method
-      } - ${req.originalUrl}`,
+      `REQUEST - ${id} - ${req.method} - ${req.route?.path ?? 'unmatched'}`,
     );
 
     return next.handle().pipe(

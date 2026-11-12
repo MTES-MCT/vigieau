@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Optional,
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -11,12 +12,16 @@ import {
   ScanOptions,
   scanDocumentStream,
 } from './antivirus.core';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class AntivirusService {
   private scanning = false;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() private readonly audit?: AuditService,
+  ) {}
 
   private isEnabled(): boolean {
     const enabled = this.config.get<string>('ANTIVIRUS_ENABLED');
@@ -83,6 +88,18 @@ export class AntivirusService {
       const result = await scanDocumentStream(
         Readable.from([file.buffer]),
         this.options(),
+      );
+      await this.audit?.recordEvent(
+        result.status === 'clean' ? 'accepted' : 'failed',
+        {
+          stage: 'document.scan',
+          verdict: result.status,
+          sha256: hash,
+          size: file.buffer.length,
+          mimeType: file.mimetype,
+          engineVersion: result.engineVersion,
+          signatureVersion: result.signatureVersion,
+        },
       );
       if (result.status === 'infected') {
         throw new UnprocessableEntityException(

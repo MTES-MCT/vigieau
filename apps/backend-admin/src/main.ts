@@ -14,6 +14,7 @@ import { DataSource } from 'typeorm';
 import { RegleauLogger } from './logger/regleau.logger';
 import { json, urlencoded } from 'express';
 import { adminWriteFreezeMiddleware } from './core/middleware/admin-write-freeze.middleware';
+import { AuditMiddleware } from './audit/audit.middleware';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -75,6 +76,8 @@ async function bootstrap() {
     }),
   );
   app.use(passport.initialize());
+  const auditMiddleware = app.get(AuditMiddleware);
+  app.use(auditMiddleware.use.bind(auditMiddleware));
 
   await app.listen(configService.get('PORT'));
 }

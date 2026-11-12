@@ -4,6 +4,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService as NestConfigService } from '@nestjs/config';
 import { CronExpression } from '@nestjs/schedule';
@@ -86,6 +87,8 @@ import { arreteRestrictionPaginateConfig } from './dto/arrete_restriction.dto';
 import { CreateUpdateArreteRestrictionDto } from './dto/create_update_arrete_restriction.dto';
 import { PublishArreteRestrictionDto } from './dto/publish_arrete_restriction.dto';
 import { RepealArreteRestrictionDto } from './dto/repeal_arrete_restriction.dto';
+import { AuditService } from '../audit/audit.service';
+import { startAuditJob, finishAuditJob } from '../audit/audit-background';
 
 export type CurrentZoneRecomputeResult =
   | 'busy'
@@ -118,6 +121,7 @@ export class ArreteRestrictionService {
     private readonly abonnementMailService: AbonnementMailService,
     private readonly configService: ConfigService,
     private readonly nestConfigService: NestConfigService,
+    @Optional() private readonly audit?: AuditService,
   ) {}
 
   async findAll(query: PaginateQuery): Promise<Paginated<ArreteRestriction>> {
@@ -2540,6 +2544,14 @@ export class ArreteRestrictionService {
           superseded = true;
           continue;
         }
+        const auditContext = await startAuditJob(
+          this.audit,
+          'current_zone.recompute',
+          contextRequests.map((request) => ({
+            kind: 'current-zone-revision',
+            reference: `${request.departementId}:${request.targetPublicRevision}`,
+          })),
+        );
         try {
           const computeDepartementIds = isZonePublicationEnabled()
             ? []
@@ -2708,6 +2720,7 @@ export class ArreteRestrictionService {
             );
           }
           processed = true;
+          await finishAuditJob(this.audit, auditContext, 'processed');
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -2720,6 +2733,7 @@ export class ArreteRestrictionService {
               targetPublicRevision,
             ));
           if (requestWasSuperseded) {
+            await finishAuditJob(this.audit, auditContext, 'superseded');
             await queryRunner.query(
               `
                 UPDATE "current_zone_recompute_request" request
@@ -2771,6 +2785,12 @@ export class ArreteRestrictionService {
               ),
             ],
           );
+          if (auditContext)
+            await this.audit.recordBestEffort(
+              'failed',
+              { stage: 'background', errorCode: 'RECOMPUTE_FAILURE' },
+              auditContext,
+            );
           throw error;
         }
       }

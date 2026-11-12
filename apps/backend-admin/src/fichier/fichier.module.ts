@@ -5,6 +5,7 @@ import { Fichier } from '@shared/entities/fichier.entity';
 import { SharedModule } from '../shared/shared.module';
 import { HttpModule } from '@nestjs/axios';
 import { AntivirusModule } from '../antivirus/antivirus.module';
+import { FichierController } from './fichier.controller';
 
 @Module({
   imports: [
@@ -13,7 +14,7 @@ import { AntivirusModule } from '../antivirus/antivirus.module';
     HttpModule,
     AntivirusModule,
   ],
-  controllers: [],
+  controllers: [FichierController],
   providers: [FichierService],
   exports: [FichierService],
 })
