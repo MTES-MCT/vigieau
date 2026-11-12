@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fileAccessUrl } from '~/utils/audit';
 import useVuelidate from '@vuelidate/core';
 import { helpers, required, requiredIf } from '@vuelidate/validators';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
@@ -125,12 +126,12 @@ defineExpose({
       </div>
     </div>
 
-    <div class="fr-mt-4w" v-if="arreteRestriction.fichier">
+    <div v-if="arreteRestriction.fichier" class="fr-mt-4w">
       <DsfrFileDownload
         format="PDF"
-        :href="arreteRestriction.fichier.url"
+        :href="fileAccessUrl(arreteRestriction.fichier.id)"
         :size="utils.fileSizeString(arreteRestriction.fichier.size)"
-        :download="arreteRestriction.fichier.url"
+        :download="arreteRestriction.fichier.nom"
         :title="arreteRestriction.fichier.nom"
       />
     </div>

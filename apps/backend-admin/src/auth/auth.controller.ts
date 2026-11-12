@@ -8,6 +8,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserService } from '../user/user.service';
 import { AuthGuard } from '@nestjs/passport';
 import { DevGuard } from '../core/guards/dev.guard';
+import { setAuditActor } from '../audit/audit-context';
 
 @Controller('auth')
 @ApiTags('Authentification')
@@ -29,6 +30,7 @@ export class AuthController {
   async loginDev(@Req() req, @Res() res: Response) {
     // Ajout de l'utilisateur avec ses droits dans la session
     req.session.user = req.user;
+    setAuditActor(req.user);
     res.redirect(this.configService.get('WEBSITE_URL'));
   }
 
@@ -38,6 +40,7 @@ export class AuthController {
   async loginCallback(@Req() req, @Res() res: Response) {
     // Ajout de l'utilisateur avec ses droits dans la session
     req.session.user = await this.userService.findOne(req.user.userinfo.email);
+    setAuditActor(req.session.user);
     req.session.user.id_token = req.user.id_token;
     res.redirect(this.configService.get('WEBSITE_URL'));
   }

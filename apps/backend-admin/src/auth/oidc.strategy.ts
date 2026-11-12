@@ -14,6 +14,13 @@ import { CommuneService } from '../commune/commune.service';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { UserService } from '../user/user.service';
 import random = generators.random;
+import { randomUUID } from 'node:crypto';
+import {
+  auditActor,
+  getAuditContext,
+  setAuditActor,
+  withAuditContext,
+} from '../audit/audit-context';
 
 export const buildOpenIdClient = async (configService: ConfigService) => {
   const issuerUrl = configService.get<string>(
@@ -76,6 +83,11 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
 
   async validate(tokenset: TokenSet): Promise<any> {
     const userinfo: UserinfoResponse = await this.client.userinfo(tokenset);
+    setAuditActor({
+      email: userinfo.email,
+      first_name: userinfo.given_name,
+      last_name: userinfo.usual_name,
+    });
     let userInDb = await this.userService.findOne(<string>userinfo?.email);
 
     /**
@@ -92,17 +104,33 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
           role: 'commune',
           role_communes: [commune.code],
         };
-        // @ts-ignore
-        userInDb = await this.userService.create({ role: 'mte' }, userToCreate);
+        const parent = getAuditContext();
+        const provision = () =>
+          this.userService.create({ role: 'mte' } as any, userToCreate as any);
+        userInDb = parent
+          ? await withAuditContext(
+              {
+                ...parent,
+                operationId: randomUUID(),
+                action: 'user.provision',
+                source: 'proconnect',
+                actor: auditActor(null),
+                metadata: { parentOperationId: parent.operationId },
+              },
+              provision,
+            )
+          : await provision();
       }
     }
     if (!userInDb) {
       this._logger.error(
         'ERROR LOGIN VALIDATE - USER NOT IN DB -',
-        JSON.stringify(userinfo),
+        'Verified identity has no authorized account',
       );
       throw new UnauthorizedException();
     }
+
+    setAuditActor(userInDb);
 
     await this.userService.updateName(
       <string>userinfo.email,
@@ -121,7 +149,7 @@ export class OidcStrategy extends PassportStrategy(Strategy, 'oidc') {
         userinfo,
       };
       return user;
-    } catch (err) {
+    } catch {
       throw new UnauthorizedException();
     }
   }

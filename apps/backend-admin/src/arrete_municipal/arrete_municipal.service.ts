@@ -202,7 +202,7 @@ export class ArreteMunicipalService {
         ? am.communes[0].code.slice(0, 3)
         : am.communes[0].code.slice(0, 2)
       : null;
-    this.mailService.sendEmailsByDepartement(
+    await this.mailService.sendEmailsByDepartement(
       depCode,
       `Un nouvel arrêté municipal est publié dans votre département`,
       'creation_am',

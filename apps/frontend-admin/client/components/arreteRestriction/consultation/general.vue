@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fileAccessUrl } from '~/utils/audit';
 import type { ArreteRestriction } from '~/dto/arrete_restriction.dto';
 
 const props = defineProps<{
@@ -49,9 +50,9 @@ const ressourceEapCommunique = computed(() => {
   <DsfrFileDownload
     v-if="arreteRestriction.fichier"
     format="PDF"
-    :href="arreteRestriction.fichier.url"
+    :href="fileAccessUrl(arreteRestriction.fichier.id)"
     :size="utils.fileSizeString(arreteRestriction.fichier.size)"
-    :download="arreteRestriction.fichier.url"
+    :download="arreteRestriction.fichier.nom"
     :title="arreteRestriction.fichier.nom"
   />
   <div v-if="arreteRestriction.fichier" class="fr-mb-2w"></div>

@@ -1,6 +1,8 @@
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
+import { executeAuditedJob } from '../audit/audit-background';
 import {
   HistoricBackfillWorkerConfig,
   readHistoricBackfillWorkerConfig,
@@ -91,7 +93,10 @@ function leaseIdentity(
 export class HistoricBackfillWorkerLoop {
   private readonly logger = new Logger(HistoricBackfillWorkerLoop.name);
 
-  constructor(private readonly queue: HistoricBackfillQueueService) {}
+  constructor(
+    private readonly queue: HistoricBackfillQueueService,
+    @Optional() private readonly audit?: AuditService,
+  ) {}
 
   async run(
     handler: HistoricBackfillTaskHandler,
@@ -142,6 +147,28 @@ export class HistoricBackfillWorkerLoop {
   }
 
   async processClaim(
+    claim: HistoricBackfillTaskClaim,
+    handler: HistoricBackfillTaskHandler,
+    config: HistoricBackfillWorkerConfig,
+    shutdownSignal?: AbortSignal,
+    sleep: HistoricBackfillSleep = historicBackfillSleep,
+  ): Promise<HistoricBackfillTaskExecutionResult> {
+    return executeAuditedJob(
+      this.audit,
+      'historic_backfill.execute',
+      [{ kind: 'historic-backfill-run', reference: claim.runId }],
+      () =>
+        this.processClaimWithAuditContext(
+          claim,
+          handler,
+          config,
+          shutdownSignal,
+          sleep,
+        ),
+    );
+  }
+
+  private async processClaimWithAuditContext(
     claim: HistoricBackfillTaskClaim,
     handler: HistoricBackfillTaskHandler,
     config: HistoricBackfillWorkerConfig,

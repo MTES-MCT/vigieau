@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
+import { executeAuditedJob } from '../audit/audit-background';
 import {
   HistoricBackfillWorkerConfig,
   readHistoricBackfillWorkerConfig,
@@ -31,6 +33,7 @@ export class HistoricBackfillArtifactWorkerLoop {
   constructor(
     private readonly queue: HistoricBackfillArtifactQueueService,
     private readonly builder: HistoricBackfillArtifactBuilderService,
+    @Optional() private readonly audit?: AuditService,
   ) {}
 
   async run(
@@ -122,6 +125,19 @@ export class HistoricBackfillArtifactWorkerLoop {
   }
 
   private async processClaim(
+    claim: HistoricBackfillArtifactLease,
+    config: HistoricBackfillWorkerConfig,
+    shutdownSignal?: AbortSignal,
+  ): Promise<'completed' | 'yielded' | 'failed' | 'lostLeases'> {
+    return executeAuditedJob(
+      this.audit,
+      'historic_backfill.artifact_execute',
+      [{ kind: 'historic-backfill-run', reference: claim.runId }],
+      () => this.processClaimWithAuditContext(claim, config, shutdownSignal),
+    );
+  }
+
+  private async processClaimWithAuditContext(
     claim: HistoricBackfillArtifactLease,
     config: HistoricBackfillWorkerConfig,
     shutdownSignal?: AbortSignal,

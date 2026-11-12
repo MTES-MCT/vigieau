@@ -33,6 +33,10 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, { text: 'Données p
       <ul>
         <li>Gérer les comptes utilisateurs des agents en services déconcentrés (DDT, DREAL et MTECT)</li>
         <li>Envoyer des notifications par mail pour fluidifier la saisie des arrêtés sécheresse</li>
+        <li>
+          Assurer la traçabilité des actions et consultations, rechercher l’origine des modifications et analyser les incidents, notamment
+          lors de la comparaison de deux saisons sécheresse.
+        </li>
       </ul>
     </div>
     <h2>Quelles sont les données que nous traitons ?</h2>
@@ -42,7 +46,15 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, { text: 'Données p
         <li>Adresse e-mail</li>
         <li>Nom Prénom</li>
         <li>Administration et département où exerce l’agent</li>
+        <li>
+          Traces d’activité : identité et droits de l’auteur, date, action, ressources concernées, changements métier, résultat et contexte
+          technique limité de la requête.
+        </li>
       </ul>
+      <p>
+        Les traces ne contiennent pas les mots de passe, cookies, jetons ProConnect ni le contenu des documents. L’accès au journal est
+        réservé aux administrateurs nationaux MTE pour ces finalités. Les consultations du journal sont elles-mêmes enregistrées.
+      </p>
     </div>
     <h2>Qu’est-ce qui nous autorise à traiter ces données ?</h2>
     <div class="fr-mb-2w">
@@ -80,6 +92,10 @@ const links: Ref<any[]> = ref([{ to: '/', text: 'Accueil' }, { text: 'Données p
             <tr>
               <td>Données de contact : adresse e-mail, nom, prénom, administration et département où exerce l'agent</td>
               <td>2 ans à compter du dernier contact avec l’utilisateur</td>
+            </tr>
+            <tr>
+              <td>Journal des actions et consultations</td>
+              <td>2 ans à compter du dernier événement de l’opération, puis suppression automatique</td>
             </tr>
           </tbody>
         </table>

@@ -8,9 +8,11 @@ import { ParametresApi } from '~/api/parametres';
 import { UserApi } from '~/api/user';
 import { VigiEauApi } from '~/api/vigieau';
 import { ZoneAlerteApi } from '~/api/zone-alerte';
+import { AuditApi } from '~/api/audit';
 
 export const useApi = () => {
   return {
+    audit: new AuditApi(),
     arreteCadre: new ArreteCadreApi('arrete-cadre'),
     arreteRestriction: new ArreteRestrictionApi('arrete-restriction'),
     arreteMunicipal: new ArreteMunicipalApi('arrete-municipal'),

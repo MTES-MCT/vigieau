@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fileAccessUrl } from '~/utils/audit';
 import useVuelidate from '@vuelidate/core';
 import { ArreteCadre } from '~/dto/arrete_cadre.dto';
 import { helpers, required, requiredIf } from '@vuelidate/validators';
@@ -92,12 +93,12 @@ defineExpose({
       </div>
     </div>
 
-    <div class="fr-mt-4w" v-if="arreteCadre.fichier">
+    <div v-if="arreteCadre.fichier" class="fr-mt-4w">
       <DsfrFileDownload
         format="PDF"
-        :href="arreteCadre.fichier.url"
+        :href="fileAccessUrl(arreteCadre.fichier.id)"
         :size="utils.fileSizeString(arreteCadre.fichier.size)"
-        :download="arreteCadre.fichier.url"
+        :download="arreteCadre.fichier.nom"
         :title="arreteCadre.fichier.nom"
       />
     </div>
@@ -108,7 +109,7 @@ defineExpose({
           :required="!arreteCadre.fichier"
           :label="arreteCadre.fichier ? 'Modifier le PDF de l\'arrêté' : 'Importer le PDF de l\'arrêté'"
           hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
-          :arreteCadrecept="['application/pdf']"
+          :arrete-cadrecept="['application/pdf']"
           data-cy="PublishFormFileInput"
           @change="arreteCadre.file = $event[0]"
         />
