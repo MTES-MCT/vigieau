@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fileAccessUrl } from '~/utils/audit';
 import type { Ref } from 'vue';
 import type { PaginatedResult } from '~/dto/paginated_result.dto';
 import type { ArreteMunicipal } from '~/dto/arrete_municipal.dto';
@@ -53,9 +54,9 @@ const populateTable = () => {
         ? {
             component: 'DsfrFileDownload',
             format: 'PDF',
-            href: am.fichier.url,
+            href: fileAccessUrl(am.fichier.id),
             size: utils.fileSizeString(am.fichier.size),
-            download: am.fichier.url,
+            download: am.fichier.nom,
             title: am.fichier.nom,
           }
         : '',

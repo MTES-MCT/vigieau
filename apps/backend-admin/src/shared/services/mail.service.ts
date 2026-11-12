@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { MailerService } from '@nestjs-modules/mailer';
 import { RegleauLogger } from '../../logger/regleau.logger';
 import { UserService } from '../../user/user.service';
 import { ConfigService } from '@nestjs/config';
+import { AuditService } from '../../audit/audit.service';
 
 @Injectable()
 export class MailService {
@@ -17,6 +18,7 @@ export class MailService {
     private readonly mailerService: MailerService,
     private readonly userService: UserService,
     private readonly configService: ConfigService,
+    @Optional() private readonly audit?: AuditService,
   ) {}
 
   /**
@@ -26,18 +28,21 @@ export class MailService {
    * @param template
    * @param context
    */
-  sendEmail(
+  async sendEmail(
     email: string,
     subject: string,
     template: string,
     context?: any,
   ): Promise<any> {
     if (!this.configService.get('MAIL_USER')) {
-      this.logger.log(
-        `EMAIL NOT SEND - NO MAIL_USER ${email} WITH SUBJECT: ${subject} WITH TEMPLATE: ${template}`,
-      );
+      this.logger.log('EMAIL NOT SENT - MAIL_USER not configured');
       return;
     }
+    await this.audit?.recordEvent('started', {
+      stage: 'mail.send',
+      template,
+      recipientCount: 1,
+    });
     return this.mailerService
       .sendMail({
         to: email,
@@ -46,20 +51,23 @@ export class MailService {
         template: `./${template}`,
         context: context,
       })
-      .then(() => {
-        this.logger.log(
-          `MAIL SEND TO: ${email} WITH SUBJECT: ${subject} WITH TEMPLATE: ${template} AND CONTEXT: ${JSON.stringify(
-            context,
-          )}`,
-        );
+      .then(async () => {
+        await this.audit?.recordBestEffort('accepted', {
+          stage: 'mail.send',
+          template,
+          recipientCount: 1,
+          externalOutcome: 'smtp_accepted',
+        });
+        this.logger.log('MAIL accepted by SMTP');
       })
-      .catch((error) => {
-        this.logger.error(
-          `FAIL - MAIL SEND TO: ${email} WITH SUBJECT: ${subject} WITH TEMPLATE: ${template} AND CONTEXT: ${JSON.stringify(
-            context,
-          )}`,
-          error,
-        );
+      .catch(async () => {
+        await this.audit?.recordBestEffort('failed', {
+          stage: 'mail.send',
+          template,
+          recipientCount: 1,
+          errorCode: 'MAIL_SEND_FAILURE',
+        });
+        this.logger.error('MAIL_SEND_FAILURE', '');
       });
   }
 
@@ -82,14 +90,12 @@ export class MailService {
     sendToMte?: boolean,
   ): Promise<any> {
     const users = await this.userService.findByDepartementsCode([depCode]);
+    const emails = users.map((user) => user.email);
     if (sendToMte) {
-      // @ts-ignore
-      users.push({ email: this.configService.get('MAIL_MTE') });
+      emails.push(this.configService.get('MAIL_MTE'));
     }
     return Promise.all(
-      users
-        .map((u) => u.email)
-        .map((email) => this.sendEmail(email, subject, template, context)),
+      emails.map((email) => this.sendEmail(email, subject, template, context)),
     );
   }
 }

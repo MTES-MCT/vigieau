@@ -3,7 +3,7 @@ import type { Ref } from 'vue';
 import type { User } from '~/dto/user.dto';
 import { UserRole } from '~/dto/user.dto';
 import { useAuthStore } from '~/stores/auth';
-import deburr from 'lodash.deburr';
+import { matchesUserSearch, userExportUrl } from '~/utils/audit';
 
 const headers = ['Nom', 'Prénom', 'Email', 'Rôle', '', ''];
 const noCaption = false;
@@ -20,6 +20,7 @@ const modalActions: Ref<any[]> = ref([]);
 const userToEdit: Ref<User> = ref(null);
 const userFormRef = ref(null);
 const componentKey = ref(0);
+const exporting = ref(false);
 
 const authStore = useAuthStore();
 const utils = useUtils();
@@ -170,25 +171,7 @@ const validateEditUserForm = () => {
 };
 
 const filterUsers = () => {
-  usersFiltered.value = query.value
-    ? users.value.filter((u) => {
-        const nom = deburr(u.lastName).replace(/[\-_]/g, '');
-        const prenom = deburr(u.firstName).replace(/[\-_]/g, '');
-        const queryWords = deburr(query.value)
-          .replace(/[\-_]/g, '')
-          .split(' ')
-          .map((s) => s.replace(/^/, '(').replace(/$/, ')'))
-          .join('*');
-        const regex = new RegExp(`${queryWords}`, 'gi');
-        return (
-          nom?.match(regex) ||
-          prenom?.match(regex) ||
-          u.roleDepartements?.join('').match(regex) ||
-          u.roleCommunes?.join('').match(regex) ||
-          u.email?.match(regex)
-        );
-      })
-    : users.value;
+  usersFiltered.value = users.value.filter((user) => matchesUserSearch(user, query.value));
   generateRows();
 };
 
@@ -200,22 +183,23 @@ watch(
   { immediate: true },
 );
 
-const exportToCSV = () => {
-  const headers = ['Nom', 'Prénom', 'Email', 'Rôle'];
-  const csvContent = [
-    headers.join(','),
-    ...usersFiltered.value.map((u) => [u.lastName, u.firstName, u.email, u.role].map((cell) => `"${cell}"`).join(',')),
-  ].join('\n');
-
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
-  const url = URL.createObjectURL(blob);
-  link.setAttribute('href', url);
-  link.setAttribute('download', `utilisateurs_${new Date().toISOString().split('T')[0]}.csv`);
-  link.style.visibility = 'hidden';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+const exportToCSV = async () => {
+  if (exporting.value) return;
+  exporting.value = true;
+  try {
+    const { data, error } = await useCustomFetch(userExportUrl(query.value), { responseType: 'blob', retry: 0 });
+    if (error.value || !data.value) return;
+    const url = URL.createObjectURL(data.value);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `utilisateurs_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } finally {
+    exporting.value = false;
+  }
 };
 </script>
 
@@ -226,15 +210,15 @@ const exportToCSV = () => {
   </div>
   <div class="fr-grid-row">
     <div class="fr-col-12 fr-col-lg-4">
-      <DsfrInput placeholder="Rechercher un utilisateur" buttonText="Chercher" v-model="query" />
+      <DsfrInput v-model="query" placeholder="Rechercher un utilisateur" button-text="Chercher" />
     </div>
   </div>
-  <DsfrTable :headers="headers" :rows="rows" :no-caption="noCaption" :pagination="pagination" :key="componentKey" />
+  <DsfrTable :key="componentKey" :headers="headers" :rows="rows" :no-caption="noCaption" :pagination="pagination" />
   <div class="fr-mt-4w fr-col-12 text-align-right">
-    <DsfrButton label="Export CSV" @click="exportToCSV()" />
+    <DsfrButton :label="exporting ? 'Export en cours…' : 'Export CSV'" :disabled="exporting" @click="exportToCSV()" />
   </div>
   <DsfrModal :opened="modalEditOpened" :title="modalTitle" :icon="modalIcon" :actions="modalActions" @close="closeModal">
-    <UserForm ref="userFormRef" :user="userToEdit" :loading="loading" @createEdit="createEditUser($event)" />
+    <UserForm ref="userFormRef" :user="userToEdit" :loading="loading" @create-edit="createEditUser($event)" />
   </DsfrModal>
   <DsfrModal :opened="modalDeleteOpened" :title="modalTitle" :icon="modalIcon" :actions="modalActions" @close="closeModal">
     <div v-html="modalText" />

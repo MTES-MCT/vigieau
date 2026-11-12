@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fileAccessUrl } from '~/utils/audit';
 import type { ArreteMunicipal } from '~/dto/arrete_municipal.dto';
 import { email, helpers, required, requiredIf } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
@@ -88,8 +89,8 @@ const parseCommunes = (communesText: string) => {
   if (!communesText) {
     return;
   }
-  const inseeRegex = /(0[1-9]|[1-9][AB\d])\d{3}/gim;
-  const inseeRegexWithout0 = /(?:\s|^)([1-9])\d{3}(?:\s|$)/gim;
+  const inseeRegex = /(0[1-9]|[1-9][AB\d])\d{3}/gi;
+  const inseeRegexWithout0 = /(?:\s|^)([1-9])\d{3}(?:\s|$)/gm;
   let codesExtracted = communesText.match(inseeRegex);
   let codesExtractedWithout0 = communesText.match(inseeRegexWithout0);
   if (!codesExtracted && !codesExtractedWithout0) {
@@ -119,8 +120,8 @@ defineExpose({
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'userFirstName')">
           <DsfrInput
             id="user"
-            data-cy="FormUserInput"
             v-model="userFullName"
+            data-cy="FormUserInput"
             label="Nom"
             label-visible
             type="text"
@@ -133,8 +134,8 @@ defineExpose({
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'userEmail')">
           <DsfrInput
             id="email"
-            data-cy="FormEmailInput"
             v-model="arreteMunicipal.userEmail"
+            data-cy="FormEmailInput"
             label="Email"
             label-visible
             type="text"
@@ -147,8 +148,8 @@ defineExpose({
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'userPhone')">
           <DsfrInput
             id="phone"
-            data-cy="FormPhoneInput"
             v-model="arreteMunicipal.userPhone"
+            data-cy="FormPhoneInput"
             label="Numéro de téléphone"
             hint="Format attendu : (+33) 1 22 33 44 55"
             label-visible
@@ -167,14 +168,14 @@ defineExpose({
         <DsfrInputGroup :error-message="utils.showInputError(v$, 'communes')">
           <DsfrInput
             :model-value="communesText"
-            @update:modelValue="parseCommunes($event)"
             data-cy="CommunesFormNomInput"
             label="Coller ici le code INSEE de votre commune."
             label-visible
-            isTextarea
+            is-textarea
             required
             type="text"
             :disabled="communesLoading || communes.length <= 0"
+            @update:model-value="parseCommunes($event)"
           />
           <p v-if="communesLoading" class="fr-mt-1w">
             <VIcon name="ri-loader-4-line" animation="spin" />
@@ -223,12 +224,12 @@ defineExpose({
           </div>
         </div>
 
-        <div class="fr-mt-4w" v-if="arreteMunicipal.fichier">
+        <div v-if="arreteMunicipal.fichier" class="fr-mt-4w">
           <DsfrFileDownload
             format="PDF"
-            :href="arreteMunicipal.fichier.url"
+            :href="fileAccessUrl(arreteMunicipal.fichier.id)"
             :size="utils.fileSizeString(arreteMunicipal.fichier.size)"
-            :download="arreteMunicipal.fichier.url"
+            :download="arreteMunicipal.fichier.nom"
             :title="arreteMunicipal.fichier.nom"
           />
         </div>
@@ -239,7 +240,7 @@ defineExpose({
               :required="!arreteMunicipal.fichier"
               :label="arreteMunicipal.fichier ? 'Modifier le PDF de l\'arrêté' : 'Importer le PDF de l\'arrêté'"
               hint="Taille maximale autorisée : 10Mo. Le nom du fichier ne doit pas dépasser 100 caractères, évitez les espaces et caractères spéciaux."
-              :arreteCadrecept="['application/pdf']"
+              :arrete-cadrecept="['application/pdf']"
               data-cy="PublishFormFileInput"
               @change="arreteMunicipal.file = $event[0]"
             />

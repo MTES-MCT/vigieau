@@ -158,6 +158,13 @@ jobs:
         run: node scripts/verify-admin-migrations.mjs
         env:
           MIGRATION_VERIFY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
+      - name: Verify transactional user activity audit
+        run: >-
+          npm --prefix apps/backend-admin test -- --runInBand
+          src/audit/audit-db.postgres.spec.ts
+          src/audit/audit-core.postgres.spec.ts
+        env:
+          USER_ACTIVITY_AUDIT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/vigieau_ci
       - name: Verify durable antivirus quarantine evidence
         run: |
           psql -h localhost -U postgres -d postgres --set ON_ERROR_STOP=1 --command 'CREATE DATABASE vigieau_antivirus_test'

@@ -3,12 +3,17 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryColumn,
 } from 'typeorm';
 import { UserRole } from '../types/user-role.type';
 
 @Entity()
 export class User extends BaseEntity {
+  @Index('UQ_user_audit_id', { unique: true })
+  @Column({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  audit_id: string;
+
   @PrimaryColumn({ nullable: false, length: 200 })
   email: string;
 

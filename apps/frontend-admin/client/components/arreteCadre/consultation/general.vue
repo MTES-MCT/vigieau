@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fileAccessUrl } from '~/utils/audit';
 import type { ArreteCadre } from '~/dto/arrete_cadre.dto';
 
 const _props = defineProps<{
@@ -25,9 +26,9 @@ const utils = useUtils();
   <DsfrFileDownload
     v-if="arreteCadre.fichier"
     format="PDF"
-    :href="arreteCadre.fichier.url"
+    :href="fileAccessUrl(arreteCadre.fichier.id)"
     :size="utils.fileSizeString(arreteCadre.fichier.size)"
-    :download="arreteCadre.fichier.url"
+    :download="arreteCadre.fichier.nom"
     :title="arreteCadre.fichier.nom"
   />
   <div v-if="arreteCadre.fichier" class="fr-mb-2w"></div>

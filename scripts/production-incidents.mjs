@@ -21,6 +21,7 @@ export async function collectLight({ env = process.env, fetchImpl = fetch, now =
     ["public-api", `${publicApi}/api/health/live`, "ok"],
     ["admin-api", `${adminApi}/api/health/ready`, "ready"],
     ["document-antivirus", `${adminApi}/api/health/antivirus`, "ready"],
+    ["user-activity-audit", `${adminApi}/api/health/audit`, "ready"],
     ["public-cache", `${publicApi}/api/health/cache`, "ready"],
     ["statistics-cache", `${publicApi}/api/health/statistics`, "ready"],
     ["business-clock", `${adminApi}/api/health/clock`, "healthy"],
@@ -109,7 +110,7 @@ export async function collectLight({ env = process.env, fetchImpl = fetch, now =
   }
   // Unavailable upstream APIs must not generate extra causes for every dependent endpoint.
   for (const [parent, children] of [["public-api", ["public-cache", "statistics-cache"]],
-    ["admin-api", ["document-antivirus", "business-clock", "zone-publication", "external-publications"]]]) {
+    ["admin-api", ["document-antivirus", "user-activity-audit", "business-clock", "zone-publication", "external-publications"]]]) {
     if (results.find((item) => item.key === parent)?.status === "failure") {
       for (const item of results.filter((row) => children.includes(row.key) || row.dependsOn === parent)) {
         item.status = "pending";

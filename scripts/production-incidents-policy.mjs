@@ -6,6 +6,7 @@ export const CAUSES = {
   "public-api": ["API publique indisponible", "critical"],
   "admin-api": ["API administration indisponible", "critical"],
   "document-antivirus": ["Antivirus des documents indisponible", "warning"],
+  "user-activity-audit": ["Journal d’activité indisponible ou dégradé", "warning"],
   "public-cache": ["Cache public degrade", "warning"],
   "statistics-cache": ["Cache statistique degrade", "warning"],
   "business-clock": ["Horloge metier arretee", "critical"],

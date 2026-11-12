@@ -70,6 +70,9 @@ const loadQuickLinks = async () => {
       to: '/arrete-restriction',
     });
   }
+  if (isAuthenticated && authStore.isMte) {
+    links.push({ label: 'Journal d’activité', to: '/journal-activite' });
+  }
   if (isAuthenticated) {
     links.push({
       label: 'Mon compte',
@@ -111,6 +114,9 @@ const loadNavItems = async () => {
       title: 'Mon compte',
       links: accountOptions(false),
     });
+  }
+  if (isAuthenticated && authStore.isMte) {
+    links.push({ text: 'Journal d’activité', to: '/journal-activite' });
   }
   navItems.value = links;
 };
@@ -211,7 +217,7 @@ onUnmounted(() => {
 });
 
 watch(
-  authStore.user,
+  () => authStore.user,
   async () => {
     await loadQuickLinks();
     await loadNavItems();
@@ -221,7 +227,7 @@ watch(
 </script>
 
 <template>
-  <DsfrHeader :service-title="serviceTitle" :logo-text="logoText" :quickLinks="quickLinks" :show-beta="!+runTimeConfig.isProd" home-to="/">
+  <DsfrHeader :service-title="serviceTitle" :logo-text="logoText" :quick-links="quickLinks" :show-beta="!+runTimeConfig.isProd" home-to="/">
     <template #mainnav>
       <DsfrNavigation :nav-items="navItems" />
     </template>
@@ -247,7 +253,7 @@ watch(
     </div>
   </div>
   <main>
-    <div class="fr-container fr-mb-6w" v-if="!+runTimeConfig.isProd">
+    <div v-if="!+runTimeConfig.isProd" class="fr-container fr-mb-6w">
       <DsfrAlert
         description="Plateforme de développement, les données sont fictives. Si vous souhaitez accéder à la plateforme de production, allez sur https://admin.vigieau.beta.gouv.fr"
         type="warning"
@@ -260,7 +266,11 @@ watch(
       <slot />
     </div>
   </main>
-  <DsfrFooter :logo-text="logoText" :mandatoryLinks="mandatoryLinks" :ecosystemLinks="ecosystemLinks" home-link="/arrete-cadre" />
+  <p v-if="authStore.user" class="fr-container fr-text--sm">
+    Les actions et consultations dans cet espace sont enregistrées pendant deux ans.
+    <NuxtLink to="/donnees-personnelles">En savoir plus sur l’utilisation des données</NuxtLink>.
+  </p>
+  <DsfrFooter :logo-text="logoText" :mandatory-links="mandatoryLinks" :ecosystem-links="ecosystemLinks" home-link="/arrete-cadre" />
   <DsfrModal :opened="modalSchemeOpened" title="Paramètres d'affichage" :actions="modalActions" @close="closeModal">
     <SchemeForm ref="schemeFormRef" />
   </DsfrModal>

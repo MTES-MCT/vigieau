@@ -247,8 +247,8 @@ test("lightweight checks enforce contracts, retaining updating as pending", asyn
     if (url.endsWith("/zone-publication")) return new Response(JSON.stringify(zoneHealth("updating")), { headers: { "content-type": "application/json" } });
     return healthyResponse(url);
   } });
-  assert.equal(rows.length, 10);
-  assert.equal(rows.filter((row) => row.status === "success").length, 9);
+  assert.equal(rows.length, 11);
+  assert.equal(rows.filter((row) => row.status === "success").length, 10);
   assert.equal(rows.find((row) => row.key === "zone-publication").status, "pending");
   assert.equal(rows.some((row) => row.key === "certified-history"), false);
 });
@@ -311,6 +311,17 @@ test("an unavailable or disabled antivirus is reported while the admin API remai
   }
 });
 
+test("a disabled or degraded activity journal is reported without hiding application readiness", async () => {
+  for (const status of ["disabled", "degraded", "unavailable"]) {
+    const rows = await collectLight({ now: context().now, fetchImpl: async (url) =>
+      url.endsWith("/health/audit")
+        ? new Response(JSON.stringify({ status }), { status: 503 })
+        : healthyResponse(url) });
+    assert.equal(rows.find((row) => row.key === "admin-api").status, "success");
+    assert.equal(rows.find((row) => row.key === "user-activity-audit").status, "failure");
+  }
+});
+
 test("certified overlay covering the dirty range defers recovery to both deep canaries", async () => {
   const body = { historicComplete: false, historicDirtyFrom: "2026-07-11", historicDirtyThrough: "2026-08-31",
     certifiedHistoryRepair: { id: "repair-id", sourceRunId: "source-run-id", publicationRevision: "42", activatedAt: "2026-09-07T07:00:00Z",
@@ -347,7 +358,7 @@ test("dry-run observes without any GitHub writes or token", async (t) => {
   t.mock.method(globalThis, "fetch", async (url) => { urls.push(url); return healthyResponse(url); });
   t.mock.method(console, "log", () => {});
   await main({ args: ["--dry-run"], env: {} });
-  assert.equal(urls.length, 11);
+  assert.equal(urls.length, 12);
   assert.equal(urls.some((url) => url.includes("api.github.com")), false);
 });
 
