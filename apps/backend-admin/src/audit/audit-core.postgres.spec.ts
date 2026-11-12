@@ -193,8 +193,14 @@ suite('transactional audit core (PostgreSQL)', () => {
   });
 
   it('paginates same-millisecond events without omission and validates filters', async () => {
-    for (let i = 0; i < 4; i++)
-      await service.recordEvent('read', {}, context('pagination@example.test'));
+    await dataSource.query(`
+      INSERT INTO audit_event(operation_id, occurred_at, phase, action, actor)
+      SELECT gen_random_uuid(),
+        date_trunc('milliseconds', statement_timestamp() - interval '1 second')
+          + i * interval '1 microsecond',
+        'read', 'user.list', '{"email":"pagination@example.test"}'::jsonb
+      FROM generate_series(1, 4) i
+    `);
     const first = await service.list({
       actor: 'pagination@example.test',
       limit: '2',
@@ -205,11 +211,56 @@ suite('transactional audit core (PostgreSQL)', () => {
       cursor: first.nextCursor,
     });
     expect(
+      JSON.parse(Buffer.from(first.nextCursor, 'base64url').toString()).at,
+    ).toMatch(/\.\d{3}003Z$/);
+    expect(new Set(first.items.map((x) => x.occurredAt)).size).toBe(1);
+    expect(
       new Set([...first.items, ...second.items].map((x) => x.id)).size,
     ).toBe(4);
     expect(second.nextCursor).toBeNull();
     await expect(service.list({ limit: '1000000' })).rejects.toThrow();
     await expect(service.list({ cursor: 'not-a-cursor' })).rejects.toThrow();
+  });
+
+  it('uses the database clock for the default upper bound, including sub-millisecond events', async () => {
+    const [event] = await dataSource.query(`
+      INSERT INTO audit_event(operation_id, occurred_at, phase, action, actor)
+      VALUES (gen_random_uuid(),
+        date_trunc('milliseconds', statement_timestamp() - interval '1 second')
+          + interval '999 microseconds',
+        'read', 'user.list', '{"email":"database-clock@example.test"}'::jsonb)
+      RETURNING operation_id, occurred_at
+    `);
+    const applicationClock = new Date(event.occurred_at);
+    // Only Date is faked; PostgreSQL and its network timers keep running.
+    jest.useFakeTimers({
+      now: applicationClock,
+      doNotFake: [
+        'hrtime',
+        'nextTick',
+        'performance',
+        'queueMicrotask',
+        'setImmediate',
+        'clearImmediate',
+        'setInterval',
+        'clearInterval',
+        'setTimeout',
+        'clearTimeout',
+      ],
+    });
+    try {
+      const result = await service.list({
+        actor: 'database-clock@example.test',
+      });
+      expect(result.items.map((item) => item.id)).toEqual([event.operation_id]);
+      const explicitlyBounded = await service.list({
+        actor: 'database-clock@example.test',
+        to: applicationClock.toISOString(),
+      });
+      expect(explicitlyBounded.items).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('rolls back the business statement when the trigger cannot persist its audit row', async () => {
