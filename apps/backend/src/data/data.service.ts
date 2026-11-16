@@ -1745,11 +1745,47 @@ export class DataService implements OnModuleInit {
       );
       sparseCurrent = !snapshotCoverageValidated;
     }
-    const startDate = sparseCurrent
+    let startDate = sparseCurrent
       ? currentPublishedDate
       : appendOnly
         ? nextDate
         : active.identity.latestDate;
+    let targetRanges = [{ from: startDate, through: currentPublishedDate }];
+    if (
+      sparseCurrent &&
+      appendOnly &&
+      this.getStatisticCacheMode(publicationState) === 'versioned' &&
+      publicationState.historicDirtyFrom !== null &&
+      !this.hasCertifiedHistoryRepair(publicationState)
+    ) {
+      const coverage = await this.getAvailableSafeHistoricCoverageRequirement(
+        publicationState,
+        manager,
+      );
+      // Append every newly certified day while retaining gaps. Group adjacent
+      // days so catching up months does not rescan the JSON statistics per day.
+      const dates = new Set<string>([currentPublishedDate]);
+      for (const { from, through } of coverage?.ranges ?? []) {
+        const firstDate = from < nextDate ? nextDate : from;
+        for (const { date } of this.generateDateRange(firstDate, through)) {
+          dates.add(date);
+        }
+      }
+      targetRanges = [];
+      for (const date of [...dates].sort()) {
+        const previous = targetRanges.at(-1);
+        if (
+          previous &&
+          moment.utc(previous.through).add(1, 'day').format('YYYY-MM-DD') ===
+            date
+        ) {
+          previous.through = date;
+        } else {
+          targetRanges.push({ from: date, through: date });
+        }
+      }
+      startDate = targetRanges[0].from;
+    }
     const strategy = statisticDeltaMaterializationStrategy(
       active.identity.materializationStrategy,
       this.hasCertifiedHistoryRepair(publicationState),
@@ -1757,28 +1793,42 @@ export class DataService implements OnModuleInit {
       appendOnly,
     );
     if (!snapshotCoverageValidated) {
-      await this.assertDeltaSnapshotCoverage(
-        startDate,
-        currentPublishedDate,
+      for (const { from, through } of targetRanges) {
+        await this.assertDeltaSnapshotCoverage(
+          from,
+          through,
+          active.identity.communeCount,
+          publicationState,
+          manager,
+        );
+      }
+    }
+    const referenceData = await this.loadRefData(manager);
+    const targetDepartments = { dataArea: [], dataDepartement: [] };
+    const targetCommuneWeights = new Map<
+      string,
+      StatisticCacheLatestCommuneWeight[]
+    >();
+    for (const { from, through } of targetRanges) {
+      const departments = await this.loadDailyDepartmentCollections(
+        from,
+        through,
+        referenceData,
+        manager,
+      );
+      targetDepartments.dataArea.push(...departments.dataArea);
+      targetDepartments.dataDepartement.push(...departments.dataDepartement);
+      const weights = await this.loadDailyCommuneWeights(
+        from,
+        through,
         active.identity.communeCount,
         publicationState,
         manager,
       );
+      for (const [date, values] of weights) {
+        targetCommuneWeights.set(date, values);
+      }
     }
-    const referenceData = await this.loadRefData(manager);
-    const targetDepartments = await this.loadDailyDepartmentCollections(
-      startDate,
-      currentPublishedDate,
-      referenceData,
-      manager,
-    );
-    const targetCommuneWeights = await this.loadDailyCommuneWeights(
-      startDate,
-      currentPublishedDate,
-      active.identity.communeCount,
-      publicationState,
-      manager,
-    );
     const dataArea = this.replaceDatedEntries(
       active.dataArea,
       targetDepartments.dataArea,
@@ -1953,7 +2003,7 @@ export class DataService implements OnModuleInit {
           row.status !== 'completed' ||
           Number(row.expectedCommuneCount) !== expectedCommuneCount ||
           Number(row.processedCommuneCount) !== expectedCommuneCount ||
-          (date === endDate &&
+          (date === publicationState.currentPublishedDate &&
             String(row.sourceRevision ?? '') !==
               String(publicationState.sourceRevision ?? ''))
         );
