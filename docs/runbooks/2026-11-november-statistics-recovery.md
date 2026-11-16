@@ -123,6 +123,36 @@ incrémente `statistic_publication_state.revision` par comparaison de version.
 Après succès, attendre le worker de cache et vérifier les trois dates ainsi que
 la conservation des dates déjà présentes et de la fraîcheur courante.
 
+## Exécution en production du 16 novembre 2026
+
+Le premier essai a été refusé parce qu'un verrou était déjà détenu, avant toute
+écriture. La reprise a confirmé `APPLIED` puis `COMMIT` à **15:10:40 UTC**, en
+**382 658 ms** : 34 943 communes et 101 départements traités, 104 829 points
+communaux, 303 points départementaux, trois journées nationales et trois
+certifications ajoutés. La révision statistique est passée de 398 à 399.
+
+| Preuve | Identifiant |
+| --- | --- |
+| Commit de l'opérateur exécuté | `682139439c4d316b488cd9bb10b840ea856d1690` |
+| Opération d'audit | `86d89771-107c-42a7-b89d-a323713141b8` |
+| SHA256 du manifeste | `16d088409c6cf1b716d50e7786a1dad09867d09459a5cafe53a83e7fe12d2e75` |
+| SHA256 du script compilé | `f7432742b2f215324c0a5d8171b0bcc519463c7f1c34bf4db70019ecc8e8bee2` |
+
+La lecture SQL après import confirme les trois snapshots complets
+(34 943/34 943 communes chacun), les trois statistiques nationales couvrant
+101 départements et le contexte courant conservé à `sourceRevision=169376`.
+Les événements d'audit `started`, `succeeded` et `applied` sont présents.
+
+Les quatre arrêtés concernés restent correctement servis (38505, 38508,
+38495 et 38503), leurs quatre PDF répondent en HTTP 200, le GeoJSON contient
+2 537 entités avec son empreinte attendue et les tuiles PMTiles répondent en
+HTTP 206. La publication courante `77611a0d…` est inchangée.
+
+**Vérification du cache statistique encore en attente** : l'import en base
+est confirmé, mais l'activation de l'artefact contenant les 5 016 dates doit
+encore être contrôlée. Aucun déploiement applicatif ni fusion de PR n'est
+nécessaire pour cette intervention ponctuelle.
+
 ## Vérification locale
 
 Les tests unitaires valident les contrats, les empreintes et les fusions.
