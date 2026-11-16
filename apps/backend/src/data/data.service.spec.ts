@@ -2560,7 +2560,7 @@ describe('DataService', () => {
       );
     });
 
-    it('detects a partial sparse cache even when its first date is preserved', () => {
+    it('detects a partial sparse cache even when its first date is preserved', async () => {
       const state = {
         ...artifactState,
         activePublicationId: '00000000-0000-4000-8000-000000000049',
@@ -2576,15 +2576,18 @@ describe('DataService', () => {
         dateCount: 2,
       };
 
-      expect(
+      mockDataSource.query.mockResolvedValue([
+        { date: state.currentPublishedDate },
+      ]);
+      await expect(
         (service as any).shouldRecoverSparseHistoricArtifact(
           partialIdentity,
           state,
         ),
-      ).toBe(true);
+      ).resolves.toBe(true);
     });
 
-    it('recovers a safe suffix when the dirty range starts at history begin', () => {
+    it('recovers a safe suffix when the dirty range starts at history begin', async () => {
       const state = {
         ...artifactState,
         activePublicationId: '00000000-0000-4000-8000-000000000049',
@@ -2600,12 +2603,16 @@ describe('DataService', () => {
         dateCount: 1,
       };
 
-      expect(
+      mockDataSource.query.mockResolvedValue([
+        { date: '2026-09-01' },
+        { date: '2026-09-02' },
+      ]);
+      await expect(
         (service as any).shouldRecoverSparseHistoricArtifact(
           oneDayIdentity,
           state,
         ),
-      ).toBe(true);
+      ).resolves.toBe(true);
       expect(
         (service as any).getSafeHistoricCoverageRequirement(state),
       ).toEqual({
