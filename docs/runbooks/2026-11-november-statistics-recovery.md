@@ -72,9 +72,14 @@ node dist/apps/backend-admin/src/scripts/import-november-statistics.js > dry-run
 ```
 
 Vérifier les trois preuves d'entrées, la chaîne complète des invalidations,
-les compteurs, `inspectedBytes` et `elapsedMs`. Si la durée mesurée ne laisse
-pas assez de marge pour l'écriture sous 300 s, arrêter et adapter le transfert
-après revue ; ne pas forcer une reprise avec des délais arbitraires.
+les compteurs, `inspectedBytes` et `elapsedMs`. La lecture ne transfère que les
+points de novembre, leurs positions d'insertion et `xmin`. PostgreSQL contrôle
+les dates de l'historique entier, puis insère les nouveaux points avec
+`jsonb_insert` et compare `xmin` avant d'écrire. Les autres objets du tableau
+et leur ordre relatif sont conservés, y compris si le tableau initial n'est
+pas trié. Seul l'objet mensuel de novembre est remplacé avec `jsonb_set`.
+Si la durée mesurée ne laisse pas assez de marge pour l'écriture sous 300 s,
+arrêter et analyser le coût après revue ; ne pas relever arbitrairement le délai.
 
 L'application exige le champ `context` exact de cette inspection, un label
 d'opérateur et la confirmation bornée :
@@ -104,7 +109,8 @@ la conservation des dates déjà présentes et de la fraîcheur courante.
 Les tests unitaires valident les contrats, les empreintes et les fusions.
 Les tests PostgreSQL optionnels créent leurs schémas temporaires dans une base
 de test dédiée et exercent 34 943 communes, le rollback, l'idempotence, les
-verrous, la conservation des mois/attestations et la preuve d'équivalence datée.
+verrous, la conservation des mois/attestations, la preuve d'équivalence datée,
+un historique de plus de 5 000 journées et le refus d'un `xmin` concurrent.
 
 ```sh
 NOVEMBER_RECOVERY_TEST_DATABASE_URL=connexion_base_de_test npm test -- --runInBand src/scripts/import-november-statistics.spec.ts src/scripts/import-november-statistics.postgres.spec.ts

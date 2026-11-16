@@ -8,6 +8,8 @@ import {
   RecoveryBundle,
   readRecoveryInputEvidence,
   RECOVERY_STATE_SQL,
+  RECOVERY_COMMUNE_PROJECTION_SQL,
+  RECOVERY_COMMUNE_MERGE_SQL,
 } from './import-november-statistics';
 
 const url = process.env.NOVEMBER_RECOVERY_TEST_DATABASE_URL;
@@ -301,7 +303,7 @@ postgres('November importer against PostgreSQL', () => {
     const database = {
       query: async (sql: string, parameters?: any[]) => {
         const result = await client.query(sql, parameters);
-        if (!changed && sql.startsWith('UPDATE statistic_commune target')) {
+        if (!changed && sql.includes('UPDATE statistic_commune target')) {
           changed = true;
           await other.query(
             'UPDATE zone_publication_source_state SET "publicRevision"="publicRevision"+1',
@@ -391,6 +393,105 @@ postgres('November importer against PostgreSQL', () => {
         )
       ).rows[0].restrictions,
     ).toEqual(baseline);
+  });
+
+  it('merges long histories on the server while preserving every outside value and relative order', async () => {
+    const start = Date.parse('2013-01-01T00:00:00Z');
+    const count = (Date.parse('2026-11-12T00:00:00Z') - start) / 86400000 + 1;
+    const history = Array.from({ length: count }, (_, index) =>
+      day(new Date(start + index * 86400000).toISOString().slice(0, 10)),
+    );
+    history[history.length - 1].SOU = 'vigilance';
+    [history[0], history[1]] = [history[1], history[0]];
+    history.push(day('2026-11-16', 'crise'));
+    await client.query(
+      'UPDATE statistic_commune SET restrictions=$1::jsonb WHERE id=1',
+      [JSON.stringify(history)],
+    );
+    const projected = (
+      await client.query(RECOVERY_COMMUNE_PROJECTION_SQL, [['00001']])
+    ).rows[0];
+    expect(projected.restrictions).toHaveLength(13);
+    expect(Buffer.byteLength(JSON.stringify(projected))).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(history)) / 50,
+    );
+    const outside = await outsideData();
+    const dryRun = await importNovemberStatistics(client, bundle, options());
+    await importNovemberStatistics(client, bundle, {
+      ...options(),
+      apply: true,
+      expectedContext: dryRun.context,
+    });
+    expect(await outsideData()).toEqual(outside);
+    const after = (
+      await client.query(
+        'SELECT restrictions FROM statistic_commune WHERE id=1',
+      )
+    ).rows[0].restrictions;
+    expect(
+      after.filter((entry) => !NOVEMBER_RECOVERY_DATES.includes(entry.date)),
+    ).toEqual(history);
+    expect(after.slice(-4).map((entry) => entry.date)).toEqual([
+      '2026-11-13',
+      '2026-11-14',
+      '2026-11-15',
+      '2026-11-16',
+    ]);
+    await client.query(
+      'UPDATE statistic_commune SET restrictions=restrictions || $1::jsonb WHERE id=1',
+      [JSON.stringify([history[0]])],
+    );
+    await expect(
+      importNovemberStatistics(client, bundle, options()),
+    ).rejects.toThrow('duplicated dates');
+  });
+
+  it('rejects a concurrent xmin change without overwriting its daily or monthly values', async () => {
+    const dryRun = await importNovemberStatistics(client, bundle, options());
+    let changed = false;
+    const database = {
+      query: async (sql: string, parameters?: any[]) => {
+        if (!changed && sql === RECOVERY_COMMUNE_MERGE_SQL) {
+          changed = true;
+          await other.query(
+            `UPDATE statistic_commune SET "restrictionsByMonth"=jsonb_set("restrictionsByMonth",'{1,ponderation}','999'::jsonb) WHERE id=1`,
+          );
+        }
+        return client.query(sql, parameters);
+      },
+    };
+    await expect(
+      importNovemberStatistics(database, bundle, {
+        ...options(),
+        apply: true,
+        expectedContext: dryRun.context,
+      }),
+    ).rejects.toThrow('Concurrent commune statistic modification');
+    expect(changed).toBe(true);
+    expect(
+      (
+        await client.query(
+          'SELECT restrictions,"restrictionsByMonth" FROM statistic_commune WHERE id=1',
+        )
+      ).rows[0],
+    ).toEqual({
+      restrictions: oldDays,
+      restrictionsByMonth: [
+        oldMonths[0],
+        { date: '2026-10', ponderation: 999 },
+        oldMonths[2],
+      ],
+    });
+    expect(
+      (
+        await client.query(
+          'SELECT restrictions FROM statistic_commune WHERE id=2',
+        )
+      ).rows[0].restrictions,
+    ).toEqual(oldDays);
+    expect((await client.query('SELECT phase FROM audit_event')).rows).toEqual([
+      { phase: 'failed' },
+    ]);
   });
 
   it('yields without writes when the current computation holds its lock', async () => {

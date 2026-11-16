@@ -491,6 +491,51 @@ async function audit(
   );
 }
 
+// Scan the target history once on the server. Only November values and insertion
+// positions cross the connection; xmin fences both daily and monthly JSONB.
+export const RECOVERY_COMMUNE_PROJECTION_SQL = `
+  SELECT statistic.id, commune.code, statistic.xmin::text AS version,
+    daily.days AS restrictions, daily."validDates", daily."uniqueDates", daily."dayCount",
+    daily.positions, monthly.months AS "restrictionsByMonth", monthly.position AS "monthPosition"
+  FROM statistic_commune statistic JOIN commune ON commune.id = statistic."communeId"
+  CROSS JOIN LATERAL (
+    SELECT coalesce(jsonb_agg(value ORDER BY ordinal) FILTER (WHERE value->>'date' LIKE '2026-11-%'), '[]') AS days,
+      coalesce(bool_and(jsonb_typeof(value)='object' AND coalesce(value->>'date' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$',false)),true) AS "validDates",
+      count(*)::integer AS "dayCount",count(DISTINCT value->>'date')::integer AS "uniqueDates",
+      jsonb_build_object(
+        '2026-11-13',coalesce(min(ordinal-1) FILTER (WHERE value->>'date'>'2026-11-13'),count(*)),
+        '2026-11-14',coalesce(min(ordinal-1) FILTER (WHERE value->>'date'>'2026-11-14'),count(*)),
+        '2026-11-15',coalesce(min(ordinal-1) FILTER (WHERE value->>'date'>'2026-11-15'),count(*))) AS positions
+    FROM jsonb_array_elements(coalesce(statistic.restrictions,'[]'::jsonb)) WITH ORDINALITY history(value,ordinal)
+  ) daily
+  CROSS JOIN LATERAL (
+    SELECT coalesce(jsonb_agg(value ORDER BY ordinal) FILTER (WHERE value->>'date'='2026-11'),'[]') AS months,
+      coalesce(min(ordinal-1) FILTER (WHERE value->>'date'='2026-11'),count(*))::integer AS position
+    FROM jsonb_array_elements(coalesce(statistic."restrictionsByMonth",'[]'::jsonb)) WITH ORDINALITY history(value,ordinal)
+  ) monthly
+  WHERE commune.code=ANY($1::text[]) ORDER BY commune.code
+`;
+export const RECOVERY_COMMUNE_MERGE_SQL = `
+  WITH changes AS MATERIALIZED (
+    SELECT * FROM jsonb_to_recordset($1::jsonb) change(id integer,version text,additions jsonb,month jsonb,"monthPosition" integer)
+  ), original AS (
+    SELECT change.*,coalesce(target.restrictions,'[]'::jsonb) AS value
+    FROM statistic_commune target JOIN changes change ON target.id=change.id AND target.xmin::text=change.version
+  ), first_day AS (
+    SELECT original.*,CASE WHEN jsonb_array_length(additions)>0
+      THEN jsonb_insert(value,ARRAY[additions->0->>'index'],additions->0->'value') ELSE value END AS first_value FROM original
+  ), second_day AS (
+    SELECT first_day.*,CASE WHEN jsonb_array_length(additions)>1
+      THEN jsonb_insert(first_value,ARRAY[additions->1->>'index'],additions->1->'value') ELSE first_value END AS second_value FROM first_day
+  ), third_day AS (
+    SELECT second_day.*,CASE WHEN jsonb_array_length(additions)>2
+      THEN jsonb_insert(second_value,ARRAY[additions->2->>'index'],additions->2->'value') ELSE second_value END AS merged_value FROM second_day
+  )
+  UPDATE statistic_commune target SET restrictions=change.merged_value,
+    "restrictionsByMonth"=jsonb_set(coalesce(target."restrictionsByMonth",'[]'::jsonb),ARRAY[change."monthPosition"::text],change.month,true)
+  FROM third_day change WHERE target.id=change.id AND target.xmin::text=change.version RETURNING target.id
+`;
+
 export async function importNovemberStatistics(
   database: RecoveryDatabase,
   bundle: RecoveryBundle,
@@ -632,17 +677,17 @@ export async function importNovemberStatistics(
       await assertSameState(database, before);
       const codes = communes.slice(offset, offset + batchSize);
       const rows = (
-        await database.query(
-          `SELECT statistic.id, commune.code, statistic.restrictions, statistic."restrictionsByMonth"
-        FROM statistic_commune statistic JOIN commune ON commune.id = statistic."communeId" WHERE commune.code = ANY($1::text[]) ORDER BY commune.code`,
-          [codes],
-        )
+        await database.query(RECOVERY_COMMUNE_PROJECTION_SQL, [codes])
       ).rows;
       if (rows.length !== codes.length)
         throw new Error('Target commune statistics are incomplete');
       inspectedBytes += Buffer.byteLength(JSON.stringify(rows));
       const changes = [];
       for (const row of rows) {
+        if (row.validDates !== true || row.uniqueDates !== row.dayCount)
+          throw new Error(
+            'Target daily history has invalid or duplicated dates',
+          );
         const incoming = communeDays.get(row.code);
         if (!incoming)
           throw new Error('Target commune code is outside the source');
@@ -658,21 +703,27 @@ export async function importNovemberStatistics(
         )
           changes.push({
             id: row.id,
-            before: row.restrictions,
-            beforeMonths: row.restrictionsByMonth,
-            after: merged.value,
-            months,
+            version: row.version,
+            additions: incoming
+              .filter(
+                (entry) =>
+                  !row.restrictions.some(
+                    (existing) => existing.date === entry.date,
+                  ),
+              )
+              .map((value, index) => ({
+                index: Number(row.positions[value.date]) + index,
+                value,
+              })),
+            month: months[0],
+            monthPosition: row.monthPosition,
           });
       }
       changedCommunes += changes.length;
       if (options.apply && changes.length) {
-        const result = await database.query(
-          `UPDATE statistic_commune target SET restrictions = change.after, "restrictionsByMonth" = change.months
-          FROM jsonb_to_recordset($1::jsonb) change(id integer, before jsonb, "beforeMonths" jsonb, after jsonb, months jsonb)
-          WHERE target.id = change.id AND target.restrictions IS NOT DISTINCT FROM change.before
-            AND target."restrictionsByMonth" IS NOT DISTINCT FROM change."beforeMonths" RETURNING target.id`,
-          [JSON.stringify(changes)],
-        );
+        const result = await database.query(RECOVERY_COMMUNE_MERGE_SQL, [
+          JSON.stringify(changes),
+        ]);
         if (result.rows.length !== changes.length)
           throw new Error('Concurrent commune statistic modification');
       }
