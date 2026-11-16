@@ -148,10 +148,17 @@ Les quatre arrêtés concernés restent correctement servis (38505, 38508,
 2 537 entités avec son empreinte attendue et les tuiles PMTiles répondent en
 HTTP 206. La publication courante `77611a0d…` est inchangée.
 
-**Vérification du cache statistique encore en attente** : l'import en base
-est confirmé, mais l'activation de l'artefact contenant les 5 016 dates doit
-encore être contrôlée. Aucun déploiement applicatif ni fusion de PR n'est
-nécessaire pour cette intervention ponctuelle.
+La vérification publique indépendante est **réussie à 15:12:24 UTC** :
+le cache actif `d97512bb…` contient 5 016 dates et est frais. Les 5 013 anciennes
+valeurs sont strictement inchangées ; seuls les 13, 14 et 15 novembre ont été
+ajoutés. Les niveaux des 101 départements, les surfaces des quatre DDT et
+12 points communaux sont conformes aux résultats calculés. La carte conserve
+la même publication `77611a0d…`.
+
+La reprise des trois journées est donc confirmée en base et dans le cache
+public. Aucun déploiement applicatif ni fusion de PR n'a été réalisé pour
+cette intervention ponctuelle ; la PR conserve l'opérateur et ses preuves
+pour revue.
 
 ## Vérification locale
 
