@@ -1462,10 +1462,11 @@ export class DataService implements OnModuleInit {
       mode === 'versioned' &&
       !certifiedHistoryRepairActivated &&
       publicationState.historicDirtyFrom !== null &&
-      this.shouldRecoverSparseHistoricArtifact(
+      (await this.shouldRecoverSparseHistoricArtifact(
         active.identity,
         publicationState,
-      )
+        manager,
+      ))
     ) {
       return this.createSparseHistoricArtifactCandidate(
         publicationState,
@@ -1562,7 +1563,10 @@ export class DataService implements OnModuleInit {
     manager: EntityManager,
   ): Promise<StatisticCacheArtifactCandidate> {
     const requiredCoverage =
-      this.getSafeHistoricCoverageRequirement(publicationState);
+      await this.getAvailableSafeHistoricCoverageRequirement(
+        publicationState,
+        manager,
+      );
     if (!requiredCoverage || requiredCoverage.minimumDateCount <= 1) {
       return this.createSparseCurrentArtifactCandidate(
         publicationState,
@@ -2442,6 +2446,21 @@ export class DataService implements OnModuleInit {
     this.logMemoryUsage();
 
     this.data = this.generateDateRange(this.beginDate, currentPublishedDate);
+    if (
+      this.getStatisticCacheMode(publicationState) === 'versioned' &&
+      publicationState.historicDirtyFrom !== null &&
+      !this.hasCertifiedHistoryRepair(publicationState)
+    ) {
+      const coverage = await this.getAvailableSafeHistoricCoverageRequirement(
+        publicationState,
+        manager,
+      );
+      this.data = this.data.filter(({ date }) =>
+        coverage?.ranges.some(
+          ({ from, through }) => date >= from && date <= through,
+        ),
+      );
+    }
     const expectedCommuneCount = await this.assertSnapshotCoverage(
       publicationState,
       manager,
@@ -2677,16 +2696,35 @@ export class DataService implements OnModuleInit {
       }
       const target = this.getCandidateTarget(publicationState);
       const active = await artifactService.loadActiveIdentity();
-      const forceHistoricRecovery = this.shouldRecoverSparseHistoricArtifact(
-        active,
-        publicationState,
-      );
+      const forceHistoricRecovery =
+        await this.shouldRecoverSparseHistoricArtifact(
+          active,
+          publicationState,
+        );
       const safeHistoricCoverage =
         publicationState.historicDirtyFrom !== null &&
         this.getStatisticCacheMode(publicationState) === 'versioned' &&
         !this.hasCertifiedHistoryRepair(publicationState)
-          ? this.getSafeHistoricCoverageRequirement(publicationState)
+          ? await this.getAvailableSafeHistoricCoverageRequirement(
+              publicationState,
+            )
           : null;
+      const retainedSparseHistory = Boolean(
+        active &&
+        !forceHistoricRecovery &&
+        active.mode === 'versioned' &&
+        active.materializationStrategy === 'sparse-current' &&
+        active.historicDirtyFrom === publicationState.historicDirtyFrom &&
+        active.historicDirtyThrough === publicationState.historicDirtyThrough &&
+        active.latestDate <= publicationState.currentPublishedDate,
+      );
+      const minimumDateCount = Math.max(
+        safeHistoricCoverage?.minimumDateCount ?? 0,
+        retainedSparseHistory
+          ? active!.dateCount +
+              Number(active!.latestDate < publicationState.currentPublishedDate)
+          : 0,
+      );
       if (
         active &&
         !forceHistoricRecovery &&
@@ -2707,15 +2745,17 @@ export class DataService implements OnModuleInit {
           const base = await artifactService.loadActive(manager);
           return this.createArtifactCandidate(latestState, base, manager);
         },
-        forceHistoricRecovery || safeHistoricCoverage
+        forceHistoricRecovery || safeHistoricCoverage || retainedSparseHistory
           ? {
               ...(forceHistoricRecovery
                 ? { replaceActivePublicationId: active!.id }
                 : {}),
-              ...(safeHistoricCoverage
+              ...(safeHistoricCoverage || retainedSparseHistory
                 ? {
-                    requiredFirstDate: safeHistoricCoverage.firstDate,
-                    minimumDateCount: safeHistoricCoverage.minimumDateCount,
+                    requiredFirstDate: retainedSparseHistory
+                      ? active!.firstDate
+                      : safeHistoricCoverage!.firstDate,
+                    minimumDateCount,
                   }
                 : {}),
             }
@@ -3560,10 +3600,11 @@ export class DataService implements OnModuleInit {
     return configuredMode;
   }
 
-  private shouldRecoverSparseHistoricArtifact(
+  private async shouldRecoverSparseHistoricArtifact(
     identity: StatisticCacheArtifactIdentity | null | undefined,
     publicationState: StatisticPublicationState,
-  ): boolean {
+    manager: Pick<EntityManager, 'query'> = this.dataSource,
+  ): Promise<boolean> {
     if (
       identity?.materializationStrategy !== 'sparse-current' ||
       this.getStatisticCacheMode(publicationState) !== 'versioned' ||
@@ -3572,13 +3613,88 @@ export class DataService implements OnModuleInit {
     ) {
       return false;
     }
+    // A new current day is appended by the delta path. It does not mean that
+    // the existing artifact has lost history, nor certify intervening days.
     const requiredCoverage =
-      this.getSafeHistoricCoverageRequirement(publicationState);
+      await this.getAvailableSafeHistoricCoverageRequirement(
+        {
+          ...publicationState,
+          currentPublishedDate:
+            identity.latestDate < publicationState.currentPublishedDate!
+              ? identity.latestDate
+              : publicationState.currentPublishedDate,
+        },
+        manager,
+      );
     if (!requiredCoverage) return false;
     return (
       identity.firstDate !== requiredCoverage.firstDate ||
       identity.dateCount < requiredCoverage.minimumDateCount
     );
+  }
+
+  private async getAvailableSafeHistoricCoverageRequirement(
+    publicationState: StatisticPublicationState,
+    manager: Pick<EntityManager, 'query'> = this.dataSource,
+  ): Promise<StatisticSafeHistoricCoverage | null> {
+    const required = this.getSafeHistoricCoverageRequirement(publicationState);
+    const dirtyThrough = publicationState.historicDirtyThrough;
+    const currentDate = publicationState.currentPublishedDate;
+    if (
+      !required ||
+      !dirtyThrough ||
+      !currentDate ||
+      dirtyThrough >= currentDate
+    ) {
+      return required;
+    }
+    const suffixFrom = [
+      moment.utc(dirtyThrough).add(1, 'day').format('YYYY-MM-DD'),
+      this.beginDate,
+      this.releaseDate,
+    ]
+      .sort()
+      .at(-1)!;
+    if (suffixFrom > currentDate) return required;
+
+    // Keep the established prefix, including pre-release history. After the
+    // dirty range, only completed national snapshots prove a day is available.
+    // Missing days remain holes and must not force a full rebuild of a sound
+    // sparse artifact whenever its current date advances.
+    const prefixThrough = moment
+      .utc(suffixFrom)
+      .subtract(1, 'day')
+      .format('YYYY-MM-DD');
+    const ranges = required.ranges
+      .filter(({ from }) => from <= prefixThrough)
+      .map(({ from, through }) => ({
+        from,
+        through: through < prefixThrough ? through : prefixThrough,
+      }));
+    const snapshots: Array<{ date: string }> = await manager.query(
+      `
+        SELECT "snapshotDate"::text AS date
+        FROM "statistic_commune_snapshot"
+        WHERE "scope" = 'national'
+          AND "snapshotDate" BETWEEN $1::date AND $2::date
+          AND "status" = 'completed'
+          AND "expectedCommuneCount" > 0
+          AND "processedCommuneCount" = "expectedCommuneCount"
+          AND "expectedCommuneCount" = (SELECT COUNT(*) FROM "commune")
+        ORDER BY "snapshotDate"
+      `,
+      [suffixFrom, currentDate],
+    );
+    for (const { date } of snapshots) {
+      ranges.push({ from: date, through: date });
+    }
+    const minimumDateCount = ranges.reduce(
+      (count, { from, through }) => count + this.countCivilDates(from, through),
+      0,
+    );
+    return minimumDateCount > 0
+      ? { firstDate: ranges[0].from, minimumDateCount, ranges }
+      : null;
   }
 
   private getSafeHistoricCoverageRequirement(

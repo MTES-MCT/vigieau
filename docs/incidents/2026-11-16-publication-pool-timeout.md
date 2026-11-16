@@ -17,11 +17,11 @@ Le contrôle de publication a signalé l'incident le 12 novembre à 16:26 UTC
 (issue #70). La disponibilité HTTP et la santé du journal ne détectent pas,
 à elles seules, l'échec d'un calcul national.
 
-La production sert toujours la publication `760d1047-cdfe-4c9f-8b6c-da49083cdd76`
-(révision 574, date métier du 12 novembre). La file comporte 101 départements
+Au diagnostic du 16 novembre à 11:20 UTC, la production servait la publication `760d1047-cdfe-4c9f-8b6c-da49083cdd76`
+(révision 574, date métier du 12 novembre). La file comportait 101 départements
 pour les calculs quotidiens et 15 demandes courantes. Les quatre signalements
-ont des arrêtés correctement publiés en base, mais leurs prédécesseurs sont
-encore présents dans la publication publique :
+avaient des arrêtés correctement publiés en base, mais leurs prédécesseurs
+restaient présents dans la publication publique :
 
 | Département | Arrêté attendu | ID attendu | ID encore servi |
 | --- | --- | --- | --- |
@@ -69,3 +69,41 @@ le rejeu historique mutable pour cette reprise.
 Les preuves de déploiement, reprises et contrôles finaux sont conservées dans
 le compte rendu de livraison. Ne pas déclarer l'incident résolu sur la seule
 base d'un build réussi ou d'un processus `running`.
+
+## Reprise des cartes constatée le 16 novembre
+
+Le correctif du pool a été livré en préproduction (`4007c3e`) puis en production
+(`6b09eaf`). Le réarmement journalisé a avancé seulement les échéances des
+101 demandes. Le calcul de production a démarré à 12:00 UTC et s'est terminé
+avec succès à 12:30. La publication `e6745282-d056-4137-a45b-35bcce080583`
+(révision publique 575, révision source 169373) a été activée à 12:36:14 UTC.
+
+À 12:41 UTC, la file est vide et les quatre nouveaux arrêtés sont servis avec
+leurs PDF accessibles. La Côte-d'Or comporte 36 zones en crise et 6 en alerte
+renforcée, soit les 12 et 2 zones source déclinées par ressource. Les contrôles
+navigateur de carte sur ordinateur et mobile passent. La santé de publication
+est `healthy`, avec trois instances publiques sur la nouvelle version.
+Le journal confirme le recalcul réussi ainsi que les deux événements et
+101 références de causalité de la reprise opérateur.
+
+## Blocage secondaire du cache statistique
+
+Après activation, le cache statistique reste au 12 novembre : sa reconstruction
+échoue sur les données départementales absentes du 13 novembre. Les journées
+13 à 15 n'ont pas été calculées pendant l'incident ; le 16 est complet et
+certifié. Les cartes et ce cache statistique sont des publications distinctes.
+
+Le cache actif utilise la stratégie `sparse-current` et conserve 5 012 dates.
+La détection de récupération historique compare sa couverture à un calendrier
+continu allant jusqu'au nouveau jour publié. Elle impose donc une reconstruction
+complète avant que la voie incrémentale puisse conserver l'historique et ajouter
+le jour certifié. La contrainte minimale de couverture du candidat fait la même
+hypothèse.
+
+La reprise doit conserver le préfixe historique établi, prendre en compte les
+dates réellement certifiées du suffixe et préserver la couverture déjà publiée.
+Aucune donnée ne doit être inventée pour les journées absentes. Les contrôles
+doivent couvrir l'avance du 12 au 16, la réconciliation du nouvel artefact, une
+modification le même jour puis le passage au 17. Une vraie perte d'une date
+certifiée doit continuer à déclencher la récupération. Les bornes historiques,
+les curseurs et les attestations ne sont pas modifiés par cette correction.
