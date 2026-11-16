@@ -46,6 +46,9 @@ const MONTH = '2026-11';
 const ACTION = 'statistics.import_november_2026';
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_FILE_SIZE = 64 * 1024 * 1024;
+// Measured production reads plus estimated JSONB/TOAST writes need 372–494 s; current
+// work still aborts the transaction at the next batch priority fence.
+const MAX_TRANSACTION_MS = 600_000;
 type JsonObject = Record<string, any>;
 
 export interface RecoverySource {
@@ -600,6 +603,7 @@ export async function importNovemberStatistics(
     manifestSha256: bundle.manifestSha256,
     dates: NOVEMBER_RECOVERY_DATES,
     sources: bundle.days.map(({ source }) => source),
+    transactionTimeoutMs: MAX_TRANSACTION_MS,
   };
   try {
     for (const lock of LOCKS) {
@@ -615,7 +619,8 @@ export async function importNovemberStatistics(
     await database.query(options.apply ? 'BEGIN' : 'BEGIN READ ONLY');
     transaction = true;
     await database.query(
-      "SELECT set_config('lock_timeout', '1000ms', true), set_config('statement_timeout', '120000ms', true), set_config('transaction_timeout', '300000ms', true)",
+      "SELECT set_config('lock_timeout', '1000ms', true), set_config('statement_timeout', '120000ms', true), set_config('transaction_timeout', $1, true)",
+      [`${MAX_TRANSACTION_MS}ms`],
     );
     const before = await readState(database);
     assertRecoveryState(before, options, bundle);
@@ -891,6 +896,7 @@ export async function importNovemberStatistics(
       certifiedDays,
       inspectedBytes,
       elapsedMs: Date.now() - startedAt,
+      transactionTimeoutMs: MAX_TRANSACTION_MS,
       revisionBefore: String(before.statistics.revision),
       revisionAfter: revision,
     };

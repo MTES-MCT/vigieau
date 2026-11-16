@@ -62,7 +62,7 @@ exactement les trois sources. Chaque source porte les champs :
 Le mode par défaut est une transaction en lecture seule. La cible doit être
 fraîche et certifiée, sans calcul courant ou historique en attente/en cours.
 Tous les verrous sont tentés sans attente. Chaque requête est bornée à 120 s,
-la transaction entière à 300 s ; aucune limite ne doit être relevée sans analyse.
+la transaction entière à 600 s ; aucune limite ne doit être relevée sans analyse.
 
 ```sh
 export NOVEMBER_RECOVERY_MANIFEST=/chemin/recovery/manifest.json
@@ -88,8 +88,16 @@ locales ne remplacent pas la mesure en production.
 Sur les mêmes 100 lignes, trois transactions locales annulées mesurent
 278–427 ms supplémentaires pour l'UPDATE/CAS, soit 460–612 ms au total.
 La marge avant application doit donc intégrer le coût d'écriture JSONB/TOAST,
-pas seulement celui de la simulation.
-Si la durée mesurée ne laisse pas assez de marge pour l'écriture sous 300 s,
+pas seulement celui de la simulation. La mesure de production est de 423 ms
+par lot de 100 communes et 1,6–5,8 ms pour le contrôle léger, avec une
+simulation nationale complète validée en 144,310 s. En appliquant ce facteur au coût local
+d'écriture, l'opération complète est estimée à 372–494 s : la borne est donc
+fixée à 600 s, avec 106–228 s de marge estimée. Les limites de requête (120 s)
+et de verrou (1 s) ainsi que l'abandon immédiat au prochain lot si le calcul
+courant devient prioritaire restent identiques. La simulation validée en production a inspecté les 34 943 communes,
+101 départements et trois journées nationales sans écriture. Son contexte
+exact doit encore être identique au début de l'application.
+Si la durée mesurée ne laisse pas assez de marge pour l'écriture sous 600 s,
 arrêter et analyser le coût après revue ; ne pas relever arbitrairement le délai.
 
 L'application exige le champ `context` exact de cette inspection, un label

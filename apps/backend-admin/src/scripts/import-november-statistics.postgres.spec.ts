@@ -537,6 +537,28 @@ postgres('November importer against PostgreSQL', () => {
     ]);
   });
 
+  it('applies bounded PostgreSQL timeouts locally and restores session settings afterward', async () => {
+    const timeoutSql = `SELECT name,setting::integer AS value FROM pg_settings WHERE name IN ('transaction_timeout','statement_timeout','lock_timeout') ORDER BY name`;
+    const baseline = (await client.query(timeoutSql)).rows;
+    let observed: any[] | undefined;
+    const database = {
+      query: async (sql: string, parameters?: any[]) => {
+        const result = await client.query(sql, parameters);
+        if (sql.includes("set_config('transaction_timeout'"))
+          observed = (await client.query(timeoutSql)).rows;
+        return result;
+      },
+    };
+    const result = await importNovemberStatistics(database, bundle, options());
+    expect(observed).toEqual([
+      { name: 'lock_timeout', value: 1000 },
+      { name: 'statement_timeout', value: 120000 },
+      { name: 'transaction_timeout', value: 600000 },
+    ]);
+    expect(result.transactionTimeoutMs).toBe(600000);
+    expect((await client.query(timeoutSql)).rows).toEqual(baseline);
+  });
+
   it('yields without writes when the current computation holds its lock', async () => {
     await other.query(
       "SELECT pg_advisory_lock(hashtext('vigieau'),hashtext('current-zone-recompute'))",
