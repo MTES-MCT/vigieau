@@ -273,7 +273,12 @@ export function mergeRecoveryDays(
   const value: JsonObject[] = [...(original ?? [])];
   const byDate = new Map<string, JsonObject>();
   for (const day of value) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day?.date) || byDate.has(day.date))
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(day?.date) ||
+      byDate.has(day.date) ||
+      (day.date.startsWith('2026-11-') &&
+        !/^2026-11-(0[1-9]|[12][0-9]|30)$/.test(day.date))
+    )
       throw new Error('Existing daily dates are invalid or duplicated');
     byDate.set(day.date, day);
   }
@@ -328,11 +333,14 @@ export function recoverNovemberMonth(
   return months;
 }
 
-export const RECOVERY_STATE_SQL = `
+function recoveryStateSql(includeProtectedHistory: boolean): string {
+  return `
   SELECT current_database() AS database,
     to_jsonb(config) AS config, to_jsonb(source) AS source,
     to_jsonb(state) AS statistics, to_jsonb(zones) AS zones,
-    (SELECT coalesce(jsonb_agg(to_jsonb(invalidation) || jsonb_build_object('affectedDates',
+    ${
+      includeProtectedHistory
+        ? `    (SELECT coalesce(jsonb_agg(to_jsonb(invalidation) || jsonb_build_object('affectedDates',
       (SELECT coalesce(jsonb_agg(day::text ORDER BY day), '[]') FROM unnest($1::date[]) dates(day)
         WHERE invalidation."affectedRange" @> day)) ORDER BY invalidation."epochAfter"), '[]')
       FROM historic_range_invalidation invalidation WHERE invalidation."epochAfter" > 1447) AS invalidations,
@@ -340,6 +348,9 @@ export const RECOVERY_STATE_SQL = `
     (SELECT coalesce(jsonb_agg(to_jsonb(attestation) ORDER BY attestation.id), '[]') FROM certified_history_repair_attestation attestation) AS attestations,
     (SELECT md5(coalesce(jsonb_agg(to_jsonb(snapshot) ORDER BY snapshot."snapshotDate", snapshot.scope)::text, '[]'))
       FROM statistic_commune_snapshot snapshot WHERE NOT (snapshot."snapshotDate" = ANY($1::date[]) AND snapshot.scope = 'national')) AS "outsideSnapshots",
+`
+        : ''
+    }
     EXISTS(SELECT 1 FROM current_zone_recompute_request request WHERE request."currentPending"
       OR EXISTS(SELECT 1 FROM unnest(request."pendingScheduledDates") due(date) WHERE due.date <= (now() AT TIME ZONE 'Europe/Paris')::date)) AS "currentPending",
     EXISTS(SELECT 1 FROM external_publication_run run WHERE run.status = 'running' AND run."jobKey" IN ('compute:national-daily', 'compute:historic-catchup')) AS "runningPublication",
@@ -352,6 +363,9 @@ export const RECOVERY_STATE_SQL = `
   FROM config CROSS JOIN zone_publication_source_state source CROSS JOIN statistic_publication_state state CROSS JOIN zone_publication_state zones
   WHERE config.id = 1 AND source.id = 1 AND state.id = 1 AND zones.id = 1
 `;
+}
+export const RECOVERY_STATE_SQL = recoveryStateSql(true);
+export const RECOVERY_ACTIVE_STATE_SQL = recoveryStateSql(false);
 function assertRecoveryState(
   state: JsonObject,
   options: RecoveryOptions,
@@ -444,10 +458,11 @@ export async function assertRecoverySourceValidity(
 async function readState(
   database: RecoveryDatabase,
   lock = false,
+  includeProtectedHistory = true,
 ): Promise<JsonObject> {
   const { rows } = await database.query(
-    `${RECOVERY_STATE_SQL}${lock ? ' FOR SHARE OF config, source, state, zones' : ''}`,
-    [NOVEMBER_RECOVERY_DATES],
+    `${includeProtectedHistory ? RECOVERY_STATE_SQL : RECOVERY_ACTIVE_STATE_SQL}${lock ? ' FOR SHARE OF config, source, state, zones' : ''}`,
+    includeProtectedHistory ? [NOVEMBER_RECOVERY_DATES] : [],
   );
   if (rows.length !== 1) throw new Error('Publication context is not unique');
   return rows[0];
@@ -456,9 +471,24 @@ async function assertSameState(
   database: RecoveryDatabase,
   before: JsonObject,
   lock = false,
+  includeProtectedHistory = true,
 ): Promise<void> {
+  // Full history is checked before/after the operation under the same session
+  // locks. Per-batch checks retain current priority and all publication versions.
+  const active = Object.fromEntries(
+    Object.entries(before).filter(
+      ([key]) =>
+        ![
+          'invalidations',
+          'repairs',
+          'attestations',
+          'outsideSnapshots',
+        ].includes(key),
+    ),
+  );
   if (
-    recoveryDigest(await readState(database, lock)) !== recoveryDigest(before)
+    recoveryDigest(await readState(database, lock, includeProtectedHistory)) !==
+    recoveryDigest(includeProtectedHistory ? before : active)
   )
     throw new Error('Publication context changed during recovery');
 }
@@ -495,13 +525,11 @@ async function audit(
 // positions cross the connection; xmin fences both daily and monthly JSONB.
 export const RECOVERY_COMMUNE_PROJECTION_SQL = `
   SELECT statistic.id, commune.code, statistic.xmin::text AS version,
-    daily.days AS restrictions, daily."validDates", daily."uniqueDates", daily."dayCount",
+    daily.days AS restrictions,
     daily.positions, monthly.months AS "restrictionsByMonth", monthly.position AS "monthPosition"
   FROM statistic_commune statistic JOIN commune ON commune.id = statistic."communeId"
   CROSS JOIN LATERAL (
     SELECT coalesce(jsonb_agg(value ORDER BY ordinal) FILTER (WHERE value->>'date' LIKE '2026-11-%'), '[]') AS days,
-      coalesce(bool_and(jsonb_typeof(value)='object' AND coalesce(value->>'date' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$',false)),true) AS "validDates",
-      count(*)::integer AS "dayCount",count(DISTINCT value->>'date')::integer AS "uniqueDates",
       jsonb_build_object(
         '2026-11-13',coalesce(min(ordinal-1) FILTER (WHERE value->>'date'>'2026-11-13'),count(*)),
         '2026-11-14',coalesce(min(ordinal-1) FILTER (WHERE value->>'date'>'2026-11-14'),count(*)),
@@ -674,7 +702,7 @@ export async function importNovemberStatistics(
     let addedDepartmentDays = 0;
     let inspectedBytes = 0;
     for (let offset = 0; offset < communes.length; offset += batchSize) {
-      await assertSameState(database, before);
+      await assertSameState(database, before, false, false);
       const codes = communes.slice(offset, offset + batchSize);
       const rows = (
         await database.query(RECOVERY_COMMUNE_PROJECTION_SQL, [codes])
@@ -684,10 +712,6 @@ export async function importNovemberStatistics(
       inspectedBytes += Buffer.byteLength(JSON.stringify(rows));
       const changes = [];
       for (const row of rows) {
-        if (row.validDates !== true || row.uniqueDates !== row.dayCount)
-          throw new Error(
-            'Target daily history has invalid or duplicated dates',
-          );
         const incoming = communeDays.get(row.code);
         if (!incoming)
           throw new Error('Target commune code is outside the source');

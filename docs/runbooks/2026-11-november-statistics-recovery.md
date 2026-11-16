@@ -73,11 +73,22 @@ node dist/apps/backend-admin/src/scripts/import-november-statistics.js > dry-run
 
 Vérifier les trois preuves d'entrées, la chaîne complète des invalidations,
 les compteurs, `inspectedBytes` et `elapsedMs`. La lecture ne transfère que les
-points de novembre, leurs positions d'insertion et `xmin`. PostgreSQL contrôle
-les dates de l'historique entier, puis insère les nouveaux points avec
+points de novembre, leurs positions d'insertion et `xmin`. L'opérateur valide
+strictement les dates et les doublons de novembre, puis insère les nouveaux points avec
 `jsonb_insert` et compare `xmin` avant d'écrire. Les autres objets du tableau
 et leur ordre relatif sont conservés, y compris si le tableau initial n'est
 pas trié. Seul l'objet mensuel de novembre est remplacé avec `jsonb_set`.
+Les versions de publication et la priorité courante sont contrôlées à chaque
+lot ; le contrôle complet de l'historique protégé reste initial et final.
+Une modification de celui-ci pendant les lots provoque un rollback intégral.
+Le benchmark local sur 100 historiques de 5 065 journées mesure environ
+180 ms de projection contre 476 ms avant optimisation ; le contrôle léger
+coûte environ 0,33 ms contre 21 ms pour le contrôle complet. Ces valeurs
+locales ne remplacent pas la mesure en production.
+Sur les mêmes 100 lignes, trois transactions locales annulées mesurent
+278–427 ms supplémentaires pour l'UPDATE/CAS, soit 460–612 ms au total.
+La marge avant application doit donc intégrer le coût d'écriture JSONB/TOAST,
+pas seulement celui de la simulation.
 Si la durée mesurée ne laisse pas assez de marge pour l'écriture sous 300 s,
 arrêter et analyser le coût après revue ; ne pas relever arbitrairement le délai.
 
@@ -110,7 +121,7 @@ Les tests unitaires valident les contrats, les empreintes et les fusions.
 Les tests PostgreSQL optionnels créent leurs schémas temporaires dans une base
 de test dédiée et exercent 34 943 communes, le rollback, l'idempotence, les
 verrous, la conservation des mois/attestations, la preuve d'équivalence datée,
-un historique de plus de 5 000 journées et le refus d'un `xmin` concurrent.
+100 historiques de plus de 5 000 journées et le refus d'un `xmin` concurrent.
 
 ```sh
 NOVEMBER_RECOVERY_TEST_DATABASE_URL=connexion_base_de_test npm test -- --runInBand src/scripts/import-november-statistics.spec.ts src/scripts/import-november-statistics.postgres.spec.ts

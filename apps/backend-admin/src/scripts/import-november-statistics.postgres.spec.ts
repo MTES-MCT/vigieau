@@ -83,6 +83,9 @@ postgres('November importer against PostgreSQL', () => {
     other = new Client({ connectionString: url });
     await client.connect();
     await other.connect();
+    // Keep fixture execution independent from host-specific LLVM/JIT support.
+    await client.query('SET jit=off');
+    await other.query('SET jit=off');
     databaseName = (await client.query('SELECT current_database() AS name'))
       .rows[0].name;
   });
@@ -405,11 +408,11 @@ postgres('November importer against PostgreSQL', () => {
     [history[0], history[1]] = [history[1], history[0]];
     history.push(day('2026-11-16', 'crise'));
     await client.query(
-      'UPDATE statistic_commune SET restrictions=$1::jsonb WHERE id=1',
+      'UPDATE statistic_commune SET restrictions=$1::jsonb WHERE id<=100',
       [JSON.stringify(history)],
     );
     const projected = (
-      await client.query(RECOVERY_COMMUNE_PROJECTION_SQL, [['00001']])
+      await client.query(RECOVERY_COMMUNE_PROJECTION_SQL, [codes.slice(0, 100)])
     ).rows[0];
     expect(projected.restrictions).toHaveLength(13);
     expect(Buffer.byteLength(JSON.stringify(projected))).toBeLessThan(
@@ -443,7 +446,14 @@ postgres('November importer against PostgreSQL', () => {
     );
     await expect(
       importNovemberStatistics(client, bundle, options()),
-    ).rejects.toThrow('duplicated dates');
+    ).resolves.toMatchObject({ status: 'DRY_RUN', changedCommunes: 0 });
+    await client.query(
+      'UPDATE statistic_commune SET restrictions=restrictions || $1::jsonb WHERE id=1',
+      [JSON.stringify([day('2026-11-12')])],
+    );
+    await expect(
+      importNovemberStatistics(client, bundle, options()),
+    ).rejects.toThrow('duplicated');
   });
 
   it('rejects a concurrent xmin change without overwriting its daily or monthly values', async () => {
@@ -486,6 +496,39 @@ postgres('November importer against PostgreSQL', () => {
       (
         await client.query(
           'SELECT restrictions FROM statistic_commune WHERE id=2',
+        )
+      ).rows[0].restrictions,
+    ).toEqual(oldDays);
+    expect((await client.query('SELECT phase FROM audit_event')).rows).toEqual([
+      { phase: 'failed' },
+    ]);
+  });
+
+  it('still rolls back if protected history changes while batches use the lightweight fence', async () => {
+    const dryRun = await importNovemberStatistics(client, bundle, options());
+    let writes = 0;
+    const database = {
+      query: async (sql: string, parameters?: any[]) => {
+        const result = await client.query(sql, parameters);
+        if (sql === RECOVERY_COMMUNE_MERGE_SQL && ++writes === 1)
+          await other.query(
+            `UPDATE certified_history_repair_attestation SET proof='concurrent-proof'`,
+          );
+        return result;
+      },
+    };
+    await expect(
+      importNovemberStatistics(database, bundle, {
+        ...options(),
+        apply: true,
+        expectedContext: dryRun.context,
+      }),
+    ).rejects.toThrow('Publication context changed');
+    expect(writes).toBe(Math.ceil(34943 / 500));
+    expect(
+      (
+        await client.query(
+          'SELECT restrictions FROM statistic_commune WHERE id=34943',
         )
       ).rows[0].restrictions,
     ).toEqual(oldDays);

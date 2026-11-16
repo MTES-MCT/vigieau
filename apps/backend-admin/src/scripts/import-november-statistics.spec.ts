@@ -83,6 +83,11 @@ describe('bounded November statistic recovery', () => {
     ).toThrow('duplicated');
   });
 
+  it('rejects invalid civil dates within November', () => {
+    expect(() => mergeRecoveryDays([day('2026-11-31')], [])).toThrow('invalid');
+    expect(() => mergeRecoveryDays([day('2026-11-00')], [])).toThrow('invalid');
+  });
+
   it('rebuilds only November using preserved current and previous target days', () => {
     const months = [
       { date: '2026-07', ponderation: 17 },
