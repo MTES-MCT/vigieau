@@ -74,7 +74,10 @@ describe('sparse statistic publication after missed current days', () => {
             expectedCommuneCount: 1,
             processedCommuneCount: currentCertified ? 1 : 0,
             communeCount: 1,
-            sourceRevision: currentSourceRevision ?? state.sourceRevision,
+            sourceRevision:
+              snapshotDate === state.currentPublishedDate
+                ? (currentSourceRevision ?? state.sourceRevision)
+                : 'historical-source',
           }));
         }
         throw new Error(`Unexpected query: ${sql}`);
@@ -83,8 +86,17 @@ describe('sparse statistic publication after missed current days', () => {
     artifactService = {
       loadActiveIdentity: jest.fn(async () => active.identity),
       loadActive: jest.fn(async () => active),
-      stageCandidate: jest.fn(async (_target, build) => {
+      stageCandidate: jest.fn(async (_target, build, options) => {
         candidate = await build(manager);
+        if (
+          (options?.requiredFirstDate &&
+            candidate.firstDate !== options.requiredFirstDate) ||
+          candidate.dateCount < (options?.minimumDateCount ?? 0)
+        ) {
+          throw new Error(
+            'Statistic cache candidate does not preserve required history',
+          );
+        }
         return { ...candidate, id: 'candidate' };
       }),
       activateCandidate: jest.fn(async () => ({
@@ -291,6 +303,113 @@ describe('sparse statistic publication after missed current days', () => {
         manager,
       ),
     ).resolves.toBe(true);
+  });
+
+  it('appends all certified intermediate days in contiguous batches and preserves existing values', async () => {
+    const previousDates = [
+      '2026-08-19',
+      '2026-09-07',
+      '2026-09-08',
+      '2026-09-09',
+      '2026-09-10',
+    ];
+    const availableDates = (service as any)
+      .generateDateRange('2026-09-11', '2026-11-12')
+      .map(({ date }) => date);
+    state.historicDirtyFrom = '2011-06-07';
+    state.historicDirtyThrough = '2026-08-05';
+    active.identity = {
+      ...active.identity,
+      historicDirtyFrom: state.historicDirtyFrom,
+      historicDirtyThrough: state.historicDirtyThrough,
+      firstDate: previousDates[0],
+      latestDate: previousDates.at(-1),
+      currentPublishedDate: previousDates.at(-1),
+      dateCount: 5,
+      areaCount: 5,
+    };
+    active.dataArea = previousDates.map(areaDay);
+    active.dataDepartement = previousDates.map(departmentDay);
+    active.dataCommune = [
+      {
+        code: '01001',
+        restrictions: [
+          { d: '2026-08', p: 1 },
+          { d: '2026-09', p: 4 },
+        ],
+      },
+    ];
+    certifiedDates = new Set([
+      ...previousDates,
+      ...availableDates,
+      '2026-11-16',
+    ]);
+    const previous = structuredClone(active);
+    departmentLoad.mockImplementation(async (from: string, through: string) => {
+      const days = (service as any)
+        .generateDateRange(from, through)
+        .map(({ date }) => date);
+      return {
+        dataArea: days.map(areaDay),
+        dataDepartement: days.map(departmentDay),
+      };
+    });
+    const weightLoad = jest
+      .spyOn(service as any, 'loadDailyCommuneWeights')
+      .mockImplementation(
+        async (from: string, through: string) =>
+          new Map(
+            (service as any)
+              .generateDateRange(from, through)
+              .map(({ date }) => [date, [['01001', 3]]]),
+          ),
+      );
+
+    await expect(
+      service.reconcileStatisticCacheCandidate(),
+    ).resolves.toMatchObject({ outcome: 'activated' });
+    expect(candidate.dateCount).toBe(69);
+    expect(candidate.dataArea).toEqual([
+      ...previous.dataArea,
+      ...availableDates.map(areaDay),
+      areaDay('2026-11-16'),
+    ]);
+    expect(candidate.dataDepartement).toEqual([
+      ...previous.dataDepartement,
+      ...availableDates.map(departmentDay),
+      departmentDay('2026-11-16'),
+    ]);
+    expect(candidate.dataCommune[0].restrictions).toEqual([
+      { d: '2026-08', p: 1 },
+      { d: '2026-09', p: 64 },
+      { d: '2026-10', p: 93 },
+      { d: '2026-11', p: 39 },
+    ]);
+    expect(
+      departmentLoad.mock.calls.map(([from, through]) => [from, through]),
+    ).toEqual([
+      ['2026-09-11', '2026-11-12'],
+      ['2026-11-16', '2026-11-16'],
+    ]);
+    expect(
+      weightLoad.mock.calls.map(([from, through]) => [from, through]),
+    ).toEqual([
+      ['2026-09-11', '2026-11-12'],
+      ['2026-11-16', '2026-11-16'],
+    ]);
+    expect(artifactService.stageCandidate).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.any(Function),
+      {
+        requiredFirstDate: '2026-08-19',
+        minimumDateCount: 69,
+      },
+    );
+    expect(fullBuild).not.toHaveBeenCalled();
+    activateCandidate();
+    await expect(
+      service.reconcileStatisticCacheCandidate(),
+    ).resolves.toMatchObject({ outcome: 'up-to-date' });
   });
 
   it('requests recovery if a previously missing day becomes certified', async () => {
