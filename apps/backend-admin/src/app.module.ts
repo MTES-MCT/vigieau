@@ -38,7 +38,7 @@ import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { ZonePublicationModule } from './zone_publication/zone_publication.module';
 import { bootstrapSchema } from './schema-bootstrap';
 import { areScheduledJobsDisabled } from './core/scheduling/business-cron';
-import { parseDatabasePoolMax } from './core/database-pool';
+import { createDatabasePoolOptions } from './core/database-pool';
 import { HistoricBackfillModule } from './historic_backfill/historic-backfill.module';
 import { HistoryRecoveryModule } from './history_recovery/history-recovery.module';
 import { AuditModule } from './audit/audit.module';
@@ -63,9 +63,6 @@ const scheduledJobsEnabled = !areScheduledJobsDisabled();
         const port = configService.get<string>('DATABASE_PORT');
         const dbName = configService.get<string>('DATABASE_NAME');
         const sslCert = configService.get('DATABASE_SSL_CERT'); // Peut être undefined
-        const poolMax = parseDatabasePoolMax(
-          configService.get<string>('DATABASE_POOL_MAX'),
-        );
         const queryParam = sslCert ? 'sslmode=require' : '';
         const url = `postgres://${user}:${password}@${host}:${port}/${dbName}${queryParam ? '?' + queryParam : ''}`;
 
@@ -80,17 +77,10 @@ const scheduledJobsEnabled = !areScheduledJobsDisabled();
           },
           synchronize: false,
           ssl: configService.get('NODE_ENV') !== 'local',
-          extra: {
-            max: poolMax,
-            connectionTimeoutMillis: 5000,
-            ...(configService.get('NODE_ENV') !== 'local'
-              ? {
-                  ssl: {
-                    rejectUnauthorized: false,
-                  },
-                }
-              : {}),
-          },
+          extra: createDatabasePoolOptions(
+            configService.get<string>('DATABASE_POOL_MAX'),
+            configService.get<string>('NODE_ENV'),
+          ),
         };
       },
       dataSourceFactory: async (options) => {
