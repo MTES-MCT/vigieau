@@ -84,6 +84,7 @@ describe('MatomoStatisticsClient', () => {
     { result: 'error', message: 'Authentication failed for token secret' },
     { '2026-09-06': 12 },
     { '2026-09-06': 12, '2026-09-07': 'invalid' },
+    { ...visits, '2026-09-08': 15 },
   ])(
     'rejects an invalid or incomplete response %j instead of inventing zeroes',
     async (data) => {

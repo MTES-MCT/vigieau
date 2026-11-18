@@ -15,6 +15,10 @@ import { VigieauLogger } from '../logger/vigieau.logger';
 import { MatomoStatisticsClient } from './matomo-statistics.client';
 import { MatomoStatisticsRunService } from './matomo-statistics-run.service';
 
+// Keep the historical two-site calculation through August. The recovery of
+// published audience statistics from site 70 starts on 1 September.
+const LAST_LEGACY_DAY = '2026-08-31';
+
 const MATOMO_FIELDS = [
   'visits',
   'restrictionsSearch',
@@ -194,7 +198,19 @@ export class StatisticsService {
     );
     if (lastRequestedDate > today) lastRequestedDate.setTime(today.getTime());
     if (lastStatDate > lastRequestedDate) return;
-    const matomoDate = `${this.generateDateString(lastStatDate)},${this.generateDateString(lastRequestedDate)}`;
+    const start = this.generateDateString(lastStatDate);
+    const end = this.generateDateString(lastRequestedDate);
+    const matomoDate = `${start},${end}`;
+    const getLegacyReport = (method: string, idSubtable?: string) => {
+      if (start > LAST_LEGACY_DAY) return { data: {} };
+      const legacyEnd = end < LAST_LEGACY_DAY ? end : LAST_LEGACY_DAY;
+      return this.matomoClient.getReport(
+        'legacy',
+        method,
+        `${start},${legacyEnd}`,
+        idSubtable,
+      );
+    };
     const [
       visitsByDay,
       oldVisitsByDay,
@@ -214,71 +230,42 @@ export class StatisticsService {
         'VisitsSummary.getVisits',
         matomoDate,
       ),
-      this.matomoClient.getReport(
-        'legacy',
-        'VisitsSummary.getVisits',
-        matomoDate,
-      ),
+      getLegacyReport('VisitsSummary.getVisits'),
       this.matomoClient.getReport(
         'current',
         'Events.getActionFromCategoryId',
         matomoDate,
         '1',
       ),
-      this.matomoClient.getReport(
-        'legacy',
-        'Events.getActionFromCategoryId',
-        matomoDate,
-        '1',
-      ),
+      getLegacyReport('Events.getActionFromCategoryId', '1'),
       this.matomoClient.getReport(
         'current',
         'Events.getActionFromCategoryId',
         matomoDate,
         '2',
       ),
-      this.matomoClient.getReport(
-        'legacy',
-        'Events.getActionFromCategoryId',
-        matomoDate,
-        '2',
-      ),
+      getLegacyReport('Events.getActionFromCategoryId', '2'),
       this.matomoClient.getReport(
         'current',
         'Events.getActionFromCategoryId',
         matomoDate,
         '3',
       ),
-      this.matomoClient.getReport(
-        'legacy',
-        'Events.getActionFromCategoryId',
-        matomoDate,
-        '3',
-      ),
+      getLegacyReport('Events.getActionFromCategoryId', '3'),
       this.matomoClient.getReport(
         'current',
         'Events.getNameFromActionId',
         matomoDate,
         '1',
       ),
-      this.matomoClient.getReport(
-        'legacy',
-        'Events.getNameFromActionId',
-        matomoDate,
-        '1',
-      ),
+      getLegacyReport('Events.getNameFromActionId', '1'),
       this.matomoClient.getReport(
         'current',
         'Events.getNameFromActionId',
         matomoDate,
         '2',
       ),
-      this.matomoClient.getReport(
-        'legacy',
-        'Events.getNameFromActionId',
-        matomoDate,
-        '2',
-      ),
+      getLegacyReport('Events.getNameFromActionId', '2'),
     ]);
 
     const statsToSave: any[] = [];
