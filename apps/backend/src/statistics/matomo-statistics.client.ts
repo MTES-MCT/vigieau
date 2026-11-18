@@ -154,7 +154,8 @@ export class MatomoStatisticsClient {
         return false;
     }
     return Object.entries(data).every(([date, value]) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < start || date > end)
+        return false;
       if (method === 'VisitsSummary.getVisits') {
         return (
           typeof value === 'number' && Number.isFinite(value) && value >= 0

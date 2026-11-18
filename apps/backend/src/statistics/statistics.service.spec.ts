@@ -60,8 +60,8 @@ describe('StatisticsService', () => {
             getAllLight: jest
               .fn()
               .mockResolvedValue([
-                { createdAt: new Date().toISOString() },
-                { createdAt: new Date().toISOString() },
+                { createdAt: '2026-09-01T00:00:00.000Z' },
+                { createdAt: '2026-09-01T00:00:00.000Z' },
               ]), // Mock the method returning subscriptions
           },
         },
@@ -302,14 +302,17 @@ describe('StatisticsService', () => {
       expect(statisticRepository.update).not.toHaveBeenCalled();
     });
 
-    it.each(['current', 'legacy'] as const)(
-      'does not overwrite valid statistics when the %s source fails',
-      async (failedSource) => {
+    it.each([
+      ['current', '2026-09-01'],
+      ['legacy', '2026-08-31'],
+    ] as const)(
+      'does not overwrite valid statistics when the required %s source fails from %s',
+      async (failedSource, lastDate) => {
         const previous = { subscriptions: 42, statsByDay: [{ visits: 123 }] };
         (service as any).statistics = previous;
         jest
           .spyOn(statisticRepository, 'findOne')
-          .mockResolvedValue({ date: '2026-09-06' } as Statistic);
+          .mockResolvedValue({ date: lastDate } as Statistic);
         const upsert = jest.spyOn(statisticRepository, 'upsert');
         const load = jest.spyOn(service, 'loadStatistics');
         const error = new MatomoReportError(
@@ -340,6 +343,23 @@ describe('StatisticsService', () => {
         from: '2026-03-26',
         to: '2026-04-01',
         days: 7,
+        legacyEnd: '2026-04-01',
+      },
+      {
+        lastDate: '2026-08-31',
+        today: '2026-11-18',
+        from: '2026-08-31',
+        to: '2026-09-06',
+        days: 7,
+        legacyEnd: '2026-08-31',
+      },
+      {
+        lastDate: '2026-09-01',
+        today: '2026-11-18',
+        from: '2026-09-01',
+        to: '2026-09-07',
+        days: 7,
+        legacyEnd: null,
       },
       {
         lastDate: '2026-10-24',
@@ -347,6 +367,7 @@ describe('StatisticsService', () => {
         from: '2026-10-24',
         to: '2026-10-25',
         days: 2,
+        legacyEnd: null,
       },
       {
         lastDate: '2026-10-25',
@@ -354,6 +375,7 @@ describe('StatisticsService', () => {
         from: '2026-10-25',
         to: '2026-10-25',
         days: 1,
+        legacyEnd: null,
       },
       {
         lastDate: null,
@@ -361,10 +383,11 @@ describe('StatisticsService', () => {
         from: '2023-07-11',
         to: '2023-07-17',
         days: 7,
+        legacyEnd: '2023-07-17',
       },
     ])(
       'recovers a bounded UTC range from $from to $to',
-      async ({ lastDate, today, from, to, days }) => {
+      async ({ lastDate, today, from, to, days, legacyEnd }) => {
         jest.useFakeTimers({ now: new Date(`${today}T12:00:00.000Z`) });
         jest
           .spyOn(statisticRepository, 'findOne')
@@ -377,7 +400,22 @@ describe('StatisticsService', () => {
           .mockResolvedValue({} as any);
         jest
           .spyOn(matomoClient, 'getReport')
-          .mockImplementation(async (_source, method, range) => {
+          .mockImplementation(async (source, method, range, subtable) => {
+            const count = source === 'current' ? 2 : 1;
+            const actions = {
+              '1': [{ label: 'CODE INSEE', nb_events: count * 10 }],
+              '2': [{ label: 'Arrêté', nb_events: count }],
+              '3': [{ label: 'Arrêté cadre', nb_events: count * 3 }],
+            };
+            const names = {
+              '1': [{ label: 'particulier', nb_events: count * 4 }],
+              '2': [{ label: '01', nb_events: count * 5 }],
+            };
+            const report = {
+              'VisitsSummary.getVisits': count * 100,
+              'Events.getActionFromCategoryId': actions[subtable],
+              'Events.getNameFromActionId': names[subtable],
+            };
             const [start, end] = range.split(',');
             const data = {};
             for (
@@ -385,23 +423,41 @@ describe('StatisticsService', () => {
               date <= new Date(end);
               date.setUTCDate(date.getUTCDate() + 1)
             ) {
-              data[date.toISOString().slice(0, 10)] =
-                method === 'VisitsSummary.getVisits' ? 3 : [];
+              data[date.toISOString().slice(0, 10)] = report[method];
             }
             return { data };
           });
 
         await service.computeStatistics();
 
-        expect(matomoClient.getReport).toHaveBeenCalledTimes(12);
-        for (const call of jest.mocked(matomoClient.getReport).mock.calls)
-          expect(call[2]).toBe(`${from},${to}`);
+        const calls = jest.mocked(matomoClient.getReport).mock.calls;
+        expect(calls.filter(([source]) => source === 'current')).toHaveLength(
+          6,
+        );
+        expect(calls.filter(([source]) => source === 'legacy')).toHaveLength(
+          legacyEnd ? 6 : 0,
+        );
+        for (const [source, , range] of calls) {
+          expect(range).toBe(
+            `${from},${source === 'current' ? to : legacyEnd}`,
+          );
+        }
         const saved = upsert.mock.calls[0][0] as any[];
         expect(saved).toHaveLength(days);
         expect(saved[0].date.toISOString().slice(0, 10)).toBe(from);
         expect(saved.at(-1).date.toISOString().slice(0, 10)).toBe(to);
         for (const stat of saved) {
-          expect(stat.visits).toBe(6);
+          const day = stat.date.toISOString().slice(0, 10);
+          const count = legacyEnd && day <= legacyEnd ? 3 : 2;
+          expect(stat).toMatchObject({
+            visits: count * 100,
+            restrictionsSearch: count * 10,
+            arreteDownloads: count * 4,
+            profileRepartition: { particulier: count * 4, entreprise: 0 },
+            departementRepartition: { '01': count * 5, '02': 0 },
+            regionRepartition: { AU: count * 5, NA: 0 },
+            subscriptions: day === '2026-09-01' ? 2 : 0,
+          });
           expect(stat).not.toHaveProperty('departementSituation');
           expect(stat).not.toHaveProperty('id');
         }
