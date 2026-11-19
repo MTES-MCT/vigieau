@@ -27,6 +27,14 @@ const periodDetail = (period: MissingStatisticPeriod | ProvisionalStatisticPerio
   return `${dates} : ${period.days} ${period.days === 1 ? 'jour' : 'jours'} ${label}.`;
 };
 
+export function hasLimitedDrinkingWaterHistory(
+  series: StatisticObservationStatus[] | null,
+  waterType: string,
+): boolean {
+  return (waterType === '' || waterType === 'AEP')
+    && !!series?.some(({ date }) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date < '2024-04-28');
+}
+
 export function getStatisticSeriesStatusPresentation(
   status: StatisticDataStatus | null,
   { series, waterType, loading, missingPeriods, provisionalPeriods }: StatisticSeriesStatusContext,
@@ -35,8 +43,7 @@ export function getStatisticSeriesStatusPresentation(
 
   const currentUpdating = status?.usable && !status.currentFresh && status.latestDate
     && series.some(({ date }) => date === status.latestDate);
-  const waterHistoryLimited = (waterType === '' || waterType === 'AEP')
-    && series.some(({ date }) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date < '2024-04-28');
+  const waterHistoryLimited = hasLimitedDrinkingWaterHistory(series, waterType);
   const currentDescription = 'Les donn\u00E9es affich\u00E9es restent consultables pendant leur actualisation.';
   const waterDescription = "Les donn\u00E9es sur l'eau potable ne sont pas disponibles avant le 28/04/2024.";
   const secondaryDetails = [
