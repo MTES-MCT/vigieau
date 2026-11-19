@@ -345,7 +345,8 @@ export const EQUIVALENCE_LEDGER_SQL = `
 SELECT "epochAfter"::text, cause, context->'fallback' AS fallback,
   "invalidatesStatistics", "invalidatesMaps", "affectedRange"::text,
   "sourceRevision"::text, context
-FROM historic_range_invalidation WHERE "epochAfter">796 ORDER BY "epochAfter"`;
+FROM historic_range_invalidation AS ledger
+WHERE ledger."epochAfter">796 ORDER BY ledger."epochAfter"`;
 
 // Physical relation identity catches TRUNCATE/rewrites, which are not covered by
 // the source DML revision trigger. Trigger definitions must remain unchanged.
