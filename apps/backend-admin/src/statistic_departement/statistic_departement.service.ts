@@ -1,7 +1,7 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThanOrEqual, Repository } from 'typeorm';
+import { In, MoreThanOrEqual, Repository } from 'typeorm';
 import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
 import { CronExpression } from '@nestjs/schedule';
 import { BusinessCron } from '../core/scheduling/business-cron';
@@ -13,7 +13,6 @@ import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_c
 import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
 import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
-import { shouldSkipStartupDataLoads } from '../core/startup-data-loads';
 
 const ZONE_TYPES = ['SUP', 'SOU', 'AEP'] as const;
 const GRAVITY_LEVELS = [
@@ -61,8 +60,6 @@ export interface HistoricDepartmentRestrictionInput {
 @Injectable()
 export class StatisticDepartementService {
   private readonly logger = new RegleauLogger('StatisticDepartementService');
-  private statisticDepartements: StatisticDepartement[] = [];
-  private statisticDepartementsLoading: Promise<void> | null = null;
   releaseDate = '2023-07-12';
 
   constructor(
@@ -77,68 +74,31 @@ export class StatisticDepartementService {
     @Inject(forwardRef(() => ZoneAlerteComputedHistoricService))
     private readonly zoneAlerteComputedHistoricService: ZoneAlerteComputedHistoricService,
     private readonly zoneAlerteService: ZoneAlerteService,
-  ) {
-    if (
-      !shouldSkipStartupDataLoads() &&
-      process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS !== 'true'
-    ) {
-      void this.loadStatDep();
-    }
-  }
+  ) {}
 
   async findAll(currentUser: User): Promise<StatisticDepartement[]> {
-    await this.ensureStatDepLoaded();
-    if (!currentUser || currentUser.role === 'mte') {
-      return this.statisticDepartements;
-    } else {
-      const userDepartementCodes = currentUser.role_departements || [];
-      return this.statisticDepartements.filter((s) =>
-        userDepartementCodes.includes(s.departement.code),
-      );
-    }
-  }
+    const departmentCodes =
+      currentUser && currentUser.role !== 'mte'
+        ? (currentUser.role_departements ?? [])
+        : undefined;
+    if (departmentCodes?.length === 0) return [];
 
-  private async ensureStatDepLoaded() {
-    if (this.statisticDepartements.length > 0) {
-      return;
-    }
-    await this.loadStatDep();
-  }
-
-  async loadStatDep(force = false) {
-    if (this.statisticDepartementsLoading && !force) {
-      return this.statisticDepartementsLoading;
-    }
-
-    const loading = (async () => {
-      this.statisticDepartements =
-        await this.statisticDepartementRepository.find({
-          select: {
-            id: true,
-            visits: true,
-            totalVisits: true,
-            weekVisits: true,
-            monthVisits: true,
-            yearVisits: true,
-            subscriptions: true,
-            departement: {
-              id: true,
-              code: true,
-              nom: true,
-            },
-          },
-          relations: ['departement'],
-        });
-    })();
-
-    this.statisticDepartementsLoading = loading;
-    try {
-      await loading;
-    } finally {
-      if (this.statisticDepartementsLoading === loading) {
-        this.statisticDepartementsLoading = null;
-      }
-    }
+    return this.statisticDepartementRepository.find({
+      select: {
+        id: true,
+        visits: true,
+        totalVisits: true,
+        weekVisits: true,
+        monthVisits: true,
+        yearVisits: true,
+        subscriptions: true,
+        departement: { id: true, code: true, nom: true },
+      },
+      relations: ['departement'],
+      where: departmentCodes
+        ? { departement: { code: In(departmentCodes) } }
+        : undefined,
+    });
   }
 
   @BusinessCron(CronExpression.EVERY_2_HOURS)
@@ -219,7 +179,6 @@ export class StatisticDepartementService {
         await this.statisticDepartementRepository.save(statisticDepartement);
       }
     }
-    await this.loadStatDep(true);
   }
 
   async computeDepartementStatisticsRestrictions(
