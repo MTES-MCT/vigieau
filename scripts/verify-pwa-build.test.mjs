@@ -18,7 +18,7 @@ async function fixture(t) {
     join(output, "manifest.webmanifest"),
     JSON.stringify({ name: "VigiEau", icons: [{ src: "/favicon.png" }] }),
   );
-  await writeFile(join(app, "nginx.conf"), "absolute_redirect off;");
+  await writeFile(join(app, "nginx.conf.erb"), "absolute_redirect off;");
   return { app, output, bundle: join(output, "_nuxt/client.js") };
 }
 
@@ -71,12 +71,12 @@ test("keeps the runtime cache exclusion and HTTPS proxy guards", async (t) => {
     bundle,
     '/* vite-pwa:nuxt:client:plugin */ new Workbox("/sw.js");',
   );
-  await writeFile(join(app, "nginx.conf"), "absolute_redirect on;");
+  await writeFile(join(app, "nginx.conf.erb"), "absolute_redirect on;");
   await assert.rejects(
     verifyPwaBuild(app),
     /keep directory redirects relative/,
   );
-  await writeFile(join(app, "nginx.conf"), "absolute_redirect off;");
+  await writeFile(join(app, "nginx.conf.erb"), "absolute_redirect off;");
   await writeFile(join(output, "sw.js"), "new NetworkOnly();");
   await assert.rejects(verifyPwaBuild(app), /runtime cache exclusion/);
 });

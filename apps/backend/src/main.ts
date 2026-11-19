@@ -9,8 +9,10 @@ import { json, urlencoded } from 'express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { createHttpFailureLoggingMiddleware } from './core/middleware/http-failure-logging.middleware';
+import { createPreproductionBasicAuth } from './core/middleware/preproduction-basic-auth.middleware';
 
 async function bootstrap() {
+  const preproductionAuth = createPreproductionBasicAuth();
   const app = await NestFactory.create(AppModule);
 
   // Logger personnalisé
@@ -21,6 +23,7 @@ async function bootstrap() {
 
   // Middlewares de sécurité
   app.use(helmet());
+  if (preproductionAuth) app.use(preproductionAuth);
   app.enableCors({
     origin: '*',
   });

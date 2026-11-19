@@ -8,6 +8,7 @@ import { observeNewWindowLinks } from './utils/new-window-links';
 import { createRetryScheduler } from './utils/retryable-task';
 
 const route = useRoute();
+const preprodAuthEnabled = useRuntimeConfig().public.preprodAuthEnabled === true;
 const routeAnnouncement = ref('');
 const zonePublicationStore = useZonePublicationStore();
 const ZONE_PUBLICATION_REFRESH_MS = 60_000;
@@ -99,7 +100,7 @@ onUnmounted(() => {
 
 <template>
   <div>
-    <VitePwaManifest />
+    <VitePwaManifest v-if="!preprodAuthEnabled" />
     <NuxtLoadingIndicator />
     <div
       role="status"
