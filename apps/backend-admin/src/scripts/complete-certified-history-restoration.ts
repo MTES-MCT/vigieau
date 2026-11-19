@@ -833,7 +833,7 @@ export const CERTIFIED_COMPLETION_SOURCE_STATISTIC_BATCH_SQL = `
   ORDER BY day.date
 `;
 
-const DEPARTMENT_PLAN_CTES = `
+export const DEPARTMENT_PLAN_CTES = `
   source_input AS MATERIALIZED (
     SELECT code, date, restriction
     FROM jsonb_to_recordset($1::jsonb) source(
@@ -1150,7 +1150,7 @@ function normalizeContext(
   };
 }
 
-async function publicationContext(
+export async function publicationContext(
   runner: QueryRunner,
   lock: boolean,
 ): Promise<RepairPublicationContext> {
