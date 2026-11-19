@@ -1465,6 +1465,12 @@ export class DatagouvService {
       );
       const pinnedPublication =
         !!expectedSourceDate && !!expectedSourceRevision && !!verifyCurrent;
+      if (pinnedPublication) {
+        // A writer can touch the snapshot while the ZIP is being generated
+        // without changing its certified identity. Lock its latest version.
+        await queryRunner.commitTransaction();
+        await queryRunner.startTransaction('READ COMMITTED');
+      }
       if (expectedSourceDate) {
         const lockedCommuneCount = await this.getCertifiedHistoricCommuneCount(
           expectedSourceDate,

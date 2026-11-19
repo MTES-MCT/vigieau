@@ -1080,15 +1080,30 @@ describe('DatagouvService', () => {
     ).rejects.toThrow();
   });
 
-  it('releases the certified snapshot lock before uploading the pinned historical file', async () => {
+  it('locks the latest snapshot in a fresh transaction and releases it before the pinned upload', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
     temporaryDirectories.push(directory);
     const h = createHarness(directory, {
       DATAGOUV_HISTORIC_UPLOAD_TIMEOUT_MS: '170000',
     });
+    let snapshotTouched = false;
     const coverage = jest
       .spyOn(h.service as any, 'getCertifiedHistoricCommuneCount')
-      .mockResolvedValue(1);
+      .mockImplementation(async (...args) => {
+        if (args[3] === 'nowait') {
+          expect(snapshotTouched).toBe(true);
+          expect(h.queryRunner.isTransactionActive).toBe(true);
+          const isolation = h.queryRunner.startTransaction.mock.lastCall[0];
+          if (isolation === 'REPEATABLE READ') {
+            throw new Error(
+              'could not serialize access due to concurrent update',
+            );
+          }
+          expect(isolation).toBe('READ COMMITTED');
+          expect(h.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+        }
+        return 1;
+      });
     const verifyCurrent = jest.fn().mockResolvedValue(undefined);
     h.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
       Readable.from([
@@ -1099,7 +1114,9 @@ describe('DatagouvService', () => {
             { date: '2026-11-19', SUP: null, SOU: null, AEP: null },
           ],
         },
-      ]),
+      ]).once('end', () => {
+        snapshotTouched = true;
+      }),
     );
     const upload = jest
       .spyOn(h.service, 'uploadToDatagouv')
@@ -1124,7 +1141,7 @@ describe('DatagouvService', () => {
       'nowait',
     );
     expect(upload).toHaveBeenCalledTimes(1);
-    expect(h.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(h.queryRunner.commitTransaction).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a historical archive when one commune misses the expected date', async () => {
