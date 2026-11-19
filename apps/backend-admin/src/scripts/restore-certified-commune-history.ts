@@ -816,7 +816,7 @@ export const CERTIFIED_SOURCE_BATCH_SQL = `
   ORDER BY batch.code, day.date
 `;
 
-const CERTIFIED_TARGET_PLAN_CTES = `
+export const CERTIFIED_TARGET_PLAN_CTES = `
   source_input AS MATERIALIZED (
     SELECT code, date, "SOU", "SUP", "AEP"
     FROM jsonb_to_recordset($1::jsonb) AS source(

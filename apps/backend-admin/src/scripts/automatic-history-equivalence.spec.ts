@@ -1,4 +1,12 @@
 import { DataSource } from 'typeorm';
+import {
+  APPROVED_HISTORY_V3_RUN,
+  APPROVED_HISTORY_V3_INPUT_DIGEST,
+  APPROVED_HISTORY_V3_COMMUNE_HISTORY_DIGEST,
+  APPROVED_HISTORY_V3_DEPARTMENT_HISTORY_DIGEST,
+  APPROVED_HISTORY_V3_PROVENANCE,
+  APPROVED_HISTORY_V3_FINGERPRINT,
+} from './approved-history-v3';
 import { CurrentStatisticPriorityError } from './restore-missing-commune-history';
 import * as equivalence from './attest-history-by-source-equivalence';
 import { CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST as PINNED } from './restore-certified-commune-history';
@@ -117,6 +125,7 @@ describe('automatic pinned history equivalence recovery', () => {
       false,
       'operator',
       true,
+      undefined,
     );
     expect(apply).toHaveBeenCalledWith(target, expect.anything(), 'proof');
     expect(lease.query).toHaveBeenCalledWith('SET TRANSACTION READ ONLY');
@@ -127,6 +136,68 @@ describe('automatic pinned history equivalence recovery', () => {
     expect(lease.release).toHaveBeenCalledTimes(1);
   });
 
+  it('requires the promoted v3 attestation before attempting recovery', async () => {
+    state.audit = { ...validAudit, sourceRunId: APPROVED_HISTORY_V3_RUN };
+    await expect(
+      automaticallyAttestHistoryBySourceEquivalence(target),
+    ).rejects.toThrow('trust anchor');
+    expect(inspect).not.toHaveBeenCalled();
+  });
+  it('recovers the operator-approved repair only with identical inputs and pinned output audit', async () => {
+    const approvedAnchor = {
+      repairId: '4f2f47e1-b669-427a-8307-938ab20d3074',
+      attestationId: '6d40301c-2cd0-4532-8bf6-17c6cb099f10',
+      historicComputeEpoch: '1474',
+    };
+    state.approvedAnchor = approvedAnchor;
+    state.latestRepairId = approvedAnchor.repairId;
+    state.anchorPresent = false;
+    state.audit = {
+      ...validAudit,
+      id: approvedAnchor.repairId,
+      historicComputeEpoch: 1474,
+      sourceRunId: APPROVED_HISTORY_V3_RUN,
+      communeHistoryDigest: APPROVED_HISTORY_V3_COMMUNE_HISTORY_DIGEST,
+      departmentHistoryDigest: APPROVED_HISTORY_V3_DEPARTMENT_HISTORY_DIGEST,
+      provenanceDigest: APPROVED_HISTORY_V3_PROVENANCE,
+      publicationContext: {
+        method: 'operator-arbitrated-historical-inputs',
+        approvedInputDigest: APPROVED_HISTORY_V3_INPUT_DIGEST,
+        sourceFingerprint: APPROVED_HISTORY_V3_FINGERPRINT,
+      },
+    };
+    inspect.mockResolvedValueOnce({
+      approvedAnchor,
+      inputs: { digest: '0'.repeat(64) },
+    } as equivalence.Inspection);
+    await expect(
+      automaticallyAttestHistoryBySourceEquivalence(target),
+    ).rejects.toThrow('inputs differ');
+    expect(apply).not.toHaveBeenCalled();
+    inspect.mockResolvedValueOnce({
+      approvedAnchor,
+      inputs: { digest: APPROVED_HISTORY_V3_INPUT_DIGEST },
+    } as equivalence.Inspection);
+    await expect(
+      automaticallyAttestHistoryBySourceEquivalence(target, { apply: false }),
+    ).resolves.toEqual({ status: 'DRY_RUN', proof: 'proof' });
+    expect(inspect).toHaveBeenLastCalledWith(
+      target,
+      state.database,
+      false,
+      'operator',
+      true,
+      approvedAnchor,
+    );
+    state.audit = {
+      ...(state.audit as object),
+      communeHistoryDigest: PINNED.communeHistoryDigest,
+    };
+    await expect(
+      automaticallyAttestHistoryBySourceEquivalence(target),
+    ).rejects.toThrow('audit mismatch');
+    expect(apply).not.toHaveBeenCalled();
+  });
   it('is idempotent without any national scan for already active history', async () => {
     state.activeAttestationId = 'already-valid';
     await expect(

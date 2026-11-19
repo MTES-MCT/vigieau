@@ -179,6 +179,8 @@ export class DatagouvService {
   private readonly deadlineContext = new AsyncLocalStorage<AbortSignal>();
   private readonly httpTimeoutMs: number;
   private readonly runTimeoutMs: number;
+  private readonly historicRunTimeoutMs: number;
+  private readonly historicUploadTimeoutMs: number;
   private readonly mapArchivesEnabled: boolean;
 
   constructor(
@@ -209,6 +211,14 @@ export class DatagouvService {
       'DATAGOUV_RUN_TIMEOUT_MS',
       30 * 60_000,
     );
+    this.historicRunTimeoutMs = this.readPositiveInteger(
+      'DATAGOUV_HISTORIC_RUN_TIMEOUT_MS',
+      Math.max(this.runTimeoutMs, 60 * 60_000),
+    );
+    this.historicUploadTimeoutMs = this.readPositiveInteger(
+      'DATAGOUV_HISTORIC_UPLOAD_TIMEOUT_MS',
+      Math.max(this.httpTimeoutMs, 5 * 60_000),
+    );
     this.mapArchivesEnabled =
       this.configService.get<string>('DATAGOUV_MAP_ARCHIVES_ENABLED') ===
       'true';
@@ -231,12 +241,14 @@ export class DatagouvService {
     publicationContext?: DatagouvPublicationContext,
     group: DatagouvResourceGroup = 'all',
   ): Promise<void> {
-    return this.runWithDeadline(() =>
-      this.updateDatagouvDataWithinDeadline(
-        scheduledFor,
-        publicationContext,
-        group,
-      ),
+    return this.runWithDeadline(
+      () =>
+        this.updateDatagouvDataWithinDeadline(
+          scheduledFor,
+          publicationContext,
+          group,
+        ),
+      group === 'historic' ? this.historicRunTimeoutMs : this.runTimeoutMs,
     );
   }
 
@@ -306,6 +318,7 @@ export class DatagouvService {
           this.updateCommunes(
             new Date(scheduledFor).getUTCFullYear(),
             scheduledFor,
+            publicationContext?.verifyCurrent,
           ),
         failures,
         publicationContext,
@@ -337,6 +350,7 @@ export class DatagouvService {
             scheduledFor,
             publicationContext?.sourceRevision,
             publicationContext?.historicFirstDate,
+            publicationContext?.verifyCurrent,
           ),
         failures,
         publicationContext,
@@ -1002,6 +1016,7 @@ export class DatagouvService {
     isUrl = false,
     options?: {
       timeoutMs?: number;
+      fileTimeoutMs?: number;
       sourceDate?: string;
       verifyCurrent?: () => Promise<void>;
     },
@@ -1047,7 +1062,7 @@ export class DatagouvService {
             await this.uploadDataGouvFile(
               `${url}upload/`,
               fileName,
-              options?.timeoutMs,
+              options?.fileTimeoutMs ?? options?.timeoutMs,
             );
           } catch (error) {
             this.throwIfDeadlineExceeded();
@@ -1080,7 +1095,10 @@ export class DatagouvService {
         isUrl ? fileName : undefined,
         artifact?.byteSize,
         options?.timeoutMs,
-        options?.sourceDate && fileName.endsWith('.csv') ? artifact : undefined,
+        options?.sourceDate &&
+          (fileName.endsWith('.csv') || options.verifyCurrent)
+          ? artifact
+          : undefined,
       ).catch((error) => {
         this.throwIfDeadlineExceeded();
         throw metadataError ?? error;
@@ -1329,21 +1347,24 @@ export class DatagouvService {
   async updateCommunes(
     year = new Date().getFullYear(),
     expectedSourceDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<void> {
     return this.withAnnualCommunesPublicationLock(year, () =>
-      this.updateCommunesUnlocked(year, expectedSourceDate),
+      this.updateCommunesUnlocked(year, expectedSourceDate, verifyCurrent),
     );
   }
 
   private async updateCommunesUnlocked(
     year: number,
     expectedSourceDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<void> {
     const definition = this.getCommunesResourceDefinition(year);
     if (!(await this.getDataGouvResourceId(definition.resource))) {
       await this.createOrUpdateCommunesResourceUnlocked(
         year,
         expectedSourceDate,
+        verifyCurrent,
       );
       return;
     }
@@ -1367,7 +1388,7 @@ export class DatagouvService {
       definition.zipFileName,
       definition.title,
       false,
-      { sourceDate },
+      { sourceDate, verifyCurrent },
     );
   }
 
@@ -1375,6 +1396,7 @@ export class DatagouvService {
     expectedSourceDate?: string,
     expectedSourceRevision?: string,
     expectedStartDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<void> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
@@ -1441,12 +1463,14 @@ export class DatagouvService {
         artifact,
         expectedSourceDate,
       );
+      const pinnedPublication =
+        !!expectedSourceDate && !!expectedSourceRevision && !!verifyCurrent;
       if (expectedSourceDate) {
         const lockedCommuneCount = await this.getCertifiedHistoricCommuneCount(
           expectedSourceDate,
           expectedSourceRevision,
           queryRunner,
-          true,
+          pinnedPublication ? 'nowait' : 'wait',
         );
         if (lockedCommuneCount !== expectedCommuneCount) {
           throw new Error(
@@ -1454,14 +1478,26 @@ export class DatagouvService {
           );
         }
       }
+      // The ZIP is fully written and hashed from the repeatable-read snapshot.
+      // Release the row locks before network I/O when the scheduler can
+      // re-check this exact publication immediately before and after upload.
+      // The session advisory lock still serializes writers of this local file.
+      if (pinnedPublication) await queryRunner.commitTransaction();
       await this.uploadToDatagouv(
         'historique_communes',
         'historique_communes.zip',
         'Historique Communes',
         false,
-        { sourceDate: artifact.sourceDate },
+        {
+          sourceDate: artifact.sourceDate,
+          verifyCurrent,
+          ...(pinnedPublication
+            ? { fileTimeoutMs: this.historicUploadTimeoutMs }
+            : {}),
+        },
       );
-      await queryRunner.commitTransaction();
+      if (queryRunner.isTransactionActive)
+        await queryRunner.commitTransaction();
     } catch (error) {
       operationError = error;
       throw error;
@@ -1521,7 +1557,7 @@ export class DatagouvService {
     expectedSourceDate: string,
     expectedSourceRevision: string | undefined,
     queryRunner: QueryRunner,
-    lockForUpload = false,
+    lockForUpload?: 'wait' | 'nowait',
   ): Promise<number> {
     const [coverage] = await queryRunner.query(
       `
@@ -1537,7 +1573,7 @@ export class DatagouvService {
           ON snapshot."snapshotDate" = $1::date
          AND snapshot."scope" = 'national'
         WHERE source_state."id" = 1
-        ${lockForUpload ? 'FOR SHARE OF source_state, snapshot' : ''}
+        ${lockForUpload ? 'FOR SHARE OF source_state, snapshot' : ''} ${lockForUpload === 'nowait' ? 'NOWAIT' : ''}
       `,
       [expectedSourceDate],
     );
@@ -1574,6 +1610,7 @@ export class DatagouvService {
   private async createOrUpdateCommunesResourceUnlocked(
     year: number,
     expectedSourceDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<string> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
@@ -1615,6 +1652,8 @@ export class DatagouvService {
       sourceDate,
     );
 
+    // A new invalidation may have arrived while the archive was being compressed.
+    await verifyCurrent?.();
     let resourceId = matchingResources[0]?.id;
     if (resourceId) {
       await this.uploadDataGouvFile(
@@ -1644,7 +1683,10 @@ export class DatagouvService {
       definition.title,
       undefined,
       artifact.byteSize,
+      undefined,
+      verifyCurrent ? artifact : undefined,
     );
+    await verifyCurrent?.();
     await this.publicationRegistry.recordResourceSuccess(
       definition.resource,
       'data.gouv.fr',
@@ -1994,10 +2036,13 @@ export class DatagouvService {
     });
   }
 
-  private async runWithDeadline<T>(operation: () => Promise<T>): Promise<T> {
+  private async runWithDeadline<T>(
+    operation: () => Promise<T>,
+    timeoutMs = this.runTimeoutMs,
+  ): Promise<T> {
     const controller = new AbortController();
     const timeoutError = new Error(
-      `Datagouv publication exceeded ${this.runTimeoutMs}ms`,
+      `Datagouv publication exceeded ${timeoutMs}ms`,
     );
     timeoutError.name = 'TimeoutError';
     let forceExitTimer: NodeJS.Timeout | undefined;
@@ -2005,7 +2050,7 @@ export class DatagouvService {
       controller.abort(timeoutError);
       forceExitTimer = setTimeout(() => process.exit(1), 30_000);
       forceExitTimer.unref();
-    }, this.runTimeoutMs);
+    }, timeoutMs);
     timer.unref();
 
     return this.deadlineContext.run(controller.signal, async () => {
