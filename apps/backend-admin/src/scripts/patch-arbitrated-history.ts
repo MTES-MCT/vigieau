@@ -11,6 +11,9 @@ import {
 
 const FROM = '2026-07-11';
 const THROUGH = '2026-08-31';
+// Byte-for-byte PostgreSQL JSONB export of the verified v2/v3 differences.
+const ARBITRATED_PATCH_SHA256 =
+  '35134f135f907598887787a85bee8e5348ce3f7f0ac2c2adff21958f09ecb662';
 const types = ['SOU', 'SUP', 'AEP'] as const;
 type Kind = 'communes' | 'departments';
 type Day = Record<string, unknown>;
@@ -210,7 +213,10 @@ export async function run(): Promise<void> {
   const [mode, file, expected, dir, approvedPlan] = process.argv.slice(2);
   check(mode === 'inspect' || mode === 'apply', 'Expected inspect or apply');
   const raw = await readFile(file, 'utf8');
-  check(digest(raw) === expected, 'Unexpected patch file checksum');
+  check(
+    expected === ARBITRATED_PATCH_SHA256 && digest(raw) === expected,
+    'Unexpected patch file checksum',
+  );
   const patch: Patch = JSON.parse(raw);
   validatePatch(patch);
   const url = process.env.HISTORY_PATCH_TARGET_URL;
