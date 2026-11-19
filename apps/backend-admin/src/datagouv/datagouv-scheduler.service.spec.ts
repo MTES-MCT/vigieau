@@ -48,6 +48,7 @@ describe('DatagouvSchedulerService', () => {
 
   const createService = () => {
     const datagouvService = {
+      canUploadToDataGouv: jest.fn().mockReturnValue(true),
       updateDatagouvData: jest.fn().mockResolvedValue(undefined),
     };
     const registry = {
@@ -129,6 +130,7 @@ describe('DatagouvSchedulerService', () => {
         ...exportIdentity('2026-07-31'),
         verifyCurrent: expect.any(Function),
       }),
+      'historic',
     );
   });
 
@@ -154,6 +156,7 @@ describe('DatagouvSchedulerService', () => {
         ...exportIdentity('2026-08-01'),
         verifyCurrent: expect.any(Function),
       }),
+      'historic',
     );
   });
 
@@ -308,27 +311,87 @@ describe('DatagouvSchedulerService', () => {
     expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
   });
 
-  it('waits for the certified export boundary without requiring a catch-up run', async () => {
+  it('does not run the versioned scheduler without a configured destination', async () => {
+    const harness = createService();
+    harness.datagouvService.canUploadToDataGouv.mockReturnValue(false);
+
+    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
+
+    expect(
+      harness.zonePublicationService.getActivePublicationGate,
+    ).not.toHaveBeenCalled();
+    expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
+  });
+
+  it('requires a national computation for the promoted revision before publishing CSVs', async () => {
+    const harness = createService();
+    harness.registry.hasSucceeded.mockResolvedValue(false);
+    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
+    expect(harness.registry.hasSucceeded).toHaveBeenCalledWith(
+      'compute:national-daily',
+      '2026-08-01',
+      {
+        sourceRevision: '42',
+        materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+      },
+    );
+    expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
+    expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+  });
+
+  it('publishes the current CSVs while the historical statistics are provisional', async () => {
     const harness = createService();
     harness.historicExportReadiness.evaluate.mockResolvedValue({
       status: 'blocked',
       scheduledFor: '2026-08-01',
-      blocker: 'current_daily_not_ready',
+      blocker: 'sparse_statistic_cache',
     } as any);
-
-    await harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z'));
-
-    expect(harness.historicExportReadiness.evaluate).toHaveBeenCalledWith(
+    const now = new Date('2026-08-01T04:01:00Z');
+    await harness.service.publishIfDue(now);
+    const currentIdentity = {
+      publicationMode: 'versioned',
+      publicationId: 'publication-1',
+      sourceRevision: '42',
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    };
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledTimes(1);
+    expect(harness.registry.executeDailyRun).toHaveBeenCalledWith(
+      'datagouv:current-csv',
       '2026-08-01',
-      expect.objectContaining({ publicationId: 'publication-1' }),
+      expect.any(Function),
+      now,
+      { identity: currentIdentity },
     );
-    expect(harness.registry.hasSucceeded).not.toHaveBeenCalledWith(
-      'compute:historic-catchup',
-      expect.anything(),
-      expect.anything(),
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
+      '2026-08-01',
+      { ...currentIdentity, verifyCurrent: expect.any(Function) },
+      'current',
     );
-    expect(harness.registry.executeDailyRun).not.toHaveBeenCalled();
-    expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+    expect(harness.historicExportReadiness.assertReady).not.toHaveBeenCalled();
+  });
+
+  it('attempts eligible archives independently and reports an incomplete daily run if the CSV retry is pending', async () => {
+    const harness = createService();
+    harness.registry.executeDailyRun.mockImplementation(
+      async (key, _date, run) => {
+        if (key === 'datagouv:current-csv') return 'not_due';
+        await run();
+        return 'succeeded';
+      },
+    );
+    harness.registry.hasSucceeded.mockImplementation(
+      async (key) => key === 'compute:national-daily',
+    );
+    await expect(
+      harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z')),
+    ).rejects.toThrow('Current CSV publication is incomplete');
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
+      '2026-08-01',
+      expect.anything(),
+      'historic',
+    );
   });
 
   it('waits until the publication of the same day is fully promoted', async () => {
@@ -402,7 +465,12 @@ describe('DatagouvSchedulerService', () => {
       harness.service.publishIfDue(new Date('2026-08-01T04:01:00Z')),
     ).rejects.toThrow('Historic export boundary changed');
 
-    expect(harness.datagouvService.updateDatagouvData).not.toHaveBeenCalled();
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledTimes(1);
+    expect(harness.datagouvService.updateDatagouvData).toHaveBeenCalledWith(
+      '2026-08-01',
+      expect.anything(),
+      'current',
+    );
     expect(harness.historicExportReadiness.assertReady).toHaveBeenCalledWith(
       exportIdentity('2026-08-01'),
     );
