@@ -115,20 +115,44 @@ describe('certified history completion options', () => {
         CERTIFIED_HISTORY_COMPLETION_FROM: '2026-07-10',
         CERTIFIED_HISTORY_COMPLETION_THROUGH: '2026-08-26',
       }),
-    ).toThrow('approved v1 or v2 source run and exact scope');
+    ).toThrow('approved source run and exact scope');
     expect(() =>
       parseCertifiedHistoryCompletionOptions({
         ...v2RequiredEnvironment,
         CERTIFIED_HISTORY_COMPLETION_THROUGH: '2026-08-27',
       }),
-    ).toThrow('approved v1 or v2 source run and exact scope');
+    ).toThrow('approved source run and exact scope');
     expect(() =>
       parseCertifiedHistoryCompletionOptions({
         ...requiredEnvironment,
         CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID:
           'vigieau-2026-07-11-2026-08-31-isolated-recompute-v2',
       }),
-    ).toThrow('approved v1 or v2 source run and exact scope');
+    ).toThrow('approved source run and exact scope');
+  });
+
+  it('accepts only targeted v3 writes before promotion and the exact agreed range', () => {
+    const v3 = {
+      ...v2RequiredEnvironment,
+      CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID:
+        'vigieau-2026-07-11-2026-08-31-arbitrage-v3',
+    };
+    expect(() => parseCertifiedHistoryCompletionOptions(v3)).toThrow(
+      'targeted',
+    );
+    expect(
+      parseCertifiedHistoryCompletionOptions({
+        ...v3,
+        CERTIFIED_HISTORY_COMPLETION_MODE: 'promote',
+      }).mode,
+    ).toBe('promote');
+    expect(() =>
+      parseCertifiedHistoryCompletionOptions({
+        ...v3,
+        CERTIFIED_HISTORY_COMPLETION_MODE: 'attest',
+        CERTIFIED_HISTORY_COMPLETION_THROUGH: '2026-09-01',
+      }),
+    ).toThrow('exact scope');
   });
 
   it('pins mode, source fingerprints and dirty context in the token', () => {

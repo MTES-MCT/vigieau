@@ -17,6 +17,17 @@ import {
   CERTIFIED_HISTORY_V2_VARIANT as V2_VARIANT,
 } from './build-certified-history-source';
 
+import {
+  APPROVED_HISTORY_V3_RUN as V3_RUN,
+  APPROVED_HISTORY_V3_PROVENANCE as V3_PROVENANCE,
+  APPROVED_HISTORY_V3_FINGERPRINT as V3_FINGERPRINT,
+  APPROVED_HISTORY_V3_INPUT_DIGEST,
+  APPROVED_COMMUNE_DIGEST_SQL,
+  approvedHistoryMutationGuards,
+  lockApprovedHistoryInputs,
+  verifyApprovedHistoryInputs,
+} from './approved-history-v3';
+
 const SNAPSHOT_LOCK = 'vigieau:statistic-commune:snapshot-computation';
 const ZONE_PROMOTION_LOCK = 'vigieau:zone-publication-stable-promotion';
 const RESTORE_CONFIRMATION = 'RESTORE_CERTIFIED_DEPARTMENT_NATIONAL_HISTORY';
@@ -70,6 +81,13 @@ const CERTIFIED_HISTORY_COMPLETION_SCOPES = [
     through: '2026-08-31',
     dirtyFrom: '2026-07-11',
     dirtyThrough: '2026-08-27',
+  },
+  {
+    sourceRunId: V3_RUN,
+    from: '2026-07-11',
+    through: '2026-08-31',
+    dirtyFrom: '2026-07-11',
+    dirtyThrough: '2026-08-31',
   },
 ] as const satisfies readonly CertifiedHistoryCompletionScope[];
 
@@ -348,10 +366,21 @@ function certifiedHistoryCompletionScope(
   );
   if (!scope) {
     throw new Error(
-      'Certified history completion is restricted to the approved v1 or v2 source run and exact scope',
+      'Certified history completion is restricted to the approved source run and exact scope',
     );
   }
   return scope;
+}
+
+function assertApprovedCompletionMode(
+  run: string,
+  mode: CertifiedHistoryCompletionMode,
+): void {
+  if (run === V3_RUN && mode === 'restore') {
+    throw new Error(
+      'Use the targeted, operator-approved v3 row repair before promotion',
+    );
+  }
 }
 
 export function parseCertifiedHistoryCompletionOptions(
@@ -412,6 +441,7 @@ export function parseCertifiedHistoryCompletionOptions(
     throw new Error('CERTIFIED_HISTORY_COMPLETION_SOURCE_RUN_ID is invalid');
   }
   certifiedHistoryCompletionScope({ from, through, sourceRunId });
+  assertApprovedCompletionMode(sourceRunId, mode);
   const expectedSourceDatabase = requiredEnvironment(
     environment,
     'CERTIFIED_HISTORY_COMPLETION_EXPECTED_SOURCE_DATABASE',
@@ -697,6 +727,10 @@ export const CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL = `
                OR date_source.payload ->> 'statisticDigest'
                     !~ '^[a-f0-9]{64}$'
           )
+        WHEN run.id = '${V3_RUN}' THEN
+          run.provenance ->> 'parentSourceRunId' = '${V2_SOURCE_RUN_ID}'
+          AND encode(sha256(convert_to(run.provenance::text, 'UTF8')), 'hex') =
+            '${V3_PROVENANCE}'
         ELSE false
       END
         AS "provenanceValid",
@@ -736,7 +770,7 @@ export const CERTIFIED_COMPLETION_SOURCE_SCOPE_SQL = `
       SELECT date, "backupId", "dumpSha256"
       FROM "certified_history_commune_day"
       WHERE "sourceRunId" = $3::text
-        AND $3::text = '${V2_SOURCE_RUN_ID}'
+        AND $3::text IN ('${V2_SOURCE_RUN_ID}', '${V3_RUN}')
         AND date BETWEEN $1::date AND $2::date
       GROUP BY date, "backupId", "dumpSha256"
       UNION ALL
@@ -1435,6 +1469,15 @@ async function readSourceScope(
     sourceFingerprint,
   };
   assertPinnedV2CertifiedSource(source);
+  if (
+    options.sourceRunId === V3_RUN &&
+    (source.provenanceDigest !== V3_PROVENANCE ||
+      source.sourceFingerprint !== V3_FINGERPRINT)
+  ) {
+    throw new Error(
+      'Certified v3 source differs from the approved final manifest',
+    );
+  }
   return source;
 }
 
@@ -1842,7 +1885,12 @@ async function readCertifiedCommuneDigests(
       );
       firstDigestEntry = false;
     }
-    batches.push(...chunkCertifiedValidationRows(rows, options.batchSize));
+    batches.push(
+      ...chunkCertifiedValidationRows(
+        rows,
+        options.sourceRunId === V3_RUN ? 100 : options.batchSize,
+      ),
+    );
     cursor = rows.at(-1)!.code;
     validated += rows.length;
   }
@@ -1870,12 +1918,16 @@ async function validateAllCommunesExact(
 ): Promise<number> {
   let validated = 0;
   for (const rows of batches) {
-    await assertContext(target, expectedContext, false);
-    const [result] = (await target.query(TARGET_COMMUNE_DIGEST_VALIDATION_SQL, [
-      JSON.stringify(rows),
-      options.from,
-      options.through,
-    ])) as Array<Record<string, unknown>>;
+    // The v3 inspection runs inside one repeatable read snapshot. The context
+    // is checked at the snapshot boundary and again in the final transaction.
+    if (options.sourceRunId !== V3_RUN)
+      await assertContext(target, expectedContext, false);
+    const [result] = (await target.query(
+      options.sourceRunId === V3_RUN
+        ? APPROVED_COMMUNE_DIGEST_SQL
+        : TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
+      [JSON.stringify(rows), options.from, options.through],
+    )) as Array<Record<string, unknown>>;
     const cursor = rows.at(-1)!.code;
     if (
       count(result?.sourceCount, 'commune validation source count') !==
@@ -2238,6 +2290,98 @@ export async function assertValidatedTargetVersions(
   }
 }
 
+async function inspectAndLockCertifiedOutputs(
+  runner: QueryRunner,
+  communeDigestBatches: CertifiedCommuneDigest[][],
+  departmentBatches: CertifiedDepartmentDay[][],
+  statisticRows: CertifiedStatisticDay[],
+  expectedContext: RepairPublicationContext,
+  options: CertifiedHistoryCompletionOptions,
+): Promise<void> {
+  await runner.startTransaction('REPEATABLE READ');
+  await runner.query('SET TRANSACTION READ ONLY');
+  await runner.query("SELECT set_config('statement_timeout', $1, true)", [
+    `${options.statementTimeoutMs}ms`,
+  ]);
+  await runner.query("SELECT set_config('lock_timeout', $1, true)", [
+    `${options.lockTimeoutMs}ms`,
+  ]);
+  await assertContext(runner, expectedContext, false);
+  const inputGuards =
+    options.sourceRunId === V3_RUN
+      ? await approvedHistoryMutationGuards(runner)
+      : null;
+  if (inputGuards !== null) await verifyApprovedHistoryInputs(runner);
+  const inspectedVersions = await readValidatedTargetVersions(
+    runner,
+    options.from,
+    options.through,
+  );
+  await validateAllCommunesExact(
+    runner,
+    communeDigestBatches,
+    options,
+    expectedContext,
+  );
+  for (const rows of departmentBatches) {
+    await assertContext(runner, expectedContext, false);
+    await validateTargetDepartmentExact(runner, rows, options);
+  }
+  for (
+    let offset = 0;
+    offset < statisticRows.length;
+    offset += options.batchSize
+  ) {
+    await assertContext(runner, expectedContext, false);
+    await validateTargetStatisticExact(
+      runner,
+      statisticRows.slice(offset, offset + options.batchSize),
+    );
+  }
+  await assertContext(runner, expectedContext, false);
+
+  await runner.commitTransaction();
+
+  await runner.startTransaction('SERIALIZABLE');
+  // Match the short verification window used by automatic attestation.
+  await runner.query(`SET LOCAL jit=off;
+      SET LOCAL transaction_timeout='3s';
+      SET LOCAL statement_timeout='${Math.min(options.statementTimeoutMs, 2000)}ms';
+      SET LOCAL lock_timeout='${Math.min(options.lockTimeoutMs, 50)}ms'`);
+  if (options.apply) {
+    // Take relation locks before the serializable snapshot is established.
+    // Writers outside the snapshot scheduler must also invalidate this proof.
+    await runner.query(
+      `LOCK TABLE ${promotionTables.join(', ')} IN SHARE MODE NOWAIT`,
+    );
+    if (inputGuards !== null) await lockApprovedHistoryInputs(runner);
+  }
+  const [locks] = await runner.query(
+    `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS snapshot,
+              pg_try_advisory_xact_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS zone,
+              pg_try_advisory_xact_lock(hashtext($2)) AS promotion`,
+    [SNAPSHOT_LOCK, ZONE_PROMOTION_LOCK],
+  );
+  if (!bool(locks?.snapshot) || !bool(locks?.zone) || !bool(locks?.promotion)) {
+    throw new CurrentPriorityError('Snapshot or zone publication lock is busy');
+  }
+  await assertContext(runner, expectedContext, options.apply);
+  if (
+    inputGuards !== null &&
+    inputGuards !== (await approvedHistoryMutationGuards(runner))
+  ) {
+    throw new PublicationContextChangedError(
+      'Historical source revision guards changed during validation',
+    );
+  }
+  await assertValidatedTargetVersions(
+    runner,
+    options.from,
+    options.through,
+    inspectedVersions,
+  );
+}
+
 async function promote(
   source: QueryRunner,
   target: DataSource,
@@ -2258,85 +2402,15 @@ async function promote(
     sourceScope,
   );
   const runner = target.createQueryRunner();
-  let transactionStarted = false;
   try {
     await runner.connect();
-    await runner.startTransaction('REPEATABLE READ');
-    transactionStarted = true;
-    await runner.query('SET TRANSACTION READ ONLY');
-    await runner.query("SELECT set_config('statement_timeout', $1, true)", [
-      `${options.statementTimeoutMs}ms`,
-    ]);
-    await runner.query("SELECT set_config('lock_timeout', $1, true)", [
-      `${options.lockTimeoutMs}ms`,
-    ]);
-    await assertContext(runner, expectedContext, false);
-    const inspectedVersions = await readValidatedTargetVersions(
-      runner,
-      options.from,
-      options.through,
-    );
-    await validateAllCommunesExact(
+    await inspectAndLockCertifiedOutputs(
       runner,
       communeDigestBatches,
-      options,
+      departmentBatches,
+      statisticRows,
       expectedContext,
-    );
-    for (const rows of departmentBatches) {
-      await assertContext(runner, expectedContext, false);
-      await validateTargetDepartmentExact(runner, rows, options);
-    }
-    for (
-      let offset = 0;
-      offset < statisticRows.length;
-      offset += options.batchSize
-    ) {
-      await assertContext(runner, expectedContext, false);
-      await validateTargetStatisticExact(
-        runner,
-        statisticRows.slice(offset, offset + options.batchSize),
-      );
-    }
-    await assertContext(runner, expectedContext, false);
-
-    await runner.commitTransaction();
-    transactionStarted = false;
-
-    await runner.startTransaction('SERIALIZABLE');
-    transactionStarted = true;
-    // Match the short verification window used by automatic attestation.
-    await runner.query(`SET LOCAL jit=off;
-      SET LOCAL transaction_timeout='3s';
-      SET LOCAL statement_timeout='${Math.min(options.statementTimeoutMs, 2000)}ms';
-      SET LOCAL lock_timeout='${Math.min(options.lockTimeoutMs, 50)}ms'`);
-    if (options.apply) {
-      // Take relation locks before the serializable snapshot is established.
-      // Writers outside the snapshot scheduler must also invalidate this proof.
-      await runner.query(
-        `LOCK TABLE ${promotionTables.join(', ')} IN SHARE MODE NOWAIT`,
-      );
-    }
-    const [locks] = await runner.query(
-      `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS snapshot,
-              pg_try_advisory_xact_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS zone,
-              pg_try_advisory_xact_lock(hashtext($2)) AS promotion`,
-      [SNAPSHOT_LOCK, ZONE_PROMOTION_LOCK],
-    );
-    if (
-      !bool(locks?.snapshot) ||
-      !bool(locks?.zone) ||
-      !bool(locks?.promotion)
-    ) {
-      throw new CurrentPriorityError(
-        'Snapshot or zone publication lock is busy',
-      );
-    }
-    await assertContext(runner, expectedContext, options.apply);
-    await assertValidatedTargetVersions(
-      runner,
-      options.from,
-      options.through,
-      inspectedVersions,
+      options,
     );
     const [preflight] = (await runner.query(
       CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
@@ -2352,7 +2426,6 @@ async function promote(
     assertPromotionPreflight(preflight);
     if (!options.apply) {
       await runner.commitTransaction();
-      transactionStarted = false;
       return {
         auditId: null,
         attestationId: null,
@@ -2398,7 +2471,13 @@ async function promote(
       expectedContext.statisticRevision,
       JSON.stringify({
         executionContext,
-        method: 'certified-backup-repair',
+        method:
+          options.sourceRunId === V3_RUN
+            ? 'operator-arbitrated-historical-inputs'
+            : 'certified-backup-repair',
+        ...(options.sourceRunId === V3_RUN && {
+          approvedInputDigest: APPROVED_HISTORY_V3_INPUT_DIGEST,
+        }),
         sourceFingerprint: sourceScope.sourceFingerprint,
       }),
       expectedContext.historicDirtyFrom,
@@ -2442,14 +2521,13 @@ async function promote(
       );
     }
     await runner.commitTransaction();
-    transactionStarted = false;
     return {
       auditId,
       attestationId,
       revision: promotedRevision,
     };
   } catch (error) {
-    if (transactionStarted) await runner.rollbackTransaction();
+    if (runner.isTransactionActive) await runner.rollbackTransaction();
     throw error;
   } finally {
     await runner.release();
@@ -2476,66 +2554,16 @@ async function attestExistingRepair(
     sourceScope,
   );
   const runner = target.createQueryRunner();
-  let snapshotLocked = false;
-  let transactionStarted = false;
   try {
     await runner.connect();
-    const [snapshotLock] = (await runner.query(
-      'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-      [SNAPSHOT_LOCK],
-    )) as Array<{ locked: unknown }>;
-    snapshotLocked = bool(snapshotLock?.locked);
-    if (!snapshotLocked) {
-      throw new CurrentPriorityError('Snapshot lock is busy');
-    }
-    await runner.query("SELECT set_config('statement_timeout', $1, false)", [
-      `${options.statementTimeoutMs}ms`,
-    ]);
-    await assertContext(runner, expectedContext, false);
-    await validateAllCommunesExact(
+    await inspectAndLockCertifiedOutputs(
       runner,
       communeDigestBatches,
-      options,
+      departmentBatches,
+      statisticRows,
       expectedContext,
+      options,
     );
-    for (const rows of departmentBatches) {
-      await assertContext(runner, expectedContext, false);
-      await validateTargetDepartmentExact(runner, rows, options);
-    }
-    for (
-      let offset = 0;
-      offset < statisticRows.length;
-      offset += options.batchSize
-    ) {
-      await assertContext(runner, expectedContext, false);
-      await validateTargetStatisticExact(
-        runner,
-        statisticRows.slice(offset, offset + options.batchSize),
-      );
-    }
-    await assertContext(runner, expectedContext, false);
-
-    await runner.startTransaction('SERIALIZABLE');
-    transactionStarted = true;
-    await runner.query("SELECT set_config('lock_timeout', $1, true)", [
-      `${options.lockTimeoutMs}ms`,
-    ]);
-    await runner.query("SELECT set_config('statement_timeout', $1, true)", [
-      `${options.statementTimeoutMs}ms`,
-    ]);
-    const [zoneLock] = (await runner.query(
-      `SELECT pg_try_advisory_xact_lock(
-         hashtext('vigieau'), hashtext('zone-compute-global')
-       ) AS locked`,
-    )) as Array<{ locked: unknown }>;
-    const [promotionLock] = (await runner.query(
-      'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
-      [ZONE_PROMOTION_LOCK],
-    )) as Array<{ locked: unknown }>;
-    if (!bool(zoneLock?.locked) || !bool(promotionLock?.locked)) {
-      throw new CurrentPriorityError('Zone publication lock is busy');
-    }
-    await assertContext(runner, expectedContext, options.apply);
     const [preflight] = (await runner.query(
       CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
       [
@@ -2583,7 +2611,6 @@ async function attestExistingRepair(
     )) as Array<{ id: string; revision: string }>;
     if (existing) {
       await runner.commitTransaction();
-      transactionStarted = false;
       return {
         auditId,
         attestationId: existing.id,
@@ -2592,7 +2619,6 @@ async function attestExistingRepair(
     }
     if (!options.apply) {
       await runner.commitTransaction();
-      transactionStarted = false;
       return {
         auditId,
         attestationId: null,
@@ -2688,21 +2714,15 @@ async function attestExistingRepair(
       );
     }
     await runner.commitTransaction();
-    transactionStarted = false;
     return {
       auditId,
       attestationId,
       revision: attestedRevision,
     };
   } catch (error) {
-    if (transactionStarted) await runner.rollbackTransaction();
+    if (runner.isTransactionActive) await runner.rollbackTransaction();
     throw error;
   } finally {
-    if (snapshotLocked) {
-      await runner.query('SELECT pg_advisory_unlock(hashtext($1))', [
-        SNAPSHOT_LOCK,
-      ]);
-    }
     await runner.release();
   }
 }
@@ -2712,6 +2732,7 @@ export async function completeCertifiedHistoryRestoration(
   target: DataSource,
   options: CertifiedHistoryCompletionOptions,
 ): Promise<CertifiedHistoryCompletionSummary> {
+  assertApprovedCompletionMode(options.sourceRunId, options.mode);
   await assertDatabaseName(
     sourceDataSource,
     options.expectedSourceDatabase,

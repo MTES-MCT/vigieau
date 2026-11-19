@@ -24,6 +24,8 @@ import {
   EQUIVALENCE_THROUGH as THROUGH,
   EquivalenceInput,
   HISTORY_SOURCE_EQUIVALENCE_SQL,
+  EQUIVALENCE_RELATIONS_SQL,
+  HISTORICAL_REVISION_TABLES as SOURCE_TABLES,
   canonicalEquivalenceJson,
   equivalenceDigest,
   sourceEquivalenceEvidence,
@@ -51,27 +53,6 @@ export const EQUIVALENCE_INSPECTION_SETTINGS_SQL =
 export const EQUIVALENCE_INPUT_BATCH_SQL =
   'FETCH FORWARD 100 FROM equivalence_inputs';
 export const EQUIVALENCE_CONFIRMATION_TIMEOUT_MS = 30_000;
-const SOURCE_TABLES = [
-  'zone_alerte',
-  'restriction',
-  'usage',
-  'arrete_restriction',
-  'arrete_cadre',
-  'fichier',
-  'thematique',
-  'parametres',
-  'commune',
-  'departement',
-  'bassin_versant',
-  'arrete_cadre_zone_alerte_communes',
-  'ac_za_communes',
-  'arrete_cadre_arrete_restriction',
-  'arrete_cadre_departement',
-  'arrete_cadre_zone_alerte',
-  'restriction_commune',
-  'bassin_versant_departement',
-  'sandre_zone_alias',
-] as const;
 
 export interface EquivalenceOptions {
   apply: boolean;
@@ -348,15 +329,7 @@ SELECT "epochAfter"::text, cause, context->'fallback' AS fallback,
 FROM historic_range_invalidation AS ledger
 WHERE ledger."epochAfter">796 ORDER BY ledger."epochAfter"`;
 
-// Physical relation identity catches TRUNCATE/rewrites, which are not covered by
-// the source DML revision trigger. Trigger definitions must remain unchanged.
-export const EQUIVALENCE_RELATIONS_SQL = `
-SELECT c.relname,c.oid::text,pg_relation_filenode(c.oid)::text AS filenode,
-  t.tgenabled,pg_get_triggerdef(t.oid) AS trigger,
-  md5(pg_get_functiondef(t.tgfoid)) AS function
-FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-LEFT JOIN pg_trigger t ON t.tgrelid=c.oid AND t.tgname='TRG_'||c.relname||'_zone_publication_revision'
-WHERE n.nspname=current_schema() AND c.relname=ANY($1::text[]) ORDER BY c.relname`;
+export { EQUIVALENCE_RELATIONS_SQL } from './history-source-equivalence';
 
 export function outputBatchSql(kind: OutputKind): string {
   if (kind === 'national')

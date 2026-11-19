@@ -1,3 +1,4 @@
+import { APPROVED_COMMUNE_DIGEST_SQL } from './approved-history-v3';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import {
@@ -526,8 +527,10 @@ describePostgres('complete certified history PostgreSQL', () => {
     expect(rows.some(({ id }) => id === '800' || id === '801')).toBe(false);
   });
 
-  it('rejects missing or extra keys even when the commune digest is unchanged', async () => {
-    const [expected] = await database.query(`
+  it.each([TARGET_COMMUNE_DIGEST_VALIDATION_SQL, APPROVED_COMMUNE_DIGEST_SQL])(
+    'rejects missing or extra keys even when the commune digest is unchanged',
+    async (sql) => {
+      const [expected] = await database.query(`
       SELECT encode(sha256(convert_to(
         jsonb_build_array(
           '2026-07-11'::text, NULL::text, 'vigilance'::text, NULL::text
@@ -535,59 +538,48 @@ describePostgres('complete certified history PostgreSQL', () => {
         'UTF8'
       )), 'hex') AS digest
     `);
-    const source = JSON.stringify([
-      { code: '77132', dayCount: 1, digest: expected.digest },
-    ]);
-    const parameters = [source, '2026-07-11', '2026-07-11'];
+      const source = JSON.stringify([
+        { code: '77132', dayCount: 1, digest: expected.digest },
+      ]);
+      const parameters = [source, '2026-07-11', '2026-07-11'];
 
-    const [exact] = await database.query(
-      TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
-      parameters,
-    );
-    expect(exact.mismatchCount).toBe(0);
+      const [exact] = await database.query(sql, parameters);
+      expect(exact.mismatchCount).toBe(0);
 
-    await database.query(`
+      await database.query(`
       UPDATE statistic_commune
       SET restrictions =
         '[{"date":"2026-07-11","SOU":null,"SUP":"vigilance"}]'::jsonb
     `);
-    const [missingKey] = await database.query(
-      TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
-      parameters,
-    );
-    expect(missingKey.mismatchCount).toBe(1);
+      const [missingKey] = await database.query(sql, parameters);
+      expect(missingKey.mismatchCount).toBe(1);
 
-    await database.query(`
+      await database.query(`
       UPDATE statistic_commune
       SET restrictions =
         ('[{"date":"2026-07-11","SOU":null,"SUP":"vigilance",' ||
          '"AEP":null,"unexpected":true}]')::jsonb
     `);
-    const [extraKey] = await database.query(
-      TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
-      parameters,
-    );
-    expect(extraKey.mismatchCount).toBe(1);
+      const [extraKey] = await database.query(sql, parameters);
+      expect(extraKey.mismatchCount).toBe(1);
 
-    await database.query(`
+      await database.query(`
       UPDATE statistic_commune
       SET restrictions =
         ('[{"date":"2026-07-11","SOU":null,"SUP":"vigilance",' ||
          '"AEP":null}, {}]')::jsonb
     `);
-    const [invalidElement] = await database.query(
-      TARGET_COMMUNE_DIGEST_VALIDATION_SQL,
-      parameters,
-    );
-    expect(invalidElement.mismatchCount).toBe(1);
+      const [invalidElement] = await database.query(sql, parameters);
+      expect(invalidElement.mismatchCount).toBe(1);
 
-    await database.query(`
+      await database.query(`
       UPDATE statistic_commune
       SET restrictions =
         ('[{"date":"2026-07-11","SOU":null,"SUP":"vigilance",' ||
          '"AEP":null}]')::jsonb
     `);
-  });
+    },
+  );
 
   it('atomically expands dirty coverage to the fully audited statistic range', async () => {
     await database.query(`
