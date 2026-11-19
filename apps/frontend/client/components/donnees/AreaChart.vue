@@ -22,6 +22,7 @@ import { helpers, required } from '@vuelidate/validators';
 import useVuelidate from '@vuelidate/core';
 import utils from '../../utils';
 import { downloadElementAsPng } from '../../utils/png-download';
+import { hasLimitedDrinkingWaterHistory } from '../../utils/statistic-series-status';
 import { isAreaStatisticSeries } from '../../utils/statistic-series';
 import { findMissingStatisticPeriods, MAX_DAILY_STATISTIC_GAP_MS } from '../../utils/statistic-history-gaps';
 import { findProvisionalStatisticPeriods, getStatisticPointStyle, getStatisticRowStatusLabel } from '../../utils/statistic-provisional';
@@ -383,7 +384,7 @@ watch(() => refDataStore.departements, () => {
         </DsfrButton>
       </div>
     </div>
-    <div class="fr-col-12">
+    <div v-if="!loading && hasLimitedDrinkingWaterHistory(dataArea, formData.typeEau)" class="fr-col-12">
       <DsfrAlert
         title="Données historiques sur l’eau potable limitées"
         data-html2canvas-ignore="true"
