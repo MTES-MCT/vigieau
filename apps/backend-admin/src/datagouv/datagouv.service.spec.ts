@@ -984,7 +984,7 @@ describe('DatagouvService', () => {
 
     await expect(
       harness.service.updateDailyMapArchive('2026-08-01', true),
-    ).rejects.toThrow('S3 temporarily unavailable');
+    ).rejects.toThrow('Lecture de l’archive cartographique');
 
     expect(harness.s3Service.uploadFile).not.toHaveBeenCalled();
     expect(upload).not.toHaveBeenCalled();
@@ -1739,6 +1739,190 @@ describe('DatagouvService', () => {
     expect(logged).toContain('401');
     expect(logged).not.toContain('secret-api-key');
     expect(logged).not.toContain('X-Api-Key');
+  });
+
+  it('keeps transient failures classifiable in the daily aggregate without propagating Axios data', async () => {
+    const harness = createHarness('/tmp');
+    const error = Object.assign(new Error('provider-secret'), {
+      code: 'ECONNABORTED',
+      isAxiosError: true,
+      config: { headers: { 'X-Api-Key': 'provider-secret' } },
+    });
+    jest.spyOn(harness.service, 'updateArretes').mockRejectedValue(error);
+    jest.spyOn(harness.service, 'updateRestrictions').mockResolvedValue();
+    const publish = harness.service.updateDatagouvData(
+      '2026-11-19',
+      undefined,
+      'current',
+    );
+    await expect(publish).rejects.toThrow('ECONNABORTED');
+    const aggregate = await publish.catch((e) => e);
+    expect(aggregate.errors[0]).not.toHaveProperty('config');
+    expect(
+      JSON.stringify([
+        aggregate.message,
+        ...aggregate.errors,
+        harness.logger.error.mock.calls,
+      ]),
+    ).not.toContain('provider-secret');
+  });
+
+  it('repairs the title after a timeout when data.gouv already received the exact file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    await writeFile(join(directory, 'arretes.csv'), 'abc');
+    const harness = createHarness(directory);
+    const id = 'f425cfa6-ccd1-438e-bb03-9d90ab527851';
+    const resource = {
+      id,
+      title: 'arretes.csv',
+      filesize: 3,
+      last_modified: '2026-11-19T12:00:00Z',
+      checksum: {
+        type: 'sha1',
+        value: 'a9993e364706816aba3e25717850c26c9cd0d89d',
+      },
+    };
+    harness.httpService.get
+      .mockReturnValueOnce(
+        of({ data: { ...resource, last_modified: '2026-11-18T10:00:00Z' } }),
+      )
+      .mockReturnValueOnce(of({ data: resource }))
+      .mockReturnValue(
+        of({ data: { resources: [{ ...resource, title: 'Arrêtés' }] } }),
+      );
+    const failure = Object.assign(new Error('raw-secret'), {
+      code: 'ECONNABORTED',
+      config: { headers: { 'X-Api-Key': 'secret-key' } },
+    });
+    harness.httpService.post.mockReturnValue(throwError(() => failure));
+    await harness.service.uploadToDatagouv(
+      'arretes',
+      'arretes.csv',
+      'Arrêtés',
+      false,
+      { sourceDate: '2026-11-19' },
+    );
+    expect(harness.httpService.post).toHaveBeenCalledTimes(1);
+    expect(harness.httpService.put).toHaveBeenCalledTimes(1);
+    expect(
+      harness.publicationRegistry.recordResourceSuccess,
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes an interrupted CSV from its dated checksum without a duplicate upload', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    await writeFile(join(directory, 'arretes.csv'), 'abc');
+    const harness = createHarness(directory);
+    const r = {
+      id: 'f425cfa6-ccd1-438e-bb03-9d90ab527851',
+      title: 'arretes.csv',
+      filesize: 3,
+      last_modified: '2026-11-19T12:00:00Z',
+      checksum: {
+        type: 'sha1',
+        value: 'a9993e364706816aba3e25717850c26c9cd0d89d',
+      },
+    };
+    harness.httpService.get
+      .mockReturnValueOnce(of({ data: r }))
+      .mockReturnValue(
+        of({ data: { resources: [{ ...r, title: 'Arrêtés' }] } }),
+      );
+    await harness.service.uploadToDatagouv(
+      'arretes',
+      'arretes.csv',
+      'Arrêtés',
+      false,
+      { sourceDate: '2026-11-19' },
+    );
+    expect(harness.httpService.post).not.toHaveBeenCalled();
+    expect(harness.httpService.put).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms an accepted metadata update after its response times out', async () => {
+    const harness = createHarness('/tmp');
+    const url = 'https://objects.example.test/zones.pmtiles';
+    const resource = {
+      id: 'a101ef59-0999-4b9a-a682-6f9b79d53c7e',
+      title: 'PMTiles',
+      url,
+    };
+    harness.httpService.put.mockReturnValue(
+      throwError(() =>
+        Object.assign(new Error('socket hang up'), {
+          request: { headers: { 'X-Api-Key': 'raw-secret' } },
+        }),
+      ),
+    );
+    harness.httpService.get.mockReturnValue(
+      of({ data: { resources: [resource] } }),
+    );
+    await harness.service.uploadToDatagouv('pmtiles', url, 'PMTiles', true);
+    expect(harness.httpService.put).toHaveBeenCalledTimes(1);
+    expect(
+      harness.publicationRegistry.recordResourceSuccess,
+    ).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toContain(
+      'raw-secret',
+    );
+  });
+
+  it('rejects a same-size different checksum and propagates only a safe, classifiable failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    await writeFile(join(directory, 'arretes.csv'), 'abc');
+    const harness = createHarness(directory);
+    const raw = Object.assign(new Error('secret-in-message'), {
+      code: 'ECONNABORTED',
+      response: {
+        status: 504,
+        statusText: 'secret-in-status',
+        data: 'secret-in-body',
+      },
+      request: { secrets: 'secret-in-request' },
+      config: { headers: { 'X-Api-Key': 'secret-in-header' } },
+    });
+    harness.httpService.post.mockReturnValue(throwError(() => raw));
+    harness.httpService.get.mockReturnValue(
+      of({
+        data: {
+          id: 'f425cfa6-ccd1-438e-bb03-9d90ab527851',
+          filesize: 3,
+          checksum: { type: 'sha1', value: '0'.repeat(40) },
+          last_modified: '2026-11-19T12:00:00Z',
+        },
+      }),
+    );
+    const publish = harness.service.uploadToDatagouv(
+      'arretes',
+      'arretes.csv',
+      'Arrêtés',
+      false,
+      { sourceDate: '2026-11-19' },
+    );
+    await expect(publish).rejects.toMatchObject({
+      code: 'ECONNABORTED',
+      status: 504,
+      message: expect.stringContaining('HTTP 504'),
+    });
+    const thrown = await publish.catch((error) => error);
+    expect(thrown).not.toHaveProperty('config');
+    expect(thrown).not.toHaveProperty('request');
+    expect(thrown).not.toHaveProperty('response');
+    expect(thrown).not.toHaveProperty('cause');
+    expect(
+      JSON.stringify([
+        harness.logger.error.mock.calls,
+        harness.publicationRegistry.recordResourceFailure.mock.calls,
+        thrown.message,
+      ]),
+    ).not.toContain('secret-in');
+    expect(harness.httpService.put).not.toHaveBeenCalled();
+    expect(
+      harness.publicationRegistry.recordResourceSuccess,
+    ).not.toHaveBeenCalled();
   });
 
   it('streams file uploads from disk instead of loading them into memory', async () => {
