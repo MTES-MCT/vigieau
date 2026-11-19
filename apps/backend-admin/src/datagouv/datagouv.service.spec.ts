@@ -1891,7 +1891,7 @@ describe('DatagouvService', () => {
           id: 'f425cfa6-ccd1-438e-bb03-9d90ab527851',
           filesize: 3,
           checksum: { type: 'sha1', value: '0'.repeat(40) },
-          last_modified: '2026-11-19T00:00:00Z',
+          last_modified: '2026-11-19T12:00:00Z',
         },
       }),
     );
