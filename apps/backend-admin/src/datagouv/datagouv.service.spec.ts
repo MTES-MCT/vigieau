@@ -195,6 +195,19 @@ describe('DatagouvService', () => {
     );
   });
 
+  it('sets a separate deadline only for the historical resource group', async () => {
+    const h = createHarness('/tmp', {
+      DATAGOUV_RUN_TIMEOUT_MS: '30',
+      DATAGOUV_HISTORIC_RUN_TIMEOUT_MS: '90',
+    });
+    const run = jest
+      .spyOn(h.service as any, 'runWithDeadline')
+      .mockResolvedValue(undefined);
+    for (const group of ['current', 'historic', 'all'] as const)
+      await h.service.updateDatagouvData('2026-11-19', undefined, group);
+    expect(run.mock.calls.map((call) => call[1])).toEqual([30, 90, 30]);
+  });
+
   it('aborts the run and terminates the clock when work ignores cancellation', async () => {
     jest.useFakeTimers();
     const harness = createHarness('/tmp', { DATAGOUV_RUN_TIMEOUT_MS: '10' });
@@ -1067,6 +1080,53 @@ describe('DatagouvService', () => {
     ).rejects.toThrow();
   });
 
+  it('releases the certified snapshot lock before uploading the pinned historical file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
+    temporaryDirectories.push(directory);
+    const h = createHarness(directory, {
+      DATAGOUV_HISTORIC_UPLOAD_TIMEOUT_MS: '170000',
+    });
+    const coverage = jest
+      .spyOn(h.service as any, 'getCertifiedHistoricCommuneCount')
+      .mockResolvedValue(1);
+    const verifyCurrent = jest.fn().mockResolvedValue(undefined);
+    h.statisticCommuneService.getStatisticCommuneStream.mockResolvedValue(
+      Readable.from([
+        {
+          commune_code: '01001',
+          commune_nom: 'Commune',
+          sc_restrictions: [
+            { date: '2026-11-19', SUP: null, SOU: null, AEP: null },
+          ],
+        },
+      ]),
+    );
+    const upload = jest
+      .spyOn(h.service, 'uploadToDatagouv')
+      .mockImplementation(async (resource, file, title, isUrl, opts) => {
+        expect(h.queryRunner.isTransactionActive).toBe(false);
+        expect(opts).toMatchObject({
+          verifyCurrent,
+          sourceDate: '2026-11-19',
+          fileTimeoutMs: 170000,
+        });
+      });
+    await h.service.updateHistoriqueCommunes(
+      '2026-11-19',
+      '42',
+      '2026-11-19',
+      verifyCurrent,
+    );
+    expect(coverage).toHaveBeenLastCalledWith(
+      '2026-11-19',
+      '42',
+      h.queryRunner,
+      'nowait',
+    );
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(h.queryRunner.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a historical archive when one commune misses the expected date', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'vigieau-datagouv-'));
     temporaryDirectories.push(directory);
@@ -1537,6 +1597,48 @@ describe('DatagouvService', () => {
     expect(
       harness.publicationRegistry.recordResourceSuccess,
     ).not.toHaveBeenCalled();
+  });
+
+  it('refuses to record a historical ZIP whose remote size matches but checksum differs', async () => {
+    const h = createHarness('/tmp');
+    jest.spyOn(fs, 'openAsBlob').mockResolvedValue(new Blob(['zip-content']));
+    jest
+      .spyOn(h.service as any, 'inspectLocalArtifact')
+      .mockResolvedValue({
+        byteSize: 11,
+        sha1: '1'.repeat(40),
+        checksum: '2'.repeat(64),
+      });
+    jest
+      .spyOn(h.service as any, 'waitForReadAfterWrite')
+      .mockResolvedValue(undefined);
+    h.httpService.get.mockReturnValue(
+      of({
+        data: {
+          resources: [
+            {
+              id: '4322064e-cfb4-4c8a-8200-7620f491ccdb',
+              title: 'Historique Communes',
+              filesize: 11,
+              checksum: { type: 'sha1', value: '0'.repeat(40) },
+            },
+          ],
+        },
+      }),
+    );
+    await expect(
+      h.service.uploadToDatagouv(
+        'historique_communes',
+        'historique_communes.zip',
+        'Historique Communes',
+        false,
+        {
+          sourceDate: '2026-11-19',
+          verifyCurrent: jest.fn().mockResolvedValue(undefined),
+        },
+      ),
+    ).rejects.toThrow('empreinte inattendue');
+    expect(h.publicationRegistry.recordResourceSuccess).not.toHaveBeenCalled();
   });
 
   it('applies an explicit timeout to URL resource updates', async () => {
