@@ -306,6 +306,7 @@ export class DatagouvService {
           this.updateCommunes(
             new Date(scheduledFor).getUTCFullYear(),
             scheduledFor,
+            publicationContext?.verifyCurrent,
           ),
         failures,
         publicationContext,
@@ -337,6 +338,7 @@ export class DatagouvService {
             scheduledFor,
             publicationContext?.sourceRevision,
             publicationContext?.historicFirstDate,
+            publicationContext?.verifyCurrent,
           ),
         failures,
         publicationContext,
@@ -1329,21 +1331,24 @@ export class DatagouvService {
   async updateCommunes(
     year = new Date().getFullYear(),
     expectedSourceDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<void> {
     return this.withAnnualCommunesPublicationLock(year, () =>
-      this.updateCommunesUnlocked(year, expectedSourceDate),
+      this.updateCommunesUnlocked(year, expectedSourceDate, verifyCurrent),
     );
   }
 
   private async updateCommunesUnlocked(
     year: number,
     expectedSourceDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<void> {
     const definition = this.getCommunesResourceDefinition(year);
     if (!(await this.getDataGouvResourceId(definition.resource))) {
       await this.createOrUpdateCommunesResourceUnlocked(
         year,
         expectedSourceDate,
+        verifyCurrent,
       );
       return;
     }
@@ -1367,7 +1372,7 @@ export class DatagouvService {
       definition.zipFileName,
       definition.title,
       false,
-      { sourceDate },
+      { sourceDate, verifyCurrent },
     );
   }
 
@@ -1375,6 +1380,7 @@ export class DatagouvService {
     expectedSourceDate?: string,
     expectedSourceRevision?: string,
     expectedStartDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<void> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
@@ -1459,7 +1465,7 @@ export class DatagouvService {
         'historique_communes.zip',
         'Historique Communes',
         false,
-        { sourceDate: artifact.sourceDate },
+        { sourceDate: artifact.sourceDate, verifyCurrent },
       );
       await queryRunner.commitTransaction();
     } catch (error) {
@@ -1574,6 +1580,7 @@ export class DatagouvService {
   private async createOrUpdateCommunesResourceUnlocked(
     year: number,
     expectedSourceDate?: string,
+    verifyCurrent?: () => Promise<void>,
   ): Promise<string> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
@@ -1615,6 +1622,8 @@ export class DatagouvService {
       sourceDate,
     );
 
+    // A new invalidation may have arrived while the archive was being compressed.
+    await verifyCurrent?.();
     let resourceId = matchingResources[0]?.id;
     if (resourceId) {
       await this.uploadDataGouvFile(
@@ -1645,6 +1654,7 @@ export class DatagouvService {
       undefined,
       artifact.byteSize,
     );
+    await verifyCurrent?.();
     await this.publicationRegistry.recordResourceSuccess(
       definition.resource,
       'data.gouv.fr',
