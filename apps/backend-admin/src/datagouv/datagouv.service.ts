@@ -6,7 +6,8 @@ import { ArreteRestriction } from '@shared/entities/arrete_restriction.entity';
 // CommonJS import keeps the callable export intact in both Jest and the Nest build.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import archiver = require('archiver');
-import { AxiosError } from 'axios';
+import { isAxiosError, type AxiosError } from 'axios';
+import { STATUS_CODES } from 'node:http';
 import * as fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -17,12 +18,18 @@ import JSZip = require('jszip');
 import moment = require('moment');
 import { rename, rm, stat, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
-import { catchError, firstValueFrom, lastValueFrom } from 'rxjs';
+import {
+  catchError,
+  firstValueFrom,
+  lastValueFrom,
+  type MonoTypeOperatorFunction,
+} from 'rxjs';
 import { PassThrough, Readable, Transform } from 'stream';
 import { DataSource, QueryRunner } from 'typeorm';
 import { ArreteCadreService } from '../arrete_cadre/arrete_cadre.service';
 import { ArreteRestrictionService } from '../arrete_restriction/arrete_restriction.service';
 import { DepartementService } from '../departement/departement.service';
+import { getScheduledCivilDate } from '../core/scheduling/daily-job-schedule';
 import { RegleauLogger } from '../logger/regleau.logger';
 import { S3Service } from '../shared/services/s3.service';
 import { StatisticCommuneService } from '../statistic_commune/statistic_commune.service';
@@ -47,8 +54,75 @@ interface CsvPublicationOptions {
 interface LocalArtifact {
   byteSize: number;
   checksum: string;
+  sha1?: string;
   recordCount?: number;
   sourceDate?: string;
+}
+
+type RemoteChecksum = { type: string; value: string };
+function checksumMatches(
+  checksum: RemoteChecksum | undefined,
+  artifact: LocalArtifact,
+): boolean {
+  if (checksum?.type === 'sha256') return checksum.value === artifact.checksum;
+  return (
+    checksum?.type === 'sha1' &&
+    !!artifact.sha1 &&
+    checksum.value === artifact.sha1
+  );
+}
+
+const retryableNetworkCodes = new Set([
+  'ECONNABORTED',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENETUNREACH',
+  'EAI_AGAIN',
+  'ERR_NETWORK',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+class DataGouvHttpError extends Error {
+  readonly code?: string;
+  readonly status?: number;
+  readonly transient: boolean;
+
+  constructor(operation: string, error: unknown) {
+    const original = error as AxiosError | undefined;
+    let code = original?.code;
+    if (!code && typeof original?.message === 'string') {
+      if (/socket hang up/i.test(original.message)) code = 'ECONNRESET';
+      else if (/timeout|timed out/i.test(original.message)) code = 'ETIMEDOUT';
+    }
+    const status = original?.response?.status;
+    const safeStatus =
+      Number.isInteger(status) && status >= 100 && status <= 599
+        ? status
+        : undefined;
+    const safeCode =
+      retryableNetworkCodes.has(code) ||
+      ['ERR_CANCELED', 'ERR_BAD_REQUEST', 'ERR_BAD_RESPONSE'].includes(code)
+        ? code
+        : undefined;
+    super(
+      [
+        operation,
+        safeStatus && `HTTP ${safeStatus} ${STATUS_CODES[safeStatus] ?? ''}`,
+        safeCode,
+      ]
+        .filter(Boolean)
+        .join(' - '),
+    );
+    this.name = 'DataGouvHttpError';
+    this.code = safeCode;
+    this.status = safeStatus;
+    this.transient =
+      safeStatus !== undefined
+        ? safeStatus === 408 || safeStatus === 429 || safeStatus >= 500
+        : retryableNetworkCodes.has(safeCode);
+  }
 }
 
 const DEFAULT_ARRETES_ARCHIVE_YEARS = [
@@ -272,7 +346,7 @@ export class DatagouvService {
     if (failures.length > 0) {
       throw new AggregateError(
         failures.map(({ error }) => error),
-        `Échec de ${failures.length} publication(s) Datagouv: ${failures.map(({ name }) => name).join(', ')}`,
+        `Échec de ${failures.length} publication(s) Datagouv: ${failures.map(({ name, error }) => (error instanceof DataGouvHttpError ? `${name} (${error.message})` : name)).join(', ')}`,
       );
     }
   }
@@ -306,8 +380,14 @@ export class DatagouvService {
         throw new Error(`Publication ${name} non terminée (${result})`);
       }
     } catch (error) {
-      this.logDataGouvError(name, error);
-      failures.push({ name, error });
+      const failure = isAxiosError(error)
+        ? new DataGouvHttpError(name, error)
+        : error;
+      this.logger.error(
+        `Erreur lors de la mise à jour Datagouv - ${name}`,
+        failure instanceof Error ? failure.message : 'Erreur inconnue',
+      );
+      failures.push({ name, error: failure });
     }
   }
 
@@ -317,23 +397,6 @@ export class DatagouvService {
     const { verifyCurrent, ...identity } = publicationContext;
     void verifyCurrent;
     return identity;
-  }
-
-  private logDataGouvError(name: string, error: unknown): void {
-    this.logger.error(
-      `Erreur lors de la mise à jour Datagouv - ${name}`,
-      this.formatDataGouvError(error),
-    );
-  }
-
-  private formatDataGouvError(error: unknown): string {
-    const axiosError = error as AxiosError;
-    return JSON.stringify({
-      message: error instanceof Error ? error.message : String(error),
-      code: axiosError?.code,
-      status: axiosError?.response?.status,
-      statusText: axiosError?.response?.statusText,
-    });
   }
 
   /**
@@ -786,9 +849,13 @@ export class DatagouvService {
       );
       dataZip = data;
     } catch (e) {
-      this.logger.error(`ARCHIVE ${existingArchiveUrl} non accessible`, e);
-      if ((e as AxiosError)?.response?.status !== 404) {
-        throw e;
+      const failure = new DataGouvHttpError(
+        'Lecture de l’archive cartographique',
+        e,
+      );
+      this.logger.error(failure.message, failure.stack);
+      if (failure.status !== 404) {
+        throw failure;
       }
     }
     const zip = dataZip ? await JSZip.loadAsync(dataZip) : new JSZip();
@@ -911,7 +978,10 @@ export class DatagouvService {
         return Buffer.isBuffer(data) ? data : Buffer.from(data);
       } catch (remoteError) {
         throw new AggregateError(
-          [localError, remoteError],
+          [
+            localError,
+            new DataGouvHttpError('Lecture de la carte sur S3', remoteError),
+          ],
           `Artefact ${kind} ${fileName} inaccessible localement et sur S3`,
         );
       }
@@ -959,24 +1029,63 @@ export class DatagouvService {
       if (!isUrl) {
         artifact = await this.inspectLocalArtifact(fileName);
         await options?.verifyCurrent?.();
-        await this.uploadDataGouvFile(
-          `${url}upload/`,
-          fileName,
-          options?.timeoutMs,
-        );
+        const csvDate = fileName.endsWith('.csv')
+          ? options?.sourceDate
+          : undefined;
+        const matchesRemote = () =>
+          this.remoteArtifactMatches(
+            resourceId,
+            artifact,
+            csvDate,
+            options?.timeoutMs,
+          );
+        // data.gouv may commit a file before its upload response times out.
+        // A retry on the same business day can then repair just the metadata.
+        if (!csvDate || !(await matchesRemote())) {
+          await options?.verifyCurrent?.();
+          try {
+            await this.uploadDataGouvFile(
+              `${url}upload/`,
+              fileName,
+              options?.timeoutMs,
+            );
+          } catch (error) {
+            this.throwIfDeadlineExceeded();
+            if (
+              !(error instanceof DataGouvHttpError) ||
+              !error.transient ||
+              !(await matchesRemote())
+            ) {
+              throw error;
+            }
+          }
+        }
       }
 
       const body: any = { title };
       if (isUrl) body.url = fileName;
 
-      await this.updateDataGouvResource(resourceId, body, options?.timeoutMs);
+      let metadataError: DataGouvHttpError | undefined;
+      try {
+        await this.updateDataGouvResource(resourceId, body, options?.timeoutMs);
+      } catch (error) {
+        this.throwIfDeadlineExceeded();
+        if (!(error instanceof DataGouvHttpError) || !error.transient)
+          throw error;
+        metadataError = error;
+      }
       const remoteResource = await this.verifyDataGouvResourceWithRetry(
         resourceId,
         title,
         isUrl ? fileName : undefined,
         artifact?.byteSize,
         options?.timeoutMs,
-      );
+        options?.sourceDate && fileName.endsWith('.csv') ? artifact : undefined,
+      ).catch((error) => {
+        this.throwIfDeadlineExceeded();
+        throw metadataError ?? error;
+      });
+      await options?.verifyCurrent?.();
       await this.publicationRegistry.recordResourceSuccess(
         resource,
         'data.gouv.fr',
@@ -999,6 +1108,41 @@ export class DatagouvService {
       );
       throw error;
     }
+  }
+
+  private async remoteArtifactMatches(
+    resourceId: string,
+    artifact: LocalArtifact,
+    sourceDate?: string,
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    const { data } = await firstValueFrom(
+      this.httpService
+        .get(`${this.datagouvApiUrl}/resources/${resourceId}/`, {
+          headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+          timeout: this.resolveHttpTimeout(timeoutMs),
+          signal: this.deadlineContext.getStore(),
+        })
+        .pipe(this.safeHttpErrors('Lecture de la ressource data.gouv.fr')),
+    );
+    const lastModified = new Date(data?.last_modified);
+    if (
+      data?.id !== resourceId ||
+      data.filesize !== artifact.byteSize ||
+      (sourceDate &&
+        (!Number.isFinite(lastModified.getTime()) ||
+          getScheduledCivilDate(lastModified, 6) !== sourceDate))
+    )
+      return false;
+    return checksumMatches(data.checksum, artifact);
+  }
+
+  private safeHttpErrors<T>(operation: string): MonoTypeOperatorFunction<T> {
+    return catchError((error: unknown) => {
+      const failure = new DataGouvHttpError(operation, error);
+      this.logger.error(failure.message, failure.stack);
+      throw failure;
+    });
   }
 
   private async getDataGouvResourceId(
@@ -1048,15 +1192,7 @@ export class DatagouvService {
           timeout: this.resolveHttpTimeout(timeoutMs),
           signal: this.deadlineContext.getStore(),
         })
-        .pipe(
-          catchError((error: AxiosError) => {
-            this.logger.error(
-              "ERREUR DANS L'ENVOI VERS DATAGOUV",
-              this.formatDataGouvError(error),
-            );
-            throw error;
-          }),
-        ),
+        .pipe(this.safeHttpErrors('Envoi du fichier data.gouv.fr')),
     );
     return response.data;
   }
@@ -1077,15 +1213,7 @@ export class DatagouvService {
           timeout: this.resolveHttpTimeout(timeoutMs),
           signal: this.deadlineContext.getStore(),
         })
-        .pipe(
-          catchError((error: AxiosError) => {
-            this.logger.error(
-              'ERREUR DANS LA MISE A JOUR DES METADONNEES DATAGOUV',
-              this.formatDataGouvError(error),
-            );
-            throw error;
-          }),
-        ),
+        .pipe(this.safeHttpErrors('Mise à jour des métadonnées data.gouv.fr')),
     );
   }
 
@@ -1095,6 +1223,7 @@ export class DatagouvService {
     expectedUrl?: string,
     expectedByteSize?: number,
     timeoutMs?: number,
+    expectedArtifact?: LocalArtifact,
   ): Promise<{ id: string; title: string; url?: string; filesize?: number }> {
     let lastError: unknown;
     const maximumAttempts = 4;
@@ -1106,6 +1235,7 @@ export class DatagouvService {
           expectedUrl,
           expectedByteSize,
           timeoutMs,
+          expectedArtifact,
         );
       } catch (error) {
         lastError = error;
@@ -1123,13 +1253,16 @@ export class DatagouvService {
     expectedUrl?: string,
     expectedByteSize?: number,
     timeoutMs?: number,
+    expectedArtifact?: LocalArtifact,
   ): Promise<{ id: string; title: string; url?: string; filesize?: number }> {
     const response = await firstValueFrom(
-      this.httpService.get(`${this.datagouvApiUrl}/`, {
-        headers: { Accept: 'application/json' },
-        timeout: this.resolveHttpTimeout(timeoutMs),
-        signal: this.deadlineContext.getStore(),
-      }),
+      this.httpService
+        .get(`${this.datagouvApiUrl}/`, {
+          headers: { Accept: 'application/json' },
+          timeout: this.resolveHttpTimeout(timeoutMs),
+          signal: this.deadlineContext.getStore(),
+        })
+        .pipe(this.safeHttpErrors('Vérification de la ressource data.gouv.fr')),
     );
     const resource = (response.data?.resources || []).find(
       (candidate) => candidate.id === resourceId,
@@ -1161,6 +1294,14 @@ export class DatagouvService {
         );
       }
     }
+    if (
+      expectedArtifact &&
+      !checksumMatches(resource.checksum, expectedArtifact)
+    ) {
+      throw new Error(
+        `La ressource Datagouv ${resourceId} a une empreinte inattendue`,
+      );
+    }
     return resource;
   }
 
@@ -1171,12 +1312,17 @@ export class DatagouvService {
       throw new Error(`Le fichier ${fileName} est absent ou vide`);
     }
     const hash = createHash('sha256');
-    await pipeline(fs.createReadStream(filePath), hash, {
+    const sha1 = createHash('sha1');
+    for await (const bytes of fs.createReadStream(filePath, {
       signal: this.deadlineContext.getStore(),
-    });
+    })) {
+      hash.update(bytes);
+      sha1.update(bytes);
+    }
     return {
       byteSize: fileStat.size,
       checksum: hash.digest('hex'),
+      sha1: sha1.digest('hex'),
     };
   }
 
@@ -1587,11 +1733,13 @@ export class DatagouvService {
     fileName: string,
   ): Promise<Array<{ id: string }>> {
     const response = await firstValueFrom(
-      this.httpService.get(`${this.datagouvApiUrl}/`, {
-        headers: { Accept: 'application/json' },
-        timeout: this.httpTimeoutMs,
-        signal: this.deadlineContext.getStore(),
-      }),
+      this.httpService
+        .get(`${this.datagouvApiUrl}/`, {
+          headers: { Accept: 'application/json' },
+          timeout: this.httpTimeoutMs,
+          signal: this.deadlineContext.getStore(),
+        })
+        .pipe(this.safeHttpErrors('Recherche des ressources data.gouv.fr')),
     );
     const possibleFileNames = [fileName, fileName.replaceAll('_', '-')];
     return (response.data?.resources || []).filter((resource) => {
