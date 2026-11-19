@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ChartOptions } from 'chart.js';
 import { Line } from 'vue-chartjs';
+import { aggregateTerritorialVisits } from '../../utils/territorial-visits';
 import type { StatisticDepartement } from '~/dto/statistic_departement.dto';
 
 const props = defineProps<{
@@ -8,7 +9,7 @@ const props = defineProps<{
 }>();
 
 const chartLineData = ref();
-const fullData = ref();
+const fullData = computed(() => aggregateTerritorialVisits(props.statisticDepartement));
 
 const tooltipTitle = (tooltipItems: any[]): string => {
   const date = new Date(tooltipItems[0].parsed.x);
@@ -50,40 +51,10 @@ const chartLineOptions: ChartOptions = {
   },
 };
 
-const dateMin = computed(() => {
-  const dates = props.statisticDepartement
-    .flatMap((s: any) => s.visits || [])
-    .map((v: any) => new Date(v.date))
-    .filter((date) => !Number.isNaN(date.getTime()));
-  return dates.length > 0
-    ? new Date(Math.min(...dates.map((date) => date.getTime()))).toISOString().split('T')[0]
-    : new Date().toISOString().split('T')[0];
-});
+const dateMin = computed(() => new Date(fullData.value[0]?.date ?? Date.now()).toISOString().split('T')[0]);
 const dateDebut = ref(dateMin.value);
 const dateFin = ref(new Date().toISOString().split('T')[0]);
 const currentDate = ref(new Date().toISOString().split('T')[0]);
-
-const computeData = () => {
-  const dates = props.statisticDepartement.flatMap((s: any) => s.visits?.map((v: any) => v.date) || []);
-  const uniqueDates = Array.from(new Set(dates));
-  uniqueDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
-
-  const data: any[] = [];
-  uniqueDates.forEach((d) => {
-    const visits = props.statisticDepartement
-      .map((s) => {
-        return s.visits?.find((v: any) => v.date === d)?.visits || 0;
-      })
-      .reduce((acc, current) => acc + current, 0);
-
-    data.push({
-      date: d,
-      visits,
-    });
-  });
-
-  fullData.value = data;
-};
 
 const filterData = () => {
   const filteredData = fullData.value.filter((d) => {
@@ -104,10 +75,9 @@ const filterData = () => {
   };
 };
 
-computeData();
 filterData();
 
-watch([dateDebut, dateFin], () => {
+watch([dateDebut, dateFin, fullData], () => {
   filterData();
 });
 </script>

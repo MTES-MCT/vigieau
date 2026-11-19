@@ -1,64 +1,104 @@
 import { StatisticDepartementService } from './statistic_departement.service';
-import { SKIP_STARTUP_DATA_LOADS_ENV } from '../core/startup-data-loads';
+import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { In } from 'typeorm';
+import { Statistic } from '@shared/entities/statistic.entity';
+import { StatisticDepartement } from '@shared/entities/statistic_departement.entity';
+import { User } from '@shared/entities/user.entity';
+import { AbonnementMailService } from '../abonnement_mail/abonnement_mail.service';
+import { DepartementService } from '../departement/departement.service';
+import { ZoneAlerteService } from '../zone_alerte/zone_alerte.service';
+import { ZoneAlerteComputedService } from '../zone_alerte_computed/zone_alerte_computed.service';
+import { ZoneAlerteComputedHistoricService } from '../zone_alerte_computed/zone_alerte_computed_historic.service';
 
-describe('StatisticDepartementService startup', () => {
-  const previousSkipStartup = process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS;
-  const previousSkipDataLoads = process.env[SKIP_STARTUP_DATA_LOADS_ENV];
+describe('department visit statistics in the admin API', () => {
+  let module: TestingModule;
+  let service: StatisticDepartementService;
+  const read = (user: Partial<User>) => service.findAll(user as User);
+  const find = jest.fn();
+  const departmentRows = Array.from({ length: 101 }, (_, index) => ({
+    id: index + 1,
+    departement: { code: String(index + 1).padStart(2, '0') },
+    visits: [{ date: '2026-11-18', visits: 3 }],
+    subscriptions: 2,
+  }));
 
-  afterEach(() => {
-    if (previousSkipStartup === undefined) {
-      delete process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS;
-    } else {
-      process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = previousSkipStartup;
-    }
-    if (previousSkipDataLoads === undefined) {
-      delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
-    } else {
-      process.env[SKIP_STARTUP_DATA_LOADS_ENV] = previousSkipDataLoads;
-    }
+  beforeEach(async () => {
+    let finishQuery: () => void;
+    const startup = new Promise<void>((resolve) => {
+      finishQuery = resolve;
+    });
+    find.mockReset().mockImplementation(async () => {
+      await startup;
+      return departmentRows;
+    });
+    module = await Test.createTestingModule({
+      providers: [
+        StatisticDepartementService,
+        {
+          provide: getRepositoryToken(StatisticDepartement),
+          useValue: { find },
+        },
+        ...[
+          getRepositoryToken(Statistic),
+          AbonnementMailService,
+          DepartementService,
+          ZoneAlerteService,
+          ZoneAlerteComputedService,
+          ZoneAlerteComputedHistoricService,
+        ].map((provide) => ({ provide, useValue: {} })),
+      ],
+    }).compile();
+    service = module.get(StatisticDepartementService);
+    finishQuery();
   });
 
-  function createService() {
-    const statisticDepartementRepository = {
-      find: jest.fn().mockResolvedValue([]),
+  afterEach(async () => {
+    await module.close();
+  });
+
+  it('reads all departments on demand and sees the next clock update on the same web instance', async () => {
+    const user: Partial<User> = { role: 'mte' };
+    const startupQueries = find.mock.calls.length;
+    expect(await read(user)).toHaveLength(101);
+    expect(startupQueries).toBe(0);
+    const updated = {
+      ...departmentRows[0],
+      visits: [{ date: '2026-11-19', visits: 9 }],
+      subscriptions: 7,
     };
-    const service = new StatisticDepartementService(
-      statisticDepartementRepository as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
+    find.mockResolvedValueOnce([updated, ...departmentRows.slice(1)]);
+    expect((await read(user))[0]).toEqual(updated);
+    expect(find).toHaveBeenCalledTimes(2);
+    const { select } = find.mock.calls[0][0];
+    expect(select).toEqual({
+      id: true,
+      visits: true,
+      totalVisits: true,
+      weekVisits: true,
+      monthVisits: true,
+      yearVisits: true,
+      subscriptions: true,
+      departement: { id: true, code: true, nom: true },
+    });
+  });
+
+  it('restricts the database query to the assigned departments', async () => {
+    const user: Partial<User> = {
+      role: 'departement',
+      role_departements: ['06'],
+    };
+    const authorized = departmentRows.filter(
+      (row) => row.departement.code === '06',
     );
-
-    return { service, statisticDepartementRepository };
-  }
-
-  it('skips the startup load when explicitly requested', () => {
-    process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS = 'true';
-
-    const { statisticDepartementRepository } = createService();
-
-    expect(statisticDepartementRepository.find).not.toHaveBeenCalled();
-  });
-
-  it('skips the startup load in a worker context', () => {
-    delete process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS;
-    process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
-
-    const { statisticDepartementRepository } = createService();
-
-    expect(statisticDepartementRepository.find).not.toHaveBeenCalled();
-  });
-
-  it('loads department statistics normally otherwise', () => {
-    delete process.env.SKIP_STARTUP_DEPARTEMENT_STATISTICS;
-    delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
-
-    const { statisticDepartementRepository } = createService();
-
-    expect(statisticDepartementRepository.find).toHaveBeenCalledTimes(1);
+    find.mockResolvedValueOnce(authorized);
+    expect(await read(user)).toEqual(authorized);
+    expect(find).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { departement: { code: In(['06']) } } }),
+    );
+    find.mockClear();
+    expect(await read({ role: 'departement' })).toEqual([]);
+    expect(find).not.toHaveBeenCalled();
   });
 });
 
@@ -132,8 +172,6 @@ describe('StatisticDepartementService restriction computation', () => {
     const zoneAlerteComputedHistoricService = { getZonesArea: jest.fn() };
     const zoneAlerteService = { getZonesArea: jest.fn() };
 
-    const previousSkipDataLoads = process.env[SKIP_STARTUP_DATA_LOADS_ENV];
-    process.env[SKIP_STARTUP_DATA_LOADS_ENV] = 'true';
     const service = new StatisticDepartementService(
       statisticDepartementRepository as any,
       {} as any,
@@ -143,11 +181,6 @@ describe('StatisticDepartementService restriction computation', () => {
       zoneAlerteComputedHistoricService as any,
       zoneAlerteService as any,
     );
-    if (previousSkipDataLoads === undefined) {
-      delete process.env[SKIP_STARTUP_DATA_LOADS_ENV];
-    } else {
-      process.env[SKIP_STARTUP_DATA_LOADS_ENV] = previousSkipDataLoads;
-    }
 
     return {
       service,
