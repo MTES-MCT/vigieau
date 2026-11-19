@@ -333,6 +333,95 @@ describe('provisional public department and area opt-in', () => {
     expect(read).toHaveBeenCalledTimes(2);
   });
 
+  it('fills the matching sparse window provisionally until this reader loads the certified repair', async () => {
+    state = {
+      ...state,
+      certifiedHistoryRepairId: 'repair-14',
+      certifiedHistoryRepairFrom: state.historicDirtyFrom,
+      certifiedHistoryRepairThrough: state.historicDirtyThrough,
+      certifiedHistoryRepairSourceRunId: 'run-14',
+      certifiedHistoryRepairActivatedAt: '2026-09-10T12:00:00Z',
+      certifiedHistoryRepairRevision: '14',
+      revision: '14',
+    };
+    cache.artifactIdentity = {
+      id: 'sparse-13',
+      materializationStrategy: 'sparse-current',
+      mode: 'versioned',
+      certifiedHistoryRepairId: null,
+      historicDirtyFrom: state.historicDirtyFrom,
+      historicDirtyThrough: state.historicDirtyThrough,
+    };
+    // Exercise the normal reader while its background refresh is in flight.
+    jest.spyOn(service as any, 'ensureCertifiedDataCache').mockRestore();
+    jest
+      .spyOn(service as any, 'startCertifiedDataRefresh')
+      .mockImplementation();
+    service['certifiedDataCache'] = cache;
+
+    expect(await departments(false)).toEqual(cache.dataDepartement);
+    expect(read).not.toHaveBeenCalled();
+    const views = await Promise.all([
+      departments(),
+      service.areaFindByDate(
+        '2026-07-01',
+        '2026-09-10',
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ]);
+    for (const rows of views) {
+      expect(rows[0]).toMatchObject({
+        date: '2026-07-11',
+        ...provisional.PROVISIONAL_STATISTIC_STATUS,
+      });
+      expect(rows[1]).not.toHaveProperty('dataStatus');
+    }
+    expect(read).toHaveBeenCalledTimes(1);
+
+    // An older provisional read already cached for this state must not be reused.
+    cache.artifactIdentity = {
+      ...cache.artifactIdentity,
+      materializationStrategy: 'certified-history-overlay',
+      certifiedHistoryRepairId: state.certifiedHistoryRepairId,
+    };
+    cache.dataDepartement.unshift({ date: '2026-07-11', departements: [] });
+    expect(await departments()).toEqual(cache.dataDepartement);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { historicDirtyFrom: '2026-07-12' },
+    { historicDirtyThrough: '2026-08-27' },
+    { certifiedHistoryRepairId: 'another-repair' },
+    { materializationStrategy: 'certified-history-overlay' },
+    { mode: 'legacy-bootstrap' },
+  ])(
+    'does not fill from a different sparse or certified boundary (%o)',
+    async (different) => {
+      Object.assign(state, {
+        certifiedHistoryRepairId: 'repair-14',
+        certifiedHistoryRepairFrom: state.historicDirtyFrom,
+        certifiedHistoryRepairThrough: state.historicDirtyThrough,
+        certifiedHistoryRepairSourceRunId: 'run-14',
+        certifiedHistoryRepairActivatedAt: '2026-09-10T12:00:00Z',
+        certifiedHistoryRepairRevision: '14',
+      });
+      cache.artifactIdentity = {
+        materializationStrategy: 'sparse-current',
+        mode: 'versioned',
+        certifiedHistoryRepairId: null,
+        historicDirtyFrom: state.historicDirtyFrom,
+        historicDirtyThrough: state.historicDirtyThrough,
+        ...different,
+      };
+      expect(await departments()).toEqual(cache.dataDepartement);
+      expect(read).not.toHaveBeenCalled();
+    },
+  );
+
   it('marks only missing dirty dates and keeps all internal certified collections untouched', async () => {
     const before = structuredClone(cache);
     service['data'] = [{ sentinel: true }];

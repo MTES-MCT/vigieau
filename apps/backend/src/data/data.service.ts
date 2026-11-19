@@ -673,19 +673,28 @@ export class DataService implements OnModuleInit {
   }
 
   private async getProvisionalDepartmentDays(
-    referenceData: ReferenceDataCache,
+    referenceData: CertifiedDataCache,
     dateDebut?: string,
     dateFin?: string,
     publicationRetries = 0,
   ): Promise<ProvisionalDepartmentDay[]> {
     try {
       const state = await this.getPublicationState();
-      if (
-        !state.historicDirtyFrom ||
-        !state.currentPublishedDate ||
-        this.hasCertifiedHistoryRepair(state)
-      )
-        return [];
+      if (!state.historicDirtyFrom || !state.currentPublishedDate) return [];
+      if (this.hasCertifiedHistoryRepair(state)) {
+        const artifact = referenceData.artifactIdentity;
+        // Readers may still serve the sparse artifact while the repair is loading.
+        // Only its incomplete range can be filled from the provisional source.
+        if (
+          artifact?.materializationStrategy !== 'sparse-current' ||
+          artifact.mode !== 'versioned' ||
+          artifact.certifiedHistoryRepairId !== null ||
+          artifact.historicDirtyFrom !== state.certifiedHistoryRepairFrom ||
+          artifact.historicDirtyThrough !== state.certifiedHistoryRepairThrough
+        ) {
+          return [];
+        }
+      }
       const from = [
         this.beginDate,
         state.historicDirtyFrom,
