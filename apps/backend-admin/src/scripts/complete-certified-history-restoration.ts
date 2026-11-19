@@ -2184,6 +2184,60 @@ export const CERTIFIED_COMPLETION_ATTESTATION_SQL = `
   FROM snapshot_coverage
 `;
 
+// These are precisely the target tables whose rows identify the entities and
+// outputs compared to the certified source. Reading tuple versions avoids
+// fetching their large JSONB histories again while daily publication waits.
+const promotionTables = [
+  'commune',
+  'departement',
+  'statistic_commune',
+  'statistic_departement',
+  'statistic',
+] as const;
+export const CERTIFIED_COMPLETION_VALIDATED_VERSIONS_SQL =
+  promotionTables
+    .map(
+      (table) => `
+  SELECT '${table}' AS name, '${table}'::regclass::oid::text AS oid,
+    pg_relation_filenode('${table}'::regclass)::text AS filenode,
+    count(*)::integer AS count,
+    encode(sha256(convert_to(COALESCE(string_agg(
+      id::text || E'\\t' || xmin::text || E'\\t' || ctid::text || E'\\t' || tableoid::text,
+      E'\\n' ORDER BY id), ''), 'UTF8')), 'hex') AS digest
+  FROM ${table}
+  ${table === 'statistic' ? 'WHERE date BETWEEN $1::date AND $2::date' : ''}
+`,
+    )
+    .join(' UNION ALL ') + ' ORDER BY name';
+
+export async function readValidatedTargetVersions(
+  runner: QueryRunner,
+  from: string,
+  through: string,
+): Promise<string> {
+  return JSON.stringify(
+    await runner.query(CERTIFIED_COMPLETION_VALIDATED_VERSIONS_SQL, [
+      from,
+      through,
+    ]),
+  );
+}
+
+export async function assertValidatedTargetVersions(
+  runner: QueryRunner,
+  from: string,
+  through: string,
+  inspected: string,
+): Promise<void> {
+  if (
+    (await readValidatedTargetVersions(runner, from, through)) !== inspected
+  ) {
+    throw new PublicationContextChangedError(
+      'Validated statistic or entity rows changed before promotion; rerun the dry-run',
+    );
+  }
+}
+
 async function promote(
   source: QueryRunner,
   target: DataSource,
@@ -2204,25 +2258,24 @@ async function promote(
     sourceScope,
   );
   const runner = target.createQueryRunner();
-  let snapshotLocked = false;
   let transactionStarted = false;
   try {
     await runner.connect();
-    const [snapshotLock] = (await runner.query(
-      'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-      [SNAPSHOT_LOCK],
-    )) as Array<{ locked: unknown }>;
-    snapshotLocked = bool(snapshotLock?.locked);
-    if (!snapshotLocked) {
-      throw new CurrentPriorityError('Snapshot lock is busy');
-    }
-    await runner.query("SELECT set_config('statement_timeout', $1, false)", [
+    await runner.startTransaction('REPEATABLE READ');
+    transactionStarted = true;
+    await runner.query('SET TRANSACTION READ ONLY');
+    await runner.query("SELECT set_config('statement_timeout', $1, true)", [
       `${options.statementTimeoutMs}ms`,
     ]);
+    await runner.query("SELECT set_config('lock_timeout', $1, true)", [
+      `${options.lockTimeoutMs}ms`,
+    ]);
     await assertContext(runner, expectedContext, false);
-    // All statistic writers use SNAPSHOT_LOCK. Keeping it for the complete
-    // verification makes the following short atomic activation a valid CAS
-    // without holding millions of rows in one transaction.
+    const inspectedVersions = await readValidatedTargetVersions(
+      runner,
+      options.from,
+      options.through,
+    );
     await validateAllCommunesExact(
       runner,
       communeDigestBatches,
@@ -2246,27 +2299,45 @@ async function promote(
     }
     await assertContext(runner, expectedContext, false);
 
+    await runner.commitTransaction();
+    transactionStarted = false;
+
     await runner.startTransaction('SERIALIZABLE');
     transactionStarted = true;
-    await runner.query("SELECT set_config('lock_timeout', $1, true)", [
-      `${options.lockTimeoutMs}ms`,
-    ]);
-    await runner.query("SELECT set_config('statement_timeout', $1, true)", [
-      `${options.statementTimeoutMs}ms`,
-    ]);
-    const [zoneLock] = (await runner.query(
-      `SELECT pg_try_advisory_xact_lock(
-         hashtext('vigieau'), hashtext('zone-compute-global')
-       ) AS locked`,
-    )) as Array<{ locked: unknown }>;
-    const [promotionLock] = (await runner.query(
-      'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
-      [ZONE_PROMOTION_LOCK],
-    )) as Array<{ locked: unknown }>;
-    if (!bool(zoneLock?.locked) || !bool(promotionLock?.locked)) {
-      throw new CurrentPriorityError('Zone publication lock is busy');
+    // Match the short verification window used by automatic attestation.
+    await runner.query(`SET LOCAL jit=off;
+      SET LOCAL transaction_timeout='3s';
+      SET LOCAL statement_timeout='${Math.min(options.statementTimeoutMs, 2000)}ms';
+      SET LOCAL lock_timeout='${Math.min(options.lockTimeoutMs, 50)}ms'`);
+    if (options.apply) {
+      // Take relation locks before the serializable snapshot is established.
+      // Writers outside the snapshot scheduler must also invalidate this proof.
+      await runner.query(
+        `LOCK TABLE ${promotionTables.join(', ')} IN SHARE MODE NOWAIT`,
+      );
+    }
+    const [locks] = await runner.query(
+      `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS snapshot,
+              pg_try_advisory_xact_lock(hashtext('vigieau'), hashtext('zone-compute-global')) AS zone,
+              pg_try_advisory_xact_lock(hashtext($2)) AS promotion`,
+      [SNAPSHOT_LOCK, ZONE_PROMOTION_LOCK],
+    );
+    if (
+      !bool(locks?.snapshot) ||
+      !bool(locks?.zone) ||
+      !bool(locks?.promotion)
+    ) {
+      throw new CurrentPriorityError(
+        'Snapshot or zone publication lock is busy',
+      );
     }
     await assertContext(runner, expectedContext, options.apply);
+    await assertValidatedTargetVersions(
+      runner,
+      options.from,
+      options.through,
+      inspectedVersions,
+    );
     const [preflight] = (await runner.query(
       CERTIFIED_COMPLETION_PROMOTION_PREFLIGHT_SQL,
       [
@@ -2381,11 +2452,6 @@ async function promote(
     if (transactionStarted) await runner.rollbackTransaction();
     throw error;
   } finally {
-    if (snapshotLocked) {
-      await runner.query('SELECT pg_advisory_unlock(hashtext($1))', [
-        SNAPSHOT_LOCK,
-      ]);
-    }
     await runner.release();
   }
 }

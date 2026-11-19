@@ -13,6 +13,8 @@ import {
   buildStatisticInspectionSql,
   certifiedCompletionContextSql,
   certifiedCompletionRepairAuditSql,
+  readValidatedTargetVersions,
+  assertValidatedTargetVersions,
 } from './complete-certified-history-restoration';
 
 const postgresUrl = process.env.REPAIR_CERTIFIED_HISTORY_POSTGRES_URL;
@@ -302,6 +304,64 @@ describePostgres('complete certified history PostgreSQL', () => {
         options: `-c search_path=${schema},public -c default_transaction_read_only=on`,
       },
     }).initialize();
+  });
+
+  it('detects committed changes between inspection and activation, including an entity reassignment', async () => {
+    const observer = readOnly.createQueryRunner();
+    await observer.connect();
+    const versions = () =>
+      readValidatedTargetVersions(observer, '2026-07-11', '2026-07-12');
+    try {
+      await observer.startTransaction('REPEATABLE READ');
+      const before = await versions();
+      // The two operations use independent connections to this disposable schema.
+      await database.query(
+        'UPDATE commune SET code=code WHERE id=(SELECT min(id) FROM commune)',
+      );
+      expect(await versions()).toBe(before);
+      await observer.commitTransaction();
+      const observedUpdate = await versions();
+      await expect(
+        assertValidatedTargetVersions(
+          observer,
+          '2026-07-11',
+          '2026-07-12',
+          before,
+        ),
+      ).rejects.toThrow('rows changed before promotion');
+      await expect(
+        assertValidatedTargetVersions(
+          observer,
+          '2026-07-11',
+          '2026-07-12',
+          observedUpdate,
+        ),
+      ).resolves.toBeUndefined();
+
+      await database.query(
+        'UPDATE statistic_commune SET restrictions=restrictions WHERE id=(SELECT min(id) FROM statistic_commune)',
+      );
+      expect(await versions()).not.toBe(observedUpdate);
+      const observedStatistic = await versions();
+      await database.query(
+        "INSERT INTO statistic (date) VALUES ('2035-04-01')",
+      );
+      expect(await versions()).toBe(observedStatistic);
+      await database.query("DELETE FROM statistic WHERE date='2035-04-01'");
+
+      await database.query(
+        "INSERT INTO commune (id,code) VALUES (991234,'ZZZZ1')",
+      );
+      const inserted = await versions();
+      expect(inserted).not.toBe(observedStatistic);
+      await database.query("UPDATE commune SET code='ZZZZ2' WHERE id=991234");
+      expect(await versions()).not.toBe(inserted);
+      await database.query('DELETE FROM commune WHERE id=991234');
+      expect(await versions()).toBe(observedStatistic);
+    } finally {
+      if (observer.isTransactionActive) await observer.rollbackTransaction();
+      await observer.release();
+    }
   });
 
   it('runs promotion and attestation preflight in a read-only transaction', async () => {
