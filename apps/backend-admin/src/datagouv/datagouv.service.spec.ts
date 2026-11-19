@@ -1602,13 +1602,11 @@ describe('DatagouvService', () => {
   it('refuses to record a historical ZIP whose remote size matches but checksum differs', async () => {
     const h = createHarness('/tmp');
     jest.spyOn(fs, 'openAsBlob').mockResolvedValue(new Blob(['zip-content']));
-    jest
-      .spyOn(h.service as any, 'inspectLocalArtifact')
-      .mockResolvedValue({
-        byteSize: 11,
-        sha1: '1'.repeat(40),
-        checksum: '2'.repeat(64),
-      });
+    jest.spyOn(h.service as any, 'inspectLocalArtifact').mockResolvedValue({
+      byteSize: 11,
+      sha1: '1'.repeat(40),
+      checksum: '2'.repeat(64),
+    });
     jest
       .spyOn(h.service as any, 'waitForReadAfterWrite')
       .mockResolvedValue(undefined);
