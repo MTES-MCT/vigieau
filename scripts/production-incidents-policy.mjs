@@ -35,12 +35,13 @@ export function classifyDeep(name, result) {
     return observation(`deep-${name}`, "unknown", "Execution du controle incomplete");
   }
   if (result.code === 0) return observation(`deep-${name}`, "success", "Contrat verifie");
-  const history = ["statistics", "datagouv", "admin", "public"].includes(name) &&
+  const currentCsvFailure = name === "datagouv" && /(?:Arrêtés|Restrictions) CSV:/.test(result.output || "");
+  const history = !currentCsvFailure && ["statistics", "datagouv", "admin", "public"].includes(name) &&
     /certified history|public history|public statistics no longer start|ZIP member maximum inspected date|sparse_statistic_cache|historicStatistics is not healthy|healthy historic status incomplete|historicClean is not healthy|historicCursors is not healthy/i.test(result.output || "");
   const hint = safeFailureHint(result.output);
   return observation(history ? "certified-history" : `deep-${name}`, "failure",
     hint || (history ? "Le contrat historique certifie ou ses exports est invalide" : "Le smoke strict a echoue"),
-    { source: name, publicationAgeFailure: name === "datagouv" && /(?:Communes|Historique Communes).*hours old/.test(result.output || "") });
+    { source: name, publicationAgeFailure: name === "datagouv" && !currentCsvFailure && /(?:Communes|Historique Communes).*hours old/.test(result.output || "") });
 }
 
 export function safeFailureHint(output = "") {
