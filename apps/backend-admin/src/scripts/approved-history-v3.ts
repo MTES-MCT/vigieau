@@ -14,10 +14,19 @@ export const APPROVED_HISTORY_V3_RUN =
 export const APPROVED_HISTORY_V3_INPUT_DIGEST =
   '6285956eda3f5ec2a4cb8f1fa97c7e07a899dc3d477ac45b1465de96fd897a17';
 
-// The operator accepts only a reviewed final manifest. An empty pin disables
-// publication until both hashes have been independently recomputed.
-export const APPROVED_HISTORY_V3_PROVENANCE = '';
-export const APPROVED_HISTORY_V3_FINGERPRINT = '';
+// All other sections are preserved when disabled flags are brought back to
+// their certified dated parameter baseline by the existing equivalence policy.
+export const APPROVED_HISTORY_V3_NORMALIZED_INPUT_DIGEST =
+  '8962a82afa3cc2d13cfc15d7c19d35684c315410d8f8b72a737bb7ce55d24cf7';
+
+export const APPROVED_HISTORY_V3_COMMUNE_HISTORY_DIGEST =
+  'dd89a1c03133d8ab8a37385a53525be89f1697d7108d18425212fe2c0a326d8a';
+export const APPROVED_HISTORY_V3_DEPARTMENT_HISTORY_DIGEST =
+  '01cba84b95f315b3872f01106c72ed67c14a98fbaec8e3b0c342cb47bc009aae';
+export const APPROVED_HISTORY_V3_PROVENANCE =
+  '2806f7db4bb00159bdff56f56954350d7b4e902b87e6dfcd76653da3eb5be4f9';
+export const APPROVED_HISTORY_V3_FINGERPRINT =
+  'd4d34985114ada8f130a8bd6ae335beaf338c296310c15d692302e5a2a4e8f90';
 
 export async function verifyApprovedHistoryInputs(
   runner: QueryRunner,

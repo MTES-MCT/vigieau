@@ -9,6 +9,7 @@ import { CERTIFIED_HISTORY_V2_CERTIFIED_MANIFEST as PINNED } from './restore-cer
 import { CERTIFIED_HISTORY_V2_SOURCE_RUN_ID } from './build-certified-history-source';
 import {
   CERTIFIED_COMPLETION_ATTESTATION_SQL,
+  CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL,
   CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
 } from './complete-certified-history-restoration';
 import {
@@ -35,6 +36,54 @@ import {
   historicalParameterStatusInputEvidence,
 } from './history-parameter-status-equivalence';
 
+import {
+  APPROVED_HISTORY_V3_RUN,
+  APPROVED_HISTORY_V3_INPUT_DIGEST,
+  APPROVED_HISTORY_V3_NORMALIZED_INPUT_DIGEST,
+  APPROVED_HISTORY_V3_PROVENANCE,
+  APPROVED_HISTORY_V3_FINGERPRINT,
+  APPROVED_HISTORY_V3_COMMUNE_HISTORY_DIGEST,
+  APPROVED_HISTORY_V3_DEPARTMENT_HISTORY_DIGEST,
+} from './approved-history-v3';
+
+// The initial database IDs are generated during promotion. The run, inputs,
+// output hashes and provenance are independently pinned in the release.
+export interface ApprovedHistoryAnchor {
+  repairId: string;
+  attestationId: string;
+  historicComputeEpoch: string;
+}
+function pinnedManifest(anchor?: ApprovedHistoryAnchor) {
+  return anchor
+    ? {
+        ...PINNED,
+        communeHistoryDigest: APPROVED_HISTORY_V3_COMMUNE_HISTORY_DIGEST,
+        departmentHistoryDigest: APPROVED_HISTORY_V3_DEPARTMENT_HISTORY_DIGEST,
+        provenanceDigest: APPROVED_HISTORY_V3_PROVENANCE,
+        sourceFingerprint: APPROVED_HISTORY_V3_FINGERPRINT,
+      }
+    : PINNED;
+}
+
+// Include the initial attestation's immutable linkage to its promotion as well
+// as its source, outputs and provenance. A later recovery is never an anchor.
+export const LATEST_APPROVED_HISTORY_ANCHOR_SQL = `
+SELECT a.id::text AS "repairId", original.id::text AS "attestationId",
+  a."historicComputeEpoch"::text AS "historicComputeEpoch"
+FROM (SELECT * FROM certified_history_repair_audit
+  ORDER BY "promotedAt" DESC,id DESC LIMIT 1) a
+JOIN certified_history_repair_attestation original
+  ON original."repairId"=a.id
+  AND original."attestedThroughEpoch"=a."historicComputeEpoch"
+  AND original."statisticRevision"=a."publicationRevisionAfter"
+  AND original."sourceRevision"=a."sourceRevision"
+  AND original."communeHistoryDigest"=a."communeHistoryDigest"
+  AND original."departmentHistoryDigest"=a."departmentHistoryDigest"
+  AND original."statisticDigest"=a."statisticDigest"
+  AND original."provenanceDigest"=a."provenanceDigest"
+  AND original.context->>'attestationMethod'='initial-certified-promotion'
+  AND original.context->>'sourceFingerprint'=a."publicationContext"->>'sourceFingerprint'
+WHERE a."sourceRunId"='${APPROVED_HISTORY_V3_RUN}'`;
 export const EQUIVALENCE_ANCHOR = {
   backupId: '6a98b8a299826944b3817689',
   archiveSha256:
@@ -115,6 +164,7 @@ export const EQUIVALENCE_ANCHOR_LOOKUP_GUARD: EquivalenceLookupGuard = {
   sequenceCycle: false,
 };
 export interface Inspection {
+  approvedAnchor?: ApprovedHistoryAnchor;
   operatorDigest: string;
   context: RepairPublicationContext;
   inputs: HistoricalInputEvidence;
@@ -239,20 +289,42 @@ function same(actual: unknown, expected: unknown, label: string): void {
     throw new Error(label);
 }
 
-export function assertEquivalenceAudit(row: Record<string, unknown>): void {
+export function assertEquivalenceAudit(
+  row: Record<string, unknown>,
+  anchor?: ApprovedHistoryAnchor,
+): void {
+  const pinned = pinnedManifest(anchor);
+  if (anchor) {
+    const ctx = row?.publicationContext as Record<string, unknown> | undefined;
+    if (
+      !Object.values(pinned).every(
+        (value) => typeof value !== 'string' || /^[0-9a-f]{64}$/.test(value),
+      ) ||
+      !anchor.repairId ||
+      !anchor.attestationId ||
+      !/^\d+$/.test(anchor.historicComputeEpoch) ||
+      String(row?.historicComputeEpoch) !== anchor.historicComputeEpoch ||
+      ctx?.method !== 'operator-arbitrated-historical-inputs' ||
+      ctx?.approvedInputDigest !== APPROVED_HISTORY_V3_INPUT_DIGEST
+    ) {
+      throw new Error('Approved historical promotion anchor mismatch');
+    }
+  }
   const expected = {
-    id: EQUIVALENCE_ANCHOR.repairId,
-    sourceRunId: CERTIFIED_HISTORY_V2_SOURCE_RUN_ID,
+    id: (anchor ?? EQUIVALENCE_ANCHOR).repairId,
+    sourceRunId: anchor
+      ? APPROVED_HISTORY_V3_RUN
+      : CERTIFIED_HISTORY_V2_SOURCE_RUN_ID,
     dateFrom: FROM,
     dateThrough: THROUGH,
-    communeCount: PINNED.communeCount,
-    departmentCount: PINNED.departmentCount,
+    communeCount: pinned.communeCount,
+    departmentCount: pinned.departmentCount,
     dayCount: 52,
     activationKind: 'statistics-only',
-    communeHistoryDigest: PINNED.communeHistoryDigest,
-    departmentHistoryDigest: PINNED.departmentHistoryDigest,
-    statisticDigest: PINNED.statisticDigest,
-    provenanceDigest: PINNED.provenanceDigest,
+    communeHistoryDigest: pinned.communeHistoryDigest,
+    departmentHistoryDigest: pinned.departmentHistoryDigest,
+    statisticDigest: pinned.statisticDigest,
+    provenanceDigest: pinned.provenanceDigest,
   };
   same(
     Object.fromEntries(Object.keys(expected).map((key) => [key, row?.[key]])),
@@ -261,13 +333,24 @@ export function assertEquivalenceAudit(row: Record<string, unknown>): void {
   );
   if (
     (row.publicationContext as Record<string, unknown>)?.sourceFingerprint !==
-    PINNED.sourceFingerprint
+    pinned.sourceFingerprint
   ) {
     throw new Error('Pinned repair source fingerprint mismatch');
   }
 }
 
-export function assertEquivalenceAnchorInputs(digest: string): void {
+export function assertEquivalenceAnchorInputs(
+  digest: string,
+  anchor?: ApprovedHistoryAnchor,
+): void {
+  if (anchor) {
+    if (
+      digest !== APPROVED_HISTORY_V3_INPUT_DIGEST &&
+      digest !== APPROVED_HISTORY_V3_NORMALIZED_INPUT_DIGEST
+    )
+      throw new Error('Historical inputs differ from the approved v3 source');
+    return;
+  }
   same(
     digest,
     EQUIVALENCE_ANCHOR.inputDigest,
@@ -278,9 +361,10 @@ export function assertEquivalenceAnchorInputs(digest: string): void {
 export function assertEquivalenceLedger(
   rows: LedgerRow[],
   throughEpoch: string,
+  initialEpoch: string = EQUIVALENCE_ANCHOR.historicComputeEpoch,
 ): void {
   const last = BigInt(throughEpoch);
-  let expected = BigInt(EQUIVALENCE_ANCHOR.historicComputeEpoch) + 1n;
+  let expected = BigInt(initialEpoch) + 1n;
   for (const row of rows) {
     // Calendar changes are recorded as separate map-only and statistics-only
     // events. Neither kind proves equivalence: certification still requires
@@ -322,12 +406,35 @@ export function assertEquivalenceLedger(
     );
 }
 
-export const EQUIVALENCE_LEDGER_SQL = `
+const ledgerSelect = `
 SELECT "epochAfter"::text, cause, context->'fallback' AS fallback,
   "invalidatesStatistics", "invalidatesMaps", "affectedRange"::text,
   "sourceRevision"::text, context
 FROM historic_range_invalidation AS ledger
-WHERE ledger."epochAfter">796 ORDER BY ledger."epochAfter"`;
+WHERE ledger."epochAfter">`;
+export const EQUIVALENCE_LEDGER_SQL =
+  ledgerSelect + '796 ORDER BY ledger."epochAfter"';
+function readLedger(
+  runner: QueryRunner,
+  anchor?: ApprovedHistoryAnchor,
+): Promise<LedgerRow[]> {
+  return anchor
+    ? runner.query(ledgerSelect + '$1::bigint ORDER BY ledger."epochAfter"', [
+        anchor.historicComputeEpoch,
+      ])
+    : runner.query(EQUIVALENCE_LEDGER_SQL);
+}
+async function verifyLatestApprovedAnchor(
+  runner: QueryRunner,
+  anchor: ApprovedHistoryAnchor,
+): Promise<void> {
+  const [latest] = await runner.query(LATEST_APPROVED_HISTORY_ANCHOR_SQL);
+  same(
+    latest,
+    anchor,
+    'Latest historical promotion or its initial attestation changed',
+  );
+}
 
 export { EQUIVALENCE_RELATIONS_SQL } from './history-source-equivalence';
 
@@ -363,12 +470,17 @@ export function outputBatchSql(kind: OutputKind): string {
   ) days ORDER BY b.code`;
 }
 
-export function validateOutputRows(kind: OutputKind, rows: OutputRow[]) {
+export function validateOutputRows(
+  kind: OutputKind,
+  rows: OutputRow[],
+  anchor?: ApprovedHistoryAnchor,
+) {
+  const pinned = pinnedManifest(anchor);
   const expectedCount =
     kind === 'commune'
-      ? PINNED.communeCount
+      ? pinned.communeCount
       : kind === 'department'
-        ? PINNED.departmentCount
+        ? pinned.departmentCount
         : 52;
   const days = kind === 'national' ? 1 : 52;
   const codeHash = createHash('sha256');
@@ -404,16 +516,16 @@ export function validateOutputRows(kind: OutputKind, rows: OutputRow[]) {
   same(
     digest,
     kind === 'commune'
-      ? PINNED.communeHistoryDigest
+      ? pinned.communeHistoryDigest
       : kind === 'department'
-        ? PINNED.departmentHistoryDigest
-        : PINNED.statisticDigest,
+        ? pinned.departmentHistoryDigest
+        : pinned.statisticDigest,
     'Output differs from pinned certified repair',
   );
   if (kind !== 'national')
     same(
       codeHash.digest('hex'),
-      kind === 'commune' ? PINNED.communeDigest : PINNED.departmentDigest,
+      kind === 'commune' ? pinned.communeDigest : pinned.departmentDigest,
       'Output entity coverage differs',
     );
   return {
@@ -465,6 +577,7 @@ export async function inspectEquivalenceState(
   anchor: boolean,
   operatorDigest: string,
   requirePinnedInputs = false,
+  approvedAnchor?: ApprovedHistoryAnchor,
 ): Promise<Inspection> {
   const runner = database.createQueryRunner();
   const deadline = Date.now() + MAX_INSPECTION_MS;
@@ -481,14 +594,16 @@ export async function inspectEquivalenceState(
     const [identity] = await runner.query('SELECT current_database() AS name');
     same(identity?.name, expectedDatabase, 'Unexpected database identity');
     const context = await publicationContext(runner);
+    if (approvedAnchor)
+      await verifyLatestApprovedAnchor(runner, approvedAnchor);
     const [audit] = await runner.query(
       'SELECT to_jsonb(a) AS value FROM certified_history_repair_audit a WHERE id=$1',
-      [EQUIVALENCE_ANCHOR.repairId],
+      [(approvedAnchor ?? EQUIVALENCE_ANCHOR).repairId],
     );
-    assertEquivalenceAudit(audit?.value);
+    assertEquivalenceAudit(audit?.value, approvedAnchor);
     const [active] = await runner.query(
       'SELECT to_jsonb(a) AS value FROM active_certified_history_repair a WHERE id=$1',
-      [EQUIVALENCE_ANCHOR.repairId],
+      [(approvedAnchor ?? EQUIVALENCE_ANCHOR).repairId],
     );
     if (anchor) {
       same(
@@ -502,8 +617,12 @@ export async function inspectEquivalenceState(
         'Anchor has no original active attestation',
       );
     }
-    const ledger: LedgerRow[] = await runner.query(EQUIVALENCE_LEDGER_SQL);
-    assertEquivalenceLedger(ledger, context.historicComputeEpoch);
+    const ledger: LedgerRow[] = await readLedger(runner, approvedAnchor);
+    assertEquivalenceLedger(
+      ledger,
+      context.historicComputeEpoch,
+      approvedAnchor?.historicComputeEpoch,
+    );
     const [lookupGuard]: EquivalenceLookupGuard[] = await runner.query(
       EQUIVALENCE_LOOKUP_GUARD_SQL,
     );
@@ -531,14 +650,25 @@ export async function inspectEquivalenceState(
     // Automatic recovery can prove an administrative parameter-status change
     // irrelevant to historical date selection. The original archive operator
     // keeps its strict raw comparison; neither path changes the pinned digest.
-    const inputs = requirePinnedInputs
-      ? historicalParameterStatusInputEvidence(
+    let inputs: HistoricalInputEvidence;
+    if (approvedAnchor) {
+      inputs = sourceEquivalenceEvidence(inputRows);
+      if (inputs.digest !== APPROVED_HISTORY_V3_INPUT_DIGEST) {
+        inputs = historicalParameterStatusInputEvidence(
           inputRows,
-          EQUIVALENCE_ANCHOR.inputDigest,
-        )
-      : sourceEquivalenceEvidence(inputRows);
-    if (anchor || requirePinnedInputs)
-      assertEquivalenceAnchorInputs(inputs.digest);
+          APPROVED_HISTORY_V3_NORMALIZED_INPUT_DIGEST,
+        );
+      }
+    } else {
+      inputs = requirePinnedInputs
+        ? historicalParameterStatusInputEvidence(
+            inputRows,
+            EQUIVALENCE_ANCHOR.inputDigest,
+          )
+        : sourceEquivalenceEvidence(inputRows);
+    }
+    if (anchor || requirePinnedInputs || approvedAnchor)
+      assertEquivalenceAnchorInputs(inputs.digest, approvedAnchor);
     const outputs = {} as Inspection['outputs'];
     for (const kind of ['commune', 'department', 'national'] as const) {
       const all: OutputRow[] = [];
@@ -557,7 +687,7 @@ export async function inspectEquivalenceState(
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
       }
-      outputs[kind] = validateOutputRows(kind, all);
+      outputs[kind] = validateOutputRows(kind, all, approvedAnchor);
     }
     const regionVersions: RowVersion[] = await runner.query(
       'SELECT id,xmin::text,tableoid::text FROM region ORDER BY id',
@@ -576,6 +706,7 @@ export async function inspectEquivalenceState(
     }
     await runner.commitTransaction();
     return {
+      ...(approvedAnchor && { approvedAnchor }),
       operatorDigest,
       context,
       inputs,
@@ -690,9 +821,11 @@ export function equivalenceProof(inspection: Inspection): string {
   return equivalenceDigest({
     mode: MODE,
     operatorDigest: inspection.operatorDigest,
-    anchorLookupGuard: EQUIVALENCE_ANCHOR_LOOKUP_GUARD,
+    ...(inspection.approvedAnchor
+      ? { sourceRunId: APPROVED_HISTORY_V3_RUN }
+      : { anchorLookupGuard: EQUIVALENCE_ANCHOR_LOOKUP_GUARD }),
     lookupGuard: inspection.lookupGuard,
-    anchor: EQUIVALENCE_ANCHOR,
+    anchor: inspection.approvedAnchor ?? EQUIVALENCE_ANCHOR,
     context: inspection.context,
     inputs: inspection.inputs,
     outputs: Object.fromEntries(
@@ -702,7 +835,8 @@ export function equivalenceProof(inspection: Inspection): string {
       ]),
     ),
     ledger: inspection.ledger,
-    sourceFingerprint: PINNED.sourceFingerprint,
+    sourceFingerprint: pinnedManifest(inspection.approvedAnchor)
+      .sourceFingerprint,
   });
 }
 
@@ -715,6 +849,7 @@ export async function applyEquivalenceAttestation(
   attestationId: string;
   revision?: string;
 }> {
+  const anchor = inspection.approvedAnchor ?? EQUIVALENCE_ANCHOR;
   const versionChecks = (
     [
       ['statistic_commune', inspection.outputs.commune.versions],
@@ -754,15 +889,17 @@ export async function applyEquivalenceAttestation(
       'Source relation identity or revision guards changed',
     );
     same(
-      await runner.query(EQUIVALENCE_LEDGER_SQL),
+      await readLedger(runner, inspection.approvedAnchor),
       inspection.ledger,
       'Historic invalidation ledger changed',
     );
+    if (inspection.approvedAnchor)
+      await verifyLatestApprovedAnchor(runner, inspection.approvedAnchor);
     const [audit] = await runner.query(
       'SELECT to_jsonb(a) AS value FROM certified_history_repair_audit a WHERE id=$1',
-      [EQUIVALENCE_ANCHOR.repairId],
+      [anchor.repairId],
     );
-    assertEquivalenceAudit(audit?.value);
+    assertEquivalenceAudit(audit?.value, inspection.approvedAnchor);
     same(audit.value, inspection.audit, 'Certified repair audit changed');
     for (const { table, evidence } of versionChecks) {
       const [result] = await runner.query(versionValidationSql(table));
@@ -771,7 +908,7 @@ export async function applyEquivalenceAttestation(
     const [existing] = await runner.query(
       `SELECT "attestationId" AS id FROM active_certified_history_repair
       WHERE id=$1 AND "attestedThroughEpoch"=$2`,
-      [EQUIVALENCE_ANCHOR.repairId, inspection.context.historicComputeEpoch],
+      [anchor.repairId, inspection.context.historicComputeEpoch],
     );
     if (existing) {
       await runner.commitTransaction();
@@ -782,11 +919,23 @@ export async function applyEquivalenceAttestation(
       "SELECT set_config('vigieau.certified_history_attestation_id',$1,true)",
       [id],
     );
+    if (inspection.approvedAnchor) {
+      await runner.query(
+        "SELECT set_config('vigieau.certified_history_promotion_id',$1,true)",
+        [anchor.repairId],
+      );
+      await runner.query(CERTIFIED_COMPLETION_ATTESTATION_RETAG_SQL, [
+        anchor.repairId,
+        FROM,
+        THROUGH,
+        PINNED.communeCount,
+      ]);
+    }
     const [updated] = await runner.query(CERTIFIED_COMPLETION_ATTESTATION_SQL, [
       FROM,
       THROUGH,
       PINNED.communeCount,
-      EQUIVALENCE_ANCHOR.repairId,
+      anchor.repairId,
       inspection.context.statisticRevision,
     ]);
     const revision = (
@@ -804,16 +953,20 @@ export async function applyEquivalenceAttestation(
       CERTIFIED_COMPLETION_INITIAL_ATTESTATION_SQL,
       [
         id,
-        EQUIVALENCE_ANCHOR.repairId,
+        anchor.repairId,
         inspection.context.historicComputeEpoch,
         revision,
         JSON.stringify({
-          attestationMethod: MODE,
+          attestationMethod: inspection.approvedAnchor
+            ? 'operator-arbitrated-source-equivalence'
+            : MODE,
           operatorDigest: inspection.operatorDigest,
           lookupPolicy: 'disjoint-current-historic-identifiers-v1',
-          anchorLookupGuard: EQUIVALENCE_ANCHOR_LOOKUP_GUARD,
+          ...(inspection.approvedAnchor
+            ? { sourceRunId: APPROVED_HISTORY_V3_RUN }
+            : { anchorLookupGuard: EQUIVALENCE_ANCHOR_LOOKUP_GUARD }),
           lookupGuard: inspection.lookupGuard,
-          anchor: EQUIVALENCE_ANCHOR,
+          anchor: inspection.approvedAnchor ?? EQUIVALENCE_ANCHOR,
           proof,
           inputPolicy: inspection.inputs.policy,
           inputDigest: inspection.inputs.digest,
@@ -826,7 +979,8 @@ export async function applyEquivalenceAttestation(
           legacyEventsWithoutSourceRevision: inspection.ledger.filter(
             (row) => row.sourceRevision === null,
           ).length,
-          sourceFingerprint: PINNED.sourceFingerprint,
+          sourceFingerprint: pinnedManifest(inspection.approvedAnchor)
+            .sourceFingerprint,
           currentSourceRevision: inspection.context.sourceRevision,
           currentPublicSourceRevision: inspection.context.sourcePublicRevision,
         }),
@@ -873,6 +1027,7 @@ export async function equivalenceOperatorDigest(
   const artifacts = [
     __filename,
     require.resolve('./history-source-equivalence'),
+    require.resolve('./approved-history-v3'),
     require.resolve('./history-parameter-status-equivalence'),
     require.resolve('./certified-history-parameter-anchor'),
     require.resolve('./restore-certified-commune-history'),

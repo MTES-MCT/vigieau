@@ -1,7 +1,10 @@
 import { DataSource } from 'typeorm';
+import { APPROVED_HISTORY_V3_RUN } from './approved-history-v3';
 import { CurrentStatisticPriorityError } from './restore-missing-commune-history';
 import {
   EQUIVALENCE_ANCHOR,
+  ApprovedHistoryAnchor,
+  LATEST_APPROVED_HISTORY_ANCHOR_SQL,
   EQUIVALENCE_INSPECTION_SETTINGS_SQL,
   applyEquivalenceAttestation,
   assertEquivalenceAnchorInputs,
@@ -19,14 +22,15 @@ export const AUTOMATIC_HISTORY_EQUIVALENCE_LOCK =
 // accidentally be replaced with this older trust anchor. No backup download,
 // geometry replay or historical-data rewrite is performed by this worker.
 export const AUTOMATIC_HISTORY_EQUIVALENCE_PREFLIGHT_SQL = `
+WITH latest AS (SELECT * FROM certified_history_repair_audit
+  ORDER BY "promotedAt" DESC, id DESC LIMIT 1)
 SELECT current_database() AS database,
-  (SELECT to_jsonb(a) FROM certified_history_repair_audit a WHERE a.id=$1) AS audit,
-  (SELECT id FROM certified_history_repair_audit
-    ORDER BY "promotedAt" DESC, id DESC LIMIT 1) AS "latestRepairId",
-  (SELECT "attestationId" FROM active_certified_history_repair WHERE id=$1)
-    AS "activeAttestationId",
+  to_jsonb(latest) AS audit, latest.id::text AS "latestRepairId",
+  (SELECT "attestationId" FROM active_certified_history_repair WHERE id=latest.id) AS "activeAttestationId",
   EXISTS(SELECT 1 FROM certified_history_repair_attestation
-    WHERE id=$2 AND "repairId"=$1 AND "attestedThroughEpoch"=$3) AS "anchorPresent"
+    WHERE id=$2 AND "repairId"=$1 AND "attestedThroughEpoch"=$3) AS "anchorPresent",
+  (SELECT to_jsonb(original) FROM (${LATEST_APPROVED_HISTORY_ANCHOR_SQL}) original) AS "approvedAnchor"
+FROM latest
 `;
 
 export interface AutomaticHistoryEquivalenceResult {
@@ -82,10 +86,21 @@ export async function automaticallyAttestHistoryBySourceEquivalence(
       ],
     );
     await lease.commitTransaction();
-    if (!state?.audit || state.latestRepairId !== EQUIVALENCE_ANCHOR.repairId)
+    if (!state?.audit) return { status: 'NOT_APPLICABLE' };
+    const approvedAnchor: ApprovedHistoryAnchor | undefined =
+      state.audit.sourceRunId === APPROVED_HISTORY_V3_RUN
+        ? state.approvedAnchor
+        : undefined;
+    if (state.audit.sourceRunId === APPROVED_HISTORY_V3_RUN && !approvedAnchor)
+      throw new Error(
+        'Original approved historical promotion trust anchor is missing',
+      );
+    if (
+      state.latestRepairId !== (approvedAnchor ?? EQUIVALENCE_ANCHOR).repairId
+    )
       return { status: 'NOT_APPLICABLE' };
-    assertEquivalenceAudit(state.audit);
-    if (state.anchorPresent !== true)
+    assertEquivalenceAudit(state.audit, approvedAnchor);
+    if (!approvedAnchor && state.anchorPresent !== true)
       throw new Error('Original certified history trust anchor is missing');
     if (state.activeAttestationId)
       return {
@@ -101,8 +116,9 @@ export async function automaticallyAttestHistoryBySourceEquivalence(
       false,
       await equivalenceOperatorDigest([__filename]),
       true,
+      approvedAnchor,
     );
-    assertEquivalenceAnchorInputs(current.inputs.digest);
+    assertEquivalenceAnchorInputs(current.inputs.digest, approvedAnchor);
     const proof = equivalenceProof(current);
     if (options.apply === false) return { status: 'DRY_RUN', proof };
     return {

@@ -1,7 +1,11 @@
 import { Client } from 'pg';
+import { APPROVED_HISTORY_V3_RUN } from './approved-history-v3';
+import { AUTOMATIC_HISTORY_EQUIVALENCE_PREFLIGHT_SQL } from './automatic-history-equivalence';
 import { DataSource, QueryRunner } from 'typeorm';
 import {
   EQUIVALENCE_LEDGER_SQL,
+  EQUIVALENCE_ANCHOR,
+  LATEST_APPROVED_HISTORY_ANCHOR_SQL,
   EQUIVALENCE_LOOKUP_GUARD_SQL,
   EQUIVALENCE_RELATIONS_SQL,
   RowVersion,
@@ -146,6 +150,61 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await admin.destroy();
     }
+  });
+
+  it('selects the latest approved initial attestation and rejects a changed digest or newer repair', async () => {
+    const connection = await runner();
+    await connection.startTransaction();
+    await connection.query(`
+      CREATE TEMP TABLE certified_history_repair_audit (
+        id uuid PRIMARY KEY, "sourceRunId" text, "promotedAt" timestamptz,
+        "historicComputeEpoch" bigint, "publicationRevisionAfter" bigint, "sourceRevision" bigint,
+        "communeHistoryDigest" text, "departmentHistoryDigest" text, "statisticDigest" text, "provenanceDigest" text, "publicationContext" jsonb
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE certified_history_repair_attestation (
+        id uuid PRIMARY KEY, "repairId" uuid, "attestedThroughEpoch" bigint,
+        "statisticRevision" bigint, "sourceRevision" bigint, "communeHistoryDigest" text,
+        "departmentHistoryDigest" text, "statisticDigest" text, "provenanceDigest" text, context jsonb
+      ) ON COMMIT DROP;
+      CREATE TEMP TABLE active_certified_history_repair (id uuid, "attestationId" uuid) ON COMMIT DROP;
+    `);
+    const repairId = '3b5b337a-5013-4ffc-bdfb-6bbf3106cd77';
+    const attestationId = '2345937e-c7fd-4eec-be66-e18e6159ad18';
+    await connection.query(
+      `INSERT INTO certified_history_repair_audit VALUES
+      ($1,$2,'2026-11-19',1474,414,169400,'commune','department','stat','provenance','{"sourceFingerprint":"source"}')`,
+      [repairId, APPROVED_HISTORY_V3_RUN],
+    );
+    await connection.query(
+      `INSERT INTO certified_history_repair_attestation VALUES
+      ($1,$2,1474,414,169400,'commune','department','stat','provenance','{"sourceFingerprint":"source","attestationMethod":"initial-certified-promotion"}')`,
+      [attestationId, repairId],
+    );
+    const original = { repairId, attestationId, historicComputeEpoch: '1474' };
+    expect(await connection.query(LATEST_APPROVED_HISTORY_ANCHOR_SQL)).toEqual([
+      original,
+    ]);
+    const [preflight] = await connection.query(
+      AUTOMATIC_HISTORY_EQUIVALENCE_PREFLIGHT_SQL,
+      [
+        EQUIVALENCE_ANCHOR.repairId,
+        EQUIVALENCE_ANCHOR.attestationId,
+        EQUIVALENCE_ANCHOR.historicComputeEpoch,
+      ],
+    );
+    expect(preflight.approvedAnchor).toEqual(original);
+    expect(preflight.latestRepairId).toBe(repairId);
+    await connection.query(
+      `UPDATE certified_history_repair_attestation SET "provenanceDigest"='changed'`,
+    );
+    expect(await connection.query(LATEST_APPROVED_HISTORY_ANCHOR_SQL)).toEqual(
+      [],
+    );
+    await connection.query(`UPDATE certified_history_repair_attestation SET "provenanceDigest"='provenance';
+      INSERT INTO certified_history_repair_audit (id,"sourceRunId","promotedAt") VALUES (gen_random_uuid(),'unrecognized','2026-11-20')`);
+    expect(await connection.query(LATEST_APPROVED_HISTORY_ANCHOR_SQL)).toEqual(
+      [],
+    );
   });
 
   it('validates consecutive numeric epochs across 999 and detects a real gap', async () => {
