@@ -1,10 +1,12 @@
 import { Client } from 'pg';
 import { DataSource, QueryRunner } from 'typeorm';
 import {
+  EQUIVALENCE_LEDGER_SQL,
   EQUIVALENCE_LOOKUP_GUARD_SQL,
   EQUIVALENCE_RELATIONS_SQL,
   RowVersion,
   acquireEquivalenceFinalLocks,
+  assertEquivalenceLedger,
   assertEquivalenceLookupGuard,
   assertVersionValidation,
   rowVersionEvidence,
@@ -144,6 +146,30 @@ describePostgres('history equivalence PostgreSQL concurrency boundary', () => {
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await admin.destroy();
     }
+  });
+
+  it('validates consecutive numeric epochs across 999 and detects a real gap', async () => {
+    const connection = await runner();
+    await connection.startTransaction();
+    await connection.query(`
+      CREATE TEMP TABLE historic_range_invalidation ON COMMIT DROP AS
+      SELECT epoch AS "epochAfter", 'published-source-mutation' AS cause,
+             '{"fallback":false}'::jsonb AS context, true AS "invalidatesStatistics",
+             true AS "invalidatesMaps", '[2026-07-11,2026-09-01)'::daterange AS "affectedRange",
+             100::bigint AS "sourceRevision"
+      FROM generate_series(795::bigint, 1001::bigint) AS epochs(epoch)
+    `);
+    assertEquivalenceLedger(
+      await connection.query(EQUIVALENCE_LEDGER_SQL),
+      '1001',
+    );
+    await connection.query(
+      'DELETE FROM historic_range_invalidation WHERE "epochAfter" = 999',
+    );
+    const incomplete = await connection.query(EQUIVALENCE_LEDGER_SQL);
+    expect(() => assertEquivalenceLedger(incomplete, '1001')).toThrow(
+      'epoch=1000; expected epoch 999',
+    );
   });
 
   it.each<VersionTable>([

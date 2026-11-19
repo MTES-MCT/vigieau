@@ -37,6 +37,13 @@ export type DatagouvPublicationContext = PublicationRunIdentity & {
   verifyCurrent?: () => Promise<void>;
 };
 
+type DatagouvResourceGroup = 'current' | 'historic' | 'all';
+
+interface CsvPublicationOptions {
+  sourceDate: string;
+  verifyCurrent?: () => Promise<void>;
+}
+
 interface LocalArtifact {
   byteSize: number;
   checksum: string;
@@ -148,15 +155,21 @@ export class DatagouvService {
   async updateDatagouvData(
     scheduledFor = this.getParisDate(),
     publicationContext?: DatagouvPublicationContext,
+    group: DatagouvResourceGroup = 'all',
   ): Promise<void> {
     return this.runWithDeadline(() =>
-      this.updateDatagouvDataWithinDeadline(scheduledFor, publicationContext),
+      this.updateDatagouvDataWithinDeadline(
+        scheduledFor,
+        publicationContext,
+        group,
+      ),
     );
   }
 
   private async updateDatagouvDataWithinDeadline(
     scheduledFor: string,
-    publicationContext?: DatagouvPublicationContext,
+    publicationContext: DatagouvPublicationContext | undefined,
+    group: DatagouvResourceGroup,
   ): Promise<void> {
     if (!this.canUploadToDataGouv()) {
       throw new Error("Configuration manquante pour l'upload vers Datagouv");
@@ -166,93 +179,95 @@ export class DatagouvService {
     const failures: Array<{ name: string; error: unknown }> = [];
     await publicationContext?.verifyCurrent?.();
 
-    let arretes: ArreteRestriction[] | undefined;
-    try {
-      arretes = await this.arreteRestrictionService.findDatagouv();
-    } catch (error) {
-      this.logDataGouvError('RECUPERATION DES ARRETES', error);
-      failures.push({ name: 'RECUPERATION DES ARRETES', error });
-    }
+    // Share the query in legacy mode and only load it when a resource is due.
+    let arretes: Promise<ArreteRestriction[]> | undefined;
+    const loadArretes = () =>
+      (arretes ??= this.arreteRestrictionService.findDatagouv());
 
-    if (arretes) {
+    if (group !== 'historic') {
+      const csvOptions = {
+        sourceDate: scheduledFor,
+        verifyCurrent: publicationContext?.verifyCurrent,
+      };
       await this.runDataGouvUpdate(
         'arretes',
         'ARRETES',
         scheduledFor,
-        () => this.updateArretes(arretes),
+        async () => this.updateArretes(await loadArretes(), csvOptions),
         failures,
         publicationContext,
       );
+      await this.runDataGouvUpdate(
+        'restrictions',
+        'RESTRICTIONS',
+        scheduledFor,
+        () => this.updateRestrictions(csvOptions),
+        failures,
+        publicationContext,
+      );
+    }
+    if (group !== 'current') {
       await this.runDataGouvUpdate(
         'historique-arretes',
         'HISTORIQUE ARRETES',
         scheduledFor,
-        () => this.updateHistoriqueArretes(arretes),
+        async () => this.updateHistoriqueArretes(await loadArretes()),
         failures,
         publicationContext,
       );
-    }
 
-    await this.runDataGouvUpdate(
-      'arretes-cadre',
-      'ARRETES CADRE',
-      scheduledFor,
-      () => this.updateArretesCadre(),
-      failures,
-      publicationContext,
-    );
-    await this.runDataGouvUpdate(
-      'restrictions',
-      'RESTRICTIONS',
-      scheduledFor,
-      () => this.updateRestrictions(),
-      failures,
-      publicationContext,
-    );
-    await this.runDataGouvUpdate(
-      `communes-${new Date(scheduledFor).getUTCFullYear()}`,
-      'COMMUNES',
-      scheduledFor,
-      () =>
-        this.updateCommunes(
-          new Date(scheduledFor).getUTCFullYear(),
-          scheduledFor,
-        ),
-      failures,
-      publicationContext,
-    );
-    if (this.mapArchivesEnabled) {
       await this.runDataGouvUpdate(
-        'maps-geojson',
-        'ARCHIVE CARTES GEOJSON',
+        'arretes-cadre',
+        'ARRETES CADRE',
         scheduledFor,
-        () => this.updateDailyMapArchive(scheduledFor, true),
+        () => this.updateArretesCadre(),
         failures,
         publicationContext,
       );
       await this.runDataGouvUpdate(
-        'maps-pmtiles',
-        'ARCHIVE CARTES PMTILES',
+        `communes-${new Date(scheduledFor).getUTCFullYear()}`,
+        'COMMUNES',
         scheduledFor,
-        () => this.updateDailyMapArchive(scheduledFor, false),
+        () =>
+          this.updateCommunes(
+            new Date(scheduledFor).getUTCFullYear(),
+            scheduledFor,
+          ),
+        failures,
+        publicationContext,
+      );
+      if (this.mapArchivesEnabled) {
+        await this.runDataGouvUpdate(
+          'maps-geojson',
+          'ARCHIVE CARTES GEOJSON',
+          scheduledFor,
+          () => this.updateDailyMapArchive(scheduledFor, true),
+          failures,
+          publicationContext,
+        );
+        await this.runDataGouvUpdate(
+          'maps-pmtiles',
+          'ARCHIVE CARTES PMTILES',
+          scheduledFor,
+          () => this.updateDailyMapArchive(scheduledFor, false),
+          failures,
+          publicationContext,
+        );
+      }
+      await this.runDataGouvUpdate(
+        'historique-communes',
+        'HISTORIQUE COMMUNES',
+        scheduledFor,
+        () =>
+          this.updateHistoriqueCommunes(
+            scheduledFor,
+            publicationContext?.sourceRevision,
+            publicationContext?.historicFirstDate,
+          ),
         failures,
         publicationContext,
       );
     }
-    await this.runDataGouvUpdate(
-      'historique-communes',
-      'HISTORIQUE COMMUNES',
-      scheduledFor,
-      () =>
-        this.updateHistoriqueCommunes(
-          scheduledFor,
-          publicationContext?.sourceRevision,
-          publicationContext?.historicFirstDate,
-        ),
-      failures,
-      publicationContext,
-    );
-
     this.logger.log('MISE A JOUR DATAGOUV - FIN');
     if (failures.length > 0) {
       throw new AggregateError(
@@ -325,13 +340,22 @@ export class DatagouvService {
    * Met à jour les arrêtés sur Datagouv.
    * @param arretes - Liste des arrêtés à traiter.
    */
-  async updateArretes(arretes: ArreteRestriction[]): Promise<void> {
+  async updateArretes(
+    arretes: ArreteRestriction[],
+    options?: CsvPublicationOptions,
+  ): Promise<void> {
     this.logger.log('MISE A JOUR DATAGOUV - ARRETES - DEBUT');
 
     const departements = await this.departementService.findAllLight();
     const formattedArretes = this.formatArretesData(arretes, departements);
     await this.writeCsv('arretes.csv', formattedArretes);
-    await this.uploadToDatagouv('arretes', 'arretes.csv', 'Arrêtés');
+    await this.uploadToDatagouv(
+      'arretes',
+      'arretes.csv',
+      'Arrêtés',
+      false,
+      options,
+    );
 
     this.logger.log('MISE A JOUR DATAGOUV - ARRETES - FIN');
   }
@@ -511,7 +535,7 @@ export class DatagouvService {
   /**
    * Met à jour les restrictions sur Datagouv.
    */
-  async updateRestrictions() {
+  async updateRestrictions(options?: CsvPublicationOptions) {
     this.logger.log('MISE A JOUR DATAGOUV - RESTRICTIONS - DEBUT');
 
     const zonesAlertesComputed =
@@ -586,6 +610,8 @@ export class DatagouvService {
       'restrictions',
       'restrictions.csv',
       'Restrictions',
+      false,
+      options,
     );
 
     this.logger.log('MISE A JOUR DATAGOUV - RESTRICTIONS - FIN');
@@ -904,7 +930,11 @@ export class DatagouvService {
     fileName: string,
     title: string,
     isUrl = false,
-    options?: { timeoutMs?: number; sourceDate?: string },
+    options?: {
+      timeoutMs?: number;
+      sourceDate?: string;
+      verifyCurrent?: () => Promise<void>;
+    },
   ): Promise<void> {
     this.logger.log(`ENVOI VERS DATAGOUV - ${resource}`);
 
@@ -928,6 +958,7 @@ export class DatagouvService {
       );
       if (!isUrl) {
         artifact = await this.inspectLocalArtifact(fileName);
+        await options?.verifyCurrent?.();
         await this.uploadDataGouvFile(
           `${url}upload/`,
           fileName,

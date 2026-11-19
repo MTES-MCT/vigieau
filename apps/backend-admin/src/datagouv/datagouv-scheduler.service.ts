@@ -7,6 +7,7 @@ import {
 } from '../core/scheduling/business-cron';
 import { RegleauLogger } from '../logger/regleau.logger';
 import {
+  DATAGOUV_CURRENT_CSV_JOB_KEY,
   DATAGOUV_DAILY_JOB_KEY,
   getScheduledCivilDate,
   NATIONAL_DAILY_COMPUTE_JOB_KEY,
@@ -16,8 +17,14 @@ import {
   ExternalPublicationRegistryService,
   type PublicationRunIdentity,
 } from './external-publication-registry.service';
-import { ZonePublicationService } from '../zone_publication/zone_publication.service';
-import { isZonePublicationEnabled } from '../zone_publication/zone_publication.config';
+import {
+  ActiveZonePublicationGate,
+  ZonePublicationService,
+} from '../zone_publication/zone_publication.service';
+import {
+  isZonePublicationEnabled,
+  ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+} from '../zone_publication/zone_publication.config';
 import { isStatisticCacheArtifactRequired } from '../statistic_cache/statistic_cache.config';
 import { StatisticCacheReadinessService } from '../statistic_cache/statistic_cache_readiness.service';
 import {
@@ -62,11 +69,69 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
       return;
     }
 
+    if (!this.datagouvService.canUploadToDataGouv()) return;
     const publicationGate =
       await this.zonePublicationService.getActivePublicationGate(scheduledFor);
     if (!publicationGate) {
       return;
     }
+    const computation = {
+      sourceRevision: publicationGate.sourceRevision,
+      materializationVersion: ZONE_PUBLICATION_MATERIALIZATION_VERSION,
+    };
+    const hasCurrentComputation = () =>
+      this.registry.hasSucceeded(
+        NATIONAL_DAILY_COMPUTE_JOB_KEY,
+        scheduledFor,
+        computation,
+      );
+    if (!(await hasCurrentComputation())) return;
+
+    const currentIdentity = {
+      publicationMode: 'versioned' as const,
+      publicationId: publicationGate.publicationId,
+      ...computation,
+    };
+    const verifyCurrent = async () => {
+      await this.assertPublicationGate(scheduledFor, publicationGate);
+      if (!(await hasCurrentComputation())) {
+        throw new Error(
+          `National computation changed during Datagouv run for ${scheduledFor}`,
+        );
+      }
+    };
+    try {
+      await this.registry.executeDailyRun(
+        DATAGOUV_CURRENT_CSV_JOB_KEY,
+        scheduledFor,
+        async () => {
+          await verifyCurrent();
+          await this.datagouvService.updateDatagouvData(
+            scheduledFor,
+            { ...currentIdentity, verifyCurrent },
+            'current',
+          );
+          await verifyCurrent();
+        },
+        now,
+        { identity: currentIdentity },
+      );
+    } finally {
+      await this.publishHistoricIfDue(
+        scheduledFor,
+        publicationGate,
+        currentIdentity,
+        now,
+      );
+    }
+  }
+
+  private async publishHistoricIfDue(
+    scheduledFor: string,
+    publicationGate: ActiveZonePublicationGate,
+    currentIdentity: PublicationRunIdentity,
+    now: Date,
+  ): Promise<void> {
     const readiness = await this.historicExportReadiness.evaluate(
       scheduledFor,
       publicationGate,
@@ -82,11 +147,27 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
       scheduledFor,
       async () => {
         await verifyCurrent();
-        await this.datagouvService.updateDatagouvData(scheduledFor, {
-          ...identity,
-          verifyCurrent,
-        });
+        await this.datagouvService.updateDatagouvData(
+          scheduledFor,
+          {
+            ...identity,
+            verifyCurrent,
+          },
+          'historic',
+        );
         await verifyCurrent();
+        // The daily health signal represents the complete set of resources.
+        if (
+          !(await this.registry.hasSucceeded(
+            DATAGOUV_CURRENT_CSV_JOB_KEY,
+            scheduledFor,
+            currentIdentity,
+          ))
+        ) {
+          throw new Error(
+            `Current CSV publication is incomplete for ${scheduledFor}`,
+          );
+        }
         return {
           ...identity,
           geojsonChecksum: publicationGate.geojsonChecksum,
@@ -185,11 +266,12 @@ export class DatagouvSchedulerService implements OnApplicationBootstrap {
       geojsonChecksum: string;
       pmtilesChecksum: string;
     },
-    expectedHistoricIdentity: HistoricExportReadinessIdentity,
+    expectedHistoricIdentity?: HistoricExportReadinessIdentity,
   ): Promise<void> {
     const [current] = await Promise.all([
       this.zonePublicationService.getActivePublicationGate(scheduledFor),
-      this.historicExportReadiness.assertReady(expectedHistoricIdentity),
+      expectedHistoricIdentity &&
+        this.historicExportReadiness.assertReady(expectedHistoricIdentity),
     ]);
     if (
       !current ||

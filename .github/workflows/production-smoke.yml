@@ -136,10 +136,12 @@ jobs:
       - name: Wait for an atomic publication to converge
         run: node scripts/wait-zone-publication.mjs
       - name: Verify external publication convergence policy
-        run: node --test scripts/wait-external-publications-policy.test.mjs
+        run: node --test scripts/wait-external-publications-policy.test.mjs scripts/inspect-datagouv-csv.test.mjs
       - name: Wait for certified external publications to converge
+        id: external
         run: node scripts/wait-external-publications.mjs
       - name: data.gouv.fr resources
+        if: ${{ !cancelled() && (steps.external.outcome == 'success' || steps.external.outcome == 'failure') }}
         run: node scripts/smoke-datagouv.mjs
 
   diagnostics:

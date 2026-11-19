@@ -232,6 +232,51 @@ describe('DatagouvService', () => {
     );
   });
 
+  it('runs only the selected resources, without reloading decrees on a completed retry', async () => {
+    const harness = createHarness('/tmp');
+    const current = jest
+      .spyOn(harness.service, 'updateArretes')
+      .mockResolvedValue();
+    const restrictions = jest
+      .spyOn(harness.service, 'updateRestrictions')
+      .mockResolvedValue();
+    const history = jest
+      .spyOn(harness.service, 'updateHistoriqueCommunes')
+      .mockResolvedValue();
+    const runs = new Set<string>();
+    harness.publicationRegistry.executeDailyRun.mockImplementation(
+      async (key, _day, run) => {
+        if (runs.has(key)) return 'already_succeeded';
+        await run();
+        runs.add(key);
+        return 'succeeded';
+      },
+    );
+    const context = {
+      sourceRevision: '42',
+      verifyCurrent: jest.fn().mockResolvedValue(undefined),
+    };
+    await harness.service.updateDatagouvData('2026-08-01', context, 'current');
+    await harness.service.updateDatagouvData('2026-08-01', context, 'current');
+    expect(runs).toEqual(
+      new Set(['datagouv:arretes', 'datagouv:restrictions']),
+    );
+    expect(harness.arreteRestrictionService.findDatagouv).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(current).toHaveBeenCalledTimes(1);
+    expect(restrictions).toHaveBeenCalledTimes(1);
+    expect(history).not.toHaveBeenCalled();
+
+    jest.spyOn(harness.service, 'updateHistoriqueArretes').mockResolvedValue();
+    jest.spyOn(harness.service, 'updateArretesCadre').mockResolvedValue();
+    jest.spyOn(harness.service, 'updateCommunes').mockResolvedValue();
+    await harness.service.updateDatagouvData('2026-08-01', context, 'historic');
+    expect(current).toHaveBeenCalledTimes(1);
+    expect(restrictions).toHaveBeenCalledTimes(1);
+    expect(history).toHaveBeenCalledTimes(1);
+  });
+
   it('runs map archives as independent durable sub-jobs', async () => {
     const harness = createHarness('/tmp', {
       DATAGOUV_MAP_ARCHIVES_ENABLED: 'true',
@@ -1368,6 +1413,39 @@ describe('DatagouvService', () => {
     expect(harness.dataSource.createQueryRunner).not.toHaveBeenCalled();
     expect(
       harness.statisticCommuneService.getStatisticCommuneStream,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('checks the revision after generating a current CSV and before uploading it', async () => {
+    const harness = createHarness('/tmp');
+    const inspect = jest
+      .spyOn(harness.service as any, 'inspectLocalArtifact')
+      .mockResolvedValue({
+        byteSize: 123,
+        checksum: 'a'.repeat(64),
+      });
+    const verifyCurrent = jest
+      .fn()
+      .mockRejectedValue(new Error('Source revision changed'));
+    await expect(
+      harness.service.uploadToDatagouv(
+        'arretes',
+        'arretes.csv',
+        'Arrêtés',
+        false,
+        {
+          sourceDate: '2026-11-19',
+          verifyCurrent,
+        },
+      ),
+    ).rejects.toThrow('Source revision changed');
+    expect(inspect).toHaveBeenCalled();
+    expect(
+      harness.publicationRegistry.assertResourceSourceDateNotRegressing,
+    ).toHaveBeenCalledWith('arretes', '2026-11-19');
+    expect(harness.httpService.post).not.toHaveBeenCalled();
+    expect(
+      harness.publicationRegistry.recordResourceSuccess,
     ).not.toHaveBeenCalled();
   });
 
